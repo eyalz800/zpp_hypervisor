@@ -1,5 +1,56 @@
 # Known defects
 
+## This VMM injects nothing into the application processor - so the fault is the guest's own
+
+**2026-08-25.** The previous entry asked "what delivered an event to a
+processor that was supposed to be parked", and listed injection as the
+leading candidate because every item on that list is something this VMM
+controls. Counting what it actually writes into the entry
+interruption-information field for that processor:
+
+```
+  cpu 1 injections: count 0  last 0  at exit 0
+```
+
+**Zero.** Across the processor's whole life, this VMM never injected
+anything into it. The entire candidate list from the previous entry -
+injected exception, reflected interrupt, late start-up IPI delivered as
+an event - is **eliminated in one reading**.
+
+So the exception that kills it is the processor's **own**: something it
+executed faulted, and the fault could not be delivered because the
+descriptor table was unmapped at that moment.
+
+### And the edge is not always the same instruction
+
+```
+  run A:  gdt UNMAPPED at exit 0xd9  reason 0x0a  CPUID
+  run B:  gdt UNMAPPED at exit 0xcf  reason 0x30  EPT violation
+```
+
+Two boots, two different exit reasons at the transition, and different
+exit numbers. So "it dies at the CPUID spin" from the previous entry is
+**one run's detail, not the mechanism** - and that entry's reading of a
+quiesce spin should be held much more loosely than it was written.
+
+### What is left, and it is smaller than it looks
+
+The processor faults on its own account while a page it needs is
+unmapped, and this VMM neither unmapped it nor delivered the fault. Two
+things remain that this VMM *does* own:
+
+- **it let the processor run.** The guest unmapped a region this
+  processor was executing in, which is safe only if the processor is
+  stopped - and this VMM decides when an application processor runs.
+- **it may be reporting the unmap late.** The eight-walk says the entry
+  is genuinely zero, but nothing has checked whether the *processor's*
+  view agrees with this VMM's walker at that instant - the extended page
+  tables and any cached translation sit between them.
+
+The first is the one that has been wrong all session in every other
+respect for application processors, and it is where I would look next.
+
+
 ## The unmapping happens while the processor spins on CPUID - a quiesce it never leaves
 
 **2026-08-25.** Logging each change of the global descriptor table's

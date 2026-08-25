@@ -7607,6 +7607,25 @@ private:
      * once rather than every exit. Zero until the first sample.
      */
     std::uint64_t gdt_walk_last[max_cpus]{};
+
+    /**
+     * What this VMM has put into the entry interruption-information
+     * field for this processor, and how often.
+     *
+     * The application processor dies while parked in a `CPUID` quiesce
+     * spin, and a parked processor only dies of an unmapped descriptor
+     * table if something makes it take an exception. Everything that
+     * could is an injection, and this VMM owns that field - so counting
+     * what it writes there, per processor, says whether the event came
+     * from here.
+     * @{
+     */
+    std::uint64_t injected_count[max_cpus]{};
+    std::uint64_t injected_last[max_cpus]{};
+    std::uint64_t injected_last_exit[max_cpus]{};
+    /**
+     * @}
+     */
     /**
      * @}
      */

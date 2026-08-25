@@ -209,6 +209,24 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->gs_processor_index_disagreements + 1;
     }
 
+    // What was injected into this processor on the entry that just
+    // ended. See `injected_count`: the application processor dies parked
+    // in a quiesce spin, and only an event can make a parked processor
+    // fault, so what this VMM put in that field is the first thing to
+    // account for.
+    if (cpuid < max_cpus) {
+        constexpr std::uint64_t injection_valid = 1ull << 31;
+
+        if (auto information = vmcs.read(
+                arch::x86_64::vmx::vmcs::field::
+                    vm_entry_interruption_information_field);
+            0 != (information & injection_valid)) {
+            this->injected_count[cpuid] = this->injected_count[cpuid] + 1;
+            this->injected_last[cpuid] = information;
+            this->injected_last_exit[cpuid] = this->exit_total[cpuid];
+        }
+    }
+
     // Bracket the moment this processor's global descriptor table
     // stopped being reachable. See `gdt_last_reachable`: the fault says
     // it is unmapped now and the loaded segment selectors say it was
@@ -2115,6 +2133,12 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // A missing leaf means one page. They are different
                 // defects and the error code alone cannot tell them
                 // apart, which is why `walk_refusal_level` exists.
+                log("cpu {} injections: count {} last {} at exit {}",
+                    (cpuid + 1),
+                    this->injected_count[cpuid],
+                    this->injected_last[cpuid],
+                    this->injected_last_exit[cpuid]);
+
                 log("cpu {} gdt eight-walk: all-mapped {} all-unmapped "
                     "{} mixed {}",
                     (cpuid + 1),
