@@ -1,5 +1,59 @@
 # Known defects
 
+## The shadow EPT roots, per processor at last - and what the numbers do and do not say
+
+**2026-08-25.** With the dumper reading every processor rather than only
+the boot one, on a two-processor boot in the failed state:
+
+```
+  cpu 0 shadow EPT roots held (slot 1 current)
+    slot 0  0x000101b17000
+    slot 1  0x000101b1a000  <- current
+    2 distinct non-zero root(s)
+
+  cpu 1 shadow EPT roots held (slot 0 current)
+    slot 0  0x000101b1a000  <- current
+    1 distinct non-zero root(s)
+    ONE ROOT <- both trust levels would be sharing an extended page
+                table, which VSM requires them not to
+```
+
+**Two things fall out, and only one of them is a finding.**
+
+### The ONE ROOT warning on the boot processor was a transient
+
+Earlier dumps showed cpu 0 with one distinct root and the warning fired.
+It now shows **two** - `0x101b17000` and `0x101b1a000` - so VTL0 and VTL1
+*do* get separate shadow extended page tables on a processor that
+switches between them. The warning was a sample taken before the second
+root existed, not a standing violation. **That retires it as a candidate**
+and it should not be chased again.
+
+### The application processor holds one root, and the direction is not established
+
+cpu 1 holds exactly one, and it is `0x101b1a000` - the same root cpu 0
+has current. So the processor that crashes is in the ONE ROOT condition
+while the processor that works is not.
+
+**That is correlation and it is very likely the wrong way round.** A
+shadow root is created per distinct guest extended-page-table pointer
+presented (`shadow_ept_pointer_for` keys on `eptp12 & ~0xfff`), and this
+application processor ran **only VTL1** for its whole life - 35
+second-level entries, none of them in ntoskrnl. One trust level presents
+one pointer, so one root is exactly what should exist. Having one root is
+then a *consequence* of never switching, not a cause of it.
+
+To make it a finding rather than an observation, the thing to show is
+that the single root is *wrong for VTL1* - that the application processor
+is being given VTL0's table while running VTL1 - and the roots here do
+not show that: `0x101b1a000` is the one cpu 0 has current, and which
+trust level that belongs to on cpu 0 has not been established either.
+
+Recorded because it is the first per-processor reading of this state that
+has ever been possible, and because the next person will otherwise re-run
+it. Not recorded as a cause.
+
+
 ## The single-processor control, which confirms the VTL1 crash is multiprocessor-specific
 
 **2026-08-25.** Every claim above about VTL1 crashing rests on readings
