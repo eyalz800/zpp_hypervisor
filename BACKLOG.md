@@ -1,5 +1,56 @@
 # Known defects
 
+## `rip=0x0` in the exit ring is a recording artifact, not a guest at address zero
+
+**2026-08-25.** cpu 1's first-level exit ring ends like this, and it is
+worth reading carefully because it invites a wrong conclusion:
+
+```
+  [ 991] vmresume       rip=0xfffff8057740bfca [l2-rip]   <- mov rax,dr0
+  [ 992] wrmsr          rip=0xfffff841fc5a843d  0x40000071 = 0x400
+  [ 995] ept-violation  rip=0xfffff841fc457b13  phys=0xfee00000
+  [ 996] monitor-trap   rip=0xfffff841fc457b19
+  [1004] vmresume       rip=0x0                [l2-rip]
+  [1005] ept-violation  rip=0x0  phys=0x8800000     [l2-rip]
+  [1006] ept-violation  rip=0x0  phys=0x19fa0e0     [l2-rip]
+  [1007] ept-violation  rip=0x0  phys=0x11ff9f478   [l2-rip]
+  [1008] ept-violation  rip=0x0  phys=0x137392088   [l2-rip]
+```
+
+Four consecutive extended-page-table violations at second-level RIP zero,
+on physical addresses that chain like a page walk - `0x8800000` is
+exactly the secure kernel's CR3 root. It reads as "Hyper-V resumed its
+guest at address zero and the walk faulted level by level", and a fix was
+one step from being designed on it.
+
+**It is not that.** Virtual address 0 is **unmapped in both address
+spaces** - checked under the secure kernel's CR3 `0x8800000` and VTL0's
+`0x1ae000`, both `UNMAPPED`. A processor executing there would fault
+without end and the exit counters would climb; they are frozen. So the
+zero is the *recorder* failing to read the second-level RIP, not the
+guest's RIP.
+
+The ring can read a real second-level RIP - entry 991 has one - so a zero
+is a read that returned zero, not a field that was never populated. Worth
+fixing in the reader, and worth **not** reasoning from until it is.
+
+### What survives from that ring, and it is still the sharpest thing
+
+- Those extended-page-table violations were all **claimed**:
+  `ept_violation_unclaimed` reads `[0, 0, 0]`, so this VMM satisfied
+  every one of them.
+- cpu 1 is **inside** its second-level guest - `l2_entries` 36 against
+  `l2_exits` 35 - and spinning there at 100% of a core with no exits at
+  either level.
+- The last second-level instruction it is known to have executed is the
+  `mov rax, dr0` at the head of `KiSaveProcessorControlState`, in VTL1.
+
+So the narrow question stands unchanged and unanswered: what does that
+processor execute after the first debug-register read, and what memory is
+it polling. Nothing in the exit ring can answer it, because the answer
+produces no exits.
+
+
 ## The application processor dies inside KiSaveProcessorControlState, on the first debug-register read
 
 **2026-08-25.** cpu 1's second-level exits are **all** in the
