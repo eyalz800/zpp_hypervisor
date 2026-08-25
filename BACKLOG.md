@@ -1,5 +1,70 @@
 # Known defects
 
+## Windows never bugchecked, and `-no-reboot` was hiding a real state change
+
+**2026-08-25.** `KiBugCheckData` read out of the second-level guest, with
+the reader proved first:
+
+```
+  kernel base 0xfffff804b0400000 -> phys 0x119800000  first bytes b'MZ'
+  reader proven: True
+  KiBugCheckData: stop code 0x0, params all zero
+```
+
+**Windows did not bugcheck.** Every `paused (shutdown)` in this
+investigation was a guest *requesting a reset*, not crashing - and
+`-no-reboot -no-shutdown`, made the default earlier the same day, froze
+it there and made it look like a failure. That is exactly the trap
+recorded at the switch's own site, walked into anyway.
+
+Reading it needed one field that did not exist: the second-level guest's
+CR3, now logged beside the kernel base that `nested_entry.cpp` already
+printed. Without it the monitor only has the first-level guest's CR3, so
+a second-level kernel address reads "unmapped" and looks precisely like a
+wrong symbol.
+
+### With the reboot allowed, the machine survives
+
+`ZPP_ALLOW_REBOOT=1`, three processors:
+
+```
+  VM status: running          <- not paused, for the first time
+  guest vmxoff: 0             <- Hyper-V stays resident
+  second level entry failed: 0
+  memory-form operand failures: 0
+```
+
+Hyper-V no longer tears itself down. That is a real change of state and
+the two fixes that produced it - the operand retry and the `#PF`
+delivery - are what removed the refusals it was reacting to.
+
+### But it is not the login screen, and the process list says so plainly
+
+```
+  PsInitialSystemProcess -> 0xffffbf888349d040
+  derived ImageFileName = 0x338, derived ActiveProcessLinks = 0x588
+  ring closed: YES
+  processes: 1
+     System
+```
+
+**One process.** No `smss.exe`, no `winlogon.exe`, no `explorer.exe`. The
+guest is stalled in early kernel initialisation. Consistent with the
+counters: cpu 0 advances at about six exits a second, cpu 1 frozen at
+1,004 exits and 36 second-level entries, cpu 2 at 292 and 17.
+
+The low exit rate on cpu 0 is worth flagging as a near-miss: an idle
+login screen produces the same number, and the counters alone cannot tell
+the two apart. The process list can, which is why it is the check that
+settles "did we reach the goal" and the exit rate is not.
+
+The log's last word is `no start-up ipi for 0x37e11d6000 ticks after 0x6
+of them, dropping the local apic page watch` - six start-up IPIs seen,
+then silence, with the application processors never running. That is the
+next thread: six SIPIs delivered and two processors that made a few dozen
+second-level entries and stopped.
+
+
 ## Both known failure modes are gone, and the guest still shuts down
 
 **2026-08-25.** A three-processor boot with the operand retry and the

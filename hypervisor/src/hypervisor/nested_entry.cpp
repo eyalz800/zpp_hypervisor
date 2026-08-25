@@ -5464,7 +5464,18 @@ std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
                 (pe_signature == signature) &&
                 is_guest_kernel_image(cpu, candidate, at)) {
                 this->guest_kernel_base = candidate;
-                log("second-level guest kernel image at {}", candidate);
+                // With the CR3 that reaches it. The base alone is not
+                // enough to read anything from outside: the monitor
+                // sees only the first-level guest's CR3, so a reader
+                // pointed at a second-level kernel address gets
+                // "unmapped" and cannot tell that from a wrong symbol.
+                // This is the field that makes `KiBugCheckData`
+                // readable, and the extended tables have measured
+                // identity for these pages, so the physical address a
+                // walk yields is an `xp` address directly.
+                log("second-level guest kernel image at {}, cr3 {}",
+                    candidate,
+                    this->guest_vmcs12[cpu].read(field::guest_cr3));
                 return candidate;
             }
         }
