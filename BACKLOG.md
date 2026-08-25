@@ -1,5 +1,59 @@
 # Known defects
 
+## The unreachable GDT is unreachable everywhere, and the INIT path is not the culprit
+
+**2026-08-25.** Two checks against the previous entry's hypothesis - that
+the application processor runs with one context's page table and
+another's descriptors - and **both come back negative**.
+
+**The global descriptor table is unmapped under every live page table**,
+not just the application processor's:
+
+```
+  cpu 0 cr3 0x101abb000   GDT UNMAPPED   RSP UNMAPPED
+  cpu 1 cr3 0x6962c000    GDT UNMAPPED   RSP UNMAPPED
+  AP    cr3 0x114f5e000   GDT UNMAPPED   RSP UNMAPPED
+```
+
+So it is not a mismatch between two valid contexts. That address -
+`0xffffe800002b0b00`, the same on every boot - is not mapped anywhere
+this VMM can see. The "one context's tables, another's descriptors"
+reading is withdrawn.
+
+**And the INIT/start-up path resets the descriptor tables correctly.**
+`apply_start_up` writes
+
+```
+  vmcs.guest_gdtr_base(0);
+  vmcs.guest_gdtr_limit(descriptor_table_limit_after_init);
+  vmcs.guest_idtr_base(0);
+  vmcs.guest_idtr_limit(descriptor_table_limit_after_init);
+```
+
+which is SDM Table 12-1's INIT state. So the stale-GDTR theory - the
+family CLAUDE.md already records once, where INIT failed to reset the
+general purpose registers - does not apply: this VMM does reset it, and
+the value at the fault was therefore loaded by the guest afterwards.
+
+### What that leaves, stated without a theory attached
+
+A processor that took INIT and a start-up IPI, ran far enough to install
+its own 64-bit descriptors and enable paging, and is executing code that
+*is* reachable - and whose global descriptor table and stack are at
+addresses reachable through no page table on the machine.
+
+The honest reading is that **either the guest loaded a GDTR/RSP it never
+had mappings for, which real hardware would not tolerate either, or the
+page table it loaded is not the one it built them under**. Distinguishing
+those needs the guest's CR3 *history* rather than its value at the fault
+- what this VMM saw the processor load, in order - and that is not
+recorded today.
+
+`0xffffe800002b0b00` being byte-identical across boots while everything
+else moves with KASLR remains the most specific unexplained fact in this
+investigation.
+
+
 ## Confirmed in the handler: GDT and stack unreachable, IDT and code reachable
 
 **2026-08-25.** The previous entry's caveat is closed. The walk is now
