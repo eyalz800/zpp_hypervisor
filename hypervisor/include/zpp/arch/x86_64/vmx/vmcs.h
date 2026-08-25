@@ -306,7 +306,26 @@ inline constinit vmcs_cache_row
 inline constinit std::uint64_t
     vmcs_cache_active[vmcs_cache_processors]{};
 
-inline constinit std::uint64_t vmcs_cache_epoch{1};
+/**
+ * Ends the window every cached row describes, and **atomic for the same
+ * reason `vmcs_cache_suspended` below is.** Every processor bumps this,
+ * several times per exit, and a plain `epoch = epoch + 1` is a
+ * read-modify-write whose load and store the compiler is free to
+ * separate. The note further down states the hazard precisely: restoring
+ * the epoch to a value another processor has already moved past revives
+ * that processor's stale rows.
+ *
+ * A lost increment alone is survivable - the counter stays monotonic and
+ * the read path's stale-row branch catches it - so this is closing a
+ * known class rather than a demonstrated failure. It is closed anyway,
+ * because the same defect on the counter beside it was demonstrated, and
+ * off the hot path a `lock` prefix costs nothing worth reasoning about
+ * twice.
+ *
+ * Reads stay implicit conversions: on x86-64 a sequentially consistent
+ * atomic load is a plain `mov`, so they are free.
+ */
+inline constinit std::atomic<std::uint64_t> vmcs_cache_epoch{1};
 
 /**
  * Non-zero while a caller is borrowing the current VMCS pointer and will
@@ -365,7 +384,7 @@ inline constinit std::uint64_t vmcs_cache_unarmed{};
 inline void vmcs_cache_forget()
 {
     if constexpr (vmcs_cache_enabled) {
-        vmcs_cache_epoch = vmcs_cache_epoch + 1;
+        vmcs_cache_epoch.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
