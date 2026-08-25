@@ -222,6 +222,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture - the stack, the code window, the VP assist page, the shared and spin regions. OFF: it is the last candidate for 137.6 VMCS reads a vmcall, which is 19% of the machine. The cheap register census beside it stays either way. See nested_vmx.h."
     OFF)
 
+option(ZPP_DROP_WATCH_ON_START_UP
+       "Drop the local APIC page watch as soon as a start-up has been applied, rather than after a quiet period"
+       OFF)
+
 option(ZPP_WATCH_AP_PAGE_TABLE
        "Watch the page table entry mapping an application processor's descriptor table, and name whoever writes it"
        OFF)
@@ -390,6 +394,7 @@ ExternalProject_Add(hypervisor
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}
@@ -499,6 +504,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}

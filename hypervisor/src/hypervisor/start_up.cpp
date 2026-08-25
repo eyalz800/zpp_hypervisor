@@ -396,6 +396,24 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
 
     // Runnable again.
     vmcs.guest_activity_state(arch::x86_64::vmx::activity_state::active);
+
+    // Adopted, so the watch that adopted it has done its work. See
+    // `nested_vmx::drop_watch_on_start_up`: left armed it charges this
+    // processor an exit for each of its own bring-up writes, and the
+    // quiet-period fallback is about two minutes away at the rig's
+    // clock. The drop itself happens on the next violation, in
+    // `on_ept_violation`, which resumes without advancing RIP so the
+    // guest re-executes against an entry that now permits it.
+    if constexpr (nested_vmx::drop_watch_on_start_up) {
+        if (!this->all_processors_started.load(
+                std::memory_order_relaxed)) {
+            this->all_processors_started.store(
+                true, std::memory_order_relaxed);
+            log("start-up applied on cpu {}, dropping the local apic "
+                "page watch now rather than after the quiet period",
+                vmcs.vpid());
+        }
+    }
 }
 
 bool hypervisor::start_application_processor(std::size_t slot,

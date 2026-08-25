@@ -873,6 +873,28 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_DROP_WATCH_ON_START_UP
+#define ZPP_DROP_WATCH_ON_START_UP 0
+#endif
+
+// The local APIC page watch is how an application processor is adopted
+// at all - measured, with ZPP_INTERCEPT_APIC=OFF the processor takes
+// zero exits and never runs. But it is only needed *until* a processor
+// has been adopted: after that its INIT arrives as a plain exit, which
+// the exit ring shows directly.
+//
+// Left armed, it costs the newly started processor an exit for each of
+// its own ordinary bring-up writes - logical destination, destination
+// format, spurious vector - none of which can carry a start-up IPI. Its
+// descriptor table's mapping is then torn down four exits after it is
+// installed, while still in use, by the guest and not by this VMM.
+//
+// So drop it when a start-up is applied rather than after
+// `apic_watch_quiet_ticks`, which is about two minutes at the rig's
+// clock and therefore always still armed at that moment.
+inline constexpr bool drop_watch_on_start_up =
+    (0 != ZPP_DROP_WATCH_ON_START_UP);
+
 #ifndef ZPP_WATCH_AP_PAGE_TABLE
 #define ZPP_WATCH_AP_PAGE_TABLE 0
 #endif
