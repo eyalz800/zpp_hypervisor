@@ -1540,6 +1540,32 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
             *linear,
             std::span(reinterpret_cast<std::byte *>(&value), size));
         if (!read) {
+            log("cpu {} vmwrite memory form: guest read failed at {}, "
+                "field {}, size {}, rip {}",
+                cpu,
+                *linear,
+                static_cast<std::uint64_t>(encoding.value()),
+                static_cast<std::uint64_t>(size),
+                context.rip);
+
+            // The same defect as the memory-form VMREAD above, mirrored,
+            // and found the same way: with that one fixed the boot got
+            // one instruction further and died here instead, exit reason
+            // 0x19 where it had been 0x17. The SDM sentence quoted above
+            // this block is the one that governs - faults from accessing
+            // the memory source operand happen, and they are the faults
+            // the access would raise, not #UD.
+            //
+            // Bit 1 clear because this is a read; otherwise the error
+            // code is built exactly as the VMREAD path builds it.
+            constexpr std::uint64_t fault_present = 1ull << 0;
+
+            std::uint64_t error_code{};
+            if (guest_linear_to_physical(*linear)) {
+                error_code |= fault_present;
+            }
+
+            inject_page_fault(*linear, error_code);
             return false;
         }
     }

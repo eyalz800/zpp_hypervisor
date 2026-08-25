@@ -1266,6 +1266,42 @@ static void test_memory_operands()
         check(got == source, "VMWRITE from memory wrote the wrong value");
     }
 
+    // And the mirror: a memory-form VMWRITE whose operand page cannot be
+    // read must take #PF too. Found by fixing the VMREAD case above and
+    // watching the same boot die one instruction further along, at exit
+    // reason 0x19 where it had been 0x17.
+    {
+        auto absent = 0xbeef0000ull;
+        check(!g_pages.count(absent), "the test's absent page exists");
+
+        auto faulted = g_observed.pf_faults;
+        auto refused = g_observed.ud_faults;
+
+        g_page_present_only = true;
+
+        zpp::arch::x86_64::context regs{};
+        regs.rcx = fields::guest_rsp;
+        auto r = run(basic_reason::vmwrite,
+                     regs,
+                     memory_operand_information(1 /*reg2 = rcx*/),
+                     absent);
+
+        g_page_present_only = false;
+
+        check(outcome::ud == r.what,
+              "VMWRITE from an unreadable operand did not leave RIP put");
+        check(g_observed.pf_faults == (faulted + 1),
+              "VMWRITE from an unreadable operand injected no page fault");
+        check(g_observed.ud_faults == refused,
+              "VMWRITE from an unreadable operand injected #UD as well");
+        check(g_observed.last_pf_address == absent,
+              "the injected page fault named the wrong address");
+
+        // Not-present, and a read - so both bit 0 and bit 1 stay clear.
+        check(g_observed.last_pf_error == 0x0,
+              "the injected page fault carried the wrong error code");
+    }
+
     // The encoding register is read as a full 64-bit value. A guest that
     // leaves rubbish in the high half of the register - which is legal,
     // the architecture only defines the low bits as the encoding - must
