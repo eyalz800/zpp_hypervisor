@@ -1,5 +1,59 @@
 # Known defects
 
+## With the census on: the APIC violations are ordinary, and both start-up vectors are applied
+
+**2026-08-25.** Rebuilt with `-DZPP_CENSUS_EXITS=ON`, manifest confirmed
+`census=1`, so the ring's qualification and code selector are written for
+the first time in this investigation:
+
+```
+  [105] cpuid          qual=0x0    cs=0x0038  rip=0x7ef5fba8
+  [107] init           qual=0x0    cs=0x8700  rip=0x0
+  [108] init           qual=0x0    cs=0x0200  rip=0x0
+  [109] cr-access      qual=0x800  cs=0x0010  rip=0xfffff87801da66d3
+  [113] ept-violation  qual=0x2b   cs=0x0010  phys=0xfee00000
+  [114] ept-violation  qual=0x2b   cs=0x0010  phys=0xfee00000
+  [115] ept-violation  qual=0x2b   cs=0x0010  phys=0xfee00000
+  [116] ept-violation  qual=0x2b   cs=0x0010  phys=0xfee00000
+  [117] triple-fault   qual=0x0    cs=0x0010  rip=0xfffff87801c3dfb2
+```
+
+**The paging-structure hypothesis is not supported.** `0x2b` is bits 0,
+1, 3 and 5: a **write**, to a page that is **readable and executable but
+not writable**. That is this VMM's own read-only local-APIC page watch
+working exactly as designed - an ordinary intercepted APIC write, not a
+processor being denied its page tables. The idea from two entries ago is
+dropped.
+
+**And the code selector, now that it is written, carries the start-up
+vector.** `apply_start_up` sets `CS = vector << 8`, so `cs=0x8700` is
+vector `0x87` and `cs=0x0200` is vector `0x02`. Both `init` exits carry
+one, in that order: **both start-up vectors are applied, `0x87` first and
+`0x02` second.**
+
+That is a measurement of something this file has argued about twice
+without evidence - which vector the processor actually ends up on. The
+answer is: the second one, because the second start-up overwrites the
+first.
+
+Also worth noting the firmware loop's real selector is **`0x0038`**, not
+the null `0x0000` recorded everywhere before the census was on. The
+"64-bit code with a null code selector" puzzle in earlier entries was
+entirely an artefact.
+
+### What is now worth asking
+
+The processor runs high 64-bit code after the second start-up - `0xfffff878...`
+at exits 109 through 117 - so it is *not* going back to the firmware loop
+after `0x02`. Whatever `0x2000` holds on this machine, it leads into
+kernel code, and the processor dies there four APIC writes later.
+
+So "the wrong vector sends it into firmware", which the start-up fix was
+designed around, is **not** what happens now. The processor gets somewhere
+real and dies of the descriptor table, which is the thread that was
+already open.
+
+
 ## RETRACTION: every `qual`, `cs` and activity state read from the exit ring this session was unfilled
 
 **2026-08-25.** Before reading the extended-page-table violations'
