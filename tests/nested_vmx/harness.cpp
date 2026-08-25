@@ -176,7 +176,8 @@ void hypervisor::inject_page_fault(std::uint64_t linear,
 }
 
 std::expected<std::uint64_t, zpp::error>
-hypervisor::guest_linear_to_physical(std::uint64_t linear)
+hypervisor::guest_linear_to_physical(std::uint64_t linear,
+                                     std::uint64_t)
 {
     if (g_page_present_only &&
         !g_pages.count(linear & ~std::uint64_t(0xfff))) {

@@ -653,7 +653,15 @@ private:
      * is refused rather than guessed at.
      */
     std::expected<std::uint64_t, zpp::error>
-    guest_linear_to_physical(std::uint64_t linear);
+    // `table_override` walks a linear address under a page table the
+    // calling processor is *not* currently using, which is the only way
+    // to ask "is this address mapped in some other context". Zero means
+    // the current CR3. Added to test whether an application processor
+    // that triple faults with its descriptor table unreachable is
+    // holding the wrong CR3, or whether nothing maps that table at all -
+    // two different bugs with one symptom.
+    guest_linear_to_physical(std::uint64_t linear,
+                             std::uint64_t table_override = 0);
 
     /**
      * Reserves the disk channel's I/O queue allocation, by borrowing the

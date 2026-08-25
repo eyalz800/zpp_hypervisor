@@ -2454,6 +2454,39 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 mapped(vmcs.guest_gdtr_base()),
                 mapped(vmcs.guest_rsp()),
                 mapped(context.rip));
+
+            // The same descriptor table, under every page table either
+            // processor has been seen holding. "Unreachable under the
+            // CR3 in force" has two causes that look identical and want
+            // opposite fixes: this processor is holding the wrong CR3,
+            // or nothing maps that table at all. A hit here is the
+            // first; a clean sweep is the second.
+            auto gdt_linear = vmcs.guest_gdtr_base();
+            auto rsp_linear = vmcs.guest_rsp();
+
+            for (std::size_t who{}; who < max_cpus; ++who) {
+                for (std::size_t i{};
+                     (i < this->cr3_seen_count[who]) && (i < 8);
+                     ++i) {
+                    auto table = this->cr3_seen[who][i];
+                    if (0 == table) {
+                        continue;
+                    }
+
+                    auto gdt = guest_linear_to_physical(gdt_linear, table);
+                    auto rsp = guest_linear_to_physical(rsp_linear, table);
+
+                    if (gdt || rsp) {
+                        log("cpu {} elsewhere: gdt {} rsp {} under cr3 "
+                            "{} from cpu {}",
+                            (cpuid + 1),
+                            gdt ? *gdt : std::uint64_t{},
+                            rsp ? *rsp : std::uint64_t{},
+                            table,
+                            (who + 1));
+                    }
+                }
+            }
         }
 
         log("cpu {} triple fault state: cr0 {} cr3 {} cr4 {} efer {} "

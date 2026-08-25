@@ -226,7 +226,8 @@ std::expected<void, zpp::error> hypervisor::write_guest_physical(
 }
 
 std::expected<std::uint64_t, zpp::error>
-hypervisor::guest_linear_to_physical(std::uint64_t linear)
+hypervisor::guest_linear_to_physical(std::uint64_t linear,
+                                     std::uint64_t table_override)
 {
     // Five-level paging is refused rather than approximated. A four-level
     // walk of a five-level table reads the PML5 as though it were a PML4
@@ -241,8 +242,11 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
     // Worth handling rather than refusing: an application processor coming
     // out of a start-up IPI runs with CR0.PG clear, which is what the
     // unrestricted guest control exists for.
+    // An overriding caller names a table and therefore means paging, so
+    // the current processor's CR0.PG says nothing about its question.
     constexpr std::uint64_t cr0_pg = 1ull << 31;
-    if (0 == (this->vmcs.guest_cr0() & cr0_pg)) {
+    if ((0 == table_override) &&
+        (0 == (this->vmcs.guest_cr0() & cr0_pg))) {
         // **Right for a caller asking "where does this land", wrong
         // for one asking "is this mapped".** The reachability
         // instruments ask the second, and an application processor
@@ -263,7 +267,9 @@ hypervisor::guest_linear_to_physical(std::uint64_t linear)
     // its own tables since would be walked through the wrong ones - see
     // the declaration for what that costs.
     constexpr std::uint64_t address_mask = 0xffffffffff000ull;
-    auto table = this->vmcs.guest_cr3() & address_mask;
+    auto table = ((0 != table_override) ? table_override
+                                       : this->vmcs.guest_cr3()) &
+                 address_mask;
 
     arch::x86_64::virtual_address address(linear);
 
