@@ -1,5 +1,27 @@
 # Known defects
 
+## The atomic borrow counter costs the working configuration nothing
+
+**2026-08-25.** Checked rather than assumed, because a fix to a shared
+counter on the VMCS read path is exactly the kind of change that could
+quietly slow or break the one configuration that works.
+
+One processor, with `vmcs_cache_suspended` atomic:
+
+```
+  2,072,198 second-level entries    cpl seen: 0 = 2,101,795, 3 = 44
+```
+
+Ring 3 entered and climbing, which is the trajectory toward the logon UI
+that this configuration reaches. **No regression.**
+
+The codegen was checked too rather than argued: `llvm-nm -u` reports no
+undefined symbols, so nothing pulled in a library on a freestanding
+target, and the disassembly shows `lock; xaddq` at the borrow and
+release with a plain relaxed load on the read path. Only the two
+non-hot sites became locked read-modify-writes.
+
+
 ## `ZPP_VMCS_CACHE=OFF` does not boot at all - it is not a usable bisect arm
 
 **2026-08-25.** Tried as an empirical test of the one multiprocessor
