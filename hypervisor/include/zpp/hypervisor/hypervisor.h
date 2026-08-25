@@ -7564,6 +7564,12 @@ private:
      * before it dies.
      * @{
      */
+    /**
+     * Which `GDTR` value the bracket below currently describes, so it
+     * can be reset when the guest loads a different one.
+     */
+    std::uint64_t gdt_bracket_base[max_cpus]{};
+
     std::uint64_t gdt_last_reachable[max_cpus]{};
     std::uint64_t gdt_first_unreachable[max_cpus]{};
     std::uint64_t gdt_reachable_seen[max_cpus]{};

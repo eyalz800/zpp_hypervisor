@@ -235,6 +235,23 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     if ((0 != cpuid) && (cpuid < max_cpus) &&
         (this->exit_total[cpuid] < 512)) {
         if (auto base = vmcs.guest_gdtr_base(); 0 != base) {
+            // **Per descriptor-table value, not per processor.** This
+            // bracket used to accumulate across every `GDTR` the
+            // processor ever held, so "ever reachable" could be true
+            // because the *trampoline's* table at `0x2034` was readable
+            // while saying nothing about the one it dies on. The
+            // conclusion drawn from it - that the table was reachable and
+            // became unreachable - was therefore not supported by it.
+            //
+            // Reset when the value changes, so the answer is about the
+            // table currently loaded.
+            if (base != this->gdt_bracket_base[cpuid]) {
+                this->gdt_bracket_base[cpuid] = base;
+                this->gdt_last_reachable[cpuid] = 0;
+                this->gdt_first_unreachable[cpuid] = 0;
+                this->gdt_reachable_seen[cpuid] = 0;
+            }
+
             // Twice, back to back. See `gdt_walk_disagreements`: this is
             // what separates a guest editing the entry from this VMM's
             // walker failing intermittently, and it has to be settled

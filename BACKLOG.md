@@ -1,5 +1,52 @@
 # Known defects
 
+## Corrected instrument: one clean transition, mapped to unmapped, three exits before the fault
+
+**2026-08-25.** The reachability bracket had a flaw that invalidated what
+was read from it: it accumulated across **every** `GDTR` the processor
+ever held, so "ever reachable" could be true because the *trampoline's*
+table at `0x2034` was readable, while saying nothing about the table the
+processor dies on. The "flapping" recorded from it - unreachable at 198,
+reachable again at 218 - was that artefact: two different tables.
+
+Reset when the value changes, so the bracket describes the table
+currently loaded:
+
+```
+  gdt bracket: ever reachable 1
+               last reachable    exit 205
+               first unreachable exit 206
+               of 208 exits
+  eight-walk:  all-mapped 204  all-unmapped 4  mixed 0
+```
+
+**Monotonic, and a single transition.** The descriptor table the
+processor dies on was reachable through exit 205 and unreachable from
+exit 206, three exits before the triple fault, with the eight-walk
+agreeing exactly - 204 mapped exits, then 4 unmapped, no mixed.
+
+So the earlier reading was right in substance and wrong in evidence, and
+is now properly supported: **that table was mapped under this
+processor's own page table, and was unmapped, at one identifiable moment
+while the processor was running on it.**
+
+### What this pins down
+
+- It is not a region that was never built - the table was there for 204
+  exits.
+- It is not flapping or racing - one transition, no mixed samples.
+- It is not the processor being on a stale page table - the same table
+  mapped it and then did not.
+- And it happens **three exits before the fault**, which is the tightest
+  window this investigation has had. Exits 206, 207 and 208 are on the
+  record already: the local-APIC writes this VMM intercepts, and the
+  `call` that dies.
+
+The next thing is simply to name what happens at exit 206 - the exit
+reason is in the ring, and whatever this VMM did on that exit is the
+last thing that happened before the mapping went.
+
+
 ## No page table on the machine maps that descriptor table
 
 **2026-08-25.** At the triple fault, the descriptor table's address was
