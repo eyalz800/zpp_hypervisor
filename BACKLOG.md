@@ -1,5 +1,47 @@
 # Known defects
 
+## The local-APIC watch disarm is not the blocker either
+
+**2026-08-25.** The disarm's own comment predicts a failure mode this
+guest fits exactly - "Two minutes clears the ninety-second bring-up with
+margin. It is still a heuristic and can still be wrong on a slower boot"
+- and this guest is drastically slower than the boot that number was
+tuned on, at a few exits a second on the boot processor. So the watch
+timing out before Windows reaches its own processor bring-up was a good
+hypothesis.
+
+**Measured, and it is not the cause.** `ZPP_DISARM_APIC_WATCH=OFF`,
+manifest verified `apicoff=0` in the deployed binary, three processors:
+
+- the application processors do start and enter the second level -
+  cpu 1 reaching 996 exits and 35 second-level entries, cpu 2 reaching
+  292 and 17
+- and Windows is in exactly the same place as with the disarm on: one
+  process, `System`, reader proved by the ring closing and both EPROCESS
+  offsets round-tripping
+
+That is the same state every other configuration reaches. Reverted,
+because keeping the watch armed costs a measured 27.6% of all exits and
+buys nothing here.
+
+### What this rules out, stated carefully
+
+It rules out "Windows' start-up IPIs are missed because the watch was
+dropped". It does **not** rule out anything about *when* the application
+processors start, because the numbers reached - 996/35 and 292/17 - are
+the same ones every post-reboot boot reaches with the disarm on. The
+disarm changes nothing observable in either direction.
+
+### The wall, restated
+
+Six configurations now reach the identical place: application processors
+started, a few dozen second-level entries each, then no further exits;
+boot processor alive at a few entries a second; Windows holding one
+process. Nothing tried has moved that, and the fixes that did land - the
+operand retry, the `#PF` deliveries, the reference-page storm - removed
+failures that were real but were not this.
+
+
 ## Retraction: start-up IPIs *are* delivered, and the entry above was a one-field reading
 
 **2026-08-25.** The entry above concluded, from `"handed over": 0` beside
