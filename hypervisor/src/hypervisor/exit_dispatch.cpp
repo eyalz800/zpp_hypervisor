@@ -437,6 +437,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                             vmcs.exit_reason(),
                             guest_rip);
 
+                        // **And what the boot processor was doing.** The
+                        // store that writes this zero is on some
+                        // processor at some instruction, and the window
+                        // is now four exits wide. Another processor's
+                        // VMCS cannot be read from here, but its most
+                        // recent recorded exit can - reason and
+                        // instruction pointer - which is the closest
+                        // this VMM can get to naming the writer without
+                        // trapping a store it has been shown it cannot
+                        // trap.
+                        if (auto seen = this->exit_trace_count[0];
+                            0 != seen) {
+                            auto & last =
+                                this->exit_trace[0]
+                                                [(seen - 1) %
+                                                 exit_trace_capacity];
+
+                            log("  boot processor's last exit: reason {} "
+                                "rip {} count {}",
+                                last.reason,
+                                last.rip,
+                                seen);
+                        }
+
                         this->gdt_pt_entry[cpuid] = entry;
                     }
                 }

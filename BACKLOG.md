@@ -1,5 +1,59 @@
 # Known defects
 
+## The writer is Hyper-V, on the boot processor, while the application processor runs
+
+**2026-08-26.** With the leaf entry sampled every exit, the boot
+processor's most recent recorded exit is logged beside each change - the
+closest this VMM can get to naming the writer, since another processor's
+VMCS cannot be read from here and the store itself cannot be trapped:
+
+```
+  map   exit 201:  leaf 0 -> 0x8000000114f4e163
+                   boot processor last exit: reason 0x30  count 0x162c34
+  clear exit 205:  leaf 0x8000000114f4e163 -> 0
+                   boot processor last exit: reason 0x17 (VMREAD)
+                                             rip 0xfffff87573225604
+                                             count 0x162c37
+```
+
+**Reason `0x17` is `VMREAD`** - a VMX instruction, so the boot processor
+is executing **the guest hypervisor's own code**, at
+`0xfffff87573225604`, in the same module range as the application
+processor's `0xfffff8757325a479`.
+
+And the counts say the boot processor took **three** exits across the
+application processor's four-exit window, so the store landed in a
+stretch where it was running without exiting - which is why no exit
+carries it and why trapping was the only way to see it directly.
+
+### What this establishes
+
+The mapping is cleared by **Hyper-V**, running on the boot processor,
+while the application processor is executing on that mapping. Not by this
+VMM - which injects nothing, whose extended-page-table handler was probed
+across the change, and whose watched-page window was measured at zero
+overlap - and not by the application processor itself.
+
+That is the end of the chain this investigation has been following. Every
+step from "multicore hangs" to here has been narrowing *what* happens;
+this names *who*.
+
+### What it does not establish, and it is the whole remaining question
+
+**Why Hyper-V unmaps a page it has just mapped, under a processor it has
+just started.** On hardware that would be a bug in Hyper-V, which is not
+credible - so the likely shape is that Hyper-V believes that processor is
+not running, or is somewhere else, and this VMM is the reason it believes
+that.
+
+The candidates are all things this VMM tells Hyper-V about the
+application processor, and each is now checkable in isolation: the
+processor's reported activity state, the start-up IPI it was given and
+when, whether Hyper-V's own view of the processor's progress is fed by
+something this VMM answers, and what this VMM reports for the hypercalls
+Hyper-V uses to track virtual processors.
+
+
 ## Caught by value: the guest maps the descriptor-table page, then clears the entry four exits later
 
 **2026-08-26.** Sampling the leaf page-table entry itself at every exit -
