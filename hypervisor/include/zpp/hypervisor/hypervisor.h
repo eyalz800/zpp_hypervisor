@@ -7613,7 +7613,7 @@ private:
      */
     std::uint64_t l1_gs_base[max_cpus]{};
     std::uint32_t l1_gs_index[max_cpus]{};
-    std::uint8_t l1_gs_index_taken[max_cpus]{};
+    std::uint64_t l1_gs_index_taken[max_cpus]{};
 
     std::uint64_t start_up_applied[max_cpus]{};
     std::uint64_t init_emulated[max_cpus]{};

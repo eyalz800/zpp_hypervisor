@@ -738,18 +738,35 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         //
         // Once per processor: the answer does not change and the read
         // walks guest page tables.
-        if ((cpuid < max_cpus) && !this->running_l2[cpuid] &&
-            !this->l1_gs_index_taken[cpuid]) {
-            auto gs_base = vmcs.guest_gs_base();
-            std::uint32_t index{};
+        // **Only once the base is plausible, and then kept fresh.**
+        //
+        // The first version latched the first sample with `running_l2`
+        // false, and that is long before the guest hypervisor has set
+        // up GS: it read `gs_base = 0` on every processor and answered
+        // `0x32403206` alike - guest linear address 8, in early boot.
+        // It failed the check stated for it, which is why the check was
+        // stated.
+        //
+        // A canonical kernel base is the discriminator, and the sample
+        // is overwritten rather than latched so the value tracks the
+        // guest hypervisor once it is actually running there.
+        constexpr std::uint64_t kernel_floor = 0xffff800000000000;
 
-            if (read_guest_linear(
-                    gs_base + 8,
-                    std::span(reinterpret_cast<std::byte *>(&index),
-                              sizeof(index)))) {
-                this->l1_gs_base[cpuid] = gs_base;
-                this->l1_gs_index[cpuid] = index;
-                this->l1_gs_index_taken[cpuid] = 1;
+        if ((cpuid < max_cpus) && !this->running_l2[cpuid]) {
+            auto gs_base = vmcs.guest_gs_base();
+
+            if (gs_base >= kernel_floor) {
+                std::uint32_t index{};
+
+                if (read_guest_linear(
+                        gs_base + 8,
+                        std::span(reinterpret_cast<std::byte *>(&index),
+                                  sizeof(index)))) {
+                    this->l1_gs_base[cpuid] = gs_base;
+                    this->l1_gs_index[cpuid] = index;
+                    this->l1_gs_index_taken[cpuid] =
+                        this->l1_gs_index_taken[cpuid] + 1;
+                }
             }
         }
 
