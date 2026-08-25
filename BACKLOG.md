@@ -1,5 +1,56 @@
 # Known defects
 
+## The guest's START-UP IPIs are DROPPED, and that is why its processor is abandoned
+
+**2026-08-25.** Straight out of the hypervisor log on a three-processor
+boot, four times in the window:
+
+```
+  [ 62] guest start-up ipi for cpu 0x1, activity 0x0 is not wait-for-sipi, dropped
+  [ 63] guest start-up ipi for cpu 0x2, activity 0x0 is not wait-for-sipi, dropped
+  [112] guest start-up ipi for cpu 0x1, activity 0x0 is not wait-for-sipi, dropped
+  [146] guest start-up ipi for cpu 0x2, activity 0x0 is not wait-for-sipi, dropped
+```
+
+The guest hypervisor sends a start-up IPI to bring up its virtual
+processor. The target's activity state reads **0, active** rather than
+wait-for-SIPI - because this VMM adopted that processor earlier and it is
+already running - so `start_up_processor` drops the IPI and answers
+**adopted**, which `start_up.cpp` argues is true: the processor *is* up
+and virtualized.
+
+**It is true and it is not what the guest asked for.** A start-up IPI
+carries a vector, and the vector is where the guest wants that processor
+to begin. Dropping it leaves the processor running what *we* started it
+on, so the guest hypervisor's own application-processor entry code never
+executes. The guest then re-runs its processor initialisation - the 8,230
+CPUID calls recorded in the entry above - and finally executes VMCLEAR
+and abandons the virtual processor.
+
+That chain now joins up end to end, and every link is measured:
+
+1. start-up IPI dropped, activity state not wait-for-SIPI (log, here)
+2. guest re-initialises the processor thousands of times (8,230 CPUID
+   calls at one routine's epilogue)
+3. guest gives up: `mov $0x10,%rax` retry budget, then `VMCLEAR`
+4. the processor is gone, so the all-processor rendezvous cannot
+   complete -> `IPI_WATCHDOG_TIMEOUT`, and the secure kernel's integrity
+   guards trip on the wreckage -> `0xC0000409`
+
+**MP-only by construction**: with one processor there is no application
+processor for the guest to start and no start-up IPI to drop.
+
+### What is not yet decided
+
+Whether the fix is to *not adopt* the processor before the guest asks for
+it, to put it back into wait-for-SIPI when the guest's IPI arrives, or to
+re-enter it at the guest's vector. `start_up.cpp:668` and its neighbours
+already reason about all three; the note there that this is "the same
+answer `start_up_processor` gives a duplicate start-up IPI aimed at a
+running processor" is exactly the case that is *not* a duplicate here -
+it is the guest's first.
+
+
 ## The CPUID is not a spin - the application processor is RE-INITIALISED thousands of times
 
 **2026-08-25.** Both application processors record their last CPUID at
