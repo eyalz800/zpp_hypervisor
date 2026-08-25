@@ -1,5 +1,65 @@
 # Known defects
 
+## The processor index is CORRECT, and the routine is not application-processor-only
+
+**2026-08-25.** Two corrections, both to claims made in the entries above,
+and both from one instrument that passed the check stated for it.
+
+### The guest hypervisor knows exactly which processor it is on
+
+Read from vmcs01's guest GS base at a CPUID exit with `running_l2` false
+- the one moment the context is certain - and gated on a canonical
+kernel base:
+
+```
+  cpu0  gs_base=0xfffff8159c030000  gs:0x8 = 0
+  cpu1  gs_base=0xffffe80000283000  gs:0x8 = 1
+  cpu2  gs_base=0xffffe800002d4000  gs:0x8 = 2
+```
+
+**Each processor's index equals its own number.** That was the check the
+instrument had to pass, stated before the run, and it passes. So the
+reading that `%gs:0x8` might be 0 everywhere - which would have explained
+the whole failure - **is refuted.**
+
+The first attempt at this instrument latched the first sample with
+`running_l2` false, which is long before GS is set up: it read
+`gs_base = 0` on every processor and `0x32403206` alike, guest linear
+address 8 in early boot. It failed its own check *visibly*, which is the
+difference between this and the six instruments in this investigation
+that failed plausibly.
+
+### And the routine runs on every processor, not only the application ones
+
+```
+  cpuid_total   cpu0 8,498   cpu1 6,774   cpu2 6,979
+```
+
+Comparable on all three. **The claim recorded above that it is
+"application-processor only" is wrong.** cpu0 takes the index-skip - its
+index *is* the skipped one - and still reaches the CPUID at the tail,
+because the tail is on both paths. An earlier reading that showed cpu0
+with few CPUIDs was of a different boot stage, not a different behaviour.
+
+### What that leaves, and it is a different gate
+
+The index test is not the dominant skip, because the routine branches
+before it ever gets there:
+
+```
+  cmpl $0x2, <global @0xa3d34>
+  jne  0x235fa0            ; skips everything, including the index test
+```
+
+With the body running 257 times against ~22,000 entries across three
+processors, **that first gate is what refuses almost every call**, and
+what it tests is a global this VMM has never read. It could not be read
+this run: `cpuid_last_rip` now records the last CPUID from *any* site
+rather than that routine's, so the image base is no longer derivable
+from it - **an instrument improvement that broke a derivation depending
+on it**, which is worth its own note.
+
+
 ## Hyper-V's own counter: the bring-up body is SKIPPED 97% of the time
 
 **2026-08-25**, three processors left undisturbed until the application
