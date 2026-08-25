@@ -2036,6 +2036,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 auto through = translate_guest_linear(
                     cpuid, vmcs.guest_gdtr_base());
 
+                // Which level refused, from the walk just attempted.
+                // A missing PML4 entry means the whole 512 GB region is
+                // gone - consistent with a context that was torn down.
+                // A missing leaf means one page. They are different
+                // defects and the error code alone cannot tell them
+                // apart, which is why `walk_refusal_level` exists.
+                log("cpu {} gdt walk refused at level {} entry {} "
+                    "table {}",
+                    (cpuid + 1),
+                    this->walk_refusal_level[cpuid],
+                    this->walk_refusal_entry[cpuid],
+                    this->walk_refusal_table[cpuid]);
+
                 log("cpu {} gdt by two walkers: direct {} -> {} "
                     "through-ept {} -> {}",
                     (cpuid + 1),

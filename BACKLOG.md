@@ -1,5 +1,65 @@
 # Known defects
 
+## One leaf entry, zero: the GDT's page is unmapped and nothing else is
+
+**2026-08-25.** The walk-refusal level, wired into the triple-fault
+handler:
+
+```
+  cpu 1 gdt walk refused at level 0x3  entry 0x0  table 0x101ab6000
+```
+
+Level 3 is the **leaf**. Levels 0, 1 and 2 - the PML4, the page-directory
+pointer and the page directory - are all present and walkable; only the
+final page-table entry is `0`. Not "not present with flags set", not a
+reserved-bit pattern: **zero**.
+
+So this is not a context torn down or a region withdrawn. **Exactly one
+four-kilobyte mapping is missing**, and it happens to be the one holding
+the global descriptor table the processor is using.
+
+The leaf table itself lives at `0x101ab6000`, in the same physical
+neighbourhood as the boot processor's CR3 `0x101abc000` - both guest
+hypervisor allocations, so the application processor's tables were built
+by the same allocator, as expected.
+
+### What that narrows it to
+
+The mapping was there - the hardware read `CS`, `SS` and `TR` out of that
+table - and one entry describing it is now zero while its parents are
+intact. That is the signature of something **writing a zero into a
+page-table entry**, not of a page table being replaced or a context being
+switched.
+
+Candidates, in the order the evidence supports them:
+
+1. **The guest freed the mapping.** Hyper-V maps a bring-up structure for
+   a starting processor and unmaps it when it believes the processor is
+   done - and here the processor is *not* done, because it never reported
+   in. That would make the unmap correct from the guest's point of view
+   and fatal because of a different defect upstream.
+2. **This VMM lost a write, or the guest saw a stale table.** The page
+   tables are guest memory reached through the shadow extended tables; a
+   stale shadow leaf for the *page-table page* would show a zero this
+   VMM's walker reads while hardware reads something else - though the
+   processor's own triple fault says hardware could not read it either.
+3. **A torn write.** The entry being exactly zero rather than partially
+   updated argues against this.
+
+Candidate 1 is the one that fits every measurement so far, and it points
+back upstream: the application processor never completes bring-up, so
+whatever the guest is waiting for before it reclaims that page never
+arrives.
+
+### The instrument that would settle it
+
+Watch that page-table entry. This tree already has a watched-page
+mechanism - `watched_page.cpp`, used for the local APIC - and pointing it
+at `0x101ab6000` would catch the write that zeroes the entry, with the
+RIP that did it. That is a much smaller question than any asked so far:
+one address, one write, one instruction pointer.
+
+
 ## The application processor is NOT on the boot processor's page table
 
 **2026-08-25.** The comparison the previous entry called for, both
