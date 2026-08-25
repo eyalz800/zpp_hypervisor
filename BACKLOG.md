@@ -1,5 +1,51 @@
 # Known defects
 
+## RESOLVED: the bring-up routine is called ~96 times, not 8,230
+
+**2026-08-25, and it needed no boot** - the answer was already in the
+per-processor CPUID census, unread.
+
+That routine asks **leaf 1** (`movl $0x1, %ebp` then `mov %ebp, %eax`).
+The census, per processor:
+
+```
+  cpu1  total 8,596   leaf 0x0  8,448   leaf 0x1  96
+  cpu2  total 8,378   leaf 0x0  8,230   leaf 0x1  96
+```
+
+**96 per application processor.** And Hyper-V's own counter reported its
+body running **257** times partition-wide, which ~96 x 2 plus the boot
+processor's share accounts for.
+
+So the two numbers agree, and the "8,230 calls to a processor bring-up
+routine" reading recorded above - already flagged as unproven once the
+site conflation was found - **is now definitively wrong**. The leaf-0
+storm comes from other sites entirely and has nothing to do with that
+routine.
+
+### What that costs and what it leaves
+
+It costs the most dramatic-sounding finding of the investigation. What it
+leaves is tidier and true:
+
+- The bring-up routine runs a normal number of times. **It is not
+  looping.**
+- Its body running 257 times against ~96 entries per processor is
+  consistent arithmetic, not an anomaly.
+- **The unexplained fact is now the leaf-0 storm itself** - 8,230 CPUIDs
+  on an application processor from sites at RVA ~`0x55b4e` and
+  `0x5c26f`, which nothing has looked at.
+
+That is a smaller and better-posed question than the one it replaces, and
+the sites are already identified.
+
+**The lesson, and it is the cheapest one here**: the census that answered
+this was built days-of-work earlier in the same session and its leaf-1
+row was in every dump printed since. The answer was never missing - it
+was never *read*, because attention was on the largest number in the
+table.
+
+
 ## The atomic borrow counter does not change the multiprocessor failure - tested
 
 **2026-08-25.** Three processors with `vmcs_cache_suspended` atomic:
