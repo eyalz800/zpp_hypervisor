@@ -222,6 +222,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture - the stack, the code window, the VP assist page, the shared and spin regions. OFF: it is the last candidate for 137.6 VMCS reads a vmcall, which is 19% of the machine. The cheap register census beside it stays either way. See nested_vmx.h."
     OFF)
 
+option(ZPP_WATCH_AP_PAGE_TABLE
+       "Watch the page table entry mapping an application processor's descriptor table, and name whoever writes it"
+       OFF)
+
 option(ZPP_APPLY_QUEUED_START_UP
     "Apply a start-up IPI that arrived before its target reached its INIT exit, rather than only holding it. On is how the multicore boot got past its first wall; it also starts a processor twice, which hardware would not. Off is the experiment. See nested_vmx.h."
     ON)
@@ -386,6 +390,7 @@ ExternalProject_Add(hypervisor
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
@@ -494,6 +499,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}

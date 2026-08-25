@@ -873,6 +873,23 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_WATCH_AP_PAGE_TABLE
+#define ZPP_WATCH_AP_PAGE_TABLE 0
+#endif
+
+// Names whoever zeroes the page table entry that maps an application
+// processor's descriptor table. The entry is installed, four exits pass,
+// and it is cleared while the table is still in use - and a whole-handler
+// bracket proves this VMM never writes it, so the writer is the guest.
+// Which processor of the guest is the question this answers, because
+// "the processor unmapped its own live descriptor table" and "the other
+// one unmapped it underneath" want opposite fixes.
+//
+// Off by default: it takes write permission from a live page table page,
+// so a run with it on is not comparable with one without.
+inline constexpr bool watch_ap_page_table =
+    (0 != ZPP_WATCH_AP_PAGE_TABLE);
+
 inline constexpr bool apply_queued_start_up =
     (0 != ZPP_APPLY_QUEUED_START_UP);
 

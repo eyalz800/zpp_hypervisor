@@ -1435,6 +1435,20 @@ private:
     void unwatch_guest_page(std::uint64_t guest_physical);
 
     /**
+     * Reports writes to the page holding the page table entry that maps
+     * an application processor's descriptor table. See
+     * `nested_vmx::watch_ap_page_table` for why the writer's identity is
+     * the question.
+     */
+    static void on_ap_page_table_write(void * context,
+                                       std::uint64_t page,
+                                       const guest_write * write);
+
+    bool ap_pt_watch_armed{};
+    std::uint64_t ap_pt_watch_page{};
+    std::uint64_t ap_pt_writes{};
+
+    /**
      * Handles an EPT violation. Returns whether it was ours - a false
      * means nothing had that page watched, which is a bug rather than a
      * guest error, and the caller stops the CPU.

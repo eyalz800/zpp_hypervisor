@@ -63,6 +63,37 @@
 
 namespace zpp::hypervisor
 {
+// Named rather than counted: the value and the offset say whether this
+// is the entry in question or an unrelated one on the same page, and the
+// processor and instruction pointer say who. Bounded, because a page
+// table page is written often enough to fill any ring.
+void hypervisor::on_ap_page_table_write(void * context,
+                                        std::uint64_t page,
+                                        const guest_write * write)
+{
+    auto self = static_cast<hypervisor *>(context);
+    if ((nullptr == self) || (nullptr == write)) {
+        return;
+    }
+
+    self->ap_pt_writes = self->ap_pt_writes + 1;
+
+    constexpr std::uint64_t reported = 64;
+    if (self->ap_pt_writes > reported) {
+        return;
+    }
+
+    log("ap page table write {} of page {}: address {} value {} "
+              "size {} by cpu {} rip {}",
+        self->ap_pt_writes,
+        page,
+              write->address,
+              write->value,
+              static_cast<std::uint64_t>(write->size),
+              self->vmcs.vpid(),
+              self->vmcs.guest_rip());
+}
+
 void hypervisor::on_vm_exit(std::uint64_t cpuid,
                             arch::x86_64::context & context)
 {
@@ -417,6 +448,33 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 if (ok) {
                     this->gdt_pt_page[cpuid] =
                         table + ((base >> 12) & 0x1ff) * 8;
+
+                    // Arm the watch the moment the entry's address is
+                    // known, on an application processor only. The
+                    // boot processor's descriptor table is not the one
+                    // being torn down, and watching its page table too
+                    // would take write permission from a page the
+                    // whole guest writes constantly.
+                    if constexpr (nested_vmx::watch_ap_page_table) {
+                        if ((0 != cpuid) && !this->ap_pt_watch_armed) {
+                            this->ap_pt_watch_armed = true;
+                            this->ap_pt_watch_page =
+                                this->gdt_pt_page[cpuid] & ~0xfffull;
+
+                            auto armed = watch_guest_page_writes(
+                                this->ap_pt_watch_page,
+                                &hypervisor::on_ap_page_table_write,
+                                this);
+
+                            log("cpu {} watching ap page table page {} "
+                                "for the entry at {}, armed {}",
+                                cpuid,
+                                this->ap_pt_watch_page,
+                                this->gdt_pt_page[cpuid],
+                                static_cast<std::uint64_t>(
+                                    armed.has_value()));
+                        }
+                    }
                 }
             }
 

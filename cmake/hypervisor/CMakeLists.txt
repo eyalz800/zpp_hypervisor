@@ -64,6 +64,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture. OFF. See the root CMakeLists and nested_vmx.h."
     OFF)
 
+option(ZPP_WATCH_AP_PAGE_TABLE
+       "Watch the page table entry mapping an application processor's descriptor table"
+       OFF)
+
 option(ZPP_APPLY_QUEUED_START_UP
     "Apply a start-up IPI that arrived before its target was waiting."
     ON)
@@ -293,6 +297,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # because it was never built. Adding an option is three edits here,
     # not two, and the third is the only one the compiler sees.
     -DZPP_STEP_VTL=$<BOOL:${ZPP_STEP_VTL}>
+    -DZPP_WATCH_AP_PAGE_TABLE=$<BOOL:${ZPP_WATCH_AP_PAGE_TABLE}>
     -DZPP_APPLY_QUEUED_START_UP=$<BOOL:${ZPP_APPLY_QUEUED_START_UP}>
     -DZPP_EVMCS=$<BOOL:${ZPP_EVMCS}>
     -DZPP_DEFER_GUEST_STATE=$<BOOL:${ZPP_DEFER_GUEST_STATE}>
