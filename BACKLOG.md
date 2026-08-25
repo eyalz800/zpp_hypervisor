@@ -1,5 +1,33 @@
 # Known defects
 
+## The atomic borrow counter does not change the multiprocessor failure - tested
+
+**2026-08-25.** Three processors with `vmcs_cache_suspended` atomic:
+
+```
+  cpu0  1,309,873 exits / 90,323 entries
+  cpu1      1,684 exits /     33 entries
+  cpu2        292 exits /     17 entries
+  ring 3 never entered on any processor
+```
+
+**Indistinguishable from the runs before the fix.** The commit that made
+the counter atomic said it was not claimed to fix this boot; that is now
+*tested* rather than merely disclaimed, which is a different and stronger
+statement.
+
+The fix stays. It is a real race - a lost increment resumes caching
+inside a live borrow and fills rows from the shadow VMCS - found by
+static audit against KVM's discipline, and it costs the working
+configuration nothing (checked: 2,072,198 entries with ring 3 climbing).
+It simply is not this failure.
+
+**Worth stating for whoever picks this up**: the list of things now
+*tested* against the multiprocessor boot and found not to be the cause is
+long, and every one of them is recorded above with its measurement. The
+value of that list is that it is not a list of opinions.
+
+
 ## The atomic borrow counter costs the working configuration nothing
 
 **2026-08-25.** Checked rather than assumed, because a fix to a shared
