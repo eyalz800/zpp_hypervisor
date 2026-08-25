@@ -1,5 +1,63 @@
 # Known defects
 
+## The positive control fires: the walker is broken, and the signal is smaller than its error
+
+**2026-08-25.** First run with the repaired instruments:
+
+```
+  cpu 1 injections:     count 0  last 0  at exit 0
+  cpu 1 walker control: rip unreachable 10 of 208 exits
+  cpu 1 gdt eight-walk: all-mapped 204  all-unmapped 4  mixed 0
+  cpu 1 gdt bracket:    ever reachable 1  last 205  first unreachable 206
+```
+
+**The injection count is now real** - taken where the field is written
+rather than where the processor has already cleared it - and it is
+genuinely zero. So that elimination stands this time, properly: this VMM
+injects nothing into the application processor.
+
+**And the positive control fires.** The walker could not translate
+`context.rip` on **10 of 208 exits** - addresses the processor had just
+fetched an instruction from, so the translation demonstrably exists and
+the walker is wrong. That is a **4.8% error rate**, measured, on the
+instrument every reachability claim in this file rests on.
+
+### The arithmetic that matters
+
+The descriptor table was reported unmapped on **4** exits. The walker is
+known wrong on **10**. **The signal is smaller than the instrument's
+error.**
+
+So the whole chain built on it - "mapped for 204 exits and unmapped from
+206", "one clean monotonic transition", "two exits before the fault" -
+**cannot be distinguished from the walker failing four times.** Those
+entries are withdrawn as evidence. `mixed == 0` does not rescue them: the
+audit already established that a *systematic* fault gives eight
+unanimous, identically wrong answers, which is exactly what a
+deterministic walker defect produces.
+
+### What is left standing, and it is very little
+
+- the `call` and its stack push, from **disassembly**;
+- the leaf entry read as zero by **QEMU**, which shares no code with this
+  VMM;
+- the region stopping at page `0x283`, also QEMU;
+- and `injections = 0`, now measured correctly.
+
+Everything else in the descriptor-table thread came through the walker
+and has to be re-taken after it is fixed.
+
+### Why it is wrong is already known
+
+The audit named it: `guest_linear_to_physical` never calls
+`l2_physical_to_l1`, while its sibling `translate_guest_linear` calls it
+**once per level** and says why - *"the addresses in that guest's page
+tables are physical in its hypervisor's address space and not in this
+VMM's"*. The two coincide only when nesting is off. That is the next
+change, and the control now in place will say whether it worked: `rip
+unreachable` must go to zero.
+
+
 ## Instrument audit: two of the last twenty entries' facts were null readings
 
 **2026-08-25.** Two reviews were commissioned - one of the method, one
