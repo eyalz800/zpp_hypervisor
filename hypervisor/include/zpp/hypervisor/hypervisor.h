@@ -7567,6 +7567,21 @@ private:
     std::uint64_t gdt_last_reachable[max_cpus]{};
     std::uint64_t gdt_first_unreachable[max_cpus]{};
     std::uint64_t gdt_reachable_seen[max_cpus]{};
+
+    /**
+     * How often two walks of the same address, back to back at the same
+     * exit, disagreed about whether it is mapped.
+     *
+     * The reachability bracket shows the global descriptor table's
+     * mapping flapping between exits, which is either the guest editing
+     * that page-table entry under a running processor or this VMM's
+     * walker being intermittently wrong - and both walkers share
+     * `read_guest_physical`, so their agreement does not separate the
+     * two. Two walks a few hundred cycles apart do: nothing the guest
+     * does can change between them often enough to matter, so a
+     * disagreement here is the instrument.
+     */
+    std::uint64_t gdt_walk_disagreements[max_cpus]{};
     /**
      * @}
      */

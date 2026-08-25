@@ -217,7 +217,19 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     if ((0 != cpuid) && (cpuid < max_cpus) &&
         (this->exit_total[cpuid] < 512)) {
         if (auto base = vmcs.guest_gdtr_base(); 0 != base) {
-            if (guest_linear_to_physical(base)) {
+            // Twice, back to back. See `gdt_walk_disagreements`: this is
+            // what separates a guest editing the entry from this VMM's
+            // walker failing intermittently, and it has to be settled
+            // before the flapping is reasoned about at all.
+            auto first = guest_linear_to_physical(base).has_value();
+            auto second = guest_linear_to_physical(base).has_value();
+
+            if (first != second) {
+                this->gdt_walk_disagreements[cpuid] =
+                    this->gdt_walk_disagreements[cpuid] + 1;
+            }
+
+            if (first) {
                 this->gdt_last_reachable[cpuid] = this->exit_total[cpuid];
                 this->gdt_reachable_seen[cpuid] = 1;
             } else if (0 == this->gdt_first_unreachable[cpuid]) {
@@ -2060,6 +2072,10 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // A missing leaf means one page. They are different
                 // defects and the error code alone cannot tell them
                 // apart, which is why `walk_refusal_level` exists.
+                log("cpu {} gdt walk disagreements: {}",
+                    (cpuid + 1),
+                    this->gdt_walk_disagreements[cpuid]);
+
                 log("cpu {} gdt bracket: ever reachable {} last {} "
                     "first unreachable {} of {} exits",
                     (cpuid + 1),

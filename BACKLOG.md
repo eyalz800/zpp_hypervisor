@@ -1,5 +1,52 @@
 # Known defects
 
+## The walker disagrees with itself, once in 239 - so the flapping is partly, not wholly, instrument
+
+**2026-08-25.** Two walks of the same address, back to back at the same
+exit, on the application processor:
+
+```
+  cpu 1 gdt walk disagreements: 1
+  cpu 1 gdt bracket: ever reachable 1
+                     first unreachable 0xc6 (198)
+                     last reachable    0xda (218)
+                     of 0xef (239) exits
+```
+
+**One disagreement.** Nothing the guest does plausibly lands between two
+walks a few hundred cycles apart often enough to matter, so that one is
+this VMM's walker being wrong - and the previous entry's second candidate
+is therefore **real**, not hypothetical. `read_guest_physical` is shared
+by both walkers and it is not perfectly reliable.
+
+### But it does not explain the bracket, and the arithmetic matters
+
+One error in 239 samples is a rate of about 0.4%. The bracket is not a
+single sample: it says unreachable at exit 198 and reachable again at
+exit **218**, a span of twenty exits, with the fault at 239. A 0.4% error
+rate produces isolated wrong answers, not a twenty-exit-wide interval
+bracketed on both sides.
+
+So the honest position is split, and both halves have to be carried:
+
+- **the walker is unreliable**, so *any single* reachability reading in
+  this file - including the "gdt 0" in the original triple-fault reach
+  line - could be wrong, and none of them should be quoted alone again;
+- **the flapping is probably still real**, because it is twenty exits
+  wide and the measured error rate is not.
+
+What would settle it properly is sampling more than twice - say eight
+walks per exit, and recording the majority and the spread. A mapping that
+is genuinely being written shows a *run* of one answer then a run of the
+other; an unreliable reader shows scattered singletons. That is the same
+instrument again with a loop around it, and it is the next thing to do
+before any fix is designed on the flapping.
+
+**Recorded as a caution rather than a conclusion**, because the thing this
+session has been punished for most is exactly this: believing one reading
+from an instrument nobody had checked.
+
+
 ## The GDT mapping FLAPS - it is a race, not an unmap
 
 **2026-08-25.** Walking the application processor's global descriptor
