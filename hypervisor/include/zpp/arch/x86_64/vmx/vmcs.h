@@ -4,6 +4,7 @@
 #include "zpp/arch/x86_64/vmx/evmcs.h"
 #include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/error.h"
+#include <atomic>
 #include <cstdint>
 #include <expected>
 
@@ -333,7 +334,24 @@ inline constinit std::uint64_t vmcs_cache_epoch{1};
  * would revive that processor's stale rows. Hence re-validating a row
  * forward to the current epoch rather than winding the epoch back.
  */
-inline constinit std::uint64_t vmcs_cache_suspended{};
+// **Atomic, because the increment is a read-modify-write done from
+// every processor.** The paragraph above argues this is safe global
+// rather than per-processor, and that argument is about the *value* -
+// another processor seeing it set merely stops caching. It says nothing
+// about the *update*, and `x = x + 1` from two processors loses one.
+//
+// Two ways that bites, both silent. A lost increment lets the count
+// reach zero while a borrow is still live, so caching resumes during
+// the borrow and rows are filled from the shadow VMCS the borrower made
+// current - every later read of those fields then answers with the
+// wrong VMCS's contents. The mirror interleaving leaves it stuck
+// non-zero, which only disables the cache and is the safe direction.
+//
+// Impossible with one processor, which is why it survived. The load on
+// the read path is relaxed and compiles to a plain load on x86-64, so
+// the hot path is unchanged; only the borrow and release become locked
+// read-modify-writes, and those are not hot.
+inline constinit std::atomic<std::uint64_t> vmcs_cache_suspended{};
 inline constinit std::uint64_t vmcs_cache_revalidations{};
 inline constinit std::uint64_t vmcs_cache_hits{};
 inline constinit std::uint64_t vmcs_cache_misses{};
@@ -405,18 +423,25 @@ public:
     vmcs_cache_borrow()
     {
         if constexpr (vmcs_cache_enabled) {
-            vmcs_cache_suspended = vmcs_cache_suspended + 1;
+            vmcs_cache_suspended.fetch_add(
+                1, std::memory_order_acq_rel);
         }
     }
 
     ~vmcs_cache_borrow()
     {
         if constexpr (vmcs_cache_enabled) {
-            vmcs_cache_suspended = vmcs_cache_suspended - 1;
+            // The test uses the value *this* release produced, not a
+            // re-read: between the decrement and a re-read another
+            // processor can borrow again, and revalidating then would
+            // do it inside somebody else's window.
+            auto remaining = vmcs_cache_suspended.fetch_sub(
+                                 1, std::memory_order_acq_rel) -
+                             1;
 
             // After the borrower's own `vmptrld` back, so the pointer is
             // the one the row describes again.
-            if (0 == vmcs_cache_suspended) {
+            if (0 == remaining) {
                 vmcs_cache_revalidate();
             }
         }
@@ -836,7 +861,8 @@ public:
         // so every write was arming a guaranteed miss on a path where a
         // miss is an exit to the layer below at about 4,900 cycles.
         if constexpr (vmcs_cache_enabled) {
-            auto row = (0 == vmcs_cache_suspended)
+            auto row = (0 == vmcs_cache_suspended.load(
+                            std::memory_order_relaxed))
                            ? vmcs_cache_row_index()
                            : vmcs_cache_processors;
 
@@ -899,7 +925,8 @@ public:
         }
 
         if constexpr (vmcs_cache_enabled) {
-            auto row = (0 == vmcs_cache_suspended)
+            auto row = (0 == vmcs_cache_suspended.load(
+                            std::memory_order_relaxed))
                            ? vmcs_cache_row_index()
                            : vmcs_cache_processors;
 
