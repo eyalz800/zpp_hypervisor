@@ -1,5 +1,57 @@
 # Known defects
 
+## The open window is measured at zero, so the APIC watch is cleared properly
+
+**2026-08-25.** The previous entry noted that `ept_violation_unclaimed`
+counts the *wrong* race - a violation arriving after a disarm - and that
+nothing counted the one the review actually described: a processor
+executing while **another** holds a watched page open for stepping, so
+its writes reach the register unseen.
+
+Counted directly, on the failing configuration:
+
+```
+  cpu 1 exits while another processor held a watched page open: 0
+  cpu 1 walker control: rip unreachable 0 of 208
+  cpu 1 gdt bracket: ever reachable 1  last 204  first unreachable 205
+```
+
+**Zero.** The application processor never runs while the boot processor
+is mid-step. So the partition-wide open window - the most suspicious
+construct in this VMM, flagged by its own comment and by the KVM review -
+**does not overlap this processor at all**, and candidate 2 is dead on
+both its faces rather than argued away on one.
+
+That is worth having independently of this bug: the window is a real
+design hazard and it is now known not to be firing here, which stops it
+being re-proposed.
+
+### Where the investigation actually stands
+
+Both of the review's ranked candidates are eliminated by measurement.
+What survives, all on instruments that now pass their own controls:
+
+- the processor dies on a `call` whose stack push faults, with the
+  descriptor table in the same unmapped region *(disassembly, QEMU)*;
+- that region is mapped through page `0x283` and absent above it *(QEMU)*;
+- the descriptor table is reachable for ~204 exits and unreachable for
+  the rest, one monotonic transition, zero mixed samples *(validated
+  walker, `rip unreachable 0`)*;
+- this VMM injects nothing into that processor *(counted at the write
+  site)*;
+- this VMM's extended-page-table handler does not remove the mapping
+  *(probed at entry and exit)*;
+- the guest never retries the bring-up *(log)*.
+
+**So the mapping is removed by the guest, under a processor the guest
+started, and nothing this VMM does has been shown to cause it.** Every
+mechanism proposed for *why* has now failed a test. That is an honest
+dead end rather than a narrowing, and the next move has to come from a
+different direction than the last twenty entries did - most plausibly
+from watching the page-table entry itself change, which is the one thing
+never instrumented.
+
+
 ## Both of the KVM review's leading candidates are weakened by data already in hand
 
 **2026-08-25.** The review ranked two causes and gave each a test that

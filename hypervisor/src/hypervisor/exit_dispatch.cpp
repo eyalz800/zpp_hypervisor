@@ -209,6 +209,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->gs_processor_index_disagreements + 1;
     }
 
+    // **How often this processor is running while another has a
+    // watched page held open.** The local-APIC watch services a
+    // per-processor event by changing a partition-wide protection: it
+    // opens the page, steps one instruction, and closes it, and its own
+    // comment says "for that window the page is writable for every
+    // processor, not just the one being stepped".
+    //
+    // Nothing counted the exposure. `ept_violation_unclaimed` counts a
+    // violation arriving after a *disarm*, which is a different race -
+    // measured [0,0,0] and used to argue the window is harmless, which
+    // it cannot do. This counts the window itself: an exit taken by one
+    // processor while another is mid-step means that processor has been
+    // executing with the page open, and any write it made in that time
+    // reached the register unseen.
+    if (cpuid < max_cpus) {
+        for (std::size_t other{}; other < max_cpus; ++other) {
+            if ((other != cpuid) && this->stepping_watch[other]) {
+                this->exits_while_page_open[cpuid] =
+                    this->exits_while_page_open[cpuid] + 1;
+                break;
+            }
+        }
+    }
+
     // Bracket the moment this processor's global descriptor table
     // stopped being reachable. See `gdt_last_reachable`: the fault says
     // it is unmapped now and the loaded segment selectors say it was
@@ -2243,6 +2267,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->injected_count[cpuid],
                     this->injected_last[cpuid],
                     this->injected_last_exit[cpuid]);
+
+                log("cpu {} exits while another processor held a "
+                    "watched page open: {}",
+                    (cpuid + 1),
+                    this->exits_while_page_open[cpuid]);
 
                 log("cpu {} walker control first miss: rip {} cr3 {}",
                     (cpuid + 1),

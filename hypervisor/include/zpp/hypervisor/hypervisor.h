@@ -9502,6 +9502,18 @@ private:
      * one opened. The page number alone cannot say whether a step is in
      * progress, since zero is a legal page, so the flag is separate.
      */
+    /**
+     * Exits taken by this processor while a *different* one had a
+     * watched page held open for stepping.
+     *
+     * The watch opens a partition-wide protection to service one
+     * processor's write. `ept_violation_unclaimed` counts the opposite
+     * race - a violation arriving after a disarm - and reading it as
+     * zero says nothing about this one. A non-zero count here is the
+     * window being open across processors, measured.
+     */
+    std::uint64_t exits_while_page_open[max_cpus]{};
+
     bool stepping_watch[max_cpus]{};
     std::uint64_t stepping_page[max_cpus]{};
 
