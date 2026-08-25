@@ -1,5 +1,69 @@
 # Known defects
 
+## The start-up vector was applied on the wrong path, and fixing it unwedges the multicore boot
+
+**2026-08-25.** The log said it plainly once the right question was being
+asked:
+
+```
+  start-up ipi for cpu 1, activity 0 is not wait-for-sipi, queued vector 0x87
+  ...
+  start-up ipi for cpu 1, vector 0x2, to hardware, target hand-off 0x2
+```
+
+**Two different vectors.** The operating system's start-up IPI carries
+`0x87` - its trampoline at physical `0x87000` - and it was queued and
+never applied. The processor was instead started with `0x2`, which is
+where the *firmware* put its own start-up code, and that is why every
+application processor in this investigation came up inside the firmware's
+parked loop reading `IA32_APIC_BASE` for ever.
+
+### Two bugs, both in code added earlier the same day
+
+1. **The queue was cleared at the top of `emulate_init_signal`**, to
+   discard a vector meant for a previous bring-up, which is what
+   `kvm_apic_accept_events` does. But here the start-up IPI is *always*
+   seen before the target reaches its INIT exit - `interrupt_command.cpp`
+   only forwards the INIT, so the target's activity record does not
+   change until it faults in - so the clear discarded the only vector
+   that was ever going to arrive. KVM can clear because both events are
+   latched together in `apic->pending_events`; here they arrive by
+   different routes, inverted.
+2. **The queue was consumed only on the software-wait path.** `waited` is
+   `x2apic && nested`, and `nested` is the hypervisor-present bit in
+   CPUID leaf 1, which this VMM does not set by default - so **every**
+   adopted processor takes the hardware path, and the consumption never
+   ran at all.
+
+Fixed: the queue survives the INIT, and the hardware path applies a held
+vector directly, since nothing else will come to collect it.
+
+### Measured, two processors, before and after
+
+| | before | after |
+|---|---|---|
+| cpu 0 exits | ~1,200,000 | **26,428,817** |
+| cpu 0 second-level entries | ~90,000 | **2,141,250** |
+| guest processes | **1** (`System`) | **6** - `Idle`, `Registry`, `Secure System`, `smss.exe`, `System` |
+| `Secure System` | absent | **present** |
+
+`Secure System` present means **VTL1 is healthy**, and `smss.exe` means
+Windows reached user mode - neither had ever happened above one
+processor. The 26 million exits are the *working* profile: the
+single-processor control runs 24 million.
+
+**So the whole VTL1 investigation above was downstream of this.** The
+secure kernel was not failing because of anything about VSM; the boot was
+wedged because a processor was started into firmware code.
+
+### What is still wrong
+
+`KeNumberProcessorsGroup0` still reads 1 and cpu 1 sits at 121 exits, so
+the application processor is **still not brought online** - and the guest
+now stalls at `smss.exe` rather than before it. The wedge is gone; the
+processor is not yet a processor.
+
+
 ## The multicore failure is NOT about VSM. The application processor never leaves firmware.
 
 **2026-08-25.** `check-bootable.sh` offers this experiment in its own

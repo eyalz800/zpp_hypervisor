@@ -858,14 +858,37 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     if (auto here = this->vmcs.vpid(); (0 != here) && (here <= max_cpus)) {
         this->init_emulated[here - 1] = this->init_emulated[here - 1] + 1;
 
-        // Any vector held for a previous bring-up is discarded here, at
-        // the top, before the window this INIT opens. KVM does the same
-        // in `kvm_apic_accept_events`, where taking an INIT clears a
-        // pending start-up IPI rather than carrying it forward - a
-        // processor being re-started must not inherit a vector meant for
-        // its last life. Everything queued after this point belongs to
-        // this INIT.
-        this->queued_start_up[here - 1].store(0, std::memory_order_release);
+        // **Deliberately not cleared here, and that is a reversal.**
+        //
+        // This used to discard any held vector at the top of the INIT, on
+        // the argument that a processor being re-started must not inherit
+        // a vector meant for its last life - which is what
+        // `kvm_apic_accept_events` does. Measured, it discarded the
+        // *live* one:
+        //
+        //     guest init ipi, command 0xc4500
+        //     start-up ipi for cpu 1, activity 0 is not wait-for-sipi,
+        //         queued vector 0x87
+        //     ... (much later)
+        //     cpu 1 init: found activity 0, waiting for the hardware
+        //         start-up ipi
+        //
+        // The guest sends INIT then start-up IPI, and this VMM sees the
+        // start-up IPI **before** the target reaches its own INIT exit,
+        // because `interrupt_command.cpp` only forwards the INIT and the
+        // target's activity record does not change until it faults in
+        // here. So the vector is always queued before this point, never
+        // after it, and clearing at the top threw away the only one that
+        // was ever going to arrive.
+        //
+        // KVM can clear because its INIT and start-up IPI are both
+        // latched in `apic->pending_events` and accepted together. Here
+        // they arrive by different routes and the ordering is inverted,
+        // so the queue must survive the INIT that precedes it.
+        //
+        // Staleness is bounded instead by consume-on-use: the slot holds
+        // one vector, and the exchange below empties it when it is
+        // applied.
     }
 
     // This handler must do as little as possible, and that is not a style
@@ -1083,6 +1106,42 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // implied, because a sender that assumed otherwise is what used
         // to swallow the IPI this processor is now waiting for.
         handoff.store(start_up_handoff_state::hardware_wait);
+
+        // **And a vector that arrived before this processor was ready
+        // must be applied here, on this path too.** The consumption used
+        // to live only in the software-wait branch above, and this is
+        // the branch that is actually taken: `waited` is
+        // `x2apic && nested`, and `nested` is the hypervisor-present bit
+        // in CPUID leaf 1, which this VMM does not set by default. So
+        // every adopted processor arrives here, and every queued vector
+        // sat unread.
+        //
+        // Measured, that is not hypothetical - it is the whole failure:
+        //
+        //     start-up ipi for cpu 1, activity 0 is not wait-for-sipi,
+        //         queued vector 0x87        <- never applied
+        //     start-up ipi for cpu 1, vector 0x2, to hardware
+        //
+        // The processor was started with the *later* vector instead, and
+        // `0x2` is not where the operating system put its start-up code,
+        // which is why it came up inside the firmware's parked loop and
+        // never became a Windows processor.
+        //
+        // Applied directly rather than through the mailbox, because
+        // nothing is going to come and collect it: on this path the
+        // processor returns to wait for a hardware start-up IPI that has
+        // already been sent and refused.
+        if (auto queued = this->queued_start_up[cpu].exchange(
+                0, std::memory_order_acq_rel);
+            0 != queued) {
+            log("cpu {} init: applying start-up ipi vector {} that "
+                "arrived before this processor was waiting",
+                cpu,
+                queued & 0xff);
+
+            apply_start_up(context, queued & 0xff, "queued", false);
+            return;
+        }
     }
 
     // One log line, and the placement is deliberate: the activity state is
