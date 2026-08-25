@@ -196,6 +196,16 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // processor's shadow.
         ' ', 'i', 'n', 'v', 'a', 'l', 'l', '=',
         digit(nested_vmx::invept_all_processors),
+        // Correctness, not tuning, and the reason it is here: on, the
+        // local APIC page loses write permission partition-wide, so an
+        // application processor's own ordinary bring-up writes - its
+        // logical destination, its destination format, its spurious
+        // vector - each become a VM exit, none of which can carry a
+        // start-up IPI. Two runs differing in it are not comparable,
+        // and it had every edit but this one for the whole time it
+        // mattered.
+        ' ', 'a', 'p', 'i', 'c', '=',
+        digit(nested_vmx::intercept_apic),
         ' ', 'v', 't', 'l', 't', 'r', 'c', '=',
         digit(nested_vmx::trace_vtl),
         ' ', 'b', 'l', 'k', 'w', '=',
