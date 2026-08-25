@@ -1,5 +1,68 @@
 # Known defects
 
+## The leaf-0 storm IS Hyper-V's, and it is a ONE-SECOND TIMED SPIN
+
+**2026-08-25.** Settled by the recipe recorded above, executed: read the
+bytes at the captured instruction pointer from a live guest, then search
+the three binaries.
+
+The bytes at both application processors' leaf-0 site:
+
+```
+  0f a2        cpuid            serialise
+  f3 90        pause            spin hint
+  0f 31        rdtsc            read the clock
+  48 c1 e2 20  shl  $0x20,%rdx
+  48 0b c2     or   %rdx,%rax
+  49 2b c0     sub  %r8,%rax    elapsed
+```
+
+`cpuid; pause; rdtsc; sub` is a **timed spin-wait**. The boot processor's
+leaf-0 site is different - `cpuid; cmp $0x5,%eax; ...`, ordinary feature
+enumeration - which is why the two must never have been counted together.
+
+**The search settles the attribution that the previous entry could not:**
+
+```
+  hvix64.exe        matches = 1   -> RVA 0x255b4e in .text
+  ntoskrnl.exe      matches = 0
+  securekernel.exe  matches = 0
+```
+
+One match, in the guest hypervisor. So the storm is Hyper-V's after all -
+now *proven* rather than assumed - and the base is `0xfffff841d9800000`.
+The earlier guess of RVA `0x55b4e` was wrong by exactly `0x200000`,
+because the base was masked to 1 MB when the image is 2 MB aligned.
+
+### And the timeout is one second
+
+`.pdata` puts the site in a 644-byte function at `0x25599c`-`0x255c20`,
+with four callers, two of them (`0x23645f`, `0x23648b`) immediately after
+the bring-up routine at `0x235ee4`. Its head:
+
+```
+  testq $0x8000000, <flags> ; je ...     a feature gate
+  movl  %gs:0x8, %eax                    this processor's index
+  cmpl  <VmxBootInfo+0x279f4>, %ecx
+  jne   0x255a71                         application processors go here
+  ...
+  movl  $0x989680, %esi                  10,000,000
+```
+
+**`0x989680` is 10,000,000 - one second in 100 ns units, and the same
+constant the bugcheck reports as `P1`.** So the application processors
+enter a **one-second timed spin**, gated on the same processor-index
+comparison that appears throughout this investigation.
+
+That joins the chain end to end: the application processors wait one
+second for something, it does not arrive, and an all-processor
+rendezvous that cannot complete is exactly `IPI_WATCHDOG_TIMEOUT`.
+
+**What is still not known** is what they are waiting *for* - the branch
+at `0x255a71` and the four call sites are where that is written, and none
+has been read.
+
+
 ## Attributing the leaf-0 storm cannot be done offline - and why
 
 **2026-08-25.** Tried, and it fails for a reason worth recording so
