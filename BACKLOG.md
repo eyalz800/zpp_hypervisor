@@ -1,5 +1,58 @@
 # Known defects
 
+## The clock check's inputs, read on a failing run - and its deadline base is ZERO
+
+**2026-08-25.** The inputs to the one-second clock check at
+`hvix64+0x25599c`, read on a three-processor run that fails, with the
+image base derived from an application processor sitting at the spin
+site (`0xfffff85109000000`):
+
+```
+  struct pointer @hvix64+0x232e0 = 0xfffff8523c607000
+  freq   @0xc0   = 0x989680      <- exactly 10,000,000
+  scale  @0x128  = 0x1
+  mul    @0x130  = 0x0
+  clockfn@0x70   = hvix64+0x256490
+  deadline base @hvix64+0xa9c30 = 0x0
+```
+
+**The reads carry their own check**: `freq` came back as exactly the
+constant the code compares it against, which a wrong pointer would not
+produce.
+
+Two consequences follow directly from the disassembly:
+
+- `cmpq %rsi, 0xc0(%rbx)` compares 10,000,000 against 10,000,000, so the
+  `je` is taken and **no scaling happens** - the duration is used as the
+  delta directly.
+- The deadline is `movq <0xa9c30>, %rbp ; addq %rdx, %rbp`, and that base
+  reads **zero**. So the deadline is the bare duration, not "now plus a
+  duration".
+
+### What that is and is not
+
+A deadline formed from a zero base is a deadline that any real clock
+reading is already past. That would make the wait expire immediately, on
+every attempt, for ever - which is the shape of what the application
+processors do.
+
+**It is not proven to be wrong.** The global may legitimately be zero
+before something else initialises it, and this routine may be entered
+before that happens by design; or the second clock read through
+`0x70(%rbx)` may itself return a value relative to the same zero base, in
+which case the comparison is consistent and harmless. Both are plausible
+and neither has been checked.
+
+**What would decide it** is one more reading, and it is cheap: the same
+global on a *single-processor* boot, which reaches the logon UI. If it is
+non-zero there and zero here, the difference is real and is ours. If it
+is zero in both, it is normal and this is a dead end.
+
+That comparison is the single highest-value next step in this
+investigation, and it needs one boot of a configuration already known to
+work.
+
+
 ## The application-processor spin is a CLOCK check with a one-second budget
 
 **2026-08-25.** The 644-byte function at `hvix64+0x25599c` is now read
