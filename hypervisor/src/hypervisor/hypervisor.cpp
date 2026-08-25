@@ -510,8 +510,16 @@ void hypervisor::on_host_exception(
 
     // Take the recovery point, if there is one, and consume it - unwinding
     // to it twice would land on a frame that has already returned.
-    auto recovery_flag = this->host_exception_recovery_flag;
-    this->host_exception_recovery_flag = nullptr;
+    //
+    // This processor's own recovery point. Reading another processor's
+    // would unwind onto its stack; see the declaration.
+    auto here = this_processor();
+    auto recovery_flag = (here < max_cpus)
+                             ? this->host_exception_recovery_flag[here]
+                             : nullptr;
+    if (here < max_cpus) {
+        this->host_exception_recovery_flag[here] = nullptr;
+    }
 
     // No recovery point. This is the state once the guest is running: the
     // VMCS points the host IDTR at our IDT, so an exception in the VMM
@@ -531,7 +539,7 @@ void hypervisor::on_host_exception(
     // but main's frame itself is intact, and that is where the guards that
     // put the machine back the way it was found live.
     *recovery_flag = true;
-    arch::x86_64::restore_context(&this->host_exception_recovery);
+    arch::x86_64::restore_context(&this->host_exception_recovery[here]);
 
     // restore_context does not return.
     std::unreachable();
@@ -7019,8 +7027,8 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // read from memory rather than from a register the unwind restored.
     std::atomic<bool> host_exception_occurred;
     host_exception_occurred = false;
-    this->host_exception_recovery_flag = &host_exception_occurred;
-    arch::x86_64::capture_context(&this->host_exception_recovery);
+    this->host_exception_recovery_flag[cpuid] = &host_exception_occurred;
+    arch::x86_64::capture_context(&this->host_exception_recovery[cpuid]);
 
 #if ZPP_TEST_MODULE_PROTECTION
     // Prove the module protection rather than believe it.
@@ -7431,7 +7439,7 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // caller's stack instead - so from here on a host exception has
     // nothing to unwind to and the handler stops the CPU rather than
     // jumping into a dead frame.
-    this->host_exception_recovery_flag = nullptr;
+    this->host_exception_recovery_flag[cpuid] = nullptr;
 
     // This processor's own VPID, read from its own VMCS, rather than the
     // counter it was taken from.

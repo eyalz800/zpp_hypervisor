@@ -8752,32 +8752,35 @@ private:
      * The context to unwind to when the host IDT catches an exception,
      * captured by main once the host page table is live.
      */
-    arch::x86_64::context host_exception_recovery{};
+    arch::x86_64::context host_exception_recovery[max_cpus]{};
 
     /**
      * The flag in main's frame that says the recovery context above was
-     * used, or null while there is no recovery point to unwind to.
+     * used, or null while that processor has no recovery point.
      *
-     * Only one processor is inside that window at a time, but for a
-     * different reason on each platform, and the single reason this
-     * comment used to give was wrong on one of them:
+     * **Per processor, because the argument for sharing it was false.**
+     * The comment here used to say that under UEFI only the boot
+     * processor is launched from the loader and the others "are adopted
+     * later from the guest's own start-up IPIs, which enter through
+     * `start_up_on_this_processor` rather than through main's recovery
+     * window". The first half is true and the second is not:
+     * `start_up_on_this_processor` ends in `launch_on_cpu`, which enters
+     * `main`, which arms this unconditionally. So an adopted processor
+     * goes through the window like any other.
      *
-     * - The Windows and Linux loaders loop `call_on_cpu(i, ...)`,
-     *   blocking on each, so they genuinely launch one after another.
-     * - Under UEFI they do not, because `number_of_cpus()` returns 1 and
-     *   only the boot processor is ever launched from the loader at all.
-     *   The others are adopted later from the guest's own start-up IPIs,
-     *   which enter through `start_up_on_this_processor` rather than
-     *   through main's recovery window.
+     * What that cost while shared: the boot processor finishes `main`,
+     * nulls the slot and goes resident; an application processor is then
+     * adopted, enters `main` and captures **into the same slot**. A host
+     * exception on the *resident* processor during that window reads the
+     * application processor's flag and unwinds to the application
+     * processor's context - a longjmp onto another processor's stack, at
+     * another processor's RIP. Only possible above one processor, which
+     * is the shape of the failure this tree is chasing.
      *
-     * So the slot being shared is safe today on both, and it is safe by
-     * coincidence of two unrelated facts rather than by design. What
-     * would break it is a loader that launches processors concurrently:
-     * a second fault would overwrite the first one's record, and the
-     * first processor would unwind to a context that is no longer its
-     * own. That is BACKLOG item 10.
+     * Indexed by `this_processor()`, which `on_host_exception` can reach
+     * through GS the same way every other per-processor field is reached.
      */
-    std::atomic<bool> * host_exception_recovery_flag{};
+    std::atomic<bool> * host_exception_recovery_flag[max_cpus]{};
 
     /**
      * The data pointed to by the FS register to be used by
