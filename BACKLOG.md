@@ -1,5 +1,54 @@
 # Known defects
 
+## The faulting instruction is a `call`, and it is the stack push that faults
+
+**2026-08-25.** Disassembling guest memory at the application
+processor's faulting RIP, through its own CR3:
+
+```
+  48 8b 05 45 56 de ff   mov  rax, [rip+...]      ; __security_cookie
+  48 33 c4               xor  rax, rsp            ; stack cookie
+  48 89 85 50 17 00 00   mov  [rbp+0x1750], rax   ; ~6 KB local frame
+  33 d2                  xor  edx, edx
+  48 8d 4c 24 50         lea  rcx, [rsp+0x50]
+  41 b8 f4 17 00 00      mov  r8d, 0x17f4
+  e8 89 56 17 00         call rel32     <-- the faulting instruction
+```
+
+**The processor triple faults on a `call`.** A `call` pushes a return
+address, so the first thing it does is **write to the stack** - and the
+stack pointer at the fault is `0xffffe800002b56b0`, in the *same*
+`0xffffe800002b____` region as the descriptor table at
+`0xffffe800002b0b00`.
+
+So the mechanism is complete and needs no hypothesis:
+
+1. the `call` pushes to a stack page that is not mapped -> `#PF`;
+2. delivering `#PF` needs a descriptor from the global descriptor table,
+   which is in the same unmapped region -> `#DF`;
+3. delivering `#DF` needs the same table and the same stack -> **triple
+   fault**.
+
+That also explains why the reach line reports **both** `gdt 0` and
+`rsp 0`, and why the two unmapped addresses always share a range while
+the reachable ones - the interrupt table and the code - are in a
+different one. **It is one region, holding this processor's stack and its
+descriptor table, that its page table does not map.**
+
+### What that makes the question
+
+Not "which page went missing" - a whole region is missing, consistently,
+across every boot. The processor is running on a page table that was
+never going to work for it, and it survives exactly as long as it takes
+to reach an instruction that touches its own stack.
+
+The prologue before the `call` already reads and writes `[rbp+0x1750]`
+and `[rsp+0x50]`, so *part* of the stack region is reachable and part is
+not - which points at a partially-populated mapping rather than a missing
+one, and is the next thing to measure: walk the whole
+`0xffffe800002b____` range and record which pages are present.
+
+
 ## Two independent readers agree: the GDT's page is absent from a live page table
 
 **2026-08-25.** The leaf entry this VMM's walker refuses on, read back
