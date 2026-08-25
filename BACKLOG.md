@@ -1,5 +1,61 @@
 # Known defects
 
+## On a first boot the application processors never leave firmware
+
+**2026-08-25.** cpu 1's first-level exit trace, on a three-processor
+first boot where it showed 107 exits and **zero** second-level entries:
+
+```
+  [75] rdmsr  cs=0x0000 rip=0x7ef50775 detail=0x1b value=0xfee00800
+  [76] cpuid  cs=0x0000 rip=0x7ef5fbd7 x3
+  [77] rdmsr  cs=0x0000 rip=0x7ef50775 detail=0x1b value=0xfee00800
+  [82] ept-violation  cs=0x0000 rip=0x7ef52fb2 phys=0xfee00000
+  ... repeating
+```
+
+MSR `0x1b` is `IA32_APIC_BASE`, and the value `0xfee00800` has the global
+enable bit set and **the BSP bit (0x100) clear** - so this processor
+knows it is an application processor. It reads that MSR, executes
+`CPUID`, and touches the local APIC page at `0xfee00000`, over and over,
+at `rip` around `0x7ef5xxxx` with a null code selector.
+
+**That is the UEFI firmware's application-processor park loop, not
+Windows.** These processors have zero second-level entries because they
+were never handed to the guest at all - they are still executing firmware
+under this VMM.
+
+### Which splits the multicore failure into two different states
+
+- **First boot:** the application processors never leave firmware. Zero
+  second-level entries, spinning in the park loop above.
+- **After a reboot:** they *are* adopted - cpu 1 reached 36 second-level
+  entries, ran a textbook Windows AP bring-up (Hyper-V hypercalls, the
+  synthetic MSRs, `STAR`/`LSTAR`/`SFMASK`, `cpuid`) and only then spun.
+
+Those are **not the same defect** and every earlier reading in this file
+that treated "the application processors are stuck" as one phenomenon was
+merging them. The reboot is the variable, and it is the variable because
+`-no-reboot` used to hide it.
+
+This sits directly against what CLAUDE.md records about the platform:
+under UEFI `number_of_cpus()` returns 1 unconditionally, the boot
+processor launches alone, and application processors are adopted later
+from the guest's own start-up IPIs. So on a first boot the guest's
+start-up IPIs are either not arriving or not moving these processors out
+of the firmware loop, and the earlier log line - `no start-up ipi for
+0x37e11d6000 ticks after 0x6 of them, dropping the local apic page
+watch` - is the thing to chase: six seen, then the watch dropped.
+
+### The instrument note
+
+Taken with `ZPP_STEP_VTL=ON`, since the VMX-preemption timer is
+unavailable here and the monitor trap flag is the only way to get an
+instruction pointer out of a processor that spins without exiting.
+Reverted immediately afterwards: its own comment records that boots taken
+with it sit in a different regime, so it answers "where" and must not be
+used for any comparison against a boot taken without it.
+
+
 ## The VMX-preemption timer is not available on this rig, and that is why the sampler bricked the boot
 
 **2026-08-25.** The previous entry recorded `ZPP_SAMPLE_L1=ON` as "does
