@@ -6003,7 +6003,34 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                                    pin::external_interrupt_exiting
                              : 0)));
 
+    // **Only if the control was actually granted, which here it is
+    // not.** `adjust_msr` above silently drops a pin control the
+    // processor does not offer, and this rig's KVM does not offer the
+    // VMX-preemption timer: IA32_VMX_TRUE_PINBASED_CTLS reads
+    // `0x0000003f00000016`, so the allowed-one half is `0x3f` and bit 6
+    // is absent. Writing the timer field anyway faults, and the launch
+    // ends as loader code `0x60600` - the `0x6` prefix and vector 6, a
+    // `#UD`.
+    //
+    // That cost more than a failed switch. A hypervisor that refuses to
+    // launch leaves the firmware to fall through to the next boot
+    // option, which starts Windows **bare off the disk**, and every
+    // counter then reads zero on a machine that looks perfectly healthy.
+    // So the guard is not tidiness: an unavailable capability must make
+    // the sampler inert, never unbootable.
+    auto pin_granted = vmcs.pin_based_vm_execution_controls();
+    auto timer_granted =
+        0 != (pin_granted & arch::x86_64::vmx::vm_execution_controls::
+                                pin::activate_preemption_timer);
+
     if constexpr (sample_l1) {
+        if (!timer_granted) {
+            log("first-level sampler asked for the preemption timer and "
+                "the processor refused it; sampling is off");
+        }
+    }
+
+    if (sample_l1 && timer_granted) {
         // The timer counts the time-stamp counter shifted right by
         // IA32_VMX_MISC[4:0], so the same interval is a different number
         // on every machine. A millisecond is far longer than anything

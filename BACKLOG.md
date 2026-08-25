@@ -1,5 +1,53 @@
 # Known defects
 
+## The VMX-preemption timer is not available on this rig, and that is why the sampler bricked the boot
+
+**2026-08-25.** The previous entry recorded `ZPP_SAMPLE_L1=ON` as "does
+not boot" without saying why. It is not a bug in the sampler's logic - it
+is a **capability this rig does not have**:
+
+```
+  IA32_VMX_TRUE_PINBASED_CTLS = 0x0000003f00000016
+  allowed-one half            = 0x3f
+  bit 6, activate VMX-preemption timer  -> ABSENT
+```
+
+`adjust_msr` drops the control silently, as it should, and the code then
+wrote `vmx_preemption_timer_value` anyway. That write faults, and the
+launch ends as loader code `0x60600` - prefix `0x6`, vector 6, a `#UD`.
+
+**So the sampler can never sample on this machine**, whatever is done to
+it, and the tree already half-knew this: `arm_controller_poll` has a
+"preemption-timer-refused path". The refusal is the normal case here.
+
+Fixed so an unavailable capability makes the sampler **inert rather than
+unbootable** - the granted pin controls are read back and the field is
+only written if the control survived, with a log line when it did not.
+Verified: `ZPP_SAMPLE_L1=ON` now chainloads with zero
+`ZPP_HYPERVISOR_FAILED`.
+
+That guard is not tidiness. A hypervisor that refuses to launch hands the
+firmware to the next boot option, which starts Windows bare off the disk,
+and every counter then reads zero on a machine that looks healthy - the
+trap the entry above describes.
+
+### What is available, and is therefore the instrument
+
+```
+  IA32_VMX_TRUE_PROCBASED_CTLS = 0xfff9fffe04006172
+  allowed-one half             = 0xfff9fffe
+  bit 27, monitor trap flag    -> AVAILABLE
+```
+
+So the **monitor trap flag** is the only way to get an instruction
+pointer out of a processor that spins without exiting here, and
+`ZPP_STEP_VTL` already implements it. Its own comment is the warning to
+carry: it is an exit per retired instruction, measured at 5.8% of all
+exits, and boots taken with it on sat in a different regime from boots
+without it. So it answers "where is the spin" and must not be used for
+any comparison against a boot taken without it.
+
+
 ## `ZPP_SAMPLE_L1=ON` does not boot, and a failed launch boots Windows bare
 
 **2026-08-25.** Turning on the first-level instruction-pointer sampler -
