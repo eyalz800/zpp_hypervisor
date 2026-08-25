@@ -1,5 +1,46 @@
 # Known defects
 
+## Hyper-V's init progress reads 39, which is COMPLETE, not stuck
+
+**2026-08-25.** The guest hypervisor keeps a phase counter at
+`hvix64+0x9c040`, stepped through a 4,782-byte initialisation sequence
+that error-checks every step (`test %ax,%ax; jne <error>`). Reading it
+live on a three-processor boot, through all three address spaces:
+
+```
+  cpu0/cpu1/cpu2   progress = 0x27 (39)   tsc = 0x2cafe7591   (identical)
+```
+
+**39 is the highest value written anywhere in the image.** There are 37
+writes to that variable, a clean sequence 1 through 39, and `0x27` is set
+at the two sites that end their sequences. So the counter reaching 39
+means the guest hypervisor's initialisation **completed**. It is not
+stuck at a step, and the hope of naming a failing step from it is
+withdrawn.
+
+That is a negative result and it is worth having: it removes the whole
+global initialisation sequence from suspicion, and it is a *global*, so
+one read covers every processor.
+
+### The technique is the durable part
+
+Locating `hvix64.exe`'s load base needed no boot and no scan - the twelve
+bytes around a captured instruction pointer match exactly once in the
+image - and from there its `.pdata`, its call graph and its globals are
+all readable, without symbols, which Microsoft does not publish for it.
+**A guest hypervisor's own progress variables are readable from
+underneath it.** That is new to this tree and applies to any future
+question about what the level above thinks it is doing.
+
+**What is still unexplained** is unchanged: an application-processor-only
+routine at `hvix64+0x235ee4` runs 8,230 times on each application
+processor and never on the boot processor, and the guest hypervisor then
+VMCLEARs and abandons that processor. Its two callers are known
+(`0x248111`, `0x248477`), and the second sits inside the sequence that
+has now been shown to complete - so the repetition is not that sequence
+restarting.
+
+
 ## Hyper-V's own binary can be read, and located without a boot
 
 **2026-08-25.** `hvix64.exe` comes off the guest volume the same way
