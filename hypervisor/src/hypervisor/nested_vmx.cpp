@@ -1242,6 +1242,35 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
         return true;
     }
 
+    // **Is this VMCS current on another processor right now?** It must
+    // not be - the architecture requires a VMCLEAR before a VMCS moves
+    // between logical processors - and in this VMM it would be fatal
+    // rather than merely undefined, because `guest_vmcs12` is indexed by
+    // processor while a VMCS is identified by its physical address. The
+    // other processor's writes live in *its* shadow, and this one would
+    // read them from the region, which only `flush_guest_vmcs12` ever
+    // fills. Everything that processor wrote and had not flushed is
+    // silently lost.
+    //
+    // Only possible above one processor, which is the shape of the
+    // failure being chased, so it is worth a check rather than an
+    // assumption. Once per processor.
+    for (std::size_t other{}; other < max_cpus; ++other) {
+        if ((other == cpu) ||
+            (*pointer != this->guest_current_vmcs[other])) {
+            continue;
+        }
+
+        if (!this->vmcs12_shared_logged[cpu]) {
+            this->vmcs12_shared_logged[cpu] = true;
+            log("cpu {} vmptrld of {} which is current on cpu {}",
+                cpu,
+                *pointer,
+                other);
+        }
+        break;
+    }
+
     // **Retaining a vmcs12 per pointer was proposed here, measured, and
     // is not worth doing.** The reasoning is kept because the conclusion
     // reversed once it was bracketed rather than computed.

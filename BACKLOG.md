@@ -1,5 +1,68 @@
 # Known defects
 
+## Both known failure modes are gone, and the guest still shuts down
+
+**2026-08-25.** A three-processor boot with the operand retry and the
+cross-processor VMCS check in place:
+
+```
+  entry failures: 0
+  memory-form VMREAD/VMWRITE failures: 0
+  cross-processor VMPTRLD: 0
+  VM status: paused (shutdown)
+```
+
+So the two defects this investigation spent its last stretch on are both
+eliminated, **and neither was the thing that ends the boot.** The log now
+runs from the last APIC write straight into `vmxoff` on all three
+processors with **nothing from this VMM in between** - no refusal, no
+fault, no unhandled exit. Whatever Hyper-V is reacting to is no longer
+visible from our side.
+
+That is a meaningfully different state from where this started, and it
+changes what the next instrument has to be. `vmxoff` on every processor
+followed by masking every local-APIC LVT is *also* what a clean Hyper-V
+unload looks like when Windows itself bugchecks or shuts down, so the
+question is no longer "what did we refuse" but "what did the guest
+decide", and the only thing that answers that is the guest's own stop
+code.
+
+### Hypotheses killed this round, all by measurement
+
+- **Cross-processor VMCS sharing.** `guest_vmcs12` is indexed by
+  processor while a VMCS is identified by its physical address, so a
+  VMCS loaded on one processor while current on another would silently
+  lose the first one's unflushed writes - and it is possible only above
+  one processor, which is the right shape. **Measured zero.** A check is
+  now in `on_guest_vmptrld` so it stays answered.
+- **The half-update theory** (previous entry): disproven by its own fix.
+- **Guest-state deferral** and **control-cache write elision**: both
+  disproven earlier, each by a single-variable boot.
+
+### What is needed next, and the trap in getting it
+
+`KiBugCheckData` is five words - the stop code and its four parameters -
+and CLAUDE.md already records how to read it. The obstacle here is
+addressing, not access: the monitor's `info registers -a` reports **the
+CR3s of Hyper-V's own address spaces**, because the second-level guest's
+CR3 lives in vmcs12 and is not current once the machine has stopped. The
+walk therefore reports the kernel's address unmapped, which looks exactly
+like a wrong symbol and is not.
+
+So the next boot needs the second-level guest CR3 logged **beside** the
+kernel base that `nested_entry.cpp` already prints - one extra field on a
+line that exists - and then the five words can be read directly, since
+the guest hypervisor's extended tables have measured identity for these
+pages.
+
+Two symbol-resolution traps worth keeping, both hit while getting this
+far: `llvm-pdbutil` prints `addr = 0026:1190336` and **both halves are
+decimal** - section 26 is `.data`, which is where `KiBugCheckData`
+belongs, whereas reading `0026` as hex asks for section 38 of a file that
+has 36. And the PDB carries its own section table, which is the one to
+index; the on-disk image's table is a different list.
+
+
 ## The operand transient is real and fixed; the half-update theory it suggested is wrong
 
 **2026-08-25.** Splitting the walk's single error code by level named the

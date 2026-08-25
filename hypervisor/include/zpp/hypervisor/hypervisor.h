@@ -7519,6 +7519,14 @@ private:
      */
     std::uint64_t operand_retry_count[max_cpus]{};
 
+    /**
+     * Whether this processor has reported loading a VMCS that was
+     * current on another. See `on_guest_vmptrld`: legal VMX would never
+     * do it, and here it would silently lose the other processor's
+     * unflushed writes.
+     */
+    bool vmcs12_shared_logged[max_cpus]{};
+
     bool ia32e_set_seen[max_cpus]{};
     bool ia32e_clear_seen[max_cpus]{};
     /**
