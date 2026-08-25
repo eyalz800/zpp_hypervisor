@@ -1,5 +1,55 @@
 # Known defects
 
+## Hyper-V's own counter: the bring-up body is SKIPPED 97% of the time
+
+**2026-08-25**, three processors left undisturbed until the application
+processors reached their Hyper-V phase - which matters, because the three
+runs before this one rebooted mid-sample and measured nothing.
+
+Hyper-V's own globals, read through each processor's address space, with
+its base derived offline from a captured instruction pointer
+(`0xfffff81171200000`, agreed independently by both application
+processors):
+
+```
+  skipidx  @0xd6bd4 = 0             the routine skips processor index 0
+  callcnt  @0x235d4 = ...0x101      the body ran 257 times
+  bitmap   @0xa8500 = 0x100000020
+  progress @0x9c040 = 0x27          initialisation complete
+```
+
+**257 against 8,203 CPUIDs at that routine's tail.** The counter is
+incremented *after* the `je` that skips when `%gs:0x8` equals `skipidx`,
+and the CPUID is at the tail on both paths. So the routine is entered
+about 8,200 times and **does its work 257 times** - roughly 97% of calls
+skip the body.
+
+The skip condition is "this processor's index equals the one to skip",
+and the index to skip is **0**, the boot processor. An application
+processor should never take it.
+
+### The obvious reading, and why it is not yet claimed
+
+If `%gs:0x8` reads 0 on an application processor, every processor
+believes it is processor 0, the application-processor work never runs,
+and bring-up can never complete - which would fit the entire measured
+shape. And the guest's GS base is VMCS state this VMM manages.
+
+Sampled from the monitor, `[gs:0x8]` reads **0 on cpu1** and **2 on
+cpu2**, with all three GS bases in visibly different address ranges
+(`0xfffff805…`, `0xffffda80…`, `0xffffe800…`). **That is not proof.** The
+monitor shows whichever context each processor is in at that instant, and
+under nesting that may be the second-level guest rather than the guest
+hypervisor, so the three readings are probably of different structures
+entirely.
+
+**What would settle it** is reading `%gs:0x8` in the guest hypervisor's
+own context specifically - the GS base from vmcs01's guest state at a
+moment `running_l2[cpu]` is false - rather than whatever the monitor
+catches. That is one field and one condition, and it is the next thing to
+add.
+
+
 ## CPUID leaf 0 answers identically on every processor - refuted
 
 **2026-08-25.** Recorded per processor, raw, as the hardware gave it:
