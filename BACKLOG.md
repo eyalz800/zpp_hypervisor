@@ -1,5 +1,64 @@
 # Known defects
 
+## Where the three processors actually are, from counter arithmetic
+
+**2026-08-25.** On the surviving three-processor guest - Hyper-V
+resident, no teardown, `VM status: running` - the stall decomposes, and
+none of it needed a debugger.
+
+**cpu 0 is alive and slow, not stopped.** +95 exits and +19 second-level
+entries over 20 seconds, about one entry a second. Its second-level ring
+shows real and varied work: VTL call and VTL return hypercalls (`0x11`,
+`0x12`) through the hypercall page at `0xfffff80770f50000`, `rdmsr` of
+`0x40000002` (VP index), TPR-below-threshold exits, `mov from dr0`. This
+is a processor **waiting**, not one saturated - the same distinction this
+file already had to learn once about the clock handler, and they look
+identical in a profile.
+
+**cpu 1 is inside the second-level guest.** `l2_entries` 36 against
+`l2_exits` 35 - one more entry than exit, so it entered and has not come
+back. Its ring ends on a textbook application-processor bring-up:
+Hyper-V hypercalls, the synthetic MSRs `0x40000090`/`0x40000091`/
+`0x40000083`, then `STAR`, `LSTAR` and `SFMASK`, `cpuid`, and finally a
+`mov from dr0`. It finished initialising and is now spinning in Windows
+AP code **without exiting**, which is why its exit counter is frozen at
+1,004.
+
+**cpu 2 is in Hyper-V, not in its guest.** `l2_entries` 17 against
+`l2_exits` 17 - equal, so it is not inside a second-level guest at all -
+and its total exit count is frozen at 292, so it is spinning in
+first-level code.
+
+The three are in three different places, and the pair of counters is what
+says so. A single counter could not: "frozen exits" is true of all three
+and means something different in each case.
+
+### Two reader traps hit getting here, both worth keeping
+
+- **`info registers -a` is not live on a running KVM guest.** All three
+  RIPs read identical across four samples six seconds apart while our own
+  counters showed cpu 0 advancing the whole time. KVM syncs registers to
+  userspace on exit to userspace, so the monitor shows the last sync.
+  Frozen RIPs there are not evidence of a frozen processor - use the
+  in-guest counters, which are live.
+- **The exit rate cannot distinguish "reached the desktop" from "stalled
+  in early boot".** cpu 0's handful of exits a second is exactly what an
+  idle logon screen produces. Only the process list settles it, and it
+  reports one process.
+
+### The shape this leaves
+
+An application processor spinning in Windows AP code and a boot processor
+making about one second-level entry a second is the shape of a **mutual
+wait**: the boot processor polling for the application processors to
+report started, and the application processor spinning for work the boot
+processor has not handed out. What has *not* been established is what
+either is polling, and the counters cannot answer that - the next
+instrument is the Monitor Trap Flag armed on cpu 1, which forces an exit
+after one retired instruction and yields the spin's instruction pointer
+without a debugger.
+
+
 ## Windows never bugchecked, and `-no-reboot` was hiding a real state change
 
 **2026-08-25.** `KiBugCheckData` read out of the second-level guest, with
