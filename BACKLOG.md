@@ -1,5 +1,51 @@
 # Known defects
 
+## The application processor never leaves VTL1, and that is why Windows never counts it
+
+**2026-08-25.** Two measurements on a two-processor boot, and together
+they explain the symptom without needing anything else.
+
+**Every one of the application processor's second-level exits is outside
+the VTL0 kernel.** Classified against ntoskrnl's actual extent
+(`0xfffff800f7400000` .. `+0x1450000`):
+
+```
+  AP second-level exit RIPs: 38
+    in ntoskrnl (VTL0):       0
+    outside:                 38
+```
+
+**And it performs no trust-level transition at all.** The dump prints a
+`HvCallVtlCall` / `HvCallVtlReturn` section per processor that does one;
+cpu 0 has both, with 22,244 switches each way. **cpu 1 has neither
+section**, so it has never made one.
+
+So the chain is: the application processor is started, runs the secure
+kernel's virtual-processor bring-up in VTL1 - synthetic MSRs, `STAR`,
+`LSTAR`, `SFMASK`, the debug-register save, a synthetic-ICR NMI to the
+boot processor - and **never returns to VTL0**. Windows' own
+application-processor startup code runs in VTL0. It therefore never
+executes, `KeStartAllProcessors` never completes,
+`KeNumberProcessorsGroup0` stays 1, and `smss.exe` is never created.
+
+That is a much better statement of the failure than "the application
+processors stop taking exits", and it is measured rather than inferred.
+
+### Two things beside it, both from the same dump
+
+- **The boot processor holds one shadow extended-page-table root**, and
+  the dump flags it: `1 distinct non-zero root(s)` with
+  `ONE ROOT <- both trust levels would be sharing an extended page
+  table, which VSM requires them not to`. Whether that is benign on a
+  processor that does switch trust levels is not established here, but
+  it is the one VSM invariant this tree already prints a warning about,
+  and the failing processor is one that never switches.
+- **The guest is not starved.** cpu 0's handler duty is `0.063`, and
+  Windows gets 91.7% of wall time - 97.8% of all non-VMM time. Whatever
+  is wrong, per-exit cost is not it, which retires the whole family of
+  "make exits cheaper" ideas for this failure.
+
+
 ## Two processors fails exactly like three, so it is the first one that does not come up
 
 **2026-08-25.** Only 1 and 3 had ever been tried. 2 separates "the
