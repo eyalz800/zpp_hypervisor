@@ -2091,6 +2091,48 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->gdtr_seen[cpuid][i]);
             }
 
+            // **Is there a page table here that would have worked?**
+            // The region holding this processor's descriptor table and
+            // stack stops at a page boundary under the table it is on.
+            // If some other table this machine has used maps past that
+            // boundary, then the processor is simply on the wrong one -
+            // and if none does, the region was never built and the
+            // processor is running ahead of whoever builds it. Those are
+            // different defects and this is the one reading that
+            // separates them.
+            //
+            // `guest_linear_to_physical` walks whatever CR3 the VMCS
+            // holds, so the candidate is written in, the walk taken, and
+            // the original put back.
+            {
+                auto saved = vmcs.guest_cr3();
+
+                for (std::size_t who{}; who < 2; ++who) {
+                    for (std::size_t i{};
+                         (i < this->cr3_seen_count[who]) && (i < 8);
+                         ++i) {
+                        auto candidate = this->cr3_seen[who][i];
+                        vmcs.guest_cr3(candidate);
+
+                        auto gdt = guest_linear_to_physical(
+                            this->gdtr_seen[cpuid][
+                                (this->cr3_seen_count[cpuid] > 0)
+                                    ? this->cr3_seen_count[cpuid] - 1
+                                    : 0]);
+
+                        log("cpu {} under cr3 {} (cpu {} entry {}): "
+                            "gdt {}",
+                            (cpuid + 1),
+                            candidate,
+                            who,
+                            i,
+                            static_cast<std::uint64_t>(gdt.has_value()));
+                    }
+                }
+
+                vmcs.guest_cr3(saved);
+            }
+
             // The boot processor's page tables beside this one's. The
             // candidate this is aimed at: if the guest hypervisor gives
             // each virtual processor its own table and this one is

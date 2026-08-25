@@ -1,5 +1,53 @@
 # Known defects
 
+## No page table on the machine maps that descriptor table
+
+**2026-08-25.** At the triple fault, the descriptor table's address was
+walked under **every CR3 either processor has been seen using** - twelve
+of them, the firmware's, the guest hypervisor's, the secure kernel's and
+the application processor's own:
+
+```
+  under cr3 0x7fc01000  0x1ae000  0x27a000  0x101abb000
+            0x8800000   0x8800002 0x1ae002
+            0x7fb6a000  0x0       0x114f5e000     ->  gdt 0 in every case
+```
+
+**Not one of them maps it.** So the previous entry's second candidate -
+"a processor on a page table from before the region was extended" - is
+**eliminated**: there is no page table it could be on that would work.
+
+### Which leaves a contradiction that has to be faced directly
+
+- `apply_start_up` sets `GDTR` base to **0** at every start-up, per SDM
+  Table 12-1, and it was called for this processor twice.
+- The value at the fault is `0xffffe800002b0b00`, so something set it
+  afterwards - on the face of it the guest, with `LGDT`.
+- A guest that loads `GDTR` and then loads `CS`, `SS` and `TR` **reads
+  that table**, and this processor holds `CS 0x10`, `SS 0x20`, `TR 0x30`.
+- And no page table on the machine maps the address.
+
+Those four cannot all be true. One of them is a reading rather than a
+fact, and the most likely candidate is the **fourth**: the walk is taken
+at the fault, and "no page table maps it *now*" is not "no page table
+ever mapped it". The twelve CR3s are a per-processor history sampled at
+exits, and the tables they point at are live and being edited the whole
+time.
+
+**So the honest state is that this measurement narrows less than it
+appears to.** It rules out the processor being on a *currently* wrong
+table; it does not rule out the region having existed and been torn down,
+which the earlier flapping bracket already suggested and this cannot
+contradict.
+
+What would actually settle it: sample the descriptor table's
+reachability under the processor's CR3 **from the moment it is first
+started**, not only at the fault - the eight-walk instrument already runs
+every exit and only its verdict is kept. Keeping the first exit at which
+it becomes reachable, and the last, would say whether it was ever mapped
+under this table at all.
+
+
 ## The region is not partially damaged - it stops at a page boundary
 
 **2026-08-25.** Walking every page of `0xffffe80000200000` to
