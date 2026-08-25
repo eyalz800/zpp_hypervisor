@@ -1,5 +1,49 @@
 # Known defects
 
+## Zero WBINVD exits means the short path is taken, not that bring-up dies early
+
+**2026-08-25.** `wbinvd_exiting` **is** set in vmcs01
+(`hypervisor.cpp:5930`), so a WBINVD from the guest does exit and would
+be counted - and the application processor's census shows **zero** of
+them against 8,378 CPUIDs.
+
+The tempting inference is that the bring-up dies before reaching its
+WBINVD. **It does not follow.** The routine branches first:
+
+```
+  0x3a66a5:  je   0x3a66c9
+  0x3a66a7:  mov  $0x80010021, %cr0     ; path A - no WBINVD
+             ... CR4 with 0x2e0 ...
+  0x3a66c7:  jmp  0x3a6723
+  0x3a66c9:  mov  $0xc0010021, %cr0     ; path B - CD set
+  0x3a66d3:  wbinvd                     ; ...and only this path has it
+```
+
+Zero WBINVD exits says **path A is taken every time**, which is a fact
+about the branch and not about where the sequence stops.
+
+### What the exit counts do add up to
+
+Per bring-up attempt the application processor produces **about one**
+counted exit, and it is the CPUID: 8,378 CPUIDs against roughly that many
+attempts, with `cr-access` 3, `rdmsr` 61 and no WBINVD at all in the same
+window. So the sequence runs, takes its short path, and **exits to this
+VMM essentially only for CPUID**.
+
+That is worth stating because it changes what kind of fault this can be.
+The bring-up is not being refused an instruction by us - it barely asks
+us for anything. It runs, observes something, and starts over. **The one
+thing it observes through us on every attempt is the CPUID answer**, and
+the census says that answer is for leaf 0, whose EAX is the maximum
+supported leaf, stored to `+0x6f8` of the per-processor block.
+
+`hypervisor.cpp` answers CPUID by executing the real instruction and
+editing the result. Whether leaf 0's answer differs between the boot
+processor and an application processor - or between this VMM and what
+KVM would return underneath - has never been checked, and is now the
+narrowest open question in this investigation.
+
+
 ## We start each application processor ONCE. The bring-up restarts itself.
 
 **2026-08-25**, three processors, the counters added for exactly this
