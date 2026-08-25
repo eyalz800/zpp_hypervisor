@@ -1,5 +1,60 @@
 # Known defects
 
+## The repeated routine is Hyper-V's PROCESSOR BRING-UP, run thousands of times
+
+**2026-08-25.** The call chain behind the 8,230 CPUIDs is now traced to
+its top, in Hyper-V's own binary, without symbols:
+
+```
+  hvix64+0x235ee4   feature detection, ends in the CPUID we recorded
+     <- hvix64+0x247fe0   (360 bytes, one caller)
+        <- hvix64+0x3a6690   (604 bytes, ZERO direct callers - entered indirectly)
+```
+
+And `0x3a6690` is unambiguous from its instructions alone:
+
+```
+  mov  $0xc0010021, %cr0          ; set CD
+  wbinvd
+  mov  %cr3, %rax ; mov %rax, %cr3 ; flush TLB
+  mov  $0x277, %ecx ; wrmsr        ; IA32_PAT
+  wbinvd
+  mov  %cr3, %rax ; mov %rax, %cr3
+  and  $0xbfffffff, %r8d           ; clear CD
+```
+
+That is the SDM's prescribed cache and PAT reconfiguration, performed
+**when a processor is brought up**. Its zero direct callers fit: it is
+reached indirectly, as an entry point.
+
+**So the guest hypervisor is not retrying an operation on a running
+processor - it is starting the processor over, thousands of times.** That
+finally explains the shape without contradicting anything measured: the
+feature-detection routine is application-processor only because bring-up
+skips the boot processor, and it runs 8,230 times because bring-up runs
+8,230 times.
+
+### What this asks next, precisely
+
+Why would a processor's bring-up entry be re-entered thousands of times?
+Two shapes fit, and they are distinguishable:
+
+- **It is being re-started** - something delivers INIT/SIPI, or an
+  equivalent, repeatedly. This VMM does emulate INIT and does adopt
+  start-up IPIs, and `emulate_init_signal` and `apply_start_up` are the
+  places to count.
+- **It faults and restarts itself** - bring-up runs, something in it
+  fails, and it begins again. The sequence writes CR0, CR4, CR3 and
+  IA32_PAT, every one of which this VMM can intercept or shadow, and the
+  application processor's exit census shows `cr-access` 3, `rdmsr` 61 and
+  `vmwrite` 100 - small numbers next to 8,378 CPUIDs, which argues the
+  bring-up is *not* completing far enough to touch them often.
+
+The second reading is the one the counts favour, and it is checkable:
+count entries to `emulate_init_signal` and `apply_start_up` per
+processor. Neither has ever been counted.
+
+
 ## Hyper-V's init progress reads 39, which is COMPLETE, not stuck
 
 **2026-08-25.** The guest hypervisor keeps a phase counter at
