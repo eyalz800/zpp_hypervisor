@@ -1,5 +1,37 @@
 # Known defects
 
+## The leaf-0 sites are not in Hyper-V's image - the storm may not be Hyper-V's
+
+**2026-08-25.** The two leaf-0 instruction pointers, taken against the
+base assumed for `hvix64.exe`, give RVAs `0x55b4e` and `0x5c26f` -
+and **neither is in that image's `.pdata`**. Every real function in it
+is, so the assumed base is wrong, and the likeliest reason is that these
+sites are **in a different image entirely**.
+
+That matters more than it looks. The CPUID census counts every CPUID exit
+taken on that processor, and the second-level guest's are among them. So
+the 8,230-CPUID storm may belong to Windows or to the secure kernel
+rather than to the guest hypervisor.
+
+**It was assumed to be Hyper-V's because the routine disassembled
+earlier was Hyper-V's** - which is the same conflation retracted one
+entry above, repeated one layer up: a site identified in one image, and a
+count taken across all of them, treated as the same thing.
+
+### What the next person should do first
+
+**Identify the image before attributing the count.** All three candidate
+binaries are on disk (`/tmp/hvix64.exe`, `/tmp/ntoskrnl.exe`,
+`/tmp/securekernel.exe`) and the technique for locating any of them
+without a boot is recorded above: the bytes at a captured instruction
+pointer match exactly once in the right image. Capture the bytes at a
+leaf-0 site and search all three. That is a few minutes' work and it
+decides which layer is even being investigated.
+
+Until then, "the application processor takes 8,230 CPUID exits" is the
+only part of this that is established. Whose they are is not.
+
+
 ## RESOLVED: the bring-up routine is called ~96 times, not 8,230
 
 **2026-08-25, and it needed no boot** - the answer was already in the
