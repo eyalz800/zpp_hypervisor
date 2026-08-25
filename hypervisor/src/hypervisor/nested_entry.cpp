@@ -9034,6 +9034,67 @@ hypervisor::on_l2_exit(std::size_t cpu,
             reason.value(),
             this->vmcs.exit_qualification());
 
+        // The guest state the processor just refused, read back off
+        // vmcs02 while it is still current - which is the only moment it
+        // can be read at all, since it is this processor's current VMCS
+        // and nothing outside can see it.
+        //
+        // Once per processor. This fires on the path that ends with the
+        // guest hypervisor tearing itself down, so it is the last chance
+        // to see the fields, and a repeat would evict the sequence that
+        // led here from the ring - which is the failure mode the ring's
+        // deduplication exists for.
+        //
+        // Split across lines because the ring truncates a long one, and
+        // a truncated field is indistinguishable from a zero one.
+        if ((cpu < max_cpus) && !this->l2_entry_failure_logged[cpu]) {
+            this->l2_entry_failure_logged[cpu] = true;
+
+            log("cpu {} vmcs02 refused: cr0 {} cr3 {} cr4 {} efer {}",
+                cpu,
+                this->vmcs.guest_cr0(),
+                this->vmcs.guest_cr3(),
+                this->vmcs.guest_cr4(),
+                this->vmcs.read(field::guest_ia32_efer));
+
+            log("cpu {} vmcs02 refused: rip {} rflags {} entry_ctls {} "
+                "activity {} interruptibility {}",
+                cpu,
+                this->vmcs.guest_rip(),
+                this->vmcs.guest_rflags(),
+                this->vmcs.vm_entry_controls(),
+                this->vmcs.read(field::guest_activity_state),
+                this->vmcs.read(field::guest_interruptibility_state));
+
+            // And what the guest hypervisor actually asked for, beside
+            // what the processor was given. The refused state is
+            // internally contradictory - CS.L set with the IA-32e-mode
+            // guest control clear - and these two lines are what say
+            // whether that contradiction was written by the level above
+            // or introduced here. One of them cannot answer it alone.
+            auto & asked = this->guest_vmcs12[cpu];
+
+            log("cpu {} vmcs12 asked: entry_ctls {} cs {} efer {} cr0 {} "
+                "rip {}",
+                cpu,
+                asked.read(field::vm_entry_controls),
+                asked.read(field::guest_cs_access_rights),
+                asked.read(field::guest_ia32_efer),
+                asked.read(field::guest_cr0),
+                asked.read(field::guest_rip));
+
+            log("cpu {} vmcs02 refused: cs {} ss {} tr {} link {} "
+                "pending_dbg {} entry_intr {}",
+                cpu,
+                this->vmcs.read(field::guest_cs_access_rights),
+                this->vmcs.read(field::guest_ss_access_rights),
+                this->vmcs.read(field::guest_tr_access_rights),
+                this->vmcs.read(field::vmcs_link_pointer),
+                this->vmcs.read(field::guest_pending_debug_exceptions),
+                this->vmcs.read(
+                    field::vm_entry_interruption_information_field));
+        }
+
         reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
         advance_rip = false;
         return l2_exit_outcome::reflected;

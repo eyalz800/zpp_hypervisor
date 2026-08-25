@@ -7475,6 +7475,14 @@ private:
      * @{
      */
     bool vmx_instruction_logged[max_cpus]{};
+
+    /**
+     * Whether this processor has already reported the vmcs02 guest state
+     * a VM entry refused. Once per processor: the reporting path ends
+     * with the guest hypervisor tearing itself down, so a repeat would
+     * only evict the sequence that led there.
+     */
+    bool l2_entry_failure_logged[max_cpus]{};
     std::uint64_t vmx_instructions_refused[max_cpus]{};
 
     /**
