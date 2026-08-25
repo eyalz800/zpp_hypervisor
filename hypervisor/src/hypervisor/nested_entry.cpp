@@ -6537,8 +6537,46 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
         // Nothing would change, so nothing is written. A rewrite that
         // carries the same numbers still steps the sequence and still
         // makes a reader retry.
-        if ((0 != published) && (scale == this->reference_scale[cpu])) {
-            return;
+        //
+        // **The comparison is a tolerance, not equality, and that
+        // distinction is the whole bug.** Where the frequency is not
+        // enumerable - which is *always*, under QEMU, for the reason the
+        // `0 == computed` branch above spells out - `scale` is the
+        // fitted one, and a fit is a measurement. Consecutive fits
+        // therefore differ in their low bits for ever: measured from one
+        // boot's log, 0.085 ppm between adjacent publishes and 4.4 ppm
+        // at the worst outlier. Exact equality never holds against that,
+        // so the page was rewritten every 36,000 time-stamp ticks, about
+        // 18 microseconds, for the whole life of the guest.
+        //
+        // Every rewrite steps the sequence, and the interface has the
+        // reader sample the sequence, read the pair, sample the sequence
+        // again and retry on a change. A reader slower than the rewrite
+        // interval therefore never completes a consistent read at all -
+        // and under this VMM every one of its reads is slower than 18
+        // microseconds. That is what stalled Hyper-V's own time-stamp
+        // counter calibration at `hvix64+0x255b4e`, which retries until
+        // the reference clock has advanced 1,200,000 hundred-nanosecond
+        // units and can only fail by the clock not advancing.
+        //
+        // The publisher is the boot processor and the page is
+        // partition-wide, which is why the processors that *failed* were
+        // the application processors: they were the ones still
+        // calibrating, while the boot processor had already finished.
+        //
+        // 100 ppm, which is two orders of magnitude above the observed
+        // jitter and still far tighter than anything a guest could
+        // notice. A genuine correction survives it; noise does not.
+        constexpr std::uint64_t reference_scale_tolerance = 10000;
+
+        if (0 != published) {
+            auto previous = this->reference_scale[cpu];
+            auto difference =
+                (scale > previous) ? (scale - previous) : (previous - scale);
+
+            if (difference <= (previous / reference_scale_tolerance)) {
+                return;
+            }
         }
 
         // The offset anchors reference time on what the guest has
