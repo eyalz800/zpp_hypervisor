@@ -1,5 +1,49 @@
 # Known defects
 
+## Attributing the leaf-0 storm cannot be done offline - and why
+
+**2026-08-25.** Tried, and it fails for a reason worth recording so
+nobody repeats it.
+
+The leaf-0 instruction pointers were turned into RVAs by masking them to
+a 1 MB boundary - a *guess* at the image base. Testing that guess against
+all three candidate binaries by asking whether a CPUID (`0f a2`) actually
+sits at the resulting offset:
+
+```
+  hvix64.exe        0x55b4e: out-of-image     0x5c26f: out-of-image
+  ntoskrnl.exe      0x55b4e: 0006             0x5c26f: 0000
+  securekernel.exe  0x55b4e: c74c             0x5c26f: 895c
+```
+
+**None of them.** So the RVA is wrong everywhere, which means the base
+guess is wrong - and a wrong base makes the offset meaningless in every
+image, not just the one it was meant for. The attempt is circular
+offline: the base cannot be derived without knowing the image, and the
+image cannot be identified without the base.
+
+### The way out, which is already proven here
+
+**Read the bytes at the instruction pointer from a live guest, then
+search all three binaries for that sequence.** A twelve-byte window
+matched exactly once in a 2 MB image when this was done for the
+bring-up routine, and that single match gave the image *and* the base
+together. It needs one boot and one read.
+
+The recipe, in full, since it is the most reusable thing this
+investigation produced:
+
+1. Capture an instruction pointer of interest per processor (a counter
+   field is enough).
+2. Translate it under **that processor's own CR3** and read ~16 bytes.
+3. Search `/tmp/hvix64.exe`, `/tmp/ntoskrnl.exe`,
+   `/tmp/securekernel.exe` for the sequence. One match identifies the
+   image; the file offset converts to an RVA, and RIP minus RVA is the
+   base.
+4. From there `.pdata` gives exact function bounds and the call graph
+   follows.
+
+
 ## The leaf-0 sites are not in Hyper-V's image - the storm may not be Hyper-V's
 
 **2026-08-25.** The two leaf-0 instruction pointers, taken against the
