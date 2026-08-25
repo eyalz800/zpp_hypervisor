@@ -1,5 +1,74 @@
 # Known defects
 
+## The application-processor spin is a TSC calibration, not a rendezvous
+
+**2026-08-25. This retracts the whole "rendezvous wait" framing**, including
+the two entries above it that reasoned about the variable at
+`hvix64+0xd6ba8` and about which branch reaches the spin. Those readings
+were of real memory and were correctly taken; they were simply aimed at
+the wrong thing. What the application processors are doing was settled by
+disassembling the spin site rather than by reading more variables around
+it.
+
+The spin at `hvix64+0x255b4e`, where the application processors were
+measured issuing thousands of CPUIDs, is the middle of this:
+
+```
+  0x255b4a: xorl  %eax, %eax
+  0x255b4c: xorl  %ecx, %ecx
+  0x255b4e: cpuid                    <- the exit we were counting
+  0x255b50: pause
+  0x255b52: rdtsc
+        ... subq  %r8, %rax          ; elapsed = now - start
+        ... cmpq  %rsi, %rax         ; %rsi = 0x989680 = 10,000,000
+  0x255b61: jb    0x255b4a           ; spin while elapsed < 10,000,000 TSC
+```
+
+`cpuid; pause; rdtsc` is a serialising delay loop, bounded at 10,000,000
+time-stamp counter ticks - about 5 ms at 2 GHz. It is bracketed by two
+reads of a time-source object (`movq 0x70(%rbx), %rax ; callq *%rax`,
+frequency at `+0xc0`, scale factors at `+0x128`/`+0x130`, bias at
+`hvix64+0xa9c30`), and followed by:
+
+```
+  0x255bc0: cmpq  $0x124f80, %rbx    ; elapsed REFERENCE units = 1,200,000
+  0x255bc7: jb    0x255b3e           ; not enough reference time - spin again
+  0x255bd2: subq  %r14, %rcx         ; TSC delta
+  0x255bd5: imulq $0x989680, %rcx    ; x 10,000,000
+  0x255bdc: divq  %rbx               ; / reference delta = TSC frequency, Hz
+```
+
+So it is **Hyper-V calibrating the time-stamp counter against a reference
+clock**, repeating a 5 ms delay until 1,200,000 reference units - 120 ms
+at 100 ns granularity - have passed, then dividing to get a frequency.
+
+### Why this is diagnostic, and not merely a better name
+
+The dependency runs the opposite way to the intuition that has been
+driving this investigation for several sessions:
+
+- Executing *slower* under this VMM makes *more* reference time elapse
+  per pass, so it terminates **sooner**, not later. Per-exit cost cannot
+  cause this hang.
+- The retry is gated **only** on the reference clock. So there is exactly
+  one way for it to spin for ever: **the reference clock does not
+  advance.**
+
+That also retires, in one stroke, the question the previous entries were
+circling - why the application processors "enter the spin". Entering it is
+unconditional and normal. Not leaving it is the defect.
+
+### What it names next
+
+The reference clock is reached through a pointer at `hvix64+0x232e0` to an
+object whose counter read is the function pointer at `+0x70`. That object
+is readable in the live guest by the same page-table walk already used to
+read these globals, so the next measurement is to read it, symbolise
+`+0x70` to find which clock Hyper-V picked, and read the counter twice to
+see whether it moves. Note the boot processor gets past this and the
+application processors do not, so whatever it is, it is per-processor.
+
+
 ## The rendezvous read, in the right phase - and a correction to the branch reading
 
 **2026-08-25.** With `-no-reboot -no-shutdown` now the default, a
