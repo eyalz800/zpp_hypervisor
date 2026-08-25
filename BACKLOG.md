@@ -1,5 +1,54 @@
 # Known defects
 
+## Both of the KVM review's leading candidates are weakened by data already in hand
+
+**2026-08-25.** The review ranked two causes and gave each a test that
+needs no new instrument. Both tests are answerable from the current run.
+
+**Candidate 1 - the guest reclaimed the bring-up region after the
+processor missed a handshake deadline.** Its stated signature: *"check
+whether the guest re-issues INIT/SIPI for this APIC ID shortly after the
+fault. A re-try after the fault is the signature of a timeout-and-reclaim;
+no re-try argues against it."*
+
+The log after the triple fault contains **no IPI activity at all** -
+the only line is the local-APIC watch being dropped for quiet. The guest
+does not retry. So if a region was reclaimed on a timeout, nothing was
+started again afterwards, which is not what a retry loop looks like.
+
+**Candidate 2 - an intercepted local-APIC write lost through the
+partition-wide open window.** Its direct evidence is a non-zero
+`ept_violation_unclaimed` on the application processor. Measured:
+`[0, 0, 0]`. No violation ever arrived after its watch was disarmed.
+
+### What the absence of a retry actually tells us
+
+Only **four** start-up IPIs are seen in the whole boot - two rounds for
+one application processor - and after the processor dies the guest never
+addresses it again. So Windows is not fighting to bring it up and losing;
+it tries once, gets no answer, marks the processor failed and continues
+as a uniprocessor. That is consistent with everything measured:
+`KeNumberProcessorsGroup0` reading 1, the guest reaching user mode, and
+the boot completing in every other respect.
+
+**Which reframes the goal.** The processor does not need to be rescued
+from a retry loop - there is no retry loop. It needs to survive its
+*first* bring-up, because that is the only one it gets.
+
+### Where that leaves the two candidates
+
+Neither is dead. Candidate 1 could still be a reclaim with no retry -
+Windows freeing a bring-up allocation once, on a timeout, and never
+looking back. Candidate 2's counter only covers violations arriving after
+a disarm, not writes slipping through an open window, which is the part
+the review actually described and which nothing here counts.
+
+But neither now has positive evidence, and both were the strongest
+remaining. The honest position is that the mechanism removing the mapping
+is still unidentified, and the two best guesses at it have failed their
+own cheap tests.
+
+
 ## The control was aimed at the wrong pointer; corrected, it passes and the finding stands
 
 **2026-08-25.** The walker's "first miss" was `rip 0x67168825`. This
