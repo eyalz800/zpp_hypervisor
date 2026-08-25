@@ -1,5 +1,49 @@
 # Known defects
 
+## CORRECTION: the dropped start-up IPIs are probably the normal second SIPI
+
+**The entry below claims the chain "joins up end to end" from a dropped
+start-up IPI. That claim is premature and is withdrawn.**
+
+Real hardware ignores a start-up IPI aimed at an *active* processor -
+SDM 29.7.2, "the active state blocks start-up IPIs (SIPIs)" - and
+`start_up.cpp` cites it at the very site that logs the drop. **So
+dropping it is architecturally correct**, not a defect.
+
+And the ordinary sequence is visible working in the same log window:
+
+```
+  [100] cpu 0x2 init: found activity 0x0, waiting for the hardware start-up ipi
+  [140] guest start-up ipi for cpu 0x2, vector 0x2, to hardware, target hand-off 0x2
+```
+
+An INIT-SIPI-SIPI sends **two** start-up IPIs and the second is ignored
+once the processor has started. Two drops per application processor -
+which is exactly what was observed, `[62]`/`[112]` for one and
+`[63]`/`[146]` for the other - is what that produces on any machine.
+
+**What is left standing**, and it is still the most concrete state of the
+investigation:
+
+- The guest hypervisor re-initialises each application processor
+  thousands of times (8,230 CPUID calls at one routine's epilogue) and
+  then executes VMCLEAR and abandons it. Measured, checked, and not
+  explained.
+- No path in this VMM refuses or parks its entries - seven counters, all
+  zero.
+
+**What is withdrawn** is the causal story that tied them together
+through the dropped IPI. The drop is normal; something else makes the
+guest hypervisor restart that processor.
+
+The lesson is the one this file has now paid for in a new way: **a log
+line that names a loss is not evidence of a fault.** "Dropped" was read
+as a defect because the word invites it, and the architecture says it is
+correct behaviour. The check that would have caught it sooner is the one
+that catches everything else here - ask what the same code does on a
+machine that works.
+
+
 ## The guest's START-UP IPIs are DROPPED, and that is why its processor is abandoned
 
 **2026-08-25.** Straight out of the hypervisor log on a three-processor
