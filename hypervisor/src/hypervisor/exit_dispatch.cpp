@@ -281,7 +281,21 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // reachability number here was taken without ever asking
             // that. It costs one walk in a block that already does
             // eight.
-            if (!guest_linear_to_physical(context.rip)) {
+            // **`vmcs.guest_rip()`, not `context.rip`.** The first
+            // miss this control reported was `0x67168825` against a
+            // module based at `0x6715c000` - `0xc825` bytes inside this
+            // VMM's own image. So it was walking *this VMM's* address
+            // under the *guest's* page table, which fails correctly and
+            // says nothing about the guest at all, and the conclusion
+            // drawn from it - that the processor executes from an
+            // address its page table does not map, hence on cached
+            // translations - was void.
+            //
+            // The VMCS field is the guest's instruction pointer by
+            // definition, whatever `context` happens to hold.
+            auto guest_rip = vmcs.guest_rip();
+
+            if (!guest_linear_to_physical(guest_rip)) {
                 this->gdt_walk_rip_unreachable[cpuid] =
                     this->gdt_walk_rip_unreachable[cpuid] + 1;
 
@@ -294,7 +308,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // question. If QEMU finds it mapped, this walker is
                 // wrong and every reachability number here with it.
                 if (0 == this->rip_unreachable_first[cpuid]) {
-                    this->rip_unreachable_first[cpuid] = context.rip;
+                    this->rip_unreachable_first[cpuid] = guest_rip;
                     this->rip_unreachable_cr3[cpuid] = vmcs.guest_cr3();
                 }
             }

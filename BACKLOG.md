@@ -1,5 +1,53 @@
 # Known defects
 
+## The control was aimed at the wrong pointer; corrected, it passes and the finding stands
+
+**2026-08-25.** The walker's "first miss" was `rip 0x67168825`. This
+boot's module base is `0x6715c000`. **The miss was `0xc825` bytes inside
+this VMM's own image** - so the control was walking *this VMM's*
+instruction pointer under the *guest's* page table, which fails correctly
+and says nothing about the guest.
+
+`context.rip` is not reliably the guest's instruction pointer at that
+point; `vmcs.guest_rip()` is, by definition. Pointed at the VMCS field:
+
+```
+  walker control: rip unreachable 0 of 222 exits
+  gdt eight-walk: all-mapped 209  all-unmapped 13  mixed 0
+  gdt bracket:    ever reachable 1  last 210  first unreachable 211
+```
+
+**Zero misses.** The walker translates every instruction pointer the
+processor actually executed from. The instrument is sound, and that is
+now demonstrated rather than assumed - with the right input, which is the
+whole difference.
+
+### Which settles a chain of reversals, and it is worth being plain about them
+
+1. the reachability numbers were believed;
+2. then withdrawn, because a control said the walker was broken;
+3. then the withdrawal was itself doubted, because the control could not
+   tell a broken walker from a processor on cached translations;
+4. then QEMU was read and appeared to confirm the processor was executing
+   from an unmapped address - **wrong, it confirmed this VMM's own
+   address was not in the guest's tables, which is unremarkable**;
+5. and the address being inside this module is what exposed all of it.
+
+The lesson is narrower than "check the instrument": **check what the
+instrument is pointed at.** Every step above was a correct measurement of
+the wrong quantity, and the one cheap check that caught it - comparing an
+address against the module base - is the same check `CLAUDE.md` already
+prescribes for a fault at a small offset from the module base.
+
+### What now stands, on a validated instrument
+
+The descriptor table is reachable for 209 exits and unreachable for 13,
+with **no mixed samples**, and one monotonic transition. So the mapping
+does genuinely go away under a running processor - the reading that has
+survived every correction, and now the only one taken with a control that
+passes.
+
+
 ## QEMU confirms the walker: the processor executes from an address its own page table does not map
 
 **2026-08-25.** The walker's first miss was recorded with the page table
