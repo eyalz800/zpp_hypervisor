@@ -1,5 +1,54 @@
 # Known defects
 
+## The application processor's whole life after start-up is about fifteen exits
+
+**2026-08-25.** Its exit profile, which nobody had looked at as a whole:
+
+```
+  cpu 1 exit reasons (total 209)
+    cpuid          145  69.4%
+    rdmsr           46  22.0%
+    ept-violation   13   6.2%
+    init             2   1.0%
+    cr-access        2   1.0%
+    triple-fault     1   0.5%
+```
+
+**No `hlt`.** The guest never parks this processor by halting it, so "the
+guest stopped it and this VMM resumed it anyway" is eliminated.
+
+And the two big numbers are the **firmware park loop** - `rdmsr` of
+`0x1b` and `cpuid`, the pattern already identified at `0x7ef5xxxx` -
+which is where 191 of its 209 exits go. So the previous entry's reading
+of a *quiesce* spin is wrong twice over: the spin is the firmware's park
+loop, and it happens *before* the start-up, not during a guest quiesce.
+That reading was built on one run's exit reason and should not have been
+generalised.
+
+**What is left is startling: the processor's entire life after start-up
+is about fifteen exits.** Two `init`, two control-register writes,
+thirteen extended-page-table violations, and a triple fault. It does not
+run for long and then die; it barely runs at all.
+
+### Thirteen extended-page-table violations in a fifteen-exit life
+
+That is the anomaly, and it is one this VMM owns end to end. The earlier
+capture recorded those violations on **`0xfee00000`** - the local APIC
+page, which this VMM *watches*: it protects the page, takes the
+violation, opens the page, steps one instruction with the monitor trap
+flag, and protects it again.
+
+The mechanism's own comment, in `exit_dispatch.cpp`, says what is wrong
+with that on more than one processor: *"for that window the page is
+writable for every processor, not just the one being stepped"*. It is a
+partition-wide protection change used to service a per-processor event.
+
+So the next question is concrete and local: what does that watch do to a
+processor that is *not* the one being stepped, and does an application
+processor taking APIC-page violations while the boot processor steps them
+end up executing with a protection state neither of them expects.
+
+
 ## This VMM injects nothing into the application processor - so the fault is the guest's own
 
 **2026-08-25.** The previous entry asked "what delivered an event to a
