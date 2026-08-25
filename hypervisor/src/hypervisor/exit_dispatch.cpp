@@ -692,6 +692,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // fails either is not to be used.
         note_cpuid_leaf(cpuid, leaf);
 
+        // And where it came from, which the exit ring cannot say: it
+        // holds thirty-two entries and on an application processor those
+        // are always the guest hypervisor's closing countdown.
+        if (cpuid < max_cpus) {
+            this->cpuid_last_rip[cpuid] = vmcs.guest_rip();
+        }
+
         // Recorded before the answer is edited, so the pair below is
         // what the guest asked and what it was told, in order. Frozen
         // when full: the leaves that decide anything are asked during

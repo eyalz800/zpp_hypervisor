@@ -1,5 +1,56 @@
 # Known defects
 
+## The CPUID is not a spin - the application processor is RE-INITIALISED thousands of times
+
+**2026-08-25.** Both application processors record their last CPUID at
+the *same* instruction pointer, `0xfffff83146e3606f`, while the boot
+processor is elsewhere. Disassembled in the guest hypervisor's own
+address space:
+
+```
+        mov  %ebp, %eax              ; the leaf, from EBP - it is 0
+        xor  %ecx, %ecx
+  RIP-> cpuid
+        mov  %eax, 0x6f8(%rdi)       ; store the maximum leaf
+        mov  0x30(%rsp), %rcx
+        xor  %rsp, %rcx              ; /GS stack cookie
+        call __security_check_cookie ; ... and return
+```
+
+**CPUID is the last instruction of a routine, not the body of a loop.**
+It records the maximum leaf into a structure at `+0x6f8` and returns
+through a cookie check. So the 8,230 CPUIDs on that processor are 8,230
+*calls* to a processor-feature-initialisation routine.
+
+**The guest hypervisor is re-initialising the application processor
+thousands of times** and then abandoning it. That is a repeated restart,
+not a wait - which retires the reading in the entry above that it "spins,
+waiting for a condition that never becomes true". The count and the
+site are right; "spin" was the wrong word for them.
+
+### And the entry-path candidates are all refuted
+
+`l2_start_up_waits` and `l2_activity_state` read **0 on every processor**,
+so `enter_or_park_l2`'s three uncounted refusals and its park never fire
+either. Together with the four `entry_refusals` counters at zero, **no
+path in this VMM refuses or parks the guest hypervisor's entries at all.**
+
+That is worth stating positively, because it removes a whole family: the
+application processor is not lost because we refuse it something. It is
+lost because the guest hypervisor keeps starting it over.
+
+### What to ask next
+
+Why would a guest hypervisor restart a virtual processor's
+initialisation thousands of times? The obvious candidates are that its
+start never completes and it retries, or that something resets it - and
+this VMM does emulate INIT (`emulate_init_signal`) and does adopt start-up
+IPIs. **`l2_start_up_waits` being zero does not mean no INIT/SIPI
+reached that processor**; it means no *second-level* entry parked. The
+first-level start-up path has its own counters and its own log lines, and
+those are the next reading.
+
+
 ## The application processors spin on CPUID **leaf 0**, and the reading checks out
 
 **2026-08-25, three processors.** The per-processor census landed and,

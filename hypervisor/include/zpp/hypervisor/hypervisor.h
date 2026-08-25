@@ -7532,6 +7532,22 @@ private:
     std::uint64_t cpuid_leaf_other[max_cpus]{};
     std::uint64_t cpuid_total[max_cpus]{};
 
+    /**
+     * Where the last CPUID came from, per processor.
+     *
+     * The exit ring holds thirty-two entries and on an application
+     * processor those are always the guest hypervisor's final
+     * VMRESUME/VMCALL countdown, so the eight thousand CPUIDs before it
+     * have been evicted and their instruction pointer is unobtainable
+     * from there. One field is enough: the loop is tight and every one
+     * of them comes from it.
+     *
+     * Wanted in order to disassemble the loop in the guest hypervisor's
+     * own address space, which is the only technique that has not
+     * misled this investigation.
+     */
+    std::uint64_t cpuid_last_rip[max_cpus]{};
+
     void note_cpuid_leaf(std::size_t cpu, std::uint32_t leaf)
     {
         if (cpu >= max_cpus) {
