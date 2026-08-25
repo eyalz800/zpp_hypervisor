@@ -6723,6 +6723,41 @@ private:
     std::atomic<std::uint64_t> start_up_handoff[max_cpus]{};
 
     /**
+     * A start-up IPI that arrived while its target was between its INIT
+     * exit and publishing the hand-off, held until the target is ready
+     * for it. Zero when there is none; otherwise `queued_start_up_valid`
+     * or'd with the vector.
+     *
+     * **This is the ordering the flag approach could not provide.**
+     * `interrupt_command.cpp` records why that attempt was reverted: a
+     * flag set on the target carries no order against the start-up IPI
+     * that follows it, so the INIT could land *after* the processor had
+     * already accepted its vector and put it back into wait-for-SIPI.
+     * Holding the *vector* instead inverts that - nothing is applied
+     * until the target itself reaches the point where it is waiting, so
+     * the INIT is necessarily first.
+     *
+     * The window it covers is not a race of instructions. It is the
+     * whole software wait, up to two million iterations, during which
+     * `resume_activity_state` still holds the value from the exit before
+     * the INIT - and `exit_dispatch.cpp` already named the consequence:
+     * "a start-up IPI for this processor is discarded rather than
+     * queued".
+     *
+     * Cleared at the top of `emulate_init_signal` so a vector queued for
+     * an earlier bring-up cannot be applied to a later one, which is the
+     * same reason KVM's `kvm_apic_accept_events` clears a pending
+     * start-up IPI when it takes an INIT.
+     */
+    std::atomic<std::uint64_t> queued_start_up[max_cpus]{};
+
+    /**
+     * Marks `queued_start_up` as carrying a vector, so vector zero is
+     * distinguishable from "nothing queued".
+     */
+    static constexpr std::uint64_t queued_start_up_valid = 1ull << 8;
+
+    /**
      * Set once every processor has been started, after which the
      * interception is switched off - inter-processor interrupts are hot on
      * a running system and there is no reason to keep paying for them once

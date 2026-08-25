@@ -1,5 +1,57 @@
 # Known defects
 
+## Retraction: start-up IPIs *are* delivered, and the entry above was a one-field reading
+
+**2026-08-25.** The entry above concluded, from `"handed over": 0` beside
+`"is not wait-for-sipi, dropped": 4`, that "not one start-up IPI was ever
+handed to a processor". **That is wrong.** Two counters say so directly:
+
+```
+  init_emulated    = [0, 1, 1]
+  start_up_applied = [0, 2, 2]
+```
+
+Both application processors took an INIT exit and each applied **two**
+start-up IPIs. The delivery works. What the absent log line meant is that
+delivery did not go through *that particular path* - and the four drops
+were the redundant second start-up IPI of each pair, which SDM 11.4.4.1
+step 15 has a guest send and which a started processor correctly ignores.
+
+This is the "census two fields, not one" rule, failed again and in its
+purest form: a single log line was read as the presence or absence of a
+whole behaviour, and it had nothing to disagree with. A counter that
+already existed contradicted it immediately. **Grep counts are a
+one-field instrument.**
+
+### The queued start-up IPI is kept, and it fixes nothing measured
+
+The change made under the wrong conclusion holds a start-up IPI that
+arrives while its target is between its INIT exit and publishing the
+hand-off, instead of destroying the vector - the window
+`exit_dispatch.cpp` already described as "discarded rather than queued".
+Measured after it: `queued: 4`, `handed over: 0`, and `start_up_applied`
+unchanged at `[0, 2, 2]`.
+
+So it closes a real hole and **changes nothing about this boot**, because
+the vectors it holds are the redundant ones. Kept on that basis and
+labelled as such, not as a fix for the multicore failure.
+
+### Where that leaves the application processors
+
+They are started - INIT taken, two start-up IPIs applied - and they then
+stop taking exits at all, spinning at `rip` around `0x7ef5xxxx` with a
+null code selector, reading `IA32_APIC_BASE` and touching the local APIC
+page. `l2_entries` stays zero, so Windows never makes them Hyper-V
+virtual processors.
+
+So the question is no longer "are they started" but **"why does a started
+processor end up back in that loop"**, and the honest answer is that the
+loop has not been identified. It was called the UEFI park loop from its
+address alone, which is exactly the reasoning-from-an-address this file
+has already been burned by. Naming it needs the code at `0x7ef50775`
+read, not guessed.
+
+
 ## The multicore blocker, traced end to end: every start-up IPI is dropped
 
 **2026-08-25.** The whole chain, with a log line for every step, from one

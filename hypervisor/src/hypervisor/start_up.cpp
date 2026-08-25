@@ -674,10 +674,35 @@ hypervisor::start_up_result hypervisor::start_up_processor(
                             : this->resume_activity_state[*slot];
 
         if (wait_for_sipi != activity) {
+            // **Queued, not dropped.** Measured before this: on a
+            // three-processor boot the log carried four of these and
+            // *zero* hand-overs, so not one start-up IPI ever reached a
+            // processor and both application processors stayed in the
+            // firmware's park loop for the life of the boot.
+            //
+            // The activity record read above is written by the exit path
+            // at the end of the handler, so between a target's INIT exit
+            // and its publishing the hand-off it still says "active" -
+            // for the whole software wait, which covers both of the
+            // start-up IPIs SDM 11.4.4.1 step 15 has a guest send. The
+            // reading is not wrong, it is early.
+            //
+            // Holding the vector is what the flag attempt in
+            // `interrupt_command.cpp` could not do. A flag on the target
+            // carries no order against the start-up IPI behind it and
+            // could land after the vector had been accepted; a held
+            // vector cannot be applied until the target reaches the
+            // point where it is waiting, so the INIT is necessarily
+            // first. That is the ordering KVM gets from
+            // `apic->pending_events`.
+            this->queued_start_up[*slot].store(
+                queued_start_up_valid | vector, std::memory_order_release);
+
             log("guest start-up ipi for cpu {}, activity {} is not "
-                "wait-for-sipi, dropped",
+                "wait-for-sipi, queued vector {}",
                 *slot,
-                activity);
+                activity,
+                vector);
             return start_up_result::adopted;
         }
 
@@ -832,6 +857,15 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // "the guest hypervisor's bring-up restarts itself".
     if (auto here = this->vmcs.vpid(); (0 != here) && (here <= max_cpus)) {
         this->init_emulated[here - 1] = this->init_emulated[here - 1] + 1;
+
+        // Any vector held for a previous bring-up is discarded here, at
+        // the top, before the window this INIT opens. KVM does the same
+        // in `kvm_apic_accept_events`, where taking an INIT clears a
+        // pending start-up IPI rather than carrying it forward - a
+        // processor being re-started must not inherit a vector meant for
+        // its last life. Everything queued after this point belongs to
+        // this INIT.
+        this->queued_start_up[here - 1].store(0, std::memory_order_release);
     }
 
     // This handler must do as little as possible, and that is not a style
@@ -986,6 +1020,20 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // Published before the first attempt, so a sender that arrives
         // during the wait finds this processor listening.
         handoff.store(start_up_handoff_state::software_wait);
+
+        // And a sender that arrived *before* this processor was
+        // listening. Taken after the hand-off is published so the two
+        // cannot both deliver: a sender racing this exchange either wins
+        // the compare-exchange below on `software_wait`, or finds the
+        // queue already emptied here.
+        if (auto queued = this->queued_start_up[cpu].exchange(
+                0, std::memory_order_acq_rel);
+            0 != queued) {
+            auto expected = start_up_handoff_state::software_wait;
+            static_cast<void>(handoff.compare_exchange_strong(
+                expected,
+                start_up_handoff_state::deliver(queued & 0xff)));
+        }
 
         // Bounded so a processor cannot spin forever on an INIT whose
         // start-up IPI never arrives. The senders in practice follow
