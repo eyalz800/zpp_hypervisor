@@ -1,5 +1,60 @@
 # Known defects
 
+## Two independent readers agree: the GDT's page is absent from a live page table
+
+**2026-08-25.** The leaf entry this VMM's walker refuses on, read back
+through **QEMU** - a reader with no code in common with this VMM at all:
+
+```
+  GDT virtual address  0xffffe800002b0b00
+  page-table index     0xb0
+  entry at physical    0x101ab6580
+  QEMU reads           0x0000000000000000
+```
+
+And the table it lives in is **not** an empty or abandoned page:
+
+```
+  leaf table 0x101ab6000: 139 of 512 entries non-zero
+    [0] 0x8010000101ab5163   [1] 0x8090000101ac4363
+    [2] 0x8000000101ac3163   [3] 0x8000000101ac2163
+```
+
+Ordinary mappings - present, writable, accessed, no-execute set - in a
+live table. **Only index `0xb0` is absent, and that is the global
+descriptor table's page.**
+
+So this is settled as far as reading can settle it: not this VMM's
+walker, not the mapping window, not the extended tables. The guest's own
+page table, under the CR3 the processor is running on, does not map the
+descriptor table the processor is using.
+
+### Which leaves one shape of explanation
+
+A processor cannot load `CS`, `SS` and `TR` from a table it cannot read,
+and this one did. So the descriptor table was reachable **under some page
+table**, and the processor is now on a different one - the guest switched
+`CR3` and has not yet reloaded `GDTR`, which is an entirely ordinary
+thing to be in the middle of during processor bring-up.
+
+On hardware that window is a few instructions wide and nothing can
+interrupt it, because the processor is not taking exits. **Here it is
+four extended-page-table violations wide** - the local APIC page writes
+this VMM intercepts, at exits 113 to 116, immediately before the fault -
+and every one of those is a VM exit, a handler, and a re-entry.
+
+That is the first explanation in this investigation that accounts for
+*why it is this VMM's problem* without requiring anything in the guest to
+be wrong: the guest is mid-transition, and this VMM is stretching the
+transition by intercepting instructions inside it.
+
+**Not yet evidence.** What would make it so: whether the processor is
+executing between `CR3` load and `GDTR` load at the moment it faults,
+which the exit ring can show if the instructions around
+`0xfffff81c6f8...` are disassembled out of guest memory - the same
+technique already used on the secure kernel.
+
+
 ## A/B: the queued start-up application is load bearing, proven by turning it off
 
 **2026-08-25.** The fix that moved the multicore boot had only ever been
