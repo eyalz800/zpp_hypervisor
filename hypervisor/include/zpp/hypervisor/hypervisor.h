@@ -7568,6 +7568,13 @@ private:
      * Which `GDTR` value the bracket below currently describes, so it
      * can be reset when the guest loads a different one.
      */
+    /**
+     * Whether the extended-page-table handler has already reported
+     * changing this processor's descriptor-table reachability. One
+     * report is the answer; the rest would be noise.
+     */
+    bool ept_gdt_probe_done[max_cpus]{};
+
     std::uint64_t gdt_bracket_base[max_cpus]{};
 
     std::uint64_t gdt_last_reachable[max_cpus]{};

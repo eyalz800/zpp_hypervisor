@@ -1,5 +1,56 @@
 # Known defects
 
+## This VMM's extended-page-table handler does not remove the mapping
+
+**2026-08-25.** The previous entry reduced the thread to one question:
+the descriptor table's mapping is gone at an extended-page-table
+violation exit, and this VMM only walks at exits, so did the handler take
+it away or was it already gone?
+
+Probed by walking the table at the **top** of the handler and again on
+the way out, application processors only, reporting the first time the
+two differ:
+
+```
+  "ept handler changed gdt reach" : 0 occurrences
+  gdt bracket: last reachable 0xcd  first unreachable 0xce  of 0xd0
+```
+
+**Zero.** The handler never changes it. The mapping is already gone when
+the exit is taken.
+
+So the local-APIC watch is **not** the culprit, despite its
+partition-wide open window being the most suspicious thing in the
+neighbourhood, and despite the transition being observed at exactly one
+of its exits. That was the only branch this VMM could have fixed
+directly, and it is closed by measurement rather than argument.
+
+### What that leaves
+
+The mapping disappears during the guest's own execution, in the handful
+of instructions between exit 205 and exit 206, and nothing this VMM does
+at either exit is responsible.
+
+The remaining shapes are about **what the processor is allowed to see**
+rather than what this VMM writes:
+
+- a translation the processor kept using after the guest removed it -
+  which would mean an invalidation this VMM owes and does not perform,
+  and would explain 204 exits of apparent success followed by a mapping
+  that was never really there;
+- or the guest removing a mapping under a processor it does not know is
+  running, which is upstream of this VMM entirely.
+
+The first is testable against KVM's invalidation scope and against
+`ZPP_INVEPT_ALL_PROCESSORS`, which this tree already documents as *"our
+shadow of that table is per processor and only the executing one
+discards, so another processor can keep serving the permission that was
+just revoked. Only possible above one processor."*
+
+That description matches this failure closely enough that it is the next
+thing to test, and it is one switch.
+
+
 ## The mapping goes at an APIC-write exit, two exits before the fault
 
 **2026-08-25.** The transition log, now that the bracket is per

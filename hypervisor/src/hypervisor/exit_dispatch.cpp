@@ -2617,6 +2617,44 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         break;
     }
     case basic_reason::ept_violation: {
+        // **Did this handler take the descriptor table away?** The
+        // application processor's table stops being reachable at one of
+        // these exits, two before it triple faults, and this VMM only
+        // walks at exits - so "gone at exit 206" does not say whether it
+        // went before the exit or inside the handler. Walking on entry
+        // and again on the way out separates them: reachable on entry
+        // and not on exit is this VMM; already gone on entry is not.
+        //
+        // Application processors only, and only once, so it costs
+        // nothing on the boot processor's millions of exits.
+        auto gdt_on_entry = std::uint64_t{};
+        if ((0 != cpuid) && (cpuid < max_cpus) &&
+            !this->ept_gdt_probe_done[cpuid]) {
+            if (auto base = vmcs.guest_gdtr_base(); 0 != base) {
+                gdt_on_entry = guest_linear_to_physical(base) ? 1 : 0;
+            }
+        }
+
+        scope_exit gdt_probe{[&] {
+            if ((0 != cpuid) && (cpuid < max_cpus) &&
+                !this->ept_gdt_probe_done[cpuid]) {
+                auto base = vmcs.guest_gdtr_base();
+                auto after = (0 != base) && guest_linear_to_physical(base)
+                                 ? std::uint64_t{1}
+                                 : std::uint64_t{};
+
+                if (gdt_on_entry != after) {
+                    this->ept_gdt_probe_done[cpuid] = true;
+                    log("cpu {} ept handler changed gdt reach: {} -> {} "
+                        "at exit {}",
+                        cpuid,
+                        gdt_on_entry,
+                        after,
+                        this->exit_total[cpuid]);
+                }
+            }
+        }};
+
         // A watched page was touched. RIP stays where it is: the
         // guest's instruction has not run yet, and the whole point
         // is to let it run for itself rather than emulate it.
