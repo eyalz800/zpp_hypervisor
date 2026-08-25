@@ -7532,6 +7532,20 @@ private:
      * before the next exit, so this is a lower bound on what it used.
      */
     std::uint64_t cr3_seen[max_cpus][8]{};
+
+    /**
+     * The guest GDTR base in force when each `cr3_seen` entry was first
+     * recorded, so the pair can be seen moving together or apart.
+     *
+     * The question it exists for: an application processor triple faults
+     * on the guest hypervisor's page table with a global descriptor
+     * table that table does not map. Either the guest loaded a table it
+     * then stopped mapping, or the processor changed page table while
+     * that GDTR was current - and only the second is this VMM's fault.
+     * A CR3 history alone shows where the processor went, not what its
+     * descriptors were when it went there.
+     */
+    std::uint64_t gdtr_seen[max_cpus][8]{};
     std::uint64_t cr3_seen_count[max_cpus]{};
 
     bool l2_entry_failure_logged[max_cpus]{};

@@ -229,6 +229,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
         if (!known && (count < 8)) {
             this->cr3_seen[cpuid][count] = current;
+            this->gdtr_seen[cpuid][count] = vmcs.guest_gdtr_base();
             count = count + 1;
         }
     }
@@ -1989,12 +1990,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                            : std::uint64_t{};
             };
 
-            log("cpu {} triple fault cr3 history: {} {} {} {}",
-                (cpuid + 1),
-                this->cr3_seen[cpuid][0],
-                this->cr3_seen[cpuid][1],
-                this->cr3_seen[cpuid][2],
-                this->cr3_seen[cpuid][3]);
+            for (std::size_t i{};
+                 (i < this->cr3_seen_count[cpuid]) && (i < 8);
+                 ++i) {
+                log("cpu {} history [{}]: cr3 {} gdtr {}",
+                    (cpuid + 1),
+                    i,
+                    this->cr3_seen[cpuid][i],
+                    this->gdtr_seen[cpuid][i]);
+            }
 
             log("cpu {} triple fault reach: idt {} gdt {} rsp {} rip {}",
                 (cpuid + 1),

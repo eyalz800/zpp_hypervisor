@@ -1,5 +1,58 @@
 # Known defects
 
+## The paired CR3/GDTR history: the guest installed a consistent pair, and it stopped being reachable
+
+**2026-08-25.** Recording the guest GDTR beside each distinct CR3, and
+printing every entry at the triple fault:
+
+```
+  [0] cr3 0x7fc01000    gdtr 0x6a736000            firmware
+  [1] cr3 0x7fb6a000    gdtr 0x7f9dc000            firmware
+  [2] cr3 0x0           gdtr 0x0                   INIT - both reset
+  [3] cr3 0x27a000      gdtr 0x2034                trampoline, low GDT
+  [4] cr3 0x114f5f000   gdtr 0xffffe800002b0b00    64-bit context
+```
+
+Entry [2] is worth noting on its own: CR3 **and** GDTR both zero is
+exactly SDM Table 12-1's INIT state, so `apply_start_up` is doing its job
+and the processor really is being reset properly.
+
+**Entry [4] is the finding: the CR3 and the GDTR change together.** The
+guest did not end up on one context's page table holding another's
+descriptors - it installed both as a pair. The previous entry's
+"processor on the wrong page table" reading is therefore **withdrawn**.
+
+### And the guest must have been able to read that table
+
+At the fault the processor holds `CS 0x10`, `SS 0x20`, `TR 0x30`. Loading
+any of those reads its descriptor out of the global descriptor table, so
+the table **was** reachable when they were loaded, under this same CR3.
+
+So the sequence is: a table that was readable becomes unreadable, and the
+next exception the processor takes is unserviceable.
+
+### The ambiguity that is left, and it is a real one
+
+`gdt 0` in the reach line is **this VMM's walker** failing to translate
+`0xffffe800002b0b00` under CR3 `0x114f5f000`. That is not the same
+statement as "the processor could not reach it":
+
+- the same walker, same CR3, same moment, **does** reach the interrupt
+  table at `0xfffff86765222000` and the code at
+  `0xfffff8676543dfb2` - so the walker is not simply broken;
+- but those are a different PML4 entry from `0xffffe8______`, so a
+  failure confined to one top-level entry is consistent with either a
+  genuinely absent mapping **or** something about how this VMM reaches
+  that particular table.
+
+Given how many readings in this file have been the reader rather than the
+subject, that has to be closed before a fix is designed on it. The cheap
+way: walk the same address through the *second* path this VMM has -
+`translate_guest_linear`, which goes through the guest hypervisor's
+extended tables - and see whether the two walkers agree. They already
+disagree usefully elsewhere.
+
+
 ## The CR3 history: the application processor faults on the guest hypervisor's own page table
 
 **2026-08-25.** CR3 loads do not exit here, so the only page table ever
