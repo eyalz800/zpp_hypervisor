@@ -1,5 +1,57 @@
 # Known defects
 
+## The application-processor spin is a CLOCK check with a one-second budget
+
+**2026-08-25.** The 644-byte function at `hvix64+0x25599c` is now read
+end to end, and it is not a generic wait:
+
+```
+  movl  $0x989680, %esi           ; 10,000,000 = one second in 100 ns units
+  cmpq  %rsi, 0xc0(%rbx)          ; is the platform frequency exactly 10 MHz?
+  je    ...                       ;   yes -> use the value directly
+  movq  0x130(%rbx), %rax         ;   no  -> scale it to TSC ticks
+  mulq  %rcx ; imulq 0x128(%rbx), %rcx ; addq %rcx, %rdx
+  movq  <0xa9c30>, %rbp ; addq %rdx, %rbp     ; a DEADLINE
+  rdtsc -> %r8
+loop:
+  cpuid ; pause ; rdtsc
+  subq  %r8, %rax                 ; elapsed
+  cmpq  %rsi, %rax                ; against the budget
+  ...
+  callq *0x70(%rbx)               ; read a clock through a function pointer
+  ... same frequency scaling ...
+  subq  %rbp, %rbx                ; and compare against the deadline
+```
+
+So it **converts a one-second duration into TSC ticks using the
+platform's frequency fields, spins against that budget, and separately
+reads a second clock and compares it to the deadline.** That is a clock
+validation or synchronisation, not a generic sleep, and it runs on the
+application processors - the branch is taken when `%gs:0x8` differs from
+the stored index.
+
+### The connection worth stating
+
+`ZPP_TICK_FLOOR` is, by its own comment in this tree, **"a lie about
+time and it is bounded"** - and it is the switch the single-processor
+boot *requires* to reach the logon UI at all. A routine that
+cross-checks two clocks against a one-second budget is precisely the kind
+of thing such a lie would break, and it runs only where more than one
+processor exists.
+
+**This is a hypothesis, not a result**, and the obvious test has already
+been run and does not settle it: three processors with `floor=0` also
+fail, but in a *different* way (a wedge, not this). So "the floor breaks
+the clock check" is consistent with the evidence and not demonstrated by
+it - the two failures may be independent, and the floor-off arm has its
+own problem.
+
+What would settle it is reading this routine's own inputs on a failing
+run: the frequency fields at `0xc0`, `0x128` and `0x130` of the structure
+in `%rbx`, and the deadline base at `hvix64+0xa9c30`. All are readable
+with the recipe recorded above, and none has been read.
+
+
 ## The leaf-0 storm IS Hyper-V's, and it is a ONE-SECOND TIMED SPIN
 
 **2026-08-25.** Settled by the recipe recorded above, executed: read the
