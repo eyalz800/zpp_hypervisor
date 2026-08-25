@@ -1,5 +1,71 @@
 # Known defects
 
+## The chain closes: a failed VMWRITE operand read leaves vmcs12 half-updated
+
+**2026-08-25.** Instrumented `save_l2_state` to report, once per
+processor per value, whether vmcs02's IA-32e-mode-guest bit is ever seen
+set and ever seen clear. Three-processor boot:
+
+```
+  cpu 0x0 second level ia32e bit first seen 0x1 at l2 entry 0x1, ...
+  cpu 0x1 second level ia32e bit first seen 0x1 at l2 entry 0x1, ...
+  cpu 0x2 second level ia32e bit first seen 0x1 at l2 entry 0x1, ...
+```
+
+**The "first seen 0x0" line never appears, on any processor.** So the
+store this VMM makes into vmcs12 - which SDM 30.2 and KVM's
+`sync_vmcs02_to_vmcs12` both require - never writes a zero. **The zero in
+the failing vmcs12 is not ours.** That retires the last remaining theory
+that we corrupt the field.
+
+### What does write it, and why the operand failure was not a symptom
+
+The memory-form VMREAD/VMWRITE failures were demoted to "symptom" in the
+entry above. That was wrong, and the mechanism is exact:
+
+- The failures are always on field `0x681e` (`GUEST_RIP`) or `0x6820`
+  (`GUEST_RFLAGS`) - adjacent guest-state fields.
+- **A `VMWRITE` whose memory *source* operand cannot be read does not
+  perform the write.** vmcs12 therefore keeps its previous value while
+  the guest hypervisor believes it stored a new one.
+
+Hyper-V restarting a virtual processor writes a batch: entry controls
+with the IA-32e-mode-guest bit cleared (real mode), a real-mode `RIP`,
+`RFLAGS`, segments. If the control write lands and the `GUEST_RIP` write
+silently does not, vmcs12 ends up holding **the new bit 9 = 0 beside the
+old 64-bit RIP** - which is precisely the refused pair:
+
+```
+  entry_ctls 0x11ff (bit 9 clear)   rip 0xfffff806a9aa6fd0
+```
+
+and precisely the SDM 29.3.1.4 violation (RIP bits 63:32 must be 0 when
+the IA-32e-mode-guest control is 0). The failure is **half an update**,
+not a corruption.
+
+It also explains the application-processor bias without needing one:
+only a processor being *restarted* writes this batch at all.
+
+### So the fix is the operand access, and `#PF` is not enough
+
+Answering `#PF` instead of `#UD` is right and stays, but it only helps if
+the guest can *make the page good*. Measured, the same address behaves
+two ways across runs:
+
+```
+  ... at 0xffffe70000205da0 ... phys 0x114fcfda0 err 0x10 l2 0x0   <- walk OK, access refused
+  ... at 0xffffe70000005d50 ... phys 0x0        err 0x10 l2 0x0   <- walk refused
+```
+
+Both report `guest_address_not_mapped`, and the address is in
+`0xffffe70000...` on every run despite KASLR moving Hyper-V's base, so it
+is a fixed structure. The next question is why that walk refuses, and the
+instrument for it is which *level* of the four refuses and what entry it
+read - `guest_linear_to_physical` returns one error for all four levels
+today, which is a single-field instrument aimed at four different
+failures.
+
+
 ## The refused entry, named exactly - and two hypotheses killed
 
 **2026-08-25.** The vmcs02 capture fired, with vmcs12 printed beside it,

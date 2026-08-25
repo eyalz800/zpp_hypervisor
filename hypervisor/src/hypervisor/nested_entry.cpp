@@ -4008,6 +4008,29 @@ void hypervisor::save_l2_state(std::size_t cpu)
         (shadow.read(field::vm_entry_controls) & ~entry_ia32e_mode_guest) |
             (vmcs.vm_entry_controls() & entry_ia32e_mode_guest));
 
+    // Whether bit 9 is *ever* seen set on this processor. The failing
+    // boot ends with it clear in both VMCSes, and the store above is the
+    // only thing that can ever set it in vmcs12 - so "who cleared it"
+    // and "it was never set" are different bugs with the same symptom,
+    // and one sample at the failure cannot tell them apart. Once per
+    // processor per value, so a boot reports at most six lines.
+    if (cpu < max_cpus) {
+        auto set = 0 != (vmcs.vm_entry_controls() & entry_ia32e_mode_guest);
+        auto & reported =
+            set ? this->ia32e_set_seen[cpu] : this->ia32e_clear_seen[cpu];
+
+        if (!reported) {
+            reported = true;
+            log("cpu {} second level ia32e bit first seen {} at l2 entry "
+                "{}, guest cr0 {} rip {}",
+                cpu,
+                static_cast<std::uint64_t>(set),
+                this->l2_entries[cpu],
+                vmcs.guest_cr0(),
+                vmcs.guest_rip());
+        }
+    }
+
     // The three saved conditionally, on the guest hypervisor's own exit
     // controls. SDM 30.4, "Saving MSRs", and SDM 30.3 for DR7.
     auto exit12 = shadow.read(field::vm_exit_controls);

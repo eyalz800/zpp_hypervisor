@@ -7483,6 +7483,19 @@ private:
      * only evict the sequence that led there.
      */
     bool l2_entry_failure_logged[max_cpus]{};
+
+    /**
+     * Whether this processor has reported seeing the second-level
+     * IA-32e-mode-guest bit set, and clear. Two flags rather than one,
+     * because "it was set and something cleared it" and "it was never
+     * set" are different defects with the same symptom at the failure.
+     * @{
+     */
+    bool ia32e_set_seen[max_cpus]{};
+    bool ia32e_clear_seen[max_cpus]{};
+    /**
+     * @}
+     */
     std::uint64_t vmx_instructions_refused[max_cpus]{};
 
     /**
