@@ -1,5 +1,77 @@
 # Known defects
 
+## The multicore blocker, traced end to end: every start-up IPI is dropped
+
+**2026-08-25.** The whole chain, with a log line for every step, from one
+three-processor boot:
+
+```
+  [145] cpu 0x3 start-up ipi exit, vector 0x2
+  [148] guest start-up ipi for cpu 0x2, activity 0x0 is not
+        wait-for-sipi, dropped
+  [196] no start-up ipi for 0x37e11d6000 ticks after 0x6 of them,
+        dropping the local apic page watch
+```
+
+and the counts that make it conclusive:
+
+- `"is not wait-for-sipi, dropped"`: **4**
+- `"handed over"`: **0**
+
+**Not one start-up IPI was ever handed to a processor.** Every one was
+dropped because the target's activity state was `0`, active, rather than
+`3`, wait-for-SIPI.
+
+### Why the target is never in wait-for-SIPI
+
+`interrupt_command.cpp` says it in its own words: a guest INIT IPI is
+"forwarded and nothing more, deliberately". The INIT goes out to hardware
+as the guest wrote it, and this VMM keeps no record that the target
+should now be waiting for a start-up IPI.
+
+And forwarding is not enough, for a reason already written down beside
+it: KVM's `vmx_apic_init_signal_blocked` - `nested.vmxon &&
+!is_guest_mode` - blocks an INIT for every instant a processor is inside
+this VMM's code, and `kvm_apic_accept_events` then **clears** the pending
+start-up IPI rather than deferring it. So under KVM the pair can be lost
+entirely.
+
+So: INIT is forwarded and dropped underneath us, the target stays active,
+the SIPI that follows is then correctly-but-fatally refused by the
+wait-for-SIPI guard in `start_up.cpp`, and the processor never starts.
+Every link is measured.
+
+### Why the obvious fix is already known to be wrong
+
+A previous attempt flagged each target so it would apply the INIT to
+itself at its next exit. It was reverted, and the measurement that killed
+it is recorded in the file:
+
+```
+  guest start-up ipi for cpu 1, vector 2, to hardware
+  sipi cpu 2 entry_intr 0 idt_vectoring 0
+  cpu 2 start-up ipi exit, vector 2
+  cpu 1 applying a guest init the layer below did not deliver
+  guest start-up ipi for cpu 1, vector 2, to hardware
+```
+
+The flagged INIT landed **after** the processor had accepted its start-up
+IPI, putting it back into wait-for-SIPI, so the guest saw nothing start,
+sent the pair again, and looped until Hyper-V executed `vmxoff`. A second
+fault: the flag was also set for INIT level de-assert (`0x100008500`),
+which architecturally starts nothing, so it could invent an INIT.
+
+**A flag carries no ordering against the start-up IPI that follows.** The
+thing that does is a per-processor **queue holding both events in the
+order the guest wrote them** - which is exactly what KVM's
+`apic->pending_events` bitmap is, applied together in
+`kvm_apic_accept_events`.
+
+That is the fix, and it is the next piece of work: INIT and SIPI recorded
+per target as pending events with their order preserved, applied at one
+point on the target, with level de-assert excluded.
+
+
 ## On a first boot the application processors never leave firmware
 
 **2026-08-25.** cpu 1's first-level exit trace, on a three-processor
