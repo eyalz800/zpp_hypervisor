@@ -1,5 +1,50 @@
 # Known defects
 
+## The application processors spin on CPUID **leaf 0**, and the reading checks out
+
+**2026-08-25, three processors.** The per-processor census landed and,
+for the first time in this investigation, an instrument passed a check it
+could have failed:
+
+```
+  cpu1  total=8596  other=8  slots_sum=8588  CHECK OK
+          leaf 0x00000000  x8448
+          leaf 0x00000001  x96
+  cpu2  total=8378  other=8  slots_sum=8370  CHECK OK
+          leaf 0x00000000  x8230      <- 98% of that processor's CPUIDs
+          leaf 0x00000001  x96
+```
+
+Both checks hold: the slot counts plus the overflow equal the total, and
+`cpuid_total[2]` (8,378) equals the CPUID row of cpu2's own exit-reason
+table (8,378) exactly. Two independent quantities agreeing is what the
+counter was built for, after five instruments in a row reported plausible
+nonsense.
+
+**Leaf 0 is the vendor/maximum-leaf query, and it is the canonical
+serialising instruction in a spin-wait loop.** So the guest hypervisor is
+polling on both application processors - eight thousand times each, while
+the boot processor barely uses CPUID at all - waiting for a condition
+that never becomes true, and then executing VMCLEAR and abandoning the
+processor.
+
+This is the same processor previously described here as "idle" and as
+"refused an entry". Both were wrong and both are retracted above; this
+one is measured and checked.
+
+### What it narrows the question to
+
+Not "why does the second level fail" - the second level barely runs, 17
+entries. **The guest hypervisor itself is waiting**, on the application
+processor, for something it expects this VMM or the boot processor to
+provide. Leaf 0 says only that it is serialising; it does not say what
+the loop tests. The next reading is what changes between iterations -
+the registers or the memory the loop watches - and the honest way to get
+it is the one that has worked twice tonight: disassemble around the CPUID
+instruction pointer in the guest hypervisor's own address space, rather
+than decode a field.
+
+
 ## The application processor is SPINNING ON CPUID - 97.3% of its exits
 
 **2026-08-25, three processors.** The sharpest fact yet about what an
