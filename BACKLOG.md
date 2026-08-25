@@ -1,5 +1,55 @@
 # Known defects
 
+## The application processor is NOT on the boot processor's page table
+
+**2026-08-25.** The comparison the previous entry called for, both
+histories printed at the fault:
+
+```
+  boot processor:  cr3 0x7fc01000  0x1ae000  0x27a000  0x101abc000
+                       0x8800000   0x8800002 0x1ae002
+                   gdtr all 0xfffff8________
+
+  application:     cr3 0x7fc01000  0x7fb6a000  0x0  0x27a000  0x114f5f000
+                   gdtr 0x6a736000 0x7f9dc000  0x0  0x2034
+                        0xffffe800002b0b00     <- at the fault
+```
+
+**`0x114f5f000` never appears in the boot processor's history.** The
+application processor is not running on the boot processor's page table,
+and the "the boot processor edited it out from under it" candidate is
+**refuted**.
+
+Nor is the descriptor table shared: every GDTR the boot processor holds
+is `0xfffff8________`, in module ranges; `0xffffe800002b0b00` is the
+application processor's alone.
+
+So the application processor has **its own** page table and **its own**
+descriptor table, and its descriptor table is not mapped in its page
+table.
+
+### A correction to the previous entry's "closure"
+
+That entry said two walkers agreeing discharges the reader doubt.
+**They are less independent than that claimed.**
+`guest_linear_to_physical` and `translate_guest_linear` walk different
+routes at the top, but both read every page-table entry through
+`read_guest_physical` - the same mapping window, the same
+`within_guest_physical` bound, the same `l2_physical_to_l1`. A failure in
+that shared floor produces agreement between them and proves nothing.
+
+What their agreement does rule out is a difference in the *upper* halves -
+the direct walk versus the extended-table walk. It does not rule out the
+physical access path underneath both. Given this file's history that
+distinction should have been drawn when the check was designed, not
+after it.
+
+The reading that is genuinely independent of that floor is the
+processor's own: it loaded `CS`, `SS` and `TR` out of that table, so the
+hardware reached it. That is still the strongest evidence the mapping was
+once there, and it does not depend on any walker.
+
+
 ## Two walkers agree: the GDT really is unmapped, and it was mapped earlier
 
 **2026-08-25.** The previous entry left one ambiguity - whether "gdt

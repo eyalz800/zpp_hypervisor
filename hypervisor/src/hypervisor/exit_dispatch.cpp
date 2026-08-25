@@ -2000,6 +2000,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->gdtr_seen[cpuid][i]);
             }
 
+            // The boot processor's page tables beside this one's. The
+            // candidate this is aimed at: if the guest hypervisor gives
+            // each virtual processor its own table and this one is
+            // running on the boot processor's, then any edit the boot
+            // processor makes - unmapping a bring-up structure it has
+            // finished with - pulls the table out from under this one,
+            // which is exactly the "it was mapped and then it was not"
+            // this fault shows.
+            //
+            // A shared value here does not by itself prove that: two
+            // processors legitimately share a page table for long
+            // stretches. What it does is turn the question from a
+            // hypothesis into a comparison.
+            for (std::size_t i{}; (i < this->cr3_seen_count[0]) && (i < 8);
+                 ++i) {
+                log("cpu 1 history [{}]: cr3 {} gdtr {}",
+                    i,
+                    this->cr3_seen[0][i],
+                    this->gdtr_seen[0][i]);
+            }
+
             // **Both walkers, because one of them cannot tell you it
             // is the wrong instrument.** `guest_linear_to_physical`
             // walks the guest's tables directly;
