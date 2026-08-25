@@ -720,6 +720,39 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             this->cpuid_leaf0_raw[cpuid] = cpuid_result[0];
         }
 
+        // **The guest hypervisor's own idea of which processor it is.**
+        //
+        // Its bring-up routine begins `movl %gs:0x8, %eax` and compares
+        // that against a stored index - 0, the boot processor - skipping
+        // its whole body when they match. Its own counter says the body
+        // ran 257 times against 8,203 entries, so about 97% of calls
+        // take that skip. On an application processor none should.
+        //
+        // Read here, and only here, because here is the one place the
+        // context is certain: `running_l2` false means vmcs01 is current
+        // and this is the guest hypervisor's own GS base, not the
+        // second-level guest's. Sampling it from the monitor gave 0 on
+        // one processor and 2 on another with the three bases in
+        // different address ranges - three different structures, most
+        // likely, and not evidence either way.
+        //
+        // Once per processor: the answer does not change and the read
+        // walks guest page tables.
+        if ((cpuid < max_cpus) && !this->running_l2[cpuid] &&
+            !this->l1_gs_index_taken[cpuid]) {
+            auto gs_base = vmcs.guest_gs_base();
+            std::uint32_t index{};
+
+            if (read_guest_linear(
+                    gs_base + 8,
+                    std::span(reinterpret_cast<std::byte *>(&index),
+                              sizeof(index)))) {
+                this->l1_gs_base[cpuid] = gs_base;
+                this->l1_gs_index[cpuid] = index;
+                this->l1_gs_index_taken[cpuid] = 1;
+            }
+        }
+
         // Recorded before the answer is edited, so the pair below is
         // what the guest asked and what it was told, in order. Frozen
         // when full: the leaves that decide anything are asked during

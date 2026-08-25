@@ -7588,6 +7588,33 @@ private:
      */
     std::uint32_t cpuid_leaf0_raw[max_cpus]{};
 
+    /**
+     * The guest hypervisor's own processor index, and the GS base it
+     * came from.
+     *
+     * Its bring-up routine opens with `movl %gs:0x8, %eax`, compares
+     * that against a stored index of 0 - the boot processor - and skips
+     * its entire body when they match. Its own counter reports the body
+     * running 257 times against 8,203 entries, so roughly 97% of calls
+     * take that skip, which an application processor should never do.
+     *
+     * If this reads 0 on an application processor, every processor
+     * believes it is processor 0, the application-processor work never
+     * runs, and the bring-up cannot complete - which fits every measured
+     * fact. The guest's GS base is VMCS state this VMM manages.
+     *
+     * Taken at a CPUID exit with `running_l2` false, because that is the
+     * one moment the context is certain: vmcs01 is current and the base
+     * is the guest hypervisor's, not its guest's. Sampling from the
+     * monitor could not distinguish those and is not evidence.
+     *
+     * **The check this must pass**: on a processor that works, the value
+     * equals that processor's own index.
+     */
+    std::uint64_t l1_gs_base[max_cpus]{};
+    std::uint32_t l1_gs_index[max_cpus]{};
+    std::uint8_t l1_gs_index_taken[max_cpus]{};
+
     std::uint64_t start_up_applied[max_cpus]{};
     std::uint64_t init_emulated[max_cpus]{};
 
