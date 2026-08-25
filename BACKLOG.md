@@ -1,5 +1,47 @@
 # Known defects
 
+## The ACPI PM timer advances correctly on the failing configuration too
+
+**2026-08-25.** The two questions the previous entry left - does it
+advance, and does it advance the same everywhere - answered by reading
+the extended value the guest hypervisor publishes at `hvix64+0xa9c10`
+twice, six seconds apart:
+
+```
+  1 processor (reaches the logon UI)   3.587 MHz
+  3 processors (fails)                 3.601 MHz
+  nominal ACPI PM timer                3.579545 MHz
+```
+
+Both within the sleep-timing noise of nominal, and of each other. **The
+clock the guest hypervisor validates against is healthy on the
+configuration that fails.** The lead is dead.
+
+That is the ninth idea in this investigation to be killed by a test
+written down before it was run, and like the others it cost exactly one
+run.
+
+### What the clock thread leaves behind
+
+Established, and worth keeping because it took real work to get:
+
+- The application processors enter a **one-second timed clock check** at
+  `hvix64+0x25599c`, whose budget constant `0x989680` is the same value
+  the bugcheck reports as `P1`.
+- That check validates a TSC-based spin against the **ACPI PM timer**,
+  identified by arithmetic - `0xB2CB2E2FB3EF1BE4 / 2^62 = 2.793651` and
+  `10^7 / 3,579,545 = 2.793651`, to six places.
+- Its inputs - `freq`, `scale`, `mul`, the deadline base - read
+  identically on a booting machine and a failing one.
+- And the PM timer itself advances correctly on both.
+
+So **nothing about this check's clocks or constants differs between the
+configuration that works and the one that does not.** Whatever the
+application processors are waiting for, the timing machinery around the
+wait is not it. That is a real narrowing, and it is the honest end of
+this thread rather than a suspicion left dangling.
+
+
 ## The second clock is the ACPI PM TIMER, and the arithmetic proves it
 
 **2026-08-25.** The function the one-second check calls through
