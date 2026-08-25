@@ -1131,9 +1131,31 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // nothing is going to come and collect it: on this path the
         // processor returns to wait for a hardware start-up IPI that has
         // already been sent and refused.
-        if (auto queued = this->queued_start_up[cpu].exchange(
-                0, std::memory_order_acq_rel);
-            0 != queued) {
+        // **Held, not applied - an experiment, and the switch says so.**
+        //
+        // Applying it here is what made the boot move, and it is also
+        // what starts the processor twice: the ring shows two `init`
+        // exits carrying `cs=0x8700` then `cs=0x0200`, so vector 0x87 is
+        // applied and then vector 0x02 overwrites it. A start-up IPI to
+        // a processor that is already running is ignored by hardware,
+        // and this VMM does not ignore it.
+        //
+        // So the question is whether the queued application is load
+        // bearing or whether the hardware start-up IPI that follows
+        // would have started it anyway - and the only way to know is to
+        // not apply it and see whether the processor still starts.
+        if (!nested_vmx::apply_queued_start_up) {
+            if (auto queued = this->queued_start_up[cpu].load(
+                    std::memory_order_acquire);
+                0 != queued) {
+                log("cpu {} init: holding queued start-up vector {} "
+                    "rather than applying it",
+                    cpu,
+                    queued & 0xff);
+            }
+        } else if (auto queued = this->queued_start_up[cpu].exchange(
+                       0, std::memory_order_acq_rel);
+                   0 != queued) {
             log("cpu {} init: applying start-up ipi vector {} that "
                 "arrived before this processor was waiting",
                 cpu,

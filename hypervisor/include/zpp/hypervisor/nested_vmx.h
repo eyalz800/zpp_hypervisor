@@ -856,6 +856,27 @@ inline constexpr bool census_exits = (0 != ZPP_CENSUS_EXITS);
 inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 
 /**
+ * Apply a start-up IPI that arrived before its target reached its INIT
+ * exit, rather than only holding it.
+ *
+ * On, which is how the multicore boot got past its first wall. It is
+ * also what starts a processor twice - the exit ring shows two `init`
+ * exits carrying `cs=0x8700` then `cs=0x0200`, vector 0x87 applied and
+ * then vector 0x02 over it - and hardware ignores a start-up IPI to a
+ * processor that is already running, where this does not.
+ *
+ * Off is the experiment that says whether the queued application is load
+ * bearing or whether the hardware start-up IPI behind it would have
+ * started the processor anyway.
+ */
+#ifndef ZPP_APPLY_QUEUED_START_UP
+#define ZPP_APPLY_QUEUED_START_UP 1
+#endif
+
+inline constexpr bool apply_queued_start_up =
+    (0 != ZPP_APPLY_QUEUED_START_UP);
+
+/**
  * Watch writes to the second-level guest's VP assist page.
  *
  * **Off, because it wedged the guest.** Armed on the frame the two

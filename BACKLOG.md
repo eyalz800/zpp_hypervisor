@@ -1,5 +1,41 @@
 # Known defects
 
+## A/B: the queued start-up application is load bearing, proven by turning it off
+
+**2026-08-25.** The fix that moved the multicore boot had only ever been
+tested by *doing* it - the boot improved on the same run it was added,
+which is correlation on a failure this file has repeatedly shown to be
+nondeterministic. So it was put behind a switch, `ZPP_APPLY_QUEUED_START_UP`,
+built four ways per CLAUDE.md - the option, both forwards, the sub-build's
+compiler list and the manifest field - and the manifest was checked
+(`qstart=1`, then `qstart=0`) before each run rather than the cache.
+
+Two processors, same binary otherwise:
+
+| | `qstart=0` | `qstart=1` |
+|---|---|---|
+| cpu 0 exits | 1,332,166 | ~26,000,000 |
+| second-level entries | 93,753 | ~2,100,000 |
+| guest processes | **1** (`System`) | **6** incl. `Secure System`, `smss.exe` |
+
+**Off reproduces the original wedge exactly.** So applying a start-up IPI
+that arrived before its target reached its INIT exit is not an
+optimisation or a tidy-up - it is the difference between a guest that
+never leaves one process and a guest that reaches user mode.
+
+That also retires a doubt raised two entries ago. The concern was that
+this application starts the processor **twice** - the ring shows
+`cs=0x8700` then `cs=0x0200` - where hardware would ignore a start-up IPI
+to a processor already running. The double start is real, and it is still
+not architectural; but the alternative is measured, and the alternative is
+that the processor is never started properly at all.
+
+So the double start stays for now, as the lesser of two known-wrong
+behaviours, and the entry that suspected it of causing the triple fault is
+**wrong about that**: without it the processor does not get far enough to
+triple fault, and the guest is worse off.
+
+
 ## Where the multicore investigation stands
 
 **2026-08-25.** Consolidating, because the last several entries have each

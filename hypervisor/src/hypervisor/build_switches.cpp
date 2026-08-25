@@ -82,6 +82,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::shadow_guest_state),
         ' ', 's', 't', 'e', 'p', 'v', 't', 'l', '=',
         digit(nested_vmx::step_vtl),
+        ' ', 'q', 's', 't', 'a', 'r', 't', '=',
+        digit(nested_vmx::apply_queued_start_up),
         ' ', 'p', 'r', 'o', 'f', 'i', 'l', 'e', '=',
         digit(nested_vmx::profile_l2),
         // Off leaves three fields of every exit-ring entry reading zero,
