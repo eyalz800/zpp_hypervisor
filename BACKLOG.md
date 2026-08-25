@@ -1,5 +1,67 @@
 # Known defects
 
+## Observed, not inferred: Windows loads 78 drivers, sees one processor, and never starts smss
+
+**2026-08-25.** Six mechanisms had been proposed and killed in a row, each
+plausible from one instrument. This entry is what came of stopping that
+and reading the guest instead.
+
+### What the boot processor is actually executing
+
+Its second-level exit ring, symbolised against a **module list walked
+from `PsLoadedModuleList`** rather than by scanning memory for a PE
+header:
+
+| RIP | of 40 | resolves to |
+|---|---|---|
+| `0xfffff80573a60000` (+0x19, +0x32) | 15 | in no loaded module - the hypercall page |
+| `0xfffff805773c0307` | 14 | in no loaded module - VTL1, outside VTL0's list |
+| `0xfffff805e2aaeb0c` | 2 | `ntoskrnl.exe + 0x6aeb0c` = `KiInterruptDispatchNoLockNoEtw + 0x7c` |
+
+So it alternates hypercall page and VTL1 code, with occasional interrupt
+dispatch. A VTL round trip, which this tree already knows the shape of.
+
+**A scan for the nearest MZ below an address is not a module lookup**,
+and it produced a wrong answer here before the list did: it named
+`CLASSPNP.SYS` for a RIP `0xbc0307` past that driver's base, because the
+scan skips unmapped pages and stops at the first *mapped* header below.
+The offset being absurd is what caught it. Walk the list.
+
+### How far Windows actually gets
+
+**78 loaded modules**, including `stornvme.sys`, `storport.sys`,
+`disk.sys`, `CLASSPNP.SYS`, `Ntfs.sys`, `tcpip.sys`, `WdFilter.sys`.
+Static across a 60-second window.
+
+**That retires the description this file has been using.** "Stalled in
+early kernel initialisation" is wrong: Windows has the storage stack, the
+filesystem and the network stack loaded. What it has not done is start
+its first user-mode process - one process, `System`, no `smss.exe`.
+
+### And the reason, read out of the kernel
+
+```
+  KeNumberProcessorsGroup0 = 0x1
+  KeNumberProcessors       = ...01   (low byte)
+  KeActiveProcessors       = ...01   (bit 0 only)
+```
+
+**Windows sees one processor.** The firmware's ACPI tables offer three,
+this VMM starts the application processors and they take a few dozen
+second-level entries each, and Windows still never brings them online -
+so `KeStartAllProcessors` does not complete, phase 1 initialisation does
+not finish, and `smss.exe` is never created.
+
+That is the whole failure in one line, and it is consistent with every
+counter already recorded: the application processors run briefly and stop
+exiting, the boot processor waits, and the guest holds one process for
+ever.
+
+Note the reads of `KeNumberProcessors` and `KeActiveProcessors` are
+byte-and-dword variables read as qwords, so only their low bytes are
+meaningful; `KeNumberProcessorsGroup0` is the clean one and it reads 1.
+
+
 ## The local-APIC watch disarm is not the blocker either
 
 **2026-08-25.** The disarm's own comment predicts a failure mode this
