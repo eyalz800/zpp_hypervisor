@@ -52422,3 +52422,47 @@ harmful. Neither measurement is wrong; the switch simply does
 different things in the two configurations, which is what a switch
 whose A/B was only ever run once looks like.
 
+### The whole story of the application processor's first run
+
+Its exit ring holds its entire life - 111 exits - so no inference was
+needed:
+
+    [ 79-106] firmware parking loop, cs 0x38, rip 0x7ef5xxxx,
+              CPUID and RDMSR of IA32_APIC_BASE
+    [   107] init   wait-sipi  cs=0x0038 rip=0x7fb6b030
+    [   108] sipi   qual=0x1   active  cs=0x0100 rip=0x0
+    [   110] triple-fault      cs=0x0030 rip=0x16fe
+
+**The start-up IPI carries vector 1**, so CS base `0x1000` - not the
+`0x87` the trampoline adoption used, which was the firmware's own
+earlier one. The processor runs the guest's stub at `0x1000`, reaches
+**protected mode at CS 0x30**, and triple faults at `0x16fe`.
+
+### Attempted fix: clear IA32_EFER on the start-up path. It made things worse
+
+SDM Table 12-1 gives `IA32_EFER 0H` after INIT, and this path does not
+clear it. The comment beside the omission explains why it cannot:
+without the "load IA32_EFER" VM-entry control the guest field is
+ignored, and entry leaves EFER.LME alone whenever CR0.PG is loaded as
+zero - which is what this path does. So a restarted processor keeps
+the host's LME, and a stub that enables paging expecting 32-bit
+protected mode gets long mode instead. That fits the symptom exactly.
+
+Requesting the control and writing the field measured **worse**:
+
+| | boot processor exits | outcome |
+|---|---|---|
+| `efer0=0` | 235,552 | reaches `winlogon.exe` |
+| `efer0=1` | **753** | wedged, frozen for five minutes |
+
+**And the fault is in the change, not the diagnosis.** The control is
+set and never cleared, so *every subsequent entry* loads `EFER = 0` -
+which kills the guest the moment it legitimately needs LME. A correct
+version has to clear the control again once the processor has been
+started, or write the guest's own EFER rather than zero on every later
+entry. Left off until that is done.
+
+Worth keeping as a shape: **a VM-entry control set to fix one entry
+stays set for every entry after it.** The same trap as a CMake cache,
+one level down.
+
