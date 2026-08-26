@@ -53845,3 +53845,218 @@ question than any asked so far: what does `start_application_processor`
 do when the target is already `processor_virtualized`, and what does the
 trampoline do to a processor that has already climbed it once?
 
+
+## RETRACTED: vector 0x2 is not ours. Our vector is 0x9c, and the log said so
+
+**2026-08-27.** The section above concludes that `0x2` is this VMM's own
+start-up vector, from the *expression* at `start_up.cpp:740`:
+
+    send_start_up_ipi(this->apic_id[slot], this->start_up_memory >> 12);
+
+The expression was read. The value never was. It is in the same log ring
+the rest of that section is quoted from, eighteen records in:
+
+    18 hypervisor.cpp(5100): start-up memory ready at 0x9c000, vector 0x9c
+
+`initialize_start_up_memory` logs it on the line that assigns the member
+(`hypervisor.cpp:4926-4927`), so **our start-up IPI carries vector
+`0x9c`** on this rig and cannot be `0x2`. Same run, not a different one:
+that ring also carries `start-up applied on cpu 0x2 vector 0x87 by
+launch` (record 37), the guest's last command `0xc4687` (record 34) and
+the INIT at `rip 0x7fb6b030` (record 190) - the three lines the retracted
+section quotes.
+
+The address is the UEFI loader's, from `AllocatePages(AllocateMaxAddress,
+EfiReservedMemoryType, …)` with an upper bound of `0xfffff`
+(`uefi_loader/src/main.cpp:1065-1091`), which returns the *highest* free
+block below one megabyte. `0x2000` is the lowest it could ever be. There
+was never a reason to expect page 2.
+
+### Two independent proofs that this VMM did not send it
+
+- **The vector is wrong.** `0x9c`, above.
+- **The path is unreachable.** `start_application_processor` is called
+  from one place, `start_up.cpp:1048`, behind
+  `if (this->processor_virtualized[*slot])` at `start_up.cpp:809` - which
+  returns long before it. That flag is set by the target itself
+  (`hypervisor.cpp:7632`) and cleared in exactly one place,
+  `rewind_for_resume` (`hypervisor.cpp:4141`), which runs only on an S3
+  resume. No suspend happened. And both callers of `send_start_up_ipi`
+  log - `start_up.cpp:750`/`774` and `interrupt_command.cpp:458` - and
+  neither line is anywhere in the ring.
+
+So the sender was the guest, and this tree had already recorded that
+twice. The section *"The second processor was being started at the wrong
+address, and the log ring said so"* quotes `start_up_processor`'s own
+line, whose `vector` argument is the guest's command:
+
+    guest start-up ipi for cpu 0x1, vector 0x2, to hardware,
+        target hand-off 0x2
+
+### What actually happened, from the same ring
+
+    59 watched_page.cpp(306): every processor on the platform roster of
+                              0x2 is adopted, so the local apic page
+                              watch can no longer catch a start-up ipi
+                              for a processor this vmm does not own
+    62 watched_page.cpp(1133): stopped watching guest page 0xfee00
+    ...
+   190 exit_dispatch.cpp(567): cpu 0x1 gdt now 0x1 at exit 0xbe,
+                               reason 0x3 rip 0x7fb6b030
+   191 start_up.cpp(1508): cpu 0x2 init: found activity 0x0, waiting for
+                           the hardware start-up ipi, software wait false
+   194 hypervisor.cpp(3543): cpu 0x2 start-up ipi exit, vector 0x2
+
+Record 62 retires the local APIC page watch. From there
+`interrupt_command_intercepted()` is false - it is
+`watched_apic_page != 0 || interrupt_command_bitmap_armed`
+(`local_apic.cpp:109-116`), and this machine is in xAPIC so the bitmap
+bit was never armed - so `waited = nested && interrupt_command
+_intercepted()` (`start_up.cpp:1333`) is false, which record 191 says out
+loud. **After record 62 this VMM sees no write to the interrupt command
+register at all**: no `guest ipi command` line appears again for the rest
+of the boot, `discard_start_up_for_init` never runs, `queued_start_up` is
+never filled, and `start_up_processor` is never consulted.
+
+The guest's INIT and its start-up IPI therefore arrive as ordinary
+hardware-delivered VM exits (SDM Vol. 3C 28.2, `.references/sdm.txt`
+line 200951: "SIPIs cause VM exits. If a logical processor is not in the
+wait-for-SIPI activity state when a SIPI arrives, no VM exit occurs and
+the SIPI is discarded"). We apply `0x2` faithfully - `cs 0x200 base
+0x2000`, which is `kvm_vcpu_deliver_sipi_vector`'s own arithmetic
+(`.references/kvm/x86.c:12540`) - and cpu 1 resumes into **first-level
+guest** real mode at physical `0x2000` and never exits again.
+
+Nothing here restarts an adopted processor into our trampoline. There is
+no re-trampolining, and the question the retracted section left as "the
+thing to look at next" does not exist.
+
+### Four instruments that were read wrong on the way here
+
+- **`[99]` and `[100]` are not exit numbers.** They are
+  `exit_trace_count` ordinals, and that counter counts *slots written*,
+  not exits: `record_exit` collapses a repeat into the slot already there
+  (`hypervisor.cpp:5152-5185`) and the comment there says the two
+  "disagree deliberately". `exit_trace_capacity` is 32. So 101 slots
+  stand for 192 exits, and the arithmetic closes exactly - record 190
+  prints `exit_total` *before* this exit is counted, so the INIT is exit
+  191 and the SIPI is exit 192.
+- **`in-handler = exits - resumes_reached` is not "it was resumed".**
+  `resumes_reached` is incremented at `resume.cpp:1070`, nine lines after
+  `record_exit` at `1061` and a long way above the VM entry. Zero proves
+  the handler reached that line. It says nothing about whether the
+  processor ever re-entered the guest.
+- **`sipi-waits 0` refutes the watch-retirement theory against the wrong
+  consumer.** `wait_for_l2_start_up_ipi` is one reader of the retirement.
+  `interrupt_command_intercepted()` is another, and it is the one that
+  decides the delivery mechanism for *every* INIT after the retirement -
+  which is exactly what record 191 shows changing. The theory was not
+  tested.
+- **The ring's `qual` is gated.** `qualification`, `activity_state` and
+  `cs_selector` are only read under `nested_vmx::census_exits`
+  (`hypervisor.cpp:5015`), and read zero when it is off - so a zero there
+  says nothing. `qual=0x2` is non-zero, so the switch was on, and the
+  SIPI handler's independent read of the same field
+  (`exit_dispatch.cpp:2854`) agrees with it. **Vector 2 is the one
+  reading in this dump that two instruments confirm.**
+
+### The lesson, and it is one this tree already wrote down
+
+`CLAUDE.md` records the `elf_file::relocate` bug with the line "the
+relocation writes had never been checked against memory, only against the
+source. Read the *result*." This is the same failure at the level of a
+constant: a member whose value is logged, once, on the line that assigns
+it, was inferred from the expression that reads it instead. The check
+cost one `grep` of a file already on disk.
+
+### What is open, and the cheapest thing that settles it
+
+cpu 1 is at first-level-guest `cs 0x200:0` and produces no exits. Two
+readings fit and they are opposite:
+
+- **`0x2000` holds nothing.** Opcode `0x00` in real mode is
+  `add byte ptr [bx+si], al`, and `apply_start_up` zeroes every general
+  purpose register (`start_up.cpp:507-530`), so a page of zeroes is a
+  silent, fault-free, exit-free infinite loop that wraps the segment for
+  ever. It matches the observation exactly.
+- **`0x2000` holds the guest's real trampoline** and it is spinning on a
+  flag or halted (`hlt_exiting` is only armed under `ZPP_GUEST_TESTS`, so
+  a halt is invisible).
+
+**One monitor read separates them and needs no boot:** `xp /64bx 0x2000`
+on the stopped guest. Zeroes prove the first; code proves the second.
+Guest physical is an `xp` address directly on this rig - the same
+identity the VP assist page reading already established.
+
+And **the guest's own command is recoverable without a boot too**:
+`ipi_last_command` holds `0xc4687`, the pre-retirement broadcast, which
+is itself the proof that nothing after record 62 was seen. Re-arming the
+interception is what would record the command that carried `0x2`; whether
+to re-arm it is a separate decision and is not settled by this entry.
+
+## The guest's trampoline is real, and "no exits" is not "stopped"
+
+The `xp` read that settles it, on the frozen machine, no boot:
+
+    0x2000:  e9 ad 00 ...            jmp 0x20b0
+    0x20b0:  cli
+             mov ax, cs / mov ds, ax
+             mov esi, 0x98
+             mov dword [esi], 1      <- the alive flag
+             shl eax, 4 / mov edi, eax
+             lgdt [edi+0x28]
+             mov eax, 1 / mov cr0, eax   <- protected mode, PE only
+             test byte [0xa4], 1
+             jz  ...                 <- a spin on a flag
+
+    0x2098:  02        the alive slot
+    0x20a4:  01        the flag it waits on - ALREADY SET
+
+**So `0x2000` holds the guest's own application-processor trampoline**,
+this VMM delivered vector `0x2` faithfully, and the processor is not
+hanging on that spin - the byte it tests is already `1`.
+
+### What that costs the previous three entries
+
+`mov cr0, eax` here sets **PE only**. `setup_vmcs` puts CR0.PG in the
+guest/host mask, not PE, and unrestricted guest permits the real ->
+protected transition, **so this instruction does not exit.** Neither
+does anything else the trampoline runs until it enables paging.
+
+**"cpu 1 takes no exits after the start-up IPI" therefore does not mean
+cpu 1 stopped.** It means cpu 1 is running guest code that has no reason
+to exit. And `hlt_exiting` is armed only under `ZPP_GUEST_TESTS`
+(`hypervisor.cpp:6461`), so a halted processor is invisible in exactly
+the same way. Every entry above that read a frozen exit count as a
+frozen processor was reading the absence of a reason to exit.
+
+### RETRACTED, and this one was my own inference
+
+`4171c48` claimed vector `0x2` is ours because `start_up.cpp:740` sends
+`start_up_memory >> 12`. **The value was in the same log ring that
+commit quoted from, eighteen records earlier:**
+
+    hypervisor.cpp(5100): start-up memory ready at 0x9c000, vector 0x9c
+
+**Our vector is `0x9c`.** The loader allocates the trampoline with
+`AllocateMaxAddress` under `0xfffff`, so it takes the *highest* free
+page below one megabyte and `0x2000` is the lowest it could ever be.
+And `start_application_processor` has one caller, behind
+`if (processor_virtualized[*slot])`, which returns first - the flag is
+cleared only in the S3 path, which did not run. **There is no
+re-trampolining.** The whole of that entry's closing question had no
+subject.
+
+An expression was read where a value was available. The value was
+already being logged, in the file being quoted.
+
+### And one more correction, to a refutation rather than a claim
+
+The entry above said `sipi-waits 0` refutes the watch-retirement
+theory. It refutes it **against the wrong consumer**:
+`wait_for_l2_start_up_ipi` is one reader of the retirement, and
+`interrupt_command_intercepted()` is the other - and that one is what
+actually changed behaviour, since `waited` went false and
+`start_up.cpp:1508` says so in the ring. **That theory is untested, not
+refuted.**
+

@@ -731,6 +731,17 @@ bool hypervisor::start_application_processor(std::size_t slot,
     // The vector is the trampoline page's page number, which is the whole
     // reason that page had to be below one megabyte.
     //
+    // **Its value is logged and must be read rather than inferred.**
+    // `initialize_start_up_memory` prints it on the line that assigns the
+    // member - "start-up memory ready at {}, vector {}" - and on the rig
+    // it is `0x9c`, because the UEFI loader takes the *highest* free page
+    // below one megabyte (`AllocateMaxAddress`,
+    // `uefi_loader/src/main.cpp:1065`). Reading this expression instead
+    // of that line is how a guest's start-up IPI carrying vector `0x2`
+    // was attributed to this VMM for a whole session; see BACKLOG.md,
+    // "RETRACTED: vector 0x2 is not ours". A vector in a ring or an exit
+    // record is ours only if it equals that logged number.
+    //
     // Through send_start_up_ipi rather than straight to the x2APIC
     // command MSR, which is what this used to do. That MSR does not exist
     // while the APIC is in xAPIC mode and the write faults - see

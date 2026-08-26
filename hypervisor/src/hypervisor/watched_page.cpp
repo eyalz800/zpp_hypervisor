@@ -289,8 +289,39 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
     // start-up vector". This is the third and it is a proof: every
     // identifier on the firmware's own roster has a slot that is running
     // under this hypervisor, so there is no processor left for a start-up
-    // IPI to hand over unvirtualized, which is the only thing the watch
-    // exists to prevent. See `every_platform_processor_adopted`.
+    // IPI to hand over unvirtualized. See
+    // `every_platform_processor_adopted`.
+    //
+    // **"Which is the only thing the watch exists to prevent" used to
+    // close that sentence, and it is false.** Grep says the watch has
+    // three consumers, not one, and the retirement silences all three:
+    //
+    // - `interrupt_command_intercepted` (`local_apic.cpp:109`) is
+    //   `watched_apic_page != 0 || interrupt_command_bitmap_armed`, and
+    //   it is the second conjunct of `waited` in `emulate_init_signal`
+    //   (`start_up.cpp:1333`). On an xAPIC machine the bitmap bit is
+    //   never armed, so retiring the watch forces **every INIT after it**
+    //   onto the hardware hand-off - the one the layer below discards
+    //   while this VMM is in root mode, which is the whole reason the
+    //   software hand-off exists.
+    // - `discard_start_up_for_init` (`interrupt_command.cpp:103`) only
+    //   runs from `on_interrupt_command`, so the mailbox stops being
+    //   drained by an INIT once nothing sees the INIT.
+    // - `start_up_processor` stops being consulted at all, so nothing
+    //   records what vector the guest asked for.
+    //
+    // Measured, 2026-08-27, and the third of those cost a session: after
+    // the retirement the ring carries `cpu 2 start-up ipi exit, vector
+    // 0x2` with **no `guest ipi command` line anywhere near it**, and the
+    // vector was then attributed to this VMM's own trampoline - which is
+    // at page `0x9c` on that rig, logged eighteen records earlier. See
+    // BACKLOG.md, "RETRACTED: vector 0x2 is not ours".
+    //
+    // This is a correction to the comment and not to the behaviour:
+    // whether the retirement is right is a separate question, and it is
+    // not settled - the measured cost of leaving the watch armed is real,
+    // and nothing yet shows the retirement losing a start-up IPI. What is
+    // settled is that the sentence above named one consumer out of three.
     //
     // Tested here rather than at the moment a processor marks itself
     // virtualized, because here is where it is *worth* anything: this is
