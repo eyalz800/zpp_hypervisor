@@ -53077,3 +53077,103 @@ control, it is a different experiment. If the only experiment available
 needs `nested=0`, the missing piece is an instrument, not a
 configuration.
 
+## The nested=1 stall is Phase1Initialization, and the DPC vector is the suspect
+
+Symbolized against the real `ntkrnlmp.pdb` - pulled off the guest's own
+volume with `ntfscat` and matched to Microsoft's symbol server by the
+image's own build ID, 42,458 public symbols. Kernel base
+`0xfffff802d3600000`. **This is the first time this stall has been read
+by name rather than by offset.**
+
+One processor, nesting on, 17,561,960 exits and 1,398,250 second-level
+entries, and no forward progress at all.
+
+### What the guest is actually doing
+
+    thread 0xffffd206f049c080  start routine Phase1Initialization
+    state 2 (Running), IRQL 0, THE ONLY thread across 326 samples
+
+    MiCreateSystemSection -> MiCreateSection -> MiCreateImageOrDataSection
+      -> FsRtlAcquireToCreateMappedSection -> MiCreateNewSection
+      -> SeGetImageRequiredSigningLevel -> MiValidateSectionSigningPolicy
+      -> MiValidateSectionCreate -> MiWalkEntireImage
+      -> MiPfnReferenceCountIsZero -> MiReplaceTransitionPage
+      -> MiCopyPfnEntryEx -> MiCopyPage
+      -> KiInterruptDispatchNoLockNoEtw -> HalPerformEndOfInterrupt
+      -> HvlEndSystemInterrupt
+
+**"Stalls at `smss.exe`" was the symptom, not the place.** Phase 1 is
+what *starts* `smss.exe`, so it never finished phase 1 at all - it is
+code-integrity-validating a system image section, which is the HVCI
+path, and being interrupted inside `MiCopyPage`.
+
+### The loop it is in
+
+    24.4%  HvlEndSystemInterrupt+0x1e
+    24.4%  HalpHvTimerArm+0x7a
+    24.2%  HvlWriteApicCommandRegister+0x1d
+    14.9%  KiDpcInterruptBypass+0x12
+     1.0%  HalpHvTimerArm+0x69
+     0.2%  KiInterruptDispatchNoLockNoEtw+0x7c
+
+Three counts within eighty of each other - 10,794 / 10,793 / 10,715 -
+is a strict cycle: end the interrupt, re-arm the timer, write the APIC
+command register. This is the "eight instruction pointers, all in the
+clock path" shape recorded elsewhere in this file, and that entry's own
+conclusion applies: **a guest waiting, not a guest saturated.**
+
+### The number that names the suspect
+
+`0x40000071` is `HV_X64_MSR_ICR`, the synthetic interrupt command
+register. It is written **298,883 times**, 31.6% of every WRMSR exit,
+and the last value is `0x000000000004002f`:
+
+    vector             0x2f
+    delivery mode      fixed
+    bits 18-19         01 = destination shorthand SELF
+
+A **self-IPI of vector 0x2f**, which is the DPC dispatch vector, issued
+by `KiDpcInterruptBypass` - and that function is 14.9% of the re-entry
+set, so the two agree. Against those 298,883 requests:
+
+    vectors injected into the second level
+      0xd1   337,648   95.2%   <- the synthetic timer, delivered freely
+      0x40     5,881    1.7%
+      0x50     5,608    1.6%
+      0x2f     5,454    1.5%   <- the DPC vector
+
+**The honest counter-argument, stated before anyone acts on this.** A
+real local APIC coalesces: re-asserting a vector already pending in the
+IRR sets no new bit, so many asks legitimately collapse into few
+deliveries. An earlier entry in this file concluded exactly that -
+"406,354 asks are 399,666 coalesced re-asks of 6,688 distinct requests,
+all delivered" - and retired DPC starvation on the strength of it.
+
+So 5,454 against 298,883 is **not by itself** a defect. What makes it
+worth re-opening is the thread state beside it: the only running thread
+is at **IRQL 0** with a DPC pending. Coalescing explains a low delivery
+count; it does not explain a dispatch interrupt that stays undelivered
+while the processor sits below dispatch level. Those are different
+claims and only the second one is a bug.
+
+That is the question to settle, and it is a code question rather than a
+counter question: follow `0x40000071` from the WRMSR handler to
+whatever injects, and find out whether a pending `0x2f` can be dropped.
+
+### How the symbols were obtained, since it took one attempt to get right
+
+    ./scripts/rig-kill-qemu.sh       # the disk is passed through; a
+                                     # running guest holds it and
+                                     # ntfscat returns zero bytes
+    ssh $RIG 'sudo ntfscat /dev/nvme0n1p4 /Windows/System32/ntoskrnl.exe' \
+        > sym/ntoskrnl.exe
+    ./scripts/guest-symbols.sh sym/ntoskrnl.exe sym    # -> ntkrnlmp.pdb
+
+Then symbolize with **`scripts/symbolize-trace.py`'s own `publics()`**,
+imported, rather than a fresh parser. A hand-written regex over
+`llvm-pdbutil dump --publics` returned **zero symbols** here and printed
+a clean table of `?` - which is the fail-open shape that script's own
+comment warns about. The working parser reads the section headers for
+the segment bases and takes `addr = SSSS:ooooo` off the line *after*
+each `S_PUB32`, with the offset in decimal.
+
