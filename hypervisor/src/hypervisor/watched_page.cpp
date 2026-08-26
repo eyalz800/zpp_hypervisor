@@ -423,6 +423,25 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
             this->access_offset_unknown = this->access_offset_unknown + 1;
         }
 
+        // The offset this write is about to be applied at, beside the
+        // one the exit itself reported. With bit 7 of the qualification
+        // clear there is no linear address, so the offset comes from
+        // decoding the instruction - while the guest physical address
+        // carries the true one. If these disagree the right value is
+        // being written to the wrong local APIC register, which is
+        // precisely the difference between emulating these writes and
+        // letting them go native.
+        if ((0 != cpu) && (cpu < max_cpus)) {
+            log("cpu {} apic write offset: applied {} physical {} "
+                "decoded {} known {}",
+                cpu,
+                address & page_offset_mask,
+                guest_physical & page_offset_mask,
+                decoded_address ? (*decoded_address & page_offset_mask)
+                                : 0xffffull,
+                static_cast<std::uint64_t>(address_known));
+        }
+
         // Whether the fault was the instruction's own operand rather than
         // the processor walking the guest's paging structures.
         //
