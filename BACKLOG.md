@@ -51499,3 +51499,58 @@ designed, vmcs12's cached selector simply never having been written by
 the guest hypervisor, but it has not been checked. Worth resolving
 before it becomes another confident wrong reading.
 
+## Three mechanisms killed in one boot, with the fault present
+
+The important part is that `0x2` **happened on this boot** -
+`cpu 0 entered-at census: agreed 87,580, differed 0, lowest 0x2`, at
+entry 87,566 - so every negative below is a real negative and not an
+instrument that missed its moment.
+
+    cpu 0 second-level rip SERVED to guest vmread:
+              85,199  vmread of guest_rip answered
+                   0  answered below 0x1000
+                   0  answered EXACTLY ZERO
+        served 0x1cba72b, cache held 0x1cba72b   (they always agreed)
+
+    cpu 0 shadow region imposing rip on the cache:
+        copy_shadow_to_vmcs12 never collected the rip field here -
+        shadowing was off or stood down before any entry
+
+So, with the fault occurring:
+
+- **We never served a zero.** The "our VMREAD handed Hyper-V a 0 and
+  it did the arithmetic" hypothesis is dead by measurement, not by
+  argument. It was also refutable from evidence already in hand: the
+  write census samples its `previous` from the same slot a VMREAD is
+  served from, and that read the valid RIP.
+- **Nothing computed a low RIP** - every one was copied.
+- **The shadow region never imposed one.** The real defect found in
+  `copy_shadow_to_vmcs12` - `guest_rip` is in
+  `shadow_read_write_fields`, so the region overwrites the cache on
+  every entry, and on this rig the control is advertised but stripped,
+  which would discard every guest VMWRITE of nine fields - is genuine
+  in principle and **never fires here**, because shadowing stands
+  down first. Kept as a latent defect, not this bug.
+
+What is left is uncomfortable and worth stating plainly: **this VMM
+faithfully stores, serves and enters what the guest hypervisor asks
+for, and the guest hypervisor asks to run at 2.** Every layer of our
+own handling has now been measured rather than argued, and each was
+correct.
+
+So the question moves again, to what *else* we tell Hyper-V that could
+make it compute 2 - the reflected exit reason, the exit qualification,
+and above all the **VM-exit instruction length** we report, since an
+instruction length is the one number a hypervisor adds to a RIP. None
+of those has been instrumented yet.
+
+### One defect worth fixing regardless
+
+`vmcs_field_encoding::valid()` accepts any structurally-valid encoding
+with index < 28, including fields that do not exist, and returns a
+never-written slot as **0 with VMsucceed**. Hardware VMfailValids with
+error 12, and KVM does the same in `handle_vmread`. That is a
+manufactured `0` waiting for a guest that reads a neighbouring
+unimplemented field - exactly the shape being chased here, just not
+for `0x681e`.
+
