@@ -53429,3 +53429,96 @@ Also worth recording: with shadowing in force the same guest progress
 cost half the exits - 93,092 second-level entries for 599,005 exits,
 against 87,572 for 1,252,532. Same failure, same place, half the price.
 
+## RETRACTED: there is no interrupt-window livelock, and no VMWRITE is being lost
+
+Two banners this dump prints were acted on as findings in the entries
+above. Both are wrong, and the corrections are worth more than the
+claims were.
+
+### The "LIVELOCK SHAPE" banner does not compute a rate
+
+It partitions window exits against each other by task priority class
+and fires when most of them land at a class that blocks `0x2f`. That
+premise is false twice over.
+
+**The window exit does not consult the task priority at all.** SDM 27.2
+(`.references/sdm.txt:200976`): a VM exit occurs before execution of any
+instruction if `RFLAGS.IF = 1` and there is no blocking by STI or MOV
+SS. So the class a window fires at is a fact about **where the guest
+opened its interrupt flag**, not about the window. And class 2 blocks
+`0x2f` while admitting `0xd1` - the clock - which is exactly what
+Windows wants while draining deferred calls.
+
+**The run refutes it arithmetically.** `0xd1` is the guest's own 574.7
+Hz clock, so it is a wall clock:
+
+    423,690 clock deliveries          ->  737 s of wall time
+    423,550 window exits              ->  574.5 per second
+    the guest's own clock                 574.7 Hz
+    windows / all vectors carried         0.986
+
+The window rate **is** the clock rate to four significant figures. A
+livelock is a rate claim and the banner never makes one. **575 events a
+second is not "one instruction retired per round trip."**
+
+`KiDpcInterruptBypass` is `mov cr8,2` / `sti` with no branch, so the
+window fires at the first interruptible address after Windows
+deliberately raised to dispatch level and re-enabled interrupts. That
+is Windows opening a window for the clock on purpose.
+
+### The "VMWRITE of rip is being discarded" banner is stale
+
+`guest_rip` is a shadowed read-write field with its bit cleared in both
+bitmaps, and `note_shadowing_ineffective` stands shadowing down after
+**64** exits of any permitted field. Shadowing was on at second-level
+entry 0 and still on at 637,472, so **fewer than 64 shadowed VMX
+instructions exited all boot** - Hyper-V's writes of `guest_rip` never
+exited, they landed in the region, and `copy_shadow_to_vmcs12` at the
+top of the entry is the only path by which they can reach the cache.
+That is KVM's design exactly - `copy_shadow_to_vmcs12` at the top of
+`nested_vmx_run` (`.references/kvm/nested.c:3703`), `GUEST_RIP` tagged
+`SHADOW_FIELD_RW`.
+
+`changed` is the delivery, not the loss. It fires on `changed != 0`
+alone. Three things confirm nothing is lost: `rewound = 0` across
+1,550,376 changes, `vmread_rip_served = 0` (a VMREAD of a shadowed
+field *cannot* exit, so that line is an artefact of shadowing working),
+and the 64-exit trip never firing. A guest re-executing one instruction
+for ever would show `changed` near **zero**, not 76%.
+
+### The 4.7x fall in 0x2f deliveries was compared against a string
+
+The "baseline for comparison, both switches off" line is a **hardcoded
+string literal** in `rig-dump-state.py`, added 38 commits before
+shadowing was switched on. It carries no entry count, no duration and
+no manifest. Four things differ from it, not one. It is not a control
+and it was quoted as one.
+
+Normalised by the clock instead, asks are unchanged - 566/s against
+609/s - and `0x2f` delivery is essentially perfect: **2,046 of 2,047
+distinct requests delivered**, three dropped. What actually fell is how
+often the guest drops below dispatch level: `window_granted_on_drop` is
+2,058 events, about **2.8 a second**.
+
+And `ZPP_DELIVER_ON_DROP` cannot have caused it - it never clears the
+window control, never touches the entry-interruption field and never
+clears a pending request. Its own counters say so: `window withheld 0`,
+and the window was **already live at 2,058 of 2,058** drop exits, so it
+added none.
+
+### The rule this is the fourth instance of
+
+`distinct` and `delivered` are one fact, not two - a request can only
+become distinct after the previous one was delivered, so 2,047 and
+2,046 agree **by construction** and corroborate nothing. The shadow
+record's `served` and `region` fields cannot disagree in one sample
+either: it is a six-word struct copied whole on a 1.55 M-event path
+with no sequence number, so the "two bytes apart" detail quoted above
+is a **torn read**.
+
+Instruments were fixed rather than the machine. The livelock verdict now
+compares windows against vectors actually carried and prints a rate -
+on this run it prints *NOT a livelock*, ratio 0.986. The rip verdict now
+discriminates on `served`/`rewound` and flags torn records. The baseline
+line now says it was taken with shadowing off.
+

@@ -1043,14 +1043,63 @@ def dump_served_rip(args, elf, instance):
                   "disagreed with the cache, so no guest VMWRITE of rip "
                   "was ever discarded ***")
         else:
-            print("    *** the guest hypervisor's own VMWRITE of rip is "
-                  "being discarded on the entry that follows it ***")
+            # **`changed` is not a defect on its own, and this banner
+            # used to say it was.** It was written for the world where
+            # SECONDARY_EXEC_SHADOW_VMCS was advertised and stripped
+            # underneath: there the guest hypervisor's VMWRITE *exited*
+            # and reached the cache, the region held only what
+            # `copy_vmcs12_to_shadow` last published, and an overwrite
+            # from it destroyed a real write.
+            #
+            # With shadowing genuinely in force the same counter means
+            # the opposite. `guest_rip` is in `shadow_read_write_fields`
+            # (`nested_vmx.h:2154`) with its bit clear in both bitmaps,
+            # so the guest hypervisor's VMWRITE lands in the region
+            # without exiting and `copy_shadow_to_vmcs12` is the ONLY
+            # path by which it can ever reach the cache. `changed` is
+            # then the delivery, not the loss - and KVM does exactly
+            # this, `copy_shadow_to_vmcs12` at the top of
+            # `nested_vmx_run` (`.references/kvm/nested.c:3703`) with
+            # GUEST_RIP tagged SHADOW_FIELD_RW
+            # (`.references/kvm/vmcs_shadow_fields.h:62`).
+            #
+            # `served` discriminates the two without ambiguity: a VMREAD
+            # of a shadowed field cannot exit, so any served count at
+            # all proves the control was not in force.
+            if served:
+                print("    *** the guest hypervisor's own VMWRITE of "
+                      "rip is being discarded on the entry that follows "
+                      "it: shadowing is NOT in force (it served "
+                      f"{served:,} VMREADs of a field the bitmap "
+                      "permits), so its VMWRITE exited into the cache "
+                      "and the region overwrote it ***")
+            elif rewound:
+                print(f"    *** {rewound:,} of these moved the rip "
+                      "BACKWARDS. Shadowing looks in force, so the "
+                      "region should be the fresher source and never "
+                      "is here - this is the subset worth reading ***")
+            else:
+                print("    NORMAL under shadowing: with the control in "
+                      "force this is how the guest hypervisor's silent "
+                      "VMWRITE reaches the cache at all, and nothing "
+                      "moved backwards. Not a discarded write.")
             first = record("shadow_rip_first", cpu)
             if first["occurred"]:
                 show("first", first)
             last = record("shadow_rip_last", cpu)
             if last["occurred"]:
                 show("last ", last)
+            # These records are a six-word struct copied whole on a path
+            # that runs millions of times, with no sequence number, and
+            # the monitor reads the words one at a time. On the collect
+            # path `served` is ASSIGNED the region value
+            # (`hypervisor.h:6512`), so `served != region` in a record
+            # is impossible in one sample and proves the read was torn.
+            if last["occurred"] and last["served"] != last["region"]:
+                print("    *** TORN READ: `served` and `region` are the "
+                      "same assignment on this path, so a record where "
+                      "they differ was sampled across two events. Do "
+                      "not reason from the values above. ***")
 
     dump_reflect_info(args, elf, instance)
     dump_vmcs12_regions(args, elf, instance)
@@ -1587,17 +1636,27 @@ def dump_interrupt_window(args, elf, instance):
     exit must fire, and it cannot be a guest loop because there is no
     branch to loop on.
     """
-    members = ["int_window_asked", "int_window_stale", "int_window_vtpr"]
+    members = ["int_window_asked", "int_window_stale", "int_window_vtpr",
+               "l2_given_vector", "l2_entries"]
     off = gdb_offsets(elf, members)
     classes = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)"
         "->int_window_vtpr[0] / 8"])[0]
 
     reader = Monitor(args.rig, args.port)
-    for member in ("int_window_asked", "int_window_stale"):
+    for member in ("int_window_asked", "int_window_stale", "l2_entries"):
         reader.queue(instance + off[member], args.cpus)
     reader.queue(instance + off["int_window_vtpr"], args.cpus * classes)
+    # 32 bit counters, two to a quadword - the same packing
+    # `dump_dropped_requests` unpacks.  Read to answer the one question
+    # the class histogram cannot: what the windows actually carried.
+    reader.queue(instance + off["l2_given_vector"], args.cpus * 256 // 2)
     got = reader.run()
+
+    def given(cpu, vector):
+        pair = got.get(instance + off["l2_given_vector"]
+                       + 8 * ((cpu * 256 + vector) // 2), 0)
+        return (pair >> (32 * (vector % 2))) & 0xffffffff
 
     def word(member, index):
         return got.get(instance + off[member] + 8 * index, 0)
@@ -1654,17 +1713,72 @@ def dump_interrupt_window(args, elf, instance):
         share = 100.0 * blocked / total
         print(f"  {blocked:,} of {total:,} ({share:.1f}%) fired at a "
               f"priority that blocks 0x2f")
-        if share >= 50.0:
-            print("  *** LIVELOCK SHAPE: the level above is being woken "
-                  "by a window it cannot deliver into, and re-arms it on "
-                  "the next entry. One instruction retired per round "
-                  "trip. ZPP_WINDOW_ON_TPR is the switch aimed at this; "
-                  "check `windowtpr=` in the build manifest before "
-                  "reading this as evidence it is off. ***")
+
+        # **A window firing at class 2 is not evidence of anything, and
+        # this banner used to say it was.** SDM 27.2
+        # (`.references/sdm.txt:200976`) makes the interrupt-window exit
+        # condition "RFLAGS.IF = 1 and no blocking by STI or MOV SS" -
+        # the task priority is not consulted at all.  So the priority
+        # class the window fired at is not a property of the window; it
+        # is a property of where the guest happened to open its
+        # interrupt flag, and `KiDpcInterruptBypass` above opens it two
+        # instructions after `mov cr8, 2` on purpose.
+        #
+        # The window is not "for" 0x2f.  A window taken at class 2 still
+        # admits every vector of class 3 and above, the clock at 0xd1
+        # among them (class 13), which is exactly what Windows wants
+        # during a deferred-call drain.  So the question the old share
+        # test could not ask is the only one that matters: **did these
+        # windows carry anything?**
+        clock = given(cpu, 0xd1)
+        dispatch = given(cpu, 0x2f)
+        carried = sum(given(cpu, v) for v in range(256))
+        entries = word("l2_entries", cpu)
+
+        print(f"  what vmcs02 carried over the same run: {carried:,} "
+              f"vectors (0xd1 {clock:,}, 0x2f {dispatch:,})")
+        if entries:
+            print(f"  windows are {100.0 * total / entries:.1f}% of "
+                  f"{entries:,} second-level entries")
+
+        # 0xd1 is Windows' clock and its rate is the guest's own
+        # hardcoded 574.7 Hz (CLAUDE.md, settled by disassembly), so the
+        # clock count is a wall-clock estimate and the only one a single
+        # cumulative dump has.  A livelock is a rate claim; without this
+        # the banner was making one from counts that never touched time.
+        if clock:
+            seconds = clock / 574.7
+            print(f"  ~{seconds:,.0f}s of guest time by the 574.7 Hz "
+                  f"clock, so ~{total / seconds:,.0f} windows/s")
+
+        if carried and (0.8 <= total / max(carried, 1) <= 1.25):
+            print("  NOT a livelock: the windows and the vectors "
+                  "actually delivered are within 25% of each other, so "
+                  "very nearly every window carried something. The "
+                  "priority class above is where the guest opened "
+                  "RFLAGS.IF, not a delivery failure.")
+        elif clock and total > 4 * carried:
+            print("  *** LIVELOCK SHAPE: windows are running far ahead "
+                  "of everything vmcs02 carried, so the level above is "
+                  "being woken and delivering nothing. ZPP_WINDOW_ON_TPR "
+                  "is the switch aimed at this; check `windowtpr=` in "
+                  "the build manifest before reading this as evidence it "
+                  "is off. NOTE it withholds the window, which is "
+                  "measured twice as harmful - see "
+                  "`nested_vmx::deliver_on_drop`. ***")
         else:
-            print("  Not the livelock shape: most windows fired at a "
-                  "priority that permits 0x2f, so a vector lost here was "
-                  "lost after the window, not because of it.")
+            print("  Inconclusive: compare the window count against the "
+                  "carried count above rather than against the priority "
+                  "histogram, which cannot distinguish the two.")
+
+        # The priority sampled is VTPR, and the architecture inhibits on
+        # PPR = max(TPR, ISRV) (SDM 13.8.3.1,
+        # `.references/sdm.txt:171709`).  While the guest is in service
+        # on the clock its PPR class is 13 whatever VTPR reads, so this
+        # histogram understates the inhibiting priority and must not be
+        # read as "the guest could have taken 0x2f here".
+        print("  (priority above is VTPR only; the processor inhibits "
+              "on PPR = max(TPR, ISRV), SDM 13.8.3.1)")
 
 
 def dump_dropped_requests(args, elf, instance):
@@ -1831,6 +1945,30 @@ def dump_dropped_requests(args, elf, instance):
         print("  baseline for comparison, both switches off, one "
               "processor: 404,029 carried, 0x2f 9,627, 0xd1 388,241")
 
+        # **That baseline predates VMCS shadowing being in force and is
+        # not a control for any run that has it.** It was recorded in
+        # 88235f5, 38 commits before -DZPP_EVMCS_TO_KVM=OFF first let
+        # SECONDARY_EXEC_SHADOW_VMCS survive into vmcs02, which took
+        # exits per second-level entry from ~13.3 to ~3.15. It also
+        # carries no entry count and no duration, so the raw counts are
+        # only comparable through a rate.
+        #
+        # 0xd1 is the guest's own 574.7 Hz clock, hardcoded in
+        # `ntoskrnl.exe` (CLAUDE.md, settled by disassembly), so it is
+        # the wall clock a single cumulative dump otherwise lacks.
+        if clock:
+            seconds = clock / 574.7
+            base_seconds = 388241 / 574.7
+            print(f"  ~{seconds:,.0f}s here against ~{base_seconds:,.0f}s "
+                  f"in that baseline, by the clock count")
+            print(f"  per second: 0x2f {dispatch / seconds:,.2f} "
+                  f"(baseline 14.25), all vectors "
+                  f"{carried / seconds:,.1f} (baseline 598.1)")
+            print("  NOTE the baseline was taken with shadowing OFF. "
+                  "Against a shadowing-ON run it is not a "
+                  "single-variable control - rebuild with the same "
+                  "manifest and only the switch under test moved.")
+
         if carried and carried < 100000:
             print("  *** COST, READ THIS FIRST: the total carried is "
                   "far below the 404,029 baseline. Delivery of "
@@ -1853,8 +1991,18 @@ def dump_dropped_requests(args, elf, instance):
         print(f"  window withheld {deferred:,} (MUST be 0), threshold "
               f"armed on {arm_entries:,} entries, priority drops "
               f"reported {granted:,}")
+        # **"written by this VMM" is scoped to the drop exit only.** It
+        # is `window_armed_at_drop` (`nested_entry.cpp:9840`), which
+        # counts only the tpr-below-threshold exits under
+        # ZPP_DELIVER_ON_DROP where the window was not already live. A
+        # zero here says nothing about who arms the window in general -
+        # `build_vmcs02` masks this VMM's own bit out and takes the
+        # control from vmcs12 alone (`nested_entry.cpp:1829`), so on
+        # every ordinary entry the answer is always "the level above".
         print(f"  at the drop: window already live {already:,}, window "
-              f"written by this VMM {armed:,}")
+              f"written by this VMM at that exit {armed:,} "
+              f"(drop-exit scope only; ordinary entries inherit the "
+              f"control from vmcs12)")
 
         if deferred:
             print(f"  *** {deferred:,} WINDOWS WITHHELD. Under "
