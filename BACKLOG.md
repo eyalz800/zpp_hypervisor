@@ -50883,3 +50883,51 @@ never read; the rest are diagnostics. `evmcs_active`,
 `vp_assist_physical` and `evmcs_physical` are all per-processor
 already, as are the shadow EPT roots and `guest_current_vmcs`.
 
+## What the application processor's APIC writes actually do
+
+The processor dies with the local APIC page watched and survives with
+the watch dropped, so the emulation of those writes is the difference.
+Measured, on the failing processor specifically:
+
+- **Thirteen writes emulated, none stepped.** The monitor-trap
+  fallback never runs, so the decoder handles every one.
+- **Every offset correct.** Applied equals decoded on all of them,
+  and they are exactly an application processor's bring-up set:
+  `0xf0` spurious vector, `0x350`/`0x360` LVT LINT0 and LINT1,
+  `0x3e0` divide configuration, `0x320` LVT timer, `0x380` initial
+  count, `0xd0` logical destination.
+- **No instruction-length disagreement**, so RIP advances by the
+  length the VMCS itself reports and does not land inside an
+  instruction.
+- **The store reaches the device.** `apply_guest_store` writes
+  through the identity host mapping with a volatile access at the
+  guest physical address, and returns false if the page is not
+  mapped - which would fall back to a step, and no step happens.
+
+So the emulation decodes the right register, writes the right value to
+the real APIC, and resumes at the right place, and the processor still
+dies. **The difference between emulating these writes and letting them
+go native is not yet accounted for**, and that is the open question.
+
+One thing the exit itself cannot help with: qualification `0x2b` has
+bit 7 clear, so there is no guest linear address, and the guest
+physical address arrives with its low twelve bits zero. The offset
+therefore *has* to come from the decoder - there is no second source
+to check it against, which is the one place in this investigation
+where the two-field rule cannot be applied.
+
+### An instrument bug, caught by its own implausibility
+
+`emulated_writes` has two increment sites - the filter refusal and the
+normal apply - and the per-processor counter added beside it covered
+only the first. It read `emulated 0x0 stepped 0x0` on a processor that
+had plainly just taken four EPT violations on a watched page, and that
+was reported here as decisive before the second site was found. It is
+thirteen and zero.
+
+Fifth instrument failure of the same shape in this session: a counter
+that can only see one path reports that path. The thing that caught it
+was not a second field but **a reading that was impossible rather than
+merely surprising** - zero writes on a page that had just faulted four
+times.
+
