@@ -491,6 +491,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     // it must, or it re-executes and faults for ever -
                     // but memory and the device are left alone.
                     this->emulated_writes = this->emulated_writes + 1;
+                    if (cpu < max_cpus) {
+                        this->emulated_writes_by_cpu[cpu] =
+                            this->emulated_writes_by_cpu[cpu] + 1;
+                    }
                     this->filtered_writes = this->filtered_writes + 1;
 
                     // **The processor's length wins, and a disagreement
@@ -700,6 +704,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
         }
 
         this->stepped_writes = this->stepped_writes + 1;
+        if (cpu < max_cpus) {
+            this->stepped_writes_by_cpu[cpu] =
+                this->stepped_writes_by_cpu[cpu] + 1;
+        }
 
         this->stepping_watch[cpu] = true;
         this->stepping_page[cpu] = page;

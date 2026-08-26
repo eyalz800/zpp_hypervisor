@@ -2562,6 +2562,11 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             }
         }
 
+        log("cpu {} watched page writes: emulated {} stepped {}",
+            (cpuid + 1),
+            this->emulated_writes_by_cpu[cpuid],
+            this->stepped_writes_by_cpu[cpuid]);
+
         log("cpu {} triple fault state: cr0 {} cr3 {} cr4 {} efer {} "
             "rsp {} ss {}",
             (cpuid + 1),

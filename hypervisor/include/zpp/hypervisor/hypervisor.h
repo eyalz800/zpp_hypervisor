@@ -8168,6 +8168,14 @@ private:
      */
     static constexpr bool emulate_watched_page_writes = true;
 
+    /* Per processor, beside the partition-wide `emulated_writes` and
+     * `stepped_writes`. A global cannot say which processor decoded its
+     * own watched-page write and which had to fall back to a monitor
+     * trap step, and that is the question when one processor dies at a
+     * watched page and the other does not. */
+    std::uint64_t emulated_writes_by_cpu[max_cpus]{};
+    std::uint64_t stepped_writes_by_cpu[max_cpus]{};
+
     /**
      * Whether a watched page's writes are carried out through the full
      * instruction decoder or through the narrow store-only one.
