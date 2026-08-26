@@ -57,14 +57,23 @@ EXTRA=${ZPP_QEMU_EXTRA:-}
 # The one trap, already paid for once: this turns a *routine* reboot into
 # a dead stop, and going from one processor to two is a hardware change
 # Windows reboots for. So a stop is not evidence of a crash - read
-# `KiBugCheckData` and the counters before calling it one. Set
-# ZPP_ALLOW_REBOOT=1 to opt out when a run genuinely needs to reboot
-# through that.
-if [ -z "${ZPP_ALLOW_REBOOT:-}" ]; then
-    case "$EXTRA" in
-        *-no-reboot*) ;;
-        *) EXTRA="-no-reboot -no-shutdown $EXTRA" ;;
-    esac
+# `KiBugCheckData` and the counters before calling it one.
+#
+# **There is no opt-out, deliberately.** There used to be
+# ZPP_ALLOW_REBOOT=1, and every boot of one whole investigation passed
+# it out of habit - which is the same as not having the flag at all. The
+# cost was not only lost evidence: two different post-mortem states were
+# recorded as "the failure has two presentations" when the second was
+# most likely the same failure read *after* a reset the opt-out allowed.
+# A switch that is always set is a comment, so this one is gone.
+case "$EXTRA" in
+    *-no-reboot*) ;;
+    *) EXTRA="-no-reboot -no-shutdown $EXTRA" ;;
+esac
+
+if [ -n "${ZPP_ALLOW_REBOOT:-}" ]; then
+    echo "note: ZPP_ALLOW_REBOOT is no longer honoured - the guest is" >&2
+    echo "      always started with -no-reboot -no-shutdown." >&2
 fi
 
 # How many processors the guest gets, passed through to the launcher.
