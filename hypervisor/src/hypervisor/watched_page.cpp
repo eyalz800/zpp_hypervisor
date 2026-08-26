@@ -229,6 +229,23 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 {
     auto page = guest_physical >> 12;
 
+    // Every violation an application processor takes, with the
+    // qualification decoded. It takes four on the local APIC page and
+    // dies, and its emulated and stepped counts are both zero - so
+    // neither the decode path nor the monitor-trap fallback ran, and a
+    // third branch is handling them. SDM Table 28-7: bit 0 read, bit 1
+    // write, bit 2 instruction fetch, bit 3 readable, bit 4 writable,
+    // bit 5 executable. The exit ring's qualification is not filled
+    // (census=0), so it cannot answer this.
+    if ((0 != cpu) && (cpu < max_cpus)) {
+        log("cpu {} ept violation on page {}, qualification {}, "
+            "watched apic page {}",
+            cpu,
+            page,
+            this->vmcs.exit_qualification(),
+            this->watched_apic_page);
+    }
+
     // Carried out here because this is the one place it is safe: the
     // decision is taken in `filter_local_apic_write`, which runs from
     // *inside* the loop below and cannot drop a watch without clearing the
