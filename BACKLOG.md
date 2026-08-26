@@ -51610,3 +51610,57 @@ That is multiprocessor-shaped, which fits a failure that does not
 occur with one processor, and it is the first candidate that explains
 a wrong RIP with no arithmetic at all.
 
+## Fixed: we reported an instruction length for exits no instruction caused
+
+The first defect in this investigation that is unambiguously ours,
+measured rather than argued, and fixed.
+
+Before, one boot, two processors:
+
+    91,841  reflections
+     3,193  for a reason sdm 30.2.5 leaves the length undefined
+     3,193  of those with a NON-ZERO length reported
+    first undef: reason 0x7, length 7
+    last       : reason 0x30, length 5
+
+Reason `0x7` is an interrupt window and `0x30` an EPT violation.
+Neither is caused by an instruction, so the field held whatever a
+previous exit left in vmcs02 - and a guest hypervisor advances a RIP
+by that number. The worst case is `start_up_ipi`, where the
+second-level guest never executed at all.
+
+After, with `ZPP_HONEST_EXIT_LENGTH=ON`:
+
+    89,663  reflections
+         0  with a vmcs12 rip below 0x1000
+     3,115  for a reason sdm 30.2.5 leaves the length undefined
+         0  of those with a NON-ZERO length reported
+
+and on the machine:
+
+| | boot processor lowest entry rip | outcome |
+|---|---|---|
+| before | `0x2` | second-level triple fault, guest frozen |
+| after | `0x1ad6874` | still running |
+
+So the boot processor's bad entry is gone and so is the triple fault
+that followed it.
+
+**It was found by the freeze, not by reasoning.** Every earlier boot
+passed `ZPP_ALLOW_REBOOT=1`, so the guest reset on its own fault and
+what was left to read was firmware. The first boot taken with
+`-no-reboot -no-shutdown` actually in force stopped at
+`paused (shutdown)` with the last exit still in the ring - a
+`triple-fault` tagged `L2` - and `KiBugCheckData` reading zero, which
+is what a guest that faulted while faulting looks like and is not a
+bugcheck at all.
+
+### Not finished: the application processor still enters at zero
+
+    cpu 0 entered-at census: agreed 89,663, differed 0, lowest 0x1ad6874
+    cpu 1 entered-at census: agreed 36,     differed 0, lowest 0x0
+
+Cpu 1 took **35 reflections, none for a reason with an undefined
+length**, so its zero has a different cause and this fix does not
+touch it. It remains stuck at 968 exits and 36 second-level entries.
+
