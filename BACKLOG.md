@@ -50791,3 +50791,45 @@ Not a regression from `ZPP_DROP_WATCH_ON_START_UP`: without it the
 processor never gets far enough to reach any of this, so this is the
 next failure rather than one the switch introduced.
 
+### The whole-handler bracket cannot attribute a write, and with two
+### processors that makes it useless
+
+It fires - reading the log rather than grepping it for expected
+strings found lines the greps had missed, flipping the entry between
+`0x8000000114f4e163` and `0` under reason 0x17, 0x19 and 0x1d (VMREAD,
+VMWRITE, VMPTRLD). The earlier "clean negative" was clean only because
+the processor died before reaching the nested phase at all.
+
+The hypothesis it suggested - a VMREAD/VMWRITE handler writing vmcs12
+fields at an address that is not the guest's VMCS - is **refuted**.
+Logged side by side: entry page `0x101ab7000`, current VMCS
+`0x114f84000`. Not the same page, not close.
+
+**And the instrument cannot answer the question it was built for.** It
+samples the entry on entry to the handler and again before resume, on
+*one* processor. The other processor is running guest code throughout,
+so a write it makes inside that window is attributed to our handler.
+With one processor that bracket was sound; with two it is not, and
+every reading it produced here is consistent with the guest mapping
+and unmapping a transient window through that entry.
+
+That also undermines the "gdt leaf entry" watch generally: the entry's
+physical address is resolved once per CR3/GDTR change, so once the
+guest reuses that page-table slot for something else, the sampler is
+watching a slot rather than a descriptor table.
+
+Recorded because the same shape has now appeared four times in this
+session: an instrument that can only see one thing reports that thing.
+The fix is the same each time - a second field that disagrees.
+
+### Variance is much larger than two boots suggested
+
+Same binary, four boots: 98 exits / 0 second-level entries, 977 / 37,
+2,406 / 169, 3,080 / 168. So the earlier "identical to the digit" was
+two draws from a wide distribution, and any comparison here needs
+three boots minimum and a range rather than a number.
+
+One-CPU control on the same binary: 23,494,435 exits and 1,901,770
+second-level entries, healthy. So the base is sound and everything
+here is specific to the second processor.
+
