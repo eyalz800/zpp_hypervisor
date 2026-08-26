@@ -5458,6 +5458,18 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     record.guest_linear_address = vmcs.guest_linear_address();
     record.guest_rip = vmcs.guest_rip();
     record.guest_cs_selector = vmcs.guest_cs_selector();
+    // The state a far jump needs, so a mode-switch failure names its
+    // own cause without depending on a log ring that has already
+    // wrapped by the time anyone can read it.
+    record.guest_gdtr_base = vmcs.guest_gdtr_base();
+    record.guest_gdtr_limit = vmcs.guest_gdtr_limit();
+    record.guest_idtr_base = vmcs.guest_idtr_base();
+    record.guest_idtr_limit = vmcs.guest_idtr_limit();
+    record.guest_cs_access_rights = vmcs.guest_cs_access_rights();
+    record.guest_cr0 = vmcs.guest_cr0();
+    record.guest_cr4 = vmcs.guest_cr4();
+    record.guest_ia32_efer = vmcs.guest_ia32_efer();
+    record.entry_controls = vmcs.vm_entry_controls();
 
     // Written last, so a debugger that finds this set knows the rest of
     // the record is complete rather than half filled in.

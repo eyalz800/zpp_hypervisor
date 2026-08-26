@@ -10343,6 +10343,22 @@ private:
          */
         std::uint64_t guest_rip{};
         std::uint64_t guest_cs_selector{};
+
+        /* The state a mode switch needs, kept in the record rather
+         * than only in the log because the log ring wraps long before
+         * this can be read: an application processor fails inside its
+         * first hundred exits and the boot processor then takes two
+         * hundred thousand, so the diagnostics are evicted even from a
+         * dump taken minutes in. A member survives that. */
+        std::uint64_t guest_gdtr_base{};
+        std::uint64_t guest_gdtr_limit{};
+        std::uint64_t guest_idtr_base{};
+        std::uint64_t guest_idtr_limit{};
+        std::uint64_t guest_cs_access_rights{};
+        std::uint64_t guest_cr0{};
+        std::uint64_t guest_cr4{};
+        std::uint64_t guest_ia32_efer{};
+        std::uint64_t entry_controls{};
     } unhandled_exit{};
 
     /**
