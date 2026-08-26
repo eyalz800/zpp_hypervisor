@@ -52091,3 +52091,56 @@ Two things follow:
   injected at that exit or the threshold never matches. That is the
   thing to fix, additively, with the window left exactly as it is.
 
+## RETRACTED: the deferred calls are not starved. They are all delivered
+
+The instrument built to prove starvation disproved it, and the number
+that did it is one this investigation never had - **distinct** requests
+against re-asks:
+
+    cpu 0  2,628,762 second-level entries looked at
+      asked           406,354  (399,666 coalesced into one already
+                                outstanding, so 6,688 DISTINCT requests)
+      pending       1,687,614  entries made with one outstanding
+      delivered         6,688  entries whose entry-interruption carried it
+      blocked       1,681,006  entries the priority or RFLAGS.IF refused
+      DROPPED             159  (2.4%)
+
+**Every one of the 6,688 distinct requests was delivered.** The
+411,669 "asks" quoted throughout the entries above are 399,666
+coalesced repeats of a single outstanding request; the guest re-asks
+on almost every entry while one is pending, which is what a level
+above with nothing else to do looks like. Counting those as separate
+deferred calls produced the "forty clock interrupts per dispatch
+interrupt" figure, and **that ratio was measuring the same DPC 400,000
+times**.
+
+So the chain recorded above - *deferred calls starve -> the storage
+stack never starts -> page writes never complete -> `smss.exe` blocks
+on `WrPageOut`* - has its first link broken. Delivery is complete. The
+1,681,006 blocked entries are correctly blocked: the priority or
+RFLAGS.IF genuinely refused them, and the SDM says they must be.
+
+### What does survive, and is worth keeping
+
+- **SDM 32.1.2 settles the TPR threshold**, and this is solid:
+  a below-threshold exit fires when `VTPR[7:4] < threshold`, and the
+  level above arms **0** on 1,811,656 of 1,821,262 entries - 99.5% -
+  which can never fire. The 9,520 entries where it arms a usable `2`
+  match the ~9,627 deliveries almost exactly. It arms an impossibility
+  because it expects virtual-interrupt delivery, which is not offered
+  here. That histogram had been read by the dump script for the whole
+  investigation and printed by nothing.
+- **The window is load-bearing** - two switches died proving it.
+- **The additive version costs nothing**: 439,017 carried against a
+  404,029 baseline, clock higher, no collapse. It also does not help:
+  four processes either way.
+
+### The method failure, which is the expensive part
+
+Three iterations were spent on a starvation that was not happening,
+because every instrument counted *events* and none counted *distinct
+work*. A guest that re-asks while one request is outstanding is
+indistinguishable, in an event counter, from a guest whose requests are
+being lost - and those want opposite fixes. **Count the thing, not the
+mentions of it.**
+
