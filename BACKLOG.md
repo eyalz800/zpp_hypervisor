@@ -51867,3 +51867,50 @@ CLAUDE.md warns that the singleton's offsets move when the binary
 changes; the same is true of every symbol in it. **Copy the ELF aside
 per configuration** when A/B-ing, and symbolise against the copy.
 
+### The ask, the delivery, and the ratio that is the whole story
+
+Two censuses this tree already keeps, read off the stalled run:
+
+    vectors vmcs02 actually carried (441,519)
+        0xd1      430,197   97.4%    the clock
+        0x2f        6,706    1.5%    the dispatch vector
+
+    vectors the guest asked for (411,680)
+        0x2f      411,669  100.0%
+
+    task priority when it asked (411,679)
+        0xd0      411,226   99.9%
+        0x20           67
+
+**Vector `0x2f` is not delivered zero times.** The comment in
+`CMakeLists.txt` saying "requested 145,300 times and delivered ZERO" is
+an older measurement and is now false - it is delivered 6,706 times.
+Quoting a source comment as a current measurement is the same mistake
+as trusting a CMake cache, and this file has recorded that one twice.
+
+**And the guest asks at priority `0xd0`, not `0x20`.** Class 13, far
+above `0x2f`'s class 2 - which is correct guest behaviour: a deferred
+call is queued from the clock interrupt at high priority and must be
+delivered when the priority falls. The earlier reading here, "the
+window is granted at the one moment `cr8=2` blocks it", describes
+where the window *fires*; where the guest *asks* is a different
+question, and only the second says which mechanism should have been
+armed.
+
+The ratio settles it:
+
+| | |
+|---|---|
+| asks for `0x2f` | 411,669 |
+| deliveries of `0x2f` | 6,706 |
+| TPR-below-threshold exits | 6,955 |
+| interrupt-window exits | 1,500,914, 98.5% at a blocking priority |
+
+Deliveries track TPR-below exits almost exactly, 6,706 against 6,955.
+**So the TPR threshold is the delivery mechanism and it is armed far
+too rarely, while the interrupt window is armed constantly and is pure
+waste.** The right shape is to arm the threshold at the pending
+vector's class and not arm the window at all when the class cannot be
+taken - which is what `ZPP_WINDOW_ON_TPR` intends, and why it takes
+the window count from 1,500,914 to 3.
+
