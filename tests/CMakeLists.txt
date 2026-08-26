@@ -466,6 +466,28 @@ zpp_add_host_test(ap_start_up
         "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up"
     DEFINES ZPP_HOSTED_TESTS=1)
 
+# The extended-page-table rendezvous: the real
+# wait_for_ept_acknowledgement and send_wake_nmi out of
+# ept_rendezvous.cpp. Reuses ap_start_up's shim rather than growing one of
+# its own - the two functions read IA32_APIC_BASE, write the local APIC
+# page and read a VPID, and that shim already answers all three per
+# thread.
+#
+# This is the only code in the tree whose behaviour differs between one
+# processor and two, and until the split it lived in hypervisor.cpp, which
+# nothing can compile. Those two facts together are why it had no test.
+zpp_add_host_test(ept_rendezvous
+    SOURCES
+        ept_rendezvous/harness.cpp
+        support/host_heap.cpp
+        "${ZPP_HYPERVISOR_SRC}/hypervisor/ept_rendezvous.cpp"
+        "${ZPP_HYPERVISOR_SRC}/arch/x86_64/page_table.cpp"
+        "${ZPP_HYPERVISOR_SRC}/crt/heap.cpp"
+    INCLUDES
+        "${CMAKE_CURRENT_SOURCE_DIR}/ap_start_up/shim"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shim"
+    DEFINES ZPP_HOSTED_TESTS=1)
+
 # The interrupt command register's decode path: the real processor_slot,
 # on_interrupt_command and start_up_broadcast out of interrupt_command.cpp
 # and the real note_apic_mode and intercept_interrupt_command out of
