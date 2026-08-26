@@ -52717,3 +52717,45 @@ minutes in. Every value above came from members read at the singleton
 plus a DWARF member offset. **When a failure is early and the machine
 keeps running, put the evidence in a member, not the log.**
 
+### Every layer of the far jump verified, and it still faults
+
+`RDI` is `0x1000` - the stub's own base - so the operand is
+`[0x1066]`, inside the page it is executing from. Read out of guest
+memory:
+
+    0x1060:  7c 16 00 00 30 00      far pointer 0x30:0x167c  (the 32-bit one)
+    0x1066:  01 17 00 00 10 00      far pointer 0x10:0x1701  (the 64-bit one)
+
+So the jump is to selector `0x10`, whose descriptor is
+`0x00209b0000000000` - L=1, D=0, present, type 11: a correct 64-bit
+code segment - at offset `0x1701`.
+
+And the guest's own page tables map that target, walked by hand
+through CR3 `0x7feeb000`:
+
+    level 0 idx 0x0 entry 0x118efb003
+    level 1 idx 0x0 entry 0x118efc003
+    level 2 idx 0x0 entry 0x118efd003
+    level 3 idx 0x1 entry 0x1003     -> physical 0x1701, identity
+
+| layer | verified |
+|---|---|
+| CR0, CR3, CR4, EFER, entry controls | consistent with each other |
+| GDTR base and limit | table present and readable |
+| target descriptor | valid 64-bit code, L=1 D=0 |
+| the far pointer itself | `0x10:0x1701`, correct |
+| guest page tables for the target | identity mapped |
+| guest page tables for the operand | same page as the code, executing |
+
+**Nothing in the guest's own state explains the fault**, which leaves
+what only this VMM controls: the extended page tables for those
+physical addresses, and whatever the processor is left holding that a
+VMCS field does not describe. The stub's own page tables live at
+`0x118efb000` and up - above 4 GB - and the EPT must map those too for
+the walk to succeed at all.
+
+`RSP` at the fault is `0x6940c400`, which is inside **this module's**
+memory rather than the guest's. A far jump pushes nothing, so it
+should not matter, but a guest whose stack pointer is one of our
+addresses is worth explaining rather than assuming.
+
