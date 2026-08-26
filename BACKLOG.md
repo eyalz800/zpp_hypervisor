@@ -53303,3 +53303,70 @@ a particular exit reason, now demonstrated rather than suspected.
 The reading that settles it is the screen, and the screen is a
 passed-through GPU.
 
+## Turning OFF the enlightened-VMCS advertisement turned VMCS shadowing ON
+
+**`-DZPP_EVMCS_TO_KVM=OFF`, one variable from the baseline, and it is
+the largest structural change measured in this investigation.**
+
+    before (evmk=1)                after (evmk=0)
+    shadowing off, at l2 entry 18  shadowing on, at l2 entry 0
+                                   shadowing on, at l2 entry 637,472
+    vmread   51.5%                 absent from the exit profile
+    vmwrite  28.0%                 absent from the exit profile
+    ~13.3 exits per l2 entry       ~3.15 exits per l2 entry
+
+`vmread` and `vmwrite` do not appear in the exit reasons at all any
+more. 1,893,460 exits against 600,837 second-level entries, where the
+same phase of the same boot previously cost 18.6 M against 1.4 M.
+
+### Why it works, which is the part worth keeping
+
+This was already written down in this file and never acted on.
+`EVMCS1_SUPPORTED_2NDEXEC` does not contain
+`SECONDARY_EXEC_SHADOW_VMCS`, so KVM strips shadowing from
+`IA32_VMX_PROCBASED_CTLS2` for **any guest whose CPUID advertises
+enlightened VMCS** - not for a guest that uses one. We advertised it,
+so KVM took shadowing away, and `nested_shadow_vmcs.cpp` stood down at
+second-level entry 18 every boot.
+
+So the two features are mutually exclusive **underneath us**, and we
+were choosing the one that does nothing here: `evmcs=0`, so nothing in
+this tree ever used an enlightened VMCS. We paid for it anyway.
+
+**`shadowvmcs=1` was never the state.** It is the build switch, and it
+read 1 in every run above while shadowing was off. The state is in the
+log ring, in a line that says so in English. A manifest field cannot
+report a capability the layer below withdrew at runtime.
+
+### What it does not fix
+
+The guest is still stuck, still at `Phase1Initialization`, still in the
+same four-RIP clock loop - `HvlEndSystemInterrupt`, `HalpHvTimerArm`,
+`HvlWriteApicCommandRegister`, `KiDpcInterruptBypass`, three of them
+within 123 counts of each other. Speed was never the stall, and
+`nested_vmx.h:496` already said so: *"Speed cannot get the guest out;
+it is exactly what decides whether it goes in."* This buys the margin
+that claim is about, and nothing more yet.
+
+## ZPP_WINDOW_ON_TPR traded one livelock for another
+
+Recorded so it is not re-proposed. It did what it promised -
+`int-window` exits fell 151,649 -> 1,604, a hundredfold - and the
+second-level entry set collapsed from eight instruction pointers to
+**one**, at the hypercall page. But the virtual trust level switches
+went badly out of balance:
+
+    HvCallVtlReturn   307,274
+    HvCallVtlCall      21,511      <- 14:1
+
+Every other run in this investigation is balanced to within five
+switches - 22,027/22,027 and 28,651/28,646. A secure kernel returning
+to the ordinary kernel fourteen times per call in is a second livelock,
+not an absence of the first.
+
+**Two variables, and the build forces it.**
+`static_assert(!(window_on_tpr && deliver_on_drop))` means `drop` went
+1 -> 0 in the same build, so the imbalance cannot be attributed to
+`window_on_tpr` alone from this run. Separating them costs one boot and
+is worth it only if this line is picked up again.
+
