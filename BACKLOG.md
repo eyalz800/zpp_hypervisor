@@ -52323,3 +52323,41 @@ it to hold a canonical kernel pointer, since that is
 `PsActiveProcessHead` and nothing else will. It found the base in one
 pass after two failed scans.
 
+### The multicore defect, with nesting out of the picture
+
+`nested=0`, two processors, frozen by `-no-reboot` at the reset. From
+the log:
+
+    [ 20] launching guest on virtual processor 0x1
+    [ 29] launching guest on virtual processor 0x2
+    [ 30] cpu 0x1 came up on the trampoline after 0x122b attempts,
+          guest vector 0x87
+    [301] stopping, unhandled exit reason 0x2 qualification 0x0
+          rip 0x10000 cs 0x178 linear 0x11684
+
+**Exit reason 2 is a triple fault.** So the application processor is
+adopted, is launched, runs, and triple faults **in real mode at linear
+`0x11684`** - RIP `0x10000`, CS `0x178`. This VMM then halts it as an
+unhandled exit, and the guest resets when its processor never reports
+in.
+
+State at the freeze confirms the shape:
+
+| | RIP | CR3 | where |
+|---|---|---|---|
+| cpu 0 | `0xfffff800c741569f` | `0x1ae002` | Windows kernel |
+| cpu 1 | `0x67e7d361` | `0x6a310000` | **`zpp::arch::x86_64::halt()`**, our own module |
+
+and cpu 0's last exits are a storm of EPT violations on
+`phys=0xfee00000` at kernel instruction pointers - Windows hammering
+the local APIC trying to start a processor that will never answer.
+
+The start-up vector is `0x87`, so the processor should begin at linear
+`0x87000`. It triple faults at `0x11684` instead, which is neither the
+vector nor anything near it.
+
+This is the cleanest failure this investigation has produced: no
+nesting, no guest hypervisor, roughly a thousand exits, one processor
+adopted and one triple fault, with every byte still readable because
+the guest is frozen rather than reset.
+
