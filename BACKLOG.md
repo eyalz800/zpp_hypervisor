@@ -52227,3 +52227,51 @@ is right - it would silently measure bare Windows and every number
 would be a lie. `ZPP_ALLOW_CHAINLOAD_ONLY=1` is the deliberate
 override, and the real loader was restored immediately afterwards.
 
+## THE BISECT: our hypervisor reaches the login screen. Nested VMX is the fault
+
+`ZPP_NESTED_VMX=OFF`, one processor, hypervisor resident and running
+Windows directly - VMX hidden, so Hyper-V stands down and there is no
+VBS:
+
+    77 processes: System, Registry, smss.exe, csrss.exe, wininit.exe,
+    csrss.exe, services.exe, lsass.exe, winlogon.exe, fontdrvhost,
+    svchost.exe, WUDFHost.exe, dwm.exe, IntelCpHDCPSvc, taskhostw.exe,
+    MemCompression, igfxCUIService, sihost.exe, svchost.exe x40 ...
+
+**`winlogon.exe` and `dwm.exe` are running under this hypervisor.**
+
+| configuration | processes | reaches |
+|---|---|---|
+| chainload only, no VMM | 60 | login screen |
+| **this VMM, `nested=0`** | **77** | **login screen** |
+| this VMM, `nested=1` | 4 | stalls at `smss.exe` |
+
+So:
+
+- **The base hypervisor is sound.** EPT, the exit handler, the APIC
+  watch, the module protection, the start-up path, the CPUID and MSR
+  answers - all of it carries Windows to a login screen.
+- **Every failure chased in this investigation lives in the nested VMX
+  path**, i.e. in running Hyper-V and its VBS guest. `smss.exe`
+  blocking on `WrPageOut` is a *nested* failure, not a storage one.
+- **77 against 60** is worth noticing: more processes than the
+  chainload-only control, because that run had VBS active and this one
+  does not, so the comparison is not like for like - but it is
+  comfortably past the login screen either way.
+
+The guard in `check-bootable.sh` that refuses a non-nested loader says
+in its own text that *"asking 'is this failure nested at all' is a fair
+question, and one boot answers it"*. It was right, and the question
+went unasked for a very long time.
+
+### A tool note, because the physical walk failed here
+
+`guest-processes.py` walks page tables physically, which is correct on
+a frozen guest and on one whose processors are in another address
+space. On this run it reported `PsActiveProcessHead not mapped` while
+the monitor's own `x/1xg` at the same address answered immediately.
+When a processor *is* in the guest's kernel context, the monitor's
+virtual read is both faster - one round trip instead of five - and
+more reliable. Use `x` when a processor is in kernel context, `xp`
+plus a walk when none is.
+
