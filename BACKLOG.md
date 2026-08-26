@@ -51086,3 +51086,60 @@ other than the first, relying on the ring's `[times=N]` collapsing -
 a spin loop costs one line however long it runs. Worth keeping as a
 pattern: **a census of a spin is cheap if the ring deduplicates.**
 
+## Guest symbols, and what they say
+
+The guest's own symbols are obtainable with no rebuild and nothing
+perturbed, and they immediately corrected an assumption carried for
+several sessions. The procedure, from the QEMU monitor alone:
+
+1. Take any guest RIP from `info registers -a` and scan down in
+   `0x10000` steps with `x/1xh` for `0x5a4d` - the PE `MZ`. Found at
+   `0xfffff802aac00000` on that boot.
+2. `e_lfanew` at `base+0x3c`; optional header at `+0x18` from it,
+   magic `0x020b` confirms PE32+; DataDirectory at `+0x70` from the
+   optional header, **debug is index 6, so `+0xB8` from `e_lfanew`**
+   (getting this `0xC8` reads a zero RVA and looks like "no debug
+   directory").
+3. The debug directory's type-2 entry is CODEVIEW. Its record is
+   `RSDS`, a 16-byte GUID, a 4-byte age, then the PDB name.
+4. The symbol-server key is `Data1` `Data2` `Data3` big-endianed,
+   `Data4` verbatim, then the age in hex without padding.
+5. Fetch from `msdl.microsoft.com/download/symbols/<name>/<key>/<name>`
+   and resolve with `llvm-pdbutil dump --publics` plus
+   `--section-headers`: RVA is the section's virtual address plus the
+   public's offset, and **the offset is decimal**.
+
+**The image is `ntkrnlmp.pdb`.** Every `0xfffff8...` address chased in
+this investigation and called "Hyper-V" is the Windows kernel, so the
+`0xc0000409` fast-fail is Windows' own `__fastfail`, not the guest
+hypervisor's. Nothing above this line that names Hyper-V from an
+address alone should be trusted.
+
+Keep the downloader out of the repository, as with the SDM and KVM
+sources - the procedure is here, the artefacts are not.
+
+### The application processor is not dead, it is slow
+
+With `ZPP_DROP_WATCH_ON_START_UP=ON`, resolved on the running guest:
+
+- boot processor: `RtlpUnwindPrologue+0x28f`, then `+0x27fe02`, then
+  `+0xbbd540` - **moving**, healthy.
+- application processor: **`KiInitializeKernel+0x8b1`**, frozen there
+  across every sample.
+
+So it reaches Windows' own kernel initialisation - far past "dies at
+117 exits". Its counters say `316` second-level entries against `315`
+exits, one more entry than exit, so it is *inside* the second level at
+that moment, and its exit total grew 977 -> 3,932 over the run.
+
+**About six exits a second, against thousands on the boot processor.**
+It is alive and advancing, and the thing to explain is that ratio
+rather than a death.
+
+The instruction it sits on is
+`mov eax,[rip+0x46baa9]` / `test` / `jnz`, a spin *while non-zero* on a
+word at `0xfffff802abbc1c90` which reads **zero** - so the loop's own
+condition is already satisfied. A frozen RIP on a satisfied loop means
+the samples are landing in a hot path the processor keeps re-entering,
+not that it is stuck at one instruction.
+
