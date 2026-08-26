@@ -51914,3 +51914,56 @@ vector's class and not arm the window at all when the class cannot be
 taken - which is what `ZPP_WINDOW_ON_TPR` intends, and why it takes
 the window count from 1,500,914 to 3.
 
+## Fixed: every VMfailValid was read as success
+
+SDM 31.2 gives VMX two failure modes with different flags -
+VMfailInvalid sets **CF**, VMfailValid sets **ZF with CF clear** - and
+the `vmread`/`vmwrite` stubs tested `jc`, which sees only the first.
+**Every VMfailValid had been reported to the caller as success**, on
+every boot this tree has ever taken.
+
+Confirmed on the machine by a probe using the bare instructions:
+
+    cpu 0 cr3-target value 0 probe: vmwrite 0x1 vmread 0x1
+          read back 0x0 - the layer below DISCARDS the field
+
+What it hid: this VMM is KVM's L1, and **KVM has no CR3-target values
+at all** - its `vmcs12.h` calls them "Last remnants of
+cr3_target_value[0-3]" and its field table has no entry - so
+`handle_vmwrite` answers `VMXERR_UNSUPPORTED_VMCS_COMPONENT`. The
+entry-failure recovery pointer was written into
+`cr3_target_value_0`, refused, reported successful, and cached as
+done. **The field was never set on any boot.** The stub's own
+`vmread` of it then failed the same way, and a failed VMREAD does not
+write its destination - so RDI still held the second-level guest's
+RDI. Measured `cr2` `0x16d` and `0x1d7` against guest RDI `0x14d` and
+`0x1b7`.
+
+`jc` becomes `jbe`, the recovery pointer moves to a table indexed by
+VPID, `vmcs::read`/`write` record a refusal rather than trapping - a
+trap there is a dead processor with no log line, which is the defect
+being fixed - and a refused write is no longer cached as done.
+
+**The host exception is gone**: `vector 0 error 0x0 rip 0x0`, the
+zeroed record.
+
+### But the livelock was waste, not the blocker
+
+Same binary, one processor, the only difference being the switch:
+
+| | processes | exits | interrupt windows |
+|---|---|---|---|
+| before both fixes | 4, incl. `smss.exe` | 23.0M | 1,500,914 |
+| VMX fix alone | 4, incl. `smss.exe` | 21.5M | ~1.5M |
+| VMX fix + `windowtpr=1` | **3, no `smss.exe`** | 14.7M | **1,310** |
+
+So removing the livelock outright does **not** get the guest further -
+it gets it *less* far. A million and a half wasted exits were costing
+throughput and nothing else, and the thing stopping `smss.exe` is
+still unidentified.
+
+That is worth stating flatly because the livelock was a very
+attractive explanation: it was large, it was measurable, it was
+clearly wrong, and it was in the right area. It was still not the
+cause. `ZPP_WINDOW_ON_TPR` stays **off**.
+
