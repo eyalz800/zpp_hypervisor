@@ -52775,3 +52775,35 @@ appear in both. The general-purpose registers are the context's; RSP,
 RIP, RFLAGS, CR0/3/4, the segments and the descriptor tables are the
 VMCS's.
 
+### The extended page tables are not the reason the second processor dies
+
+Eliminated by reading `initialize_ept`, at the cost of no boot at all,
+so it is recorded rather than re-proposed. The premise was that the
+application processor's page-table pages live at `0x118efb000`,
+`0x118efc000` and `0x118efd000` - **above 4 GB** - and that a map built
+from what the loader saw might stop below them, which would explain
+exactly why a processor already in long mode survives and one walking
+fresh tables does not.
+
+It does not stop. `epml4[0]` alone covers 512 GB, `epdpt` is filled in
+one loop over all 512 entries, and `epd[512][512]` gives every gigabyte
+a page directory of 2 MB large pages, all RWX, all identity, **all
+built up front** - the comment there says why: "nothing fills an EPT
+entry on demand, so the map must be complete before entry". The 4 KB
+pool exists only to re-describe regions the MTRRs split, not to extend
+coverage.
+
+So a physical address at 4.4 GB is mapped read-write-execute like any
+other, and the guest's page walk through it cannot fault. What remains
+of the original question is the *permissions* one - and those are RWX
+for everything that is not this module.
+
+**The instrument this leaves is the right one anyway.** The processor's
+IDTR after INIT is base 0 limit 0xffff, so whatever fault happens first
+lands in a real-mode interrupt vector table full of nothing, and the
+triple fault that follows is identical whatever caused it. Reading
+state cannot distinguish `#GP` from `#PF` from `#UD` here. Intercepting
+it can: the VMCS exception bitmap is **never written in this tree**, so
+no exception has ever been visible, and setting it turns the invisible
+first fault into an exit carrying its vector and error code.
+
