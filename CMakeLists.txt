@@ -230,6 +230,10 @@ option(ZPP_TRACK_LONG_MODE_SWITCH
        "Maintain the 'IA-32e mode guest' VM-entry control and the guest IA32_EFER.LMA field across a guest's own paging transitions, and own CR0.PG in the guest/host mask so those transitions cannot be silent. Nothing in this tree maintained either: setup_vmcs sets the control once for a boot processor already in long mode and apply_start_up clears it, so an application processor's stub that goes real -> protected -> long reaches VM entry with CR0.PG set, EFER.LME set and the control clear, which SDM 29.3.1.1 rejects as invalid guest state (reason 0x80000021). Mirrors KVM's vmx_set_cr0 / enter_lmode / vmx_set_efer."
        ON)
 
+option(ZPP_TRAP_AP_FAULTS
+       "Diagnostic. Intercept an application processor's first exception in the window opened by the write that enables paging, so the fault that kills it is recorded with its vector, error code and - for a page fault - its faulting linear address, instead of arriving as a bare triple fault. The capture disarms itself and resumes without advancing RIP or injecting anything, so the guest re-executes and the boot ends as it did before. Read hypervisor::ap_fault as a pair: armed 1 with occurred 0 means the trap was in place and caught nothing, which says the triple fault is not a guest exception at that instruction at all."
+       OFF)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report a VM-exit instruction length to the guest hypervisor only for exit reasons where the SDM defines it"
        ON)
@@ -431,6 +435,7 @@ ExternalProject_Add(hypervisor
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
+        -DZPP_TRAP_AP_FAULTS=${ZPP_TRAP_AP_FAULTS}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
@@ -549,6 +554,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
+        -DZPP_TRAP_AP_FAULTS=${ZPP_TRAP_AP_FAULTS}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}

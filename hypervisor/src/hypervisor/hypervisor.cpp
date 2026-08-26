@@ -6521,6 +6521,25 @@ void hypervisor::setup_vmcs(std::size_t cpu,
         arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest |
             arch::x86_64::vmx::vm_entry_controls::load_debug_controls));
 
+    // No exception is intercepted, and it is written rather than left
+    // alone - which it was, by every VMCS this tree has ever built.
+    //
+    // This is the same defect the CR0 guest/host mask above records, in
+    // the same VMCS: "a VMCS field that has never been written has no
+    // defined value". The region is zeroed storage in `.bss`, so on this
+    // machine it reads zero and the intent happened to hold - but the
+    // layout of a VMCS region is implementation specific and nothing
+    // entitles anyone to that. Two things then depend on it: the guest's
+    // faults, which is what an application processor's bring-up lives
+    // or dies by, and `build_vmcs02`, which composes the second-level
+    // bitmap as `exception_bitmap01 | vmcs12's` and would therefore OR
+    // whatever the region held into a guest hypervisor's own choices.
+    //
+    // `nested_vmx::trap_ap_faults` arms bits in this field later, at an
+    // application processor's paging transition, and disarms them on the
+    // first capture. Zero here is what it goes back to.
+    vmcs.exception_bitmap(0);
+
     // The selectors below are resolved against the intermediate GDT
     // rather than the OS one, which is not mapped here any more.
     auto intermediate_gdt_base = reinterpret_cast<std::uint64_t>(

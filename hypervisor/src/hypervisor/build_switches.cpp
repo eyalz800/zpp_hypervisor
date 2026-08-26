@@ -318,6 +318,16 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // boot processor writes at its own launch is the second.
         ' ', 'a', 'p', 'e', 'n', 't', 'r', 'y', '=',
         digit(nested_vmx::trace_ap_entry),
+        // The application-processor fault trap. Observational - it
+        // disarms itself on the first capture and resumes without
+        // advancing RIP or injecting anything, so the boot ends as it
+        // did before - but it is the only thing that distinguishes
+        // "`ap_fault` reads zero because nothing faulted" from
+        // "`ap_fault` reads zero because this was never built". Both
+        // readings are indistinguishable in a dump, and the record is
+        // the whole output of the instrument.
+        ' ', 'a', 'p', 'f', 'a', 'u', 'l', 't', '=',
+        digit(nested_vmx::trap_ap_faults),
         '\0'};
 
 } // namespace zpp::hypervisor

@@ -3406,7 +3406,8 @@ def main():
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
                "running_l2", "events_requeued", "events_deferred",
-               "pending_event", "unhandled_exit", "vm_entry_failure",
+               "pending_event", "unhandled_exit", "ap_fault",
+               "vm_entry_failure",
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
@@ -3810,7 +3811,15 @@ def main():
     monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
 
     monitor.queue(instance + off["running_l2"], (scalar_cpus + 7) // 8)
-    monitor.queue(instance + off["unhandled_exit"], 6)
+    # Nineteen words, which is every member the record has. It was
+    # six, and six was the number of members it had when this line
+    # was written - three commits have since added the mode-switch
+    # state, CR3 and the addressing registers, and the reader went
+    # on stopping at `guest_cs_selector`. tests/python_layout counts
+    # the members out of the header and fails when the two disagree.
+    monitor.queue(instance + off["unhandled_exit"], 19)
+    if "ap_fault" in off:
+        monitor.queue(instance + off["ap_fault"], 14)
     monitor.queue(instance + off["vm_entry_failure"], 6)
     for cpu in range(args.cpus):
         monitor.queue(instance + off["exit_trace"] + cpu * ring * entry_size,
@@ -3882,6 +3891,37 @@ def main():
               f"{read('events_deferred', cpu):-8d}  "
               f"0x{read('pending_event', cpu):-6x}  "
               f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # The application-processor fault trap, read as a pair.
+    #
+    # `armed` and `occurred` say three different things between them and
+    # a single field says none of them - see nested_vmx.h. The middle
+    # state is the one worth printing loudest: armed and nothing caught
+    # means no exception was ever delivered to that guest, so a triple
+    # fault read as "it faulted at the far jump" is being read wrong.
+    if "ap_fault" in off:
+        armed = read("ap_fault", 0)
+        caught = read("ap_fault", 3)
+        if armed is None:
+            pass
+        elif not armed:
+            print("\nap-fault trap: never armed "
+                  "(switch off, or no paging transition on an "
+                  "application processor) - this says nothing")
+        elif not caught:
+            print(f"\nap-fault trap: ARMED on cpu {read('ap_fault', 1)} "
+                  f"at rip 0x{read('ap_fault', 2):x} and CAUGHT NOTHING - "
+                  "no exception was delivered to this guest")
+        else:
+            print(f"\nap-fault trap: cpu {read('ap_fault', 4)} "
+                  f"vector {read('ap_fault', 5)} "
+                  f"error 0x{read('ap_fault', 6):x} "
+                  f"address 0x{read('ap_fault', 7):x} "
+                  f"rip 0x{read('ap_fault', 9):x} "
+                  f"cs 0x{read('ap_fault', 10):x} "
+                  f"cr0 0x{read('ap_fault', 11):x} "
+                  f"cr3 0x{read('ap_fault', 12):x} "
+                  f"efer 0x{read('ap_fault', 13):x}")
 
     # What the guest asked its synthetic timer for, and what it was given.
     #

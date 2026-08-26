@@ -10372,6 +10372,49 @@ private:
     } unhandled_exit{};
 
     /**
+     * The first exception an application processor took after it enabled
+     * paging, when `nested_vmx::trap_ap_faults` armed the trap for it.
+     *
+     * **Read `armed` and `occurred` as a pair.** A single field cannot
+     * separate the three states this instrument can be in, and the
+     * middle one is the interesting answer rather than a null result:
+     *
+     * - `armed` 0, `occurred` 0 - never armed. Either the switch is off,
+     *   which `strings ... | grep 'zpp switches'` answers by `apfault=`,
+     *   or no application processor ever reached a paging transition.
+     * - `armed` 1, `occurred` 0 - **armed and nothing was caught.** No
+     *   exception was delivered to the guest between the write that
+     *   enabled paging and the processor stopping, so whatever killed it
+     *   is not a fault at that instruction, and every reading of the
+     *   triple fault that assumes one is wrong.
+     * - `armed` 1, `occurred` 1 - `vector`, `error_code` and
+     *   `qualification` name the fault. For vector 14 the qualification
+     *   is the faulting linear address.
+     *
+     * In members rather than in the log for the reason the record above
+     * gives: an application processor fails inside its first hundred
+     * exits and the boot processor then takes two hundred thousand, so
+     * the ring has wrapped long before any of this can be read.
+     */
+    struct
+    {
+        std::uint64_t armed{};
+        std::uint64_t armed_on_cpu{};
+        std::uint64_t armed_at_rip{};
+        std::uint64_t occurred{};
+        std::uint64_t cpu{};
+        std::uint64_t vector{};
+        std::uint64_t error_code{};
+        std::uint64_t qualification{};
+        std::uint64_t interruption{};
+        std::uint64_t guest_rip{};
+        std::uint64_t guest_cs_selector{};
+        std::uint64_t guest_cr0{};
+        std::uint64_t guest_cr3{};
+        std::uint64_t guest_ia32_efer{};
+    } ap_fault{};
+
+    /**
      * Everything known about a VM entry that failed, filled in by
      * on_vm_entry_failure just before it stops the CPU.
      *

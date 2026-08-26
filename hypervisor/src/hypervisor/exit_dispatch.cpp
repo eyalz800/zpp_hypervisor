@@ -1029,6 +1029,72 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             break;
         }
 
+        // The application-processor fault trap, closed here.
+        //
+        // Reaching this at all means the bitmap armed at the paging
+        // transition caught the fault that the triple fault was hiding:
+        // exit reason 2 carries no vector, no error code and no address,
+        // and reason 0 carries all three. For vector 14 the exit
+        // qualification is the faulting linear address, which is the
+        // field that separates "the far pointer could not be read" from
+        // "the target could not be fetched" from "the descriptor table
+        // could not be reached", and nothing else does. **Check that
+        // against the SDM's "Exit Qualification" section before acting
+        // on the address** - this tree's `.references` were not present
+        // when this was written, so it is recalled, not looked up.
+        //
+        // Then it puts itself away and gets out of the way. The bitmap
+        // goes back to zero, `advance_rip` is already false, and
+        // **nothing is injected**: the guest re-executes the same
+        // instruction, faults again with the bitmap disarmed, and the
+        // boot ends exactly as it did without this. That is deliberate
+        // rather than lazy - re-executing needs no CR2 to be
+        // synthesised, which an injected page fault would (a #PF that
+        // causes a VM exit does not update CR2), and a instrument that
+        // changes the run cannot be trusted about the run.
+        //
+        // One capture only, so a processor that faults repeatedly leaves
+        // the *first* fault rather than the last.
+        if constexpr (nested_vmx::trap_ap_faults) {
+            if (!is_nmi && (0 != this->ap_fault.armed) &&
+                (0 == this->ap_fault.occurred) &&
+                (0 != (information & valid))) {
+                constexpr std::uint64_t error_code_valid = 1ull << 11;
+
+                vmcs.exception_bitmap(0);
+
+                this->ap_fault.cpu = cpuid;
+                this->ap_fault.vector = information & 0xff;
+                this->ap_fault.interruption = information;
+                this->ap_fault.error_code =
+                    (0 != (information & error_code_valid))
+                        ? vmcs.vm_exit_interruption_error_code()
+                        : 0;
+                this->ap_fault.qualification = vmcs.exit_qualification();
+                this->ap_fault.guest_rip = vmcs.guest_rip();
+                this->ap_fault.guest_cs_selector =
+                    vmcs.guest_cs_selector();
+                this->ap_fault.guest_cr0 = vmcs.guest_cr0();
+                this->ap_fault.guest_cr3 = vmcs.guest_cr3();
+                this->ap_fault.guest_ia32_efer = vmcs.guest_ia32_efer();
+
+                // Last, for the reason `armed` is written last: it is
+                // the field a reader tests before believing the rest.
+                this->ap_fault.occurred = 1;
+
+                log("cpu {} ap fault vector {} error {} address {} "
+                    "rip {} cs {} cr3 {}",
+                    cpuid,
+                    this->ap_fault.vector,
+                    this->ap_fault.error_code,
+                    this->ap_fault.qualification,
+                    this->ap_fault.guest_rip,
+                    this->ap_fault.guest_cs_selector,
+                    this->ap_fault.guest_cr3);
+                break;
+            }
+        }
+
         if (is_nmi) {
             // An NMI may only be injected at an instruction boundary
             // that is not inside an interrupt shadow. SDM 29.3.1.5
@@ -2344,6 +2410,40 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             context.rip,
             vmcs.guest_cs_selector());
 
+        // The trap's verdict, said out loud on the exit it was armed
+        // for, so that "nothing was caught" is a *statement* rather than
+        // a set of zero fields somebody has to interpret.
+        //
+        // Two zeroes mean two different things and the pair separates
+        // them. Armed and nothing caught is the interesting one: no
+        // exception was delivered to this guest between the write that
+        // enabled paging and this triple fault, so the fault did not
+        // start at the instruction after that write and every reading
+        // that assumes it did is wrong.
+        if constexpr (nested_vmx::trap_ap_faults) {
+            if (0 == this->ap_fault.armed) {
+                log("cpu {} triple fault: the ap-fault trap was never "
+                    "armed - no paging transition was seen on an "
+                    "application processor, so this says nothing",
+                    (cpuid + 1));
+            } else if (0 == this->ap_fault.occurred) {
+                log("cpu {} triple fault: the ap-fault trap WAS armed "
+                    "on cpu {} at rip {} and caught nothing - no "
+                    "exception was ever delivered to this guest",
+                    (cpuid + 1),
+                    this->ap_fault.armed_on_cpu,
+                    this->ap_fault.armed_at_rip);
+            } else {
+                log("cpu {} triple fault: first fault was vector {} "
+                    "error {} address {} at rip {}",
+                    (cpuid + 1),
+                    this->ap_fault.vector,
+                    this->ap_fault.error_code,
+                    this->ap_fault.qualification,
+                    this->ap_fault.guest_rip);
+            }
+        }
+
         // The whole state, and before the walks below - which read guest
         // memory and can themselves fail, so a dump placed after them is
         // a dump that goes missing precisely when it is wanted.
@@ -2615,7 +2715,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         record_exit(cpuid, full_reason, context);
         this->unhandled_exit.guest_rdi = context.rdi;
         this->unhandled_exit.guest_rsi = context.rsi;
-        this->unhandled_exit.guest_rsp = context.rsp;
+        this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
         on_unhandled_exit(full_reason);
         break;
     }
@@ -2785,11 +2885,8 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             record_exit(cpuid, full_reason, context);
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
-            this->unhandled_exit.guest_rsp = context.rsp;
-            this->unhandled_exit.guest_rdi = context.rdi;
-        this->unhandled_exit.guest_rsi = context.rsi;
-        this->unhandled_exit.guest_rsp = context.rsp;
-        on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
+            on_unhandled_exit(full_reason);
             break;
         }
 
@@ -2850,68 +2947,31 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             record_exit(cpuid, full_reason, context);
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
-            this->unhandled_exit.guest_rsp = context.rsp;
-            this->unhandled_exit.guest_rdi = context.rdi;
-        this->unhandled_exit.guest_rsi = context.rsi;
-        this->unhandled_exit.guest_rsp = context.rsp;
-        on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
+            on_unhandled_exit(full_reason);
             break;
         }
 
-        // The encoded register number is the architectural one,
-        // which is not the order this context happens to store them
-        // in - so it is spelled out rather than indexed.
-        std::uint64_t value{};
-        switch (gpr) {
-        case 0:
-            value = context.rax;
-            break;
-        case 1:
-            value = context.rcx;
-            break;
-        case 2:
-            value = context.rdx;
-            break;
-        case 3:
-            value = context.rbx;
-            break;
-        case 4:
-            value = context.rsp;
-            break;
-        case 5:
-            value = context.rbp;
-            break;
-        case 6:
-            value = context.rsi;
-            break;
-        case 7:
-            value = context.rdi;
-            break;
-        case 8:
-            value = context.r8;
-            break;
-        case 9:
-            value = context.r9;
-            break;
-        case 10:
-            value = context.r10;
-            break;
-        case 11:
-            value = context.r11;
-            break;
-        case 12:
-            value = context.r12;
-            break;
-        case 13:
-            value = context.r13;
-            break;
-        case 14:
-            value = context.r14;
-            break;
-        default:
-            value = context.r15;
-            break;
-        }
+        // The encoded register number is the architectural one, which
+        // is not the order this context happens to store them in - and
+        // encoding 4 is not in the context at all.
+        //
+        // This used to be a switch spelled out here with
+        // `case 4: value = context.rsp`, and that case was wrong.
+        // **`context.rsp` holds the address of the context structure**,
+        // stored there deliberately by the exit stub because
+        // `restore_context` iretqs onto it - so it is a hypervisor stack
+        // address inside this module, never the guest's stack pointer.
+        // A guest that wrote `mov cr0, rsp` or `mov cr4, rsp` would have
+        // had a host address put into its control register and its read
+        // shadow, silently.
+        //
+        // `guest_register` is the one function that knows this: it
+        // answers encoding 4 from `vmcs.guest_rsp()` and everything else
+        // from the context, through the same encoding table the
+        // instruction decoder uses. It exists for exactly this and this
+        // switch predated it.
+        auto value = guest_register(context, gpr);
 
         // CR0, which this VMM owns no bit of, so the write is simply
         // performed.
@@ -3034,6 +3094,45 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                             static_cast<std::uint64_t>(long_mode),
                             value,
                             vmcs.guest_rip());
+
+                        // The window this instrument exists for opens
+                        // here and closes two instructions later. See
+                        // `nested_vmx::trap_ap_faults`: from this point
+                        // the processor is running with the post-INIT
+                        // IDTR, so its next exception is not reported
+                        // as an exception at all - it faults delivering
+                        // the double fault and leaves a triple fault,
+                        // which carries no vector, no error code and no
+                        // address.
+                        //
+                        // Boot processor excluded, and not as a saving:
+                        // Windows takes page faults by the million on
+                        // it, and every one of them would exit.
+                        // Application processors only, once, and the
+                        // capture disarms it.
+                        if constexpr (nested_vmx::trap_ap_faults) {
+                            if (paging_now && (0 != cpuid) &&
+                                (0 == this->ap_fault.occurred)) {
+                                vmcs.exception_bitmap(
+                                    nested_vmx::ap_fault_vectors);
+
+                                this->ap_fault.armed_on_cpu = cpuid;
+                                this->ap_fault.armed_at_rip =
+                                    vmcs.guest_rip();
+
+                                // Last, so a reader that finds this set
+                                // knows every field beside it was
+                                // written and the bitmap is live.
+                                this->ap_fault.armed = 1;
+
+                                log("cpu {} ap-fault trap armed at the "
+                                    "paging transition, rip {}, "
+                                    "vectors {}",
+                                    cpuid,
+                                    vmcs.guest_rip(),
+                                    nested_vmx::ap_fault_vectors);
+                            }
+                        }
                     } else {
                         log("cpu {} guest paging {} with efer not "
                             "swapped, ia32e left as is, cr0 {} rip {}",
@@ -3204,11 +3303,8 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             record_exit(cpuid, full_reason, context);
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
-            this->unhandled_exit.guest_rsp = context.rsp;
-            this->unhandled_exit.guest_rdi = context.rdi;
-        this->unhandled_exit.guest_rsi = context.rsi;
-        this->unhandled_exit.guest_rsp = context.rsp;
-        on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
+            on_unhandled_exit(full_reason);
         }
         advance_rip = false;
         break;
@@ -3862,7 +3958,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         record_exit(cpuid, full_reason, context);
         this->unhandled_exit.guest_rdi = context.rdi;
         this->unhandled_exit.guest_rsi = context.rsi;
-        this->unhandled_exit.guest_rsp = context.rsp;
+        this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
         on_unhandled_exit(full_reason);
     }
     }

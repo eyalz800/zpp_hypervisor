@@ -949,6 +949,78 @@ inline constexpr bool init_clears_efer = (0 != ZPP_INIT_CLEARS_EFER);
 inline constexpr bool track_long_mode_switch =
     (0 != ZPP_TRACK_LONG_MODE_SWITCH);
 
+#ifndef ZPP_TRAP_AP_FAULTS
+#define ZPP_TRAP_AP_FAULTS 0
+#endif
+
+// Whether an application processor's *first* exception, in the window
+// between the write that enables paging and the instruction after it, is
+// intercepted and recorded instead of being delivered to a guest that has
+// no interrupt descriptor table.
+//
+// **Diagnostic only, and it exists because the failure it is aimed at
+// destroys its own evidence.** An application processor that has just
+// enabled paging runs with the post-INIT IDTR - base 0, limit 0xffff -
+// and the guest's own paging structures do not map the vectors, so the
+// first exception faults delivering the double fault and the processor
+// leaves a *triple fault*. Exit reason 2 carries no vector, no error code
+// and no address: every possible first fault - #GP on the descriptor,
+// #PF on the operand, #PF on the code fetch - produces the identical
+// record, which is why four sessions of reading guest state by hand have
+// not separated them.
+//
+// The exception bitmap does separate them, in one boot. On, a paging
+// transition on an application processor arms bits 6, 8, 11, 12, 13 and
+// 14 - #UD, #DF, #NP, #SS, #GP and #PF - so the *first* fault exits with
+// reason 0 instead, carrying its vector and error code in the VM-exit
+// interruption information and, for a page fault, the faulting linear
+// address in the exit qualification. That last is recalled rather than
+// looked up - `.references` was not fetched in the tree this was
+// written in - so check it against the SDM's "Exit Qualification"
+// section before acting on the address.
+//
+// The capture then disarms the bitmap and resumes **without advancing
+// RIP and without injecting anything**, so the guest re-executes the
+// same instruction, faults again unintercepted, and the boot ends
+// exactly as it did before. No CR2 has to be synthesised and no
+// behaviour changes - the run is the same run, with one extra exit and a
+// record in it.
+//
+// Read `ap_fault` as a pair, because a single field cannot say which of
+// three things happened:
+//
+//   armed 0, occurred 0 - the trap was never armed. Either the switch is
+//       off (check `apfault=` in `zpp switches`) or no application
+//       processor ever reached a paging transition.
+//   armed 1, occurred 0 - armed and nothing was caught. **The triple
+//       fault is then not a guest exception at the far jump**, and the
+//       whole line of enquiry that assumes one is wrong.
+//   armed 1, occurred 1 - `vector`, `error_code` and `qualification`
+//       name the fault.
+//
+// Off costs nothing: the bitmap is written as zero either way, which is
+// a fix in its own right - the field had never been written at all, and
+// an unwritten VMCS field has no defined value, which is the same defect
+// the CR0 guest/host mask beside it already records.
+//
+// **What it leaves behind if nothing is caught**, said here rather than
+// discovered: the bitmap is disarmed by the capture, so a processor that
+// arms and never faults keeps six vectors intercepted for the rest of
+// the boot, and `build_vmcs02` composes a second-level bitmap as
+// `exception_bitmap01 | vmcs12's`. That is why this is diagnostic-only
+// and default off - a run with it on is not comparable with one without
+// on any processor that reaches a second-level guest.
+inline constexpr bool trap_ap_faults = (0 != ZPP_TRAP_AP_FAULTS);
+
+// The vectors the trap above intercepts. Six, not all thirty-two: an
+// interception this VMM does not expect is one it would have to decide
+// what to do with, and NMI (vector 2) is deliberately excluded because
+// this VMM sends itself NMIs to wake processors and that path is
+// answered by the pin-based control, not by this bitmap.
+inline constexpr std::uint64_t ap_fault_vectors =
+    (1ull << 6) | (1ull << 8) | (1ull << 11) | (1ull << 12) |
+    (1ull << 13) | (1ull << 14);
+
 #ifndef ZPP_HONEST_EXIT_LENGTH
 #define ZPP_HONEST_EXIT_LENGTH 1
 #endif
