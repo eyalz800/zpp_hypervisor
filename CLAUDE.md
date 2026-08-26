@@ -709,6 +709,52 @@ So there is no lie about time left to tell, and the tick rate cannot be
 moved from underneath. What remains is the per-exit cost, which is a
 different question and is not this one.
 
+### The guest always runs with `-no-reboot -no-shutdown`. There is no opt-out
+
+`scripts/rig-boot.sh` adds both unconditionally, and it is the only
+thing in the tree that starts a guest — `rig-boot-test.sh` goes through
+it. `ZPP_ALLOW_REBOOT=1` used to turn it off and is now ignored, with a
+note printed if it is set.
+
+**Why it is unconditional rather than default-on.** The flag existed so
+a run that genuinely needed to reboot through a hardware change could,
+and then every boot of an entire investigation passed it out of habit.
+A switch that is always set is a comment. What that cost:
+
+- A guest that resets **takes its memory with it**, and every reading
+  afterwards is of firmware. Counters go backwards mid-poll (8,687 then
+  8,258 then 8,014 in one run), and a reading taken across a reset is a
+  reading of two different machines.
+- Two post-mortem states were written up as "the failure has two
+  presentations" when the second was most likely the same failure read
+  *after* a reset the opt-out permitted.
+
+With it in force the machine stops at the first reset in
+`paused (shutdown)` with every byte intact, which is the state a
+post-failure read wants.
+
+**A stop is not evidence of a crash.** Going from one processor to two
+is a hardware change Windows reboots for, and that reboot is now a dead
+stop. Read the evidence before calling it a crash, in this order:
+
+1. `scripts/rig-watch-bugcheck.sh [interval] [probes]` polls the monitor
+   and reports the moment the guest stops running, so a failure three
+   minutes in is not indistinguishable from a healthy boot until the end
+   of a nine-minute run. There is no screendump on this rig — the
+   display is a passed-through GPU and QEMU answers "There is no console
+   to take a screendump from" — so the VM's own status is the picture.
+2. The **last exit in this VMM's own ring**. A `triple-fault` tagged
+   `L2` says the second-level guest faulted while faulting; Windows
+   never reached a bugcheck at all, which is why `KiBugCheckData` reads
+   zero in that case.
+3. `KiBugCheckData` **only if** a processor still has Windows' address
+   space current. On a frozen guest both processors are usually in the
+   guest hypervisor's, and the read answers "Cannot access memory" —
+   which is a mapping fact, not evidence about the guest. Walk the page
+   tables physically instead: our own log line `second-level guest
+   kernel image at ..., cr3 ...` gives both the kernel base and Windows'
+   CR3, and `xp` reads each level.
+
 ### Never single-step the guest through QEMU's gdbstub
 
 `stepi` on a guest thread under QEMU/KVM does not just fail, it **destroys what
