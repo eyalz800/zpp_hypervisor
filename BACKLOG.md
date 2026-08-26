@@ -52868,3 +52868,24 @@ in: if the second processor still lives, the invalidation is the fix;
 if it dies, the trap was doing something else and this account is
 wrong.
 
+#### What the two-processor boot settled into
+
+Measured on the same run, three minutes apart: cpu 0 went 29,573 ->
+30,704 and cpu 1 went 25,437 -> 26,562. That is 1,131 and 1,125 exits,
+about six a second each, against roughly ninety a second while it was
+booting.
+
+**A symmetric idle on both processors.** The exit rate collapsing by an
+order of magnitude is the boot finishing; the two counts agreeing to
+within six is a scheduler balancing an idle load across two processors
+that both work. A dead application processor does not tick at all, and
+a live one that never joined the scheduler does not tick *evenly*.
+
+Not the same thing as seeing the login screen - the display is a
+passed-through GPU and `screendump` refuses - so it is recorded as what
+it is. The next boot carries a line logging the guest kernel base and
+CR3 at the first kernel-mode exit, which is what a nested=0 run needs
+before `guest-processes.py` can walk it; under nested=1 that came from
+the second-level kernel image log line, and with nesting off nothing
+prints it.
+
