@@ -51045,3 +51045,44 @@ Two practical notes for anyone repeating this:
   `reftsc` both came out different - so matching the switch manifest
   is required before comparing anything.
 
+### 88% of the application processor's exits are the firmware's parking loop
+
+Its exit profile, with the watch dropped so it survives long enough to
+profile:
+
+    cpu 1 exit reasons (total 7,658)
+      cpuid       6751  88.2%
+      vmwrite      612   8.0%
+      vmread       134   1.7%
+      rdmsr         62   0.8%
+      vmresume      35   0.5%
+
+CPUID dominating, with only 35 second-level entries, first read here as
+"the guest hypervisor is spinning". **It is not.** The leaves are `0x0`,
+`0x1` and `0xb` and the instruction pointers are `0x7ef5fbd5` and
+`0x7ef5fba6` - the UEFI firmware range, not the guest hypervisor's.
+That is EDK2's `MpInitLib` parking loop reading its own APIC id while
+it waits to be woken.
+
+So the processor is adopted by this VMM while still parked in firmware,
+and then spins there taking a VM exit per poll - CPUID exits
+unconditionally in non-root operation and no control turns it off, so
+a loop that costs a hundred cycles on bare hardware costs us an exit,
+about 23 microseconds four levels deep on this rig.
+
+Two things follow:
+
+- **The exit count is not a bring-up cost.** Only about 900 of those
+  7,658 exits are the guest hypervisor doing anything, so "the
+  processor is too slow to bring up" is not supported by this profile
+  and the earlier reading of it was wrong within one turn of being
+  written.
+- **A parked processor is not free here.** It burns an exit per poll
+  for the whole time between adoption and the guest's start-up IPI,
+  on a machine where every exit crosses two hypervisors.
+
+The census that settled it is one `log` line on CPUID for processors
+other than the first, relying on the ring's `[times=N]` collapsing -
+a spin loop costs one line however long it runs. Worth keeping as a
+pattern: **a census of a spin is cheap if the ring deduplicates.**
+
