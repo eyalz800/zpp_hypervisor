@@ -51267,3 +51267,53 @@ intuition this investigation has been running on.
 measured figure for the last start and is readable from the monitor.
 That is the number to get next.
 
+## The stop code, at last: 0xD1 at address 0x2
+
+Read from the guest's own `KiBugCheckData` (RVA `0xf229c0`) with the
+kernel base taken from this VMM's own log line, "second-level guest
+kernel image at ...", so no scanning was needed:
+
+    STOP CODE  0x000000D1   DRIVER_IRQL_NOT_LESS_OR_EQUAL
+    param1     0x2          memory address referenced
+    param2     0xff         IRQL, HIGH_LEVEL
+    param3     0x0          read
+    param4     0x2          instruction pointer that referenced it
+
+**A processor executed at RIP `0x2` and faulted.** And this VMM's own
+exit ring recorded precisely that, on the application processor:
+
+    [962] vmresume  active cs=0x0000 rip=0x2 [l2-rip]
+
+That line was seen days ago and **written off in this file as "the
+stale shadow value of a never-started virtual processor, not a bad
+entry"**. It was not stale. A second-level processor really was
+entered at address 2, and it is what kills Windows.
+
+The lesson is narrow and expensive: an implausible value in a ring is
+not evidence of a benign explanation. `0x2` was dismissed because a
+correct-looking park path existed in the source - the reasoning was
+"`enter_or_park_l2` refuses to enter on wait-for-SIPI, therefore this
+cannot be an entry". Reading the source established what the code
+*should* do and nothing about what it did.
+
+Supporting state at the moment of the crash, all measured:
+
+| | |
+|---|---|
+| boot processor | `HaliHaltSystem+0xc` - post-bugcheck halt |
+| `KiBarrierWait` | `1`, still raised |
+| `KiBootProcessorsStarted` | `0` |
+| `HalpInterruptLastProcessorStartupInMs` | `0` |
+| `HvlEnlightenments` | `0` |
+
+So the 400 ms start deadline was never reached and is **not** what
+killed this boot - the crash comes first. `HvlEnlightenments = 0` is
+now measured rather than inferred, which confirms why the application
+processor's barrier wait degenerates to a bare `pause` spin: with no
+Hyper-V interface advertised, both the `vmcall` and the `hlt` arms of
+that loop are unreachable.
+
+The application processor spinning on a raised `KiBarrierWait` is
+therefore a **consequence**, not the fault: the boot processor died
+before it could release the barrier.
+
