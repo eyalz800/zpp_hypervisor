@@ -53673,3 +53673,49 @@ So the goal needs both:
 
 Recording them as two, because for several sessions they were one.
 
+## The stall is an idle loop, not a slow boot, and the tick machinery is innocent
+
+Thirty-five minutes on two processors with the interception off, so no
+reset interferes: **6,878,916 second-level entries** and
+`Phase1Initialization` still the only scheduled thread. Six point nine
+million entries is not a boot that needs longer.
+
+The synthetic MSR census names the loop, and the proportions are the
+finding:
+
+    cpu 0 synthetic MSRs written (5,052,479)
+      0x40000070   1,599,439   31.7%   EOI
+      0x400000b1   1,599,396   31.7%   STIMER0_COUNT   (re-arm)
+      0x40000071   1,564,320   31.0%   ICR             (self-IPI 0x2f)
+      0x40000084     205,301    4.1%   EOM
+      0x400000b0      84,003    1.7%   STIMER0_CONFIG
+
+Three MSRs within 2% of each other, 1.6 million times each. **One EOI,
+one timer re-arm, one deferred-call request, per clock tick.** That is
+the whole of what the guest does.
+
+### What this rules out, which is most of the last two sessions
+
+- **The tick rate is right.** 1.6 M ticks over the run is ~666 Hz
+  against the guest's own 574.7 Hz constant, inside the error of the
+  wall-clock estimate. Nothing is running the timer fast.
+- **The per-tick cost is small.** 6,878,916 entries over 1,599,396
+  ticks is **4.3 second-level entries per tick**. With shadowing in
+  force, servicing a tick is cheap. The clock path is not saturating
+  anything.
+- **So the guest is not too slow to finish its tick**, which is the
+  reading this file already withdrew once. It finishes easily and then
+  has nothing to do.
+
+**The guest is idling at dispatch level, tick after tick, for
+thirty-five minutes.** Something `Phase1Initialization` is waiting on
+never completes, and the clock loop is what waiting looks like from
+here - not the cause, and not a livelock in our delivery.
+
+That reframes the question again. It is not "why is the deferred-call
+vector rarely delivered" - it is delivered whenever the guest's own
+priority admits it, 2,046 of 2,047 distinct requests. It is **what is
+phase 1 blocked on**, and the honest answer is that nothing in this
+dump measures it: every instrument here watches the interrupt and timer
+path, which is exactly the part that works.
+
