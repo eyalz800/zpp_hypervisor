@@ -50931,3 +50931,52 @@ was not a second field but **a reading that was impossible rather than
 merely surprising** - zero writes on a page that had just faulted four
 times.
 
+## It is the exits, not how they are handled
+
+The cleanest result of this investigation, and it retires the whole
+line of enquiry above it. Three configurations, same binary otherwise,
+two processors:
+
+| the second processor's watched-page writes | it reaches |
+|---|---|
+| emulated (`dropw=0`) | 117 exits, **0** second-level entries, dies |
+| **stepped natively (`apstep=1`)** | **128 exits, 0 entries, dies** |
+| not trapped at all (`dropw=1`) | 977-3,080 exits, 37-169 entries, lives |
+
+`ZPP_STEP_AP_WATCHED_WRITES` exists for exactly this comparison: on,
+processors other than the first take the monitor-trap fallback and
+execute their own instruction, with the watch still armed. They still
+die.
+
+**So the write emulation is exonerated**, and every field of it that
+was checked one at a time - decode, applied offset against decoded
+offset, instruction length against the length the VMCS reports,
+refusals, steps, the host being in xAPIC mode so the store reaches the
+device - was checked for nothing. One comparison of the whole
+mechanism answered what six field checks could not.
+
+What kills the processor is **taking the exits at all**. That is a
+timing result rather than a correctness one, and it accounts for the
+thing that started this: its descriptor table's mapping is installed
+and then torn down four exits later, while still in use, by the guest
+and not by us. A processor being timed out by its partner does exactly
+that.
+
+The lesson worth keeping: when every field of a mechanism measures
+correct and the failure persists, **stop checking fields and compare
+the mechanism against its own absence.** The field checks can only
+find a wrong value; they cannot find a mechanism whose cost is the
+problem.
+
+### What follows
+
+Removing the exits is what the second processor needs, and
+`ZPP_DROP_WATCH_ON_START_UP` does it too bluntly - it drops the watch
+partition-wide, which is why the guest then wedges on a fast-fail. The
+watch is needed on whichever processor *sends* a start-up IPI and is
+pure cost on the one that has just received it. That is a per-processor
+distinction and the shared EPT cannot express it, which is precisely
+the argument for `SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES` - a
+per-VMCS control - recorded earlier from the KVM review and not acted
+on.
+
