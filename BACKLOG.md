@@ -51821,3 +51821,49 @@ in a path that does not report itself, which is its own defect. Off
 again on the rig until that is understood; a switch that trades a
 livelock for a silent stop is not yet a fix.
 
+### What `window_on_tpr` actually dies of, and a second defect behind it
+
+The silent halt is not silent - it is recorded, in a field the dump
+already prints and nobody had read:
+
+    host exception: vector 14 error 0x0 rip 0x671c706b cs 0x8 cr2 0x16d
+
+A page fault **inside this VMM**, error code zero, at a faulting
+address of `0x16d` - and `0x1d7` on the previous run. A tiny, varying
+`cr2` is a bad pointer with a field offset, not a mapping problem.
+
+Symbolised against the **matching** deployed ELF - module base
+`0x67146000`, RVA `0x8106b`:
+
+    zpp::arch::x86_64::vmx::nested_vmlaunch()
+    zpp/arch/x86_64/vmx/asm.h:329
+
+    vmlaunch
+    mov  eax, 0x6008
+    vmread rdi, rax          ; recover the context pointer
+    mov  rsp, [rdi + 0x20]   ; <-- faults
+    call zpp_vmx_nested_entry_failure
+
+So two separate things are wrong:
+
+1. **The nested VM entry fails.** Reaching the fall-through after
+   `vmlaunch` means VMfail, and with the switch off it never happens.
+2. **The recovery path then faults**, because the pointer it reads back
+   out of `cr3_target_value_0` is garbage. That is the worse of the two
+   and is independent of this switch: it converts "tell the guest
+   hypervisor its entry failed" into a dead processor with no log line,
+   so *any* future entry failure is undiagnosable. The field holds
+   `&nested_entry_recovery[cpu]` (`nested_entry.cpp:2460`) and sits in
+   the cached control list (`:600`) **immediately after
+   `tpr_threshold`**, the one field this switch touches.
+
+### And a method note, because it nearly cost the diagnosis
+
+The first symbolisation of that RIP gave
+`hypervisor::enter_root_mode` - a plausible, completely wrong answer.
+`deploy-to-rig.sh` keeps **one** `.rig-deployed-hypervisor.elf`, and
+reverting the switch had already overwritten it with the other build.
+CLAUDE.md warns that the singleton's offsets move when the binary
+changes; the same is true of every symbol in it. **Copy the ELF aside
+per configuration** when A/B-ing, and symbolise against the copy.
+
