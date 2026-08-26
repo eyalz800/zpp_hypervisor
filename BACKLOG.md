@@ -51708,3 +51708,32 @@ passed-through GPU so QEMU refuses a screendump, and no counter in this
 tree distinguishes a booted system from a spinning one - which is
 exactly the mistake made above, repeatedly, in both directions.
 
+### The control: ONE processor stalls at smss.exe too
+
+    ZPP_CPUS=1, 23,045,768 exits, 1,842,990 second-level entries
+    4 processes: System, Secure System, Registry, smss.exe
+
+**So the application processor is not the only blocker, and the entry
+above claiming it was "the single thing between this tree and the
+goal" is wrong.** With one processor there is no application processor
+to wait for, and the guest stalls in exactly the same place.
+
+Two separate problems, then:
+
+1. Whatever stops a **single-processor** guest at the session manager.
+   Twenty-three million exits and it never starts `csrss.exe`.
+2. The application processor, which is additionally broken.
+
+The first is much the more tractable - no second processor, no races,
+no adoption, no shared EPT window - and it is on the path to the goal
+whether or not the second is fixed. It should have been the control
+run at the very start of this investigation; every "healthy on one
+processor" claim above was made without ever asking what the guest had
+actually reached.
+
+The lesson is the cheap one and it was available all along:
+**enumerate the processes.** Exit counts, second-level entry counts,
+task-priority histograms and PASSIVE_LEVEL entries all looked healthy
+in this configuration, and the guest had been stopped in Phase 1 for
+twenty minutes.
+
