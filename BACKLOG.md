@@ -51010,3 +51010,38 @@ paths. Everything else it turned up is either partition-wide by nature
 index (`guest_tr`), or a diagnostic (`vp_assist_l2_physical`, written
 and never read).
 
+### A release build does not fix it, and fails earlier
+
+Since the second processor dies from *taking exits* rather than from
+how they are handled, the obvious test is a build where each exit
+costs less. Our own share is measured: **16,685 cycles inside this VMM
+per exit, 36.1% of wall clock**, on a debug build carrying every
+census, ring and log this investigation added.
+
+Built release with `ZPP_TRACE=ON` and `ZPP_DISARM_APIC_WATCH=ON` so
+the switches match debug. Two processors, read from the monitor:
+
+    CPU#1  EIP=00001efb  EFL=00000046  CPL=0  (16-bit real mode)
+           EDX=000806eb  ESP=00004efa
+
+Frozen there across samples. `EDX=0x000806eb` is exactly what
+`apply_start_up` writes, so the processor *was* started by us and is
+executing low-memory trampoline code - it never reaches long mode at
+all, where the debug build gets it to 117 exits of Hyper-V code.
+
+So a faster build is **worse**, and it exposes a second, earlier
+fragility: the trampoline hand-over itself. The debug log reports that
+step as "came up on the trampoline after 0xcbe attempts", which is a
+spin with a retry count - exactly the shape that changes behaviour when
+timing changes.
+
+Two practical notes for anyone repeating this:
+
+- **A release build cannot be read by `rig-dump-state.py`**: no DWARF,
+  so it reports `could not read all offsets ... got []` and every
+  counter is unavailable. The QEMU monitor still works and is how the
+  above was read.
+- The release preset's defaults differ from debug - `apicoff` and
+  `reftsc` both came out different - so matching the switch manifest
+  is required before comparing anything.
+
