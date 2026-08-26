@@ -52361,3 +52361,64 @@ nesting, no guest hypervisor, roughly a thousand exits, one processor
 adopted and one triple fault, with every byte still readable because
 the guest is frozen rather than reset.
 
+## The queued start-up is replayed onto a processor that has already started
+
+The instrument names it outright, `nested=0`, two processors:
+
+    [ 30] start-up applied on cpu 0x2 vector 0x87 by launch
+          first-launch 0x1, application 0x1
+    [295] start-up applied on cpu 0x2 vector 0x87 by queued
+          first-launch 0x0, application 0x2
+
+**Applied twice, and the second time by the `queued` path.** By then
+the processor has long since started and reached long mode - nine of
+its exits were emulated watched-page writes, which this VMM only
+performs after a decode it refuses unless the guest is in long mode -
+so `apply_start_up` sends a running 64-bit processor back to real mode
+at `vector << 12`, a page that no longer holds a trampoline. It
+executes whatever is there, far jumps to `0x178:0x10000`, and triple
+faults one past a 64 KB segment.
+
+`ZPP_APPLY_QUEUED_START_UP=OFF`, everything else equal:
+
+| | boot processor exits | outcome |
+|---|---|---|
+| `qstart=1` | 969 | **guest resets**, frozen at `paused (shutdown)` |
+| `qstart=0` | **235,552** | **runs, and reaches `winlogon.exe`** |
+
+    60 processes: System, Registry, smss.exe, csrss.exe, wininit.exe,
+    csrss.exe, services.exe, lsass.exe, winlogon.exe, fontdrvhost x2,
+    WUDFHost, IntelCpHDCPSvc, taskhostw.exe, MemCompression,
+    igfxCUIService, svchost.exe x40 ...
+
+So **the login screen is now reached with two processors configured**,
+where before the guest reset in under a thousand exits.
+
+### But multicore is still not achieved, and the difference matters
+
+The application processor **still triple faults on its first run** -
+`cs 0x0030 rip 0x16fe`, early in Windows' own start-up code - and
+halts in `zpp::arch::x86_64::halt()` with 111 exits. Windows then
+carries on with one usable processor.
+
+What `qstart=0` fixed is the *second* failure, not the first: the
+replay used to send an already-running processor back to real mode and
+take the whole machine down with it. Removing it turns a machine-wide
+reset into a processor that fails quietly, which is exactly the trade
+recorded earlier in this file - *a processor that fails loudly is
+worse than one that fails quietly, when the alternative is a guest
+that boots without it* - only this time the quiet failure comes with a
+login screen.
+
+The remaining defect is the first-run triple fault, and it is now the
+only thing between this tree and the goal.
+
+### Note on the earlier A/B of this same switch
+
+`ZPP_APPLY_QUEUED_START_UP` was measured once before and recorded as
+**load-bearing** - off gave one process, on gave six. That run was
+`nested=1`. With `nested=0` the sign is reversed and it is actively
+harmful. Neither measurement is wrong; the switch simply does
+different things in the two configurations, which is what a switch
+whose A/B was only ever run once looks like.
+
