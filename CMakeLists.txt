@@ -298,6 +298,10 @@ option(ZPP_WATCH_VTL_BLOCK
     "Watch the IUM context block for writes. See cmake/hypervisor/CMakeLists.txt."
     OFF)
 
+option(ZPP_TRACE_AP_ENTRY
+    "Log the whole guest state at an application processor's first VM entry, at every application of the start-up state, and at any triple fault. See cmake/hypervisor/CMakeLists.txt."
+    OFF)
+
 option(ZPP_ANNOUNCE_HYPERVISOR_BIT
     "Set CPUID leaf 1 ECX bit 31 without the hypervisor block. See cmake/hypervisor/CMakeLists.txt."
     OFF)
@@ -414,6 +418,7 @@ ExternalProject_Add(hypervisor
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_INVEPT_ALL_PROCESSORS=${ZPP_INVEPT_ALL_PROCESSORS}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
+        -DZPP_TRACE_AP_ENTRY=${ZPP_TRACE_AP_ENTRY}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
@@ -529,6 +534,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_TRACE_VTL=${ZPP_TRACE_VTL}
         -DZPP_INVEPT_ALL_PROCESSORS=${ZPP_INVEPT_ALL_PROCESSORS}
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
+        -DZPP_TRACE_AP_ENTRY=${ZPP_TRACE_AP_ENTRY}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}

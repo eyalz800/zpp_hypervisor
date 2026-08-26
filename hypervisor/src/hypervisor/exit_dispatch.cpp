@@ -2344,6 +2344,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             context.rip,
             vmcs.guest_cs_selector());
 
+        // The whole state, and before the walks below - which read guest
+        // memory and can themselves fail, so a dump placed after them is
+        // a dump that goes missing precisely when it is wanted.
+        //
+        // The same dump this processor's first entry produced, and the
+        // same one `apply_start_up` produces every time it applies the
+        // start-up state, so the three can be read in sequence and the
+        // difference between them is what the guest did. See
+        // `nested_vmx::trace_ap_entry` for why that sequence is the
+        // question here.
+        if constexpr (nested_vmx::trace_ap_entry) {
+            trace_guest_state(cpuid, "triple-fault");
+        }
+
         // **The descriptor state, because a triple fault is a statement
         // about it.** The processor got here by faulting on the way into
         // its own double-fault handler, so the interrupt descriptor

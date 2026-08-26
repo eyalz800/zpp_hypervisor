@@ -133,6 +133,144 @@ hypervisor::enter_root_mode(std::size_t cpu)
     return {};
 }
 
+void hypervisor::trace_guest_state(std::size_t cpu, const char * where)
+{
+    // Compiled either way and reached only with the switch on. `return`
+    // rather than wrapping the body, so the cost with it off is one
+    // constant-folded branch and the body still has to compile - which is
+    // what keeps a diagnostic from rotting while it is switched off.
+    if constexpr (!nested_vmx::trace_ap_entry) {
+        static_cast<void>(cpu);
+        static_cast<void>(where);
+        return;
+    } else {
+        auto & vmcs = this->vmcs;
+
+        // One line per subject, because the ring truncates a long line
+        // and a truncated field is indistinguishable from a zero one -
+        // a trap this tree has already recorded once.
+        //
+        // The count first, and on every dump. A reader that finds a
+        // triple-fault dump has to be told, in the same breath, whether
+        // this instrument ever saw an application processor at all:
+        // zero here is "no application processor was ever entered", which
+        // is a different failure and not this one.
+        log("zpp-state {} cpu {}: ap first entries traced {} - zero means "
+            "no application processor was ever entered",
+            where,
+            cpu + 1,
+            this->ap_entry_traces);
+
+        log("zpp-state {} cpu {}: rip {} rsp {} rflags {}",
+            where,
+            cpu + 1,
+            vmcs.guest_rip(),
+            vmcs.guest_rsp(),
+            vmcs.guest_rflags());
+
+        log("zpp-state {} cpu {}: cr0 {} shadow {} cr3 {}",
+            where,
+            cpu + 1,
+            vmcs.guest_cr0(),
+            vmcs.cr0_read_shadow(),
+            vmcs.guest_cr3());
+
+        log("zpp-state {} cpu {}: cr4 {} shadow {} efer {} dr7 {}",
+            where,
+            cpu + 1,
+            vmcs.guest_cr4(),
+            vmcs.cr4_read_shadow(),
+            vmcs.guest_ia32_efer(),
+            vmcs.guest_dr7());
+
+        // The three fields that decide whether the *next* entry can
+        // happen at all, and the one that says which mode it will be in.
+        // A guest state that looks perfect and an entry control that
+        // disagrees with it is a VM-entry failure rather than anything
+        // the segments below would explain.
+        log("zpp-state {} cpu {}: activity {} interruptibility {} "
+            "entry-controls {} pending-dbg {}",
+            where,
+            cpu + 1,
+            vmcs.guest_activity_state(),
+            vmcs.guest_interruptibility_state(),
+            vmcs.vm_entry_controls(),
+            vmcs.guest_pending_debug_exceptions());
+
+        log("zpp-state {} cpu {}: cs {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_cs_selector(),
+            vmcs.guest_cs_base(),
+            vmcs.guest_cs_limit(),
+            vmcs.guest_cs_access_rights());
+
+        log("zpp-state {} cpu {}: ss {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_ss_selector(),
+            vmcs.guest_ss_base(),
+            vmcs.guest_ss_limit(),
+            vmcs.guest_ss_access_rights());
+
+        log("zpp-state {} cpu {}: ds {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_ds_selector(),
+            vmcs.guest_ds_base(),
+            vmcs.guest_ds_limit(),
+            vmcs.guest_ds_access_rights());
+
+        log("zpp-state {} cpu {}: es {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_es_selector(),
+            vmcs.guest_es_base(),
+            vmcs.guest_es_limit(),
+            vmcs.guest_es_access_rights());
+
+        log("zpp-state {} cpu {}: fs {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_fs_selector(),
+            vmcs.guest_fs_base(),
+            vmcs.guest_fs_limit(),
+            vmcs.guest_fs_access_rights());
+
+        log("zpp-state {} cpu {}: gs {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_gs_selector(),
+            vmcs.guest_gs_base(),
+            vmcs.guest_gs_limit(),
+            vmcs.guest_gs_access_rights());
+
+        log("zpp-state {} cpu {}: ldtr {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_ldtr_selector(),
+            vmcs.guest_ldtr_base(),
+            vmcs.guest_ldtr_limit(),
+            vmcs.guest_ldtr_access_rights());
+
+        log("zpp-state {} cpu {}: tr {} base {} limit {} ar {}",
+            where,
+            cpu + 1,
+            vmcs.guest_tr_selector(),
+            vmcs.guest_tr_base(),
+            vmcs.guest_tr_limit(),
+            vmcs.guest_tr_access_rights());
+
+        log("zpp-state {} cpu {}: gdtr {}/{} idtr {}/{}",
+            where,
+            cpu + 1,
+            vmcs.guest_gdtr_base(),
+            vmcs.guest_gdtr_limit(),
+            vmcs.guest_idtr_base(),
+            vmcs.guest_idtr_limit());
+    }
+}
+
 void hypervisor::apply_start_up(arch::x86_64::context & context,
                                 std::uint64_t vector,
                                 const char * from,
@@ -396,6 +534,27 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
 
     // Runnable again.
     vmcs.guest_activity_state(arch::x86_64::vmx::activity_state::active);
+
+    // **Which application of the start-up state this was.** The state
+    // itself is not in doubt - `cr0 0x30 cr3 0x0 cr4 0x2000` is what the
+    // writes above produce and nothing else in this tree produces it -
+    // but *when* it was applied is, and a second application sends a
+    // processor that is already running the operating system back to a
+    // page that may no longer hold the trampoline the guest put there.
+    // The caller's name, the vector and the count are what separate the
+    // two, and they exist nowhere else.
+    if constexpr (nested_vmx::trace_ap_entry) {
+        if (auto cpu = vmcs.vpid() - 1; cpu < max_cpus) {
+            log("start-up applied on cpu {} vector {} by {} "
+                "first-launch {}, application {}",
+                cpu + 1,
+                vector,
+                from,
+                static_cast<std::uint64_t>(first_launch),
+                this->start_up_applied[cpu]);
+            trace_guest_state(cpu, "start-up-applied");
+        }
+    }
 
     // Adopted, so the watch that adopted it has done its work. See
     // `nested_vmx::drop_watch_on_start_up`: left armed it charges this

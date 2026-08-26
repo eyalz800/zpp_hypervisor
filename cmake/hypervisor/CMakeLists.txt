@@ -150,6 +150,10 @@ option(ZPP_WATCH_VTL_BLOCK
     "Watch the IUM context block for writes and record who makes them. The second-level guest loops on a state byte that never changes, and polling cannot distinguish nothing-writes-it from a-write-is-lost - those want opposite fixes. Costs an EPT violation per write to a live kernel stack page."
     OFF)
 
+option(ZPP_TRACE_AP_ENTRY
+    "Log the whole guest state - every segment selector, base, limit and access-rights field, the control registers and their read shadows, IA32_EFER, RFLAGS, RIP, RSP, both descriptor tables, and the activity, interruptibility and entry-control fields - at an application processor's first VM entry, at every application of the INIT-plus-start-up state, and at any triple fault. Observational: it writes log lines and changes no VMCS field, so an A/B is still one variable. Off by default because the ring is shared with every other investigation. Self falsifying: the boot processor prints `ap-entry instrument armed` at its own launch and every dump carries the count of application-processor first entries, so `zero` at a triple fault says no application processor was ever entered rather than leaving that indistinguishable from silence. See nested_vmx.h."
+    OFF)
+
 option(ZPP_ANNOUNCE_HYPERVISOR_BIT
     "Set CPUID leaf 1 ECX bit 31 - you are virtualized - without advertising a hypervisor interface block. The bit and the block are different claims: the block makes Windows' hypervisor stand down, the bit decides which VBS path it takes. See nested_vmx.h."
     OFF)
@@ -313,6 +317,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_TRACE_VTL=$<BOOL:${ZPP_TRACE_VTL}>
     -DZPP_INVEPT_ALL_PROCESSORS=$<BOOL:${ZPP_INVEPT_ALL_PROCESSORS}>
     -DZPP_WATCH_VTL_BLOCK=$<BOOL:${ZPP_WATCH_VTL_BLOCK}>
+    -DZPP_TRACE_AP_ENTRY=$<BOOL:${ZPP_TRACE_AP_ENTRY}>
     -DZPP_ANNOUNCE_HYPERVISOR_BIT=$<BOOL:${ZPP_ANNOUNCE_HYPERVISOR_BIT}>
     # **Three switches added in one session never reached the compiler
     # because they were declared in the top-level CMakeLists, forwarded

@@ -2398,4 +2398,55 @@ inline constexpr bool invept_all_processors =
 
 inline constexpr bool watch_vtl_block = (0 != ZPP_WATCH_VTL_BLOCK);
 
+#ifndef ZPP_TRACE_AP_ENTRY
+#define ZPP_TRACE_AP_ENTRY 0
+#endif
+
+/**
+ * Whether the **whole** guest state is written to the log at the moments
+ * an application processor's life turns over: its first VM entry, every
+ * application of the INIT-plus-start-up state, and any triple fault.
+ *
+ * Observational only - nothing here changes a VMCS field, an exit
+ * decision or a control - so a run with it on is comparable with one
+ * without, unlike most of the switches above. What it costs is log
+ * lines, about a dozen per event, and the events are rare: one per
+ * processor per start.
+ *
+ * ### Why it exists
+ *
+ * The two-processor failure this was written for is a triple fault on
+ * the application processor with
+ *
+ *     cr0 0x30 cr3 0x0 cr4 0x2000 efer 0x0 rsp 0x5 ss 0x0
+ *     rip 0x10000 cs 0x178
+ *
+ * The first line is, character for character, what `apply_start_up`
+ * writes - `extension_type | numeric_error`, a zero CR3 and CR4 holding
+ * nothing but VMXE - and nothing else in this tree writes that triple.
+ * The second line cannot come from `apply_start_up` at all: it writes
+ * `vector << 8` into CS, whose low byte is therefore always zero, and
+ * `0x178` is not of that shape. So the state was applied and *then* the
+ * guest ran, and the one thing the log could not say is **which
+ * application it was** - the first, out of `main`, or a later one out of
+ * an INIT and a start-up IPI, at a vector that may no longer hold the
+ * trampoline the guest put there.
+ *
+ * That question is what the trace answers, and it answers it without a
+ * debugger: the log survives the freeze, and `-no-reboot -no-shutdown`
+ * leaves the guest frozen rather than reset.
+ *
+ * **Self-falsifying.** The boot processor prints `ap-entry instrument
+ * armed` at its own launch, so the switch being compiled in is visible
+ * even when no application processor is ever started, and every state
+ * dump carries the count of application-processor first entries - a
+ * count of zero at a triple fault says outright that no application
+ * processor was ever entered, which is a different failure from the one
+ * being chased and must not be read as it.
+ *
+ * Off by default: it is a diagnostic, and a diagnostic left on writes
+ * into a ring that other investigations need.
+ */
+inline constexpr bool trace_ap_entry = (0 != ZPP_TRACE_AP_ENTRY);
+
 } // namespace zpp::hypervisor::nested_vmx

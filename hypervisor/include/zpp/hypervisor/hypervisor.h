@@ -2002,6 +2002,27 @@ private:
                         bool first_launch = false);
 
     /**
+     * Writes the whole of this processor's guest state into the log, with
+     * `where` naming the moment.
+     *
+     * Every segment's selector, base, limit and access rights; the four
+     * control registers and both read shadows; IA32_EFER, RFLAGS, RIP and
+     * RSP; both descriptor tables; and the activity, interruptibility and
+     * IA-32e-mode-guest fields that decide whether the next entry can
+     * happen at all.
+     *
+     * Behind `nested_vmx::trace_ap_entry`, and inert with it off. Must be
+     * called on the processor whose VMCS is current, which is every one of
+     * its call sites: the launch, `apply_start_up`, and the triple-fault
+     * case of the exit handler.
+     *
+     * The first line it writes is the count of application-processor first
+     * entries, so a dump can never be read without the answer to "did this
+     * instrument ever see an application processor at all" beside it.
+     */
+    void trace_guest_state(std::size_t cpu, const char * where);
+
+    /**
      * Handles an intercepted write to the x2APIC interrupt command
      * register, and returns the command to actually issue - or nothing,
      * when the write must be swallowed instead of passed on.
@@ -9618,6 +9639,26 @@ private:
      * watched page and the other does not. */
     std::uint64_t emulated_writes_by_cpu[max_cpus]{};
     std::uint64_t stepped_writes_by_cpu[max_cpus]{};
+
+    /**
+     * How many application processors have had their first VM entry
+     * traced, and which of them already has.
+     *
+     * The count is what makes `nested_vmx::trace_ap_entry` self
+     * falsifying: it is printed beside every state dump, and zero at a
+     * triple fault means no application processor was ever entered - a
+     * different failure from one that was entered and died, and one that
+     * would otherwise look identical in a log.
+     *
+     * Zero when the switch is off, which is why the "armed" line at the
+     * boot processor's launch exists to tell the two apart.
+     * @{
+     */
+    std::uint64_t ap_entry_traces{};
+    bool ap_entry_traced[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * Whether a watched page's writes are carried out through the full

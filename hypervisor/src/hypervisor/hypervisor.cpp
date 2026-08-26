@@ -7489,6 +7489,30 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // can be compared at all.
     log("launching guest on virtual processor {}", vmcs.vpid());
 
+    // The instrument, and the line that makes it self falsifying.
+    //
+    // The boot processor's "armed" line is what separates "the switch is
+    // off" from "the switch is on and no application processor was ever
+    // entered". Those two produce the same silence otherwise, and one of
+    // them is a finding about the machine while the other is a finding
+    // about the build - a distinction this tree has already paid for
+    // twice, in ZPP_VERIFY_HYPERVISOR and in ZPP_PUBLISH_REFERENCE_TSC.
+    //
+    // Here rather than in `apply_start_up`, because this is the last
+    // point before the first VM entry: every field the entry will consume
+    // has been written by now, including the start-up state applied
+    // above.
+    if constexpr (nested_vmx::trace_ap_entry) {
+        if (0 == cpuid) {
+            log("ap-entry instrument armed; no application processor has "
+                "been entered yet");
+        } else if ((cpuid < max_cpus) && !this->ap_entry_traced[cpuid]) {
+            this->ap_entry_traced[cpuid] = true;
+            this->ap_entry_traces = this->ap_entry_traces + 1;
+            trace_guest_state(cpuid, "ap-first-entry");
+        }
+    }
+
     // The exit dispatch itself is `on_vm_exit`, in exit_dispatch.cpp.
     //
     // It was this lambda's body, seventeen hundred lines of it, and the

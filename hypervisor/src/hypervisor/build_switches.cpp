@@ -295,6 +295,17 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // guest, so a run with it on describes a different machine.
         ' ', 'n', 'o', 'v', 'i', 'n', 'a', '=',
         digit(nested_vmx::suppress_vina),
+        // The application-processor state trace. Observational, so it
+        // cannot change what the guest sees - but it is the difference
+        // between a log that says which application of the start-up
+        // state killed a processor and one where that question has no
+        // answer at all, and a reader who finds no `zpp-state` lines
+        // must be able to tell "the switch was off" from "no
+        // application processor was ever entered". This field is the
+        // first half of that; the `ap-entry instrument armed` line the
+        // boot processor writes at its own launch is the second.
+        ' ', 'a', 'p', 'e', 'n', 't', 'r', 'y', '=',
+        digit(nested_vmx::trace_ap_entry),
         '\0'};
 
 } // namespace zpp::hypervisor
