@@ -52178,3 +52178,52 @@ because without that each module name costs four monitor round trips
 and the walk outlasts the boot; kernel space maps through very few
 tables, so the cache turns minutes into seconds.
 
+## The control, at last: without us this Windows reaches the login screen
+
+`ZPP_CHAINLOAD_ONLY=ON` - our own loader runs, installs nothing, and
+chainloads Windows. Same disk, same launcher, same QEMU flags, same
+firmware, one processor. The only variable is whether this hypervisor
+is resident.
+
+    60 processes: System, Secure System, Registry, smss.exe, csrss.exe,
+    wininit.exe, csrss.exe, services.exe, LsaIso.exe, lsass.exe,
+    winlogon.exe, fontdrvhost, fontdrvhost, dwm.exe, WUDFHost.exe,
+    MemCompression, igfxCUIService, ctfmon.exe, taskhostw.exe,
+    dasHost.exe, sedlauncher.exe, svchost.exe x30 ...
+
+**`winlogon.exe` and `dwm.exe` are running. That is the login screen.**
+
+| | processes | reaches |
+|---|---|---|
+| chainload only | **60** | `winlogon.exe`, `dwm.exe` |
+| hypervisor resident | 4 | stalls at `smss.exe` |
+
+Three things this settles, and it should have been run on day one:
+
+- **The goal is achievable on this rig.** The image boots, the
+  passed-through NVMe serves a full boot, the firmware and NVRAM are
+  fine. Nothing about the environment prevents a login screen.
+- **The fault is entirely ours.** Not the guest, not the disk, not
+  KVM, not the launcher.
+- **There is now a reference for success**: sixty processes with
+  `winlogon.exe` among them. Every "the guest looks healthy" claim in
+  the entries above was made against no reference at all, which is
+  precisely why several of them were wrong.
+
+Two things had to be fixed before the control could even be run, and
+both are worth keeping:
+
+- `rig-boot.sh` hardcoded `boot-zpp.sh`; it now takes `ZPP_LAUNCHER`.
+- The stock `boot.sh` **does not work on this rig** - it invokes
+  `qemu-system-x86_64` and these runs use `qemu-system-x86_64-new` -
+  so the plain-KVM control CLAUDE.md refers to has not been runnable
+  for some time. `ZPP_CHAINLOAD_ONLY` is the better control anyway,
+  because it holds every other variable fixed.
+- `guest-processes.py` needed the page-table cache the module walker
+  already had, or a sixty-process walk outlasts its own timeout.
+
+`check-bootable.sh` refuses a chainload-only loader by default and that
+is right - it would silently measure bare Windows and every number
+would be a lie. `ZPP_ALLOW_CHAINLOAD_ONLY=1` is the deliberate
+override, and the real loader was restored immediately afterwards.
+

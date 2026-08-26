@@ -55,16 +55,31 @@ def xp_b(phys, n):
     return bytes(int(x,16) for x in re.findall(r'0x([0-9a-f]{2})', d))
 
 CR3 = int(sys.argv[2], 16) & 0x000ffffffffff000
+_ENTRY = {}
 def v2p(va):
+    """Translate through Windows' own page tables, caching each level.
+
+    The cache is what makes this usable: without it every address costs
+    four monitor round trips, and a walk of the process list outlasts
+    the boot it is meant to describe. Kernel space maps through very few
+    tables, so the hit rate is nearly total.
+    """
     t = CR3
-    for lvl, sh in ((0,39),(1,30),(2,21),(3,12)):
-        e = xp_q(t + ((va >> sh) & 0x1ff) * 8)
-        if not e or not (e[0] & 1): return None
-        if lvl < 3 and (e[0] & 0x80):
+    for lvl, sh in ((0, 39), (1, 30), (2, 21), (3, 12)):
+        key = (t, (va >> sh) & 0x1ff)
+        e0 = _ENTRY.get(key)
+        if e0 is None:
+            e = xp_q(t + ((va >> sh) & 0x1ff) * 8)
+            if not e:
+                return None
+            e0 = e[0]
+            _ENTRY[key] = e0
+        if not (e0 & 1):
+            return None
+        if lvl < 3 and (e0 & 0x80):
             mask = (1 << sh) - 1
-            return (e[0] & 0x000fffffffe00000 & ~mask) | (va & mask) if sh==21 else \
-                   (e[0] & 0x000fffffc0000000) | (va & mask)
-        t = e[0] & 0x000ffffffffff000
+            return (e0 & ~mask & 0x000fffffffffffff) | (va & mask)
+        t = e0 & 0x000ffffffffff000
     return t | (va & 0xfff)
 
 base = int(sys.argv[1], 16)
