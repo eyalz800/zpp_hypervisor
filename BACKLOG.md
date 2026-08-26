@@ -52586,3 +52586,51 @@ bug.
 Not yet confirmed. Every other SDM 27.3.1 field needs checking too,
 which is what the running audit is for.
 
+## The long-mode fix is right, and the failure moves one step further on
+
+**Correction first, and it is mine:** `CR4.PCIDE` is **clear**.
+`0x352e78` sets DE, PSE, PAE, MCE, OSFXSR, OSXMMEXCPT, UMIP, VMXE,
+FSGSBASE, OSXSAVE, SMEP and SMAP - bit 17 is not among them, so SDM
+29.3.1.1's PCIDE check passes and my prime suspect was wrong. The
+record alignment I worked out by hand was right; only that decode was
+not.
+
+The failing check is **SDM 29.3.1.1** (`.references/sdm.txt:202424`):
+with `load IA32_EFER` set, the field's LMA "must also be identical to
+bit 8 (LME) if bit 31 in the CR0 field is 1". Windows' stub sets LME
+with a `WRMSR` that **does not exit** - the exit ring shows *zero*
+exits between the start-up IPI and the control-register access - and
+then enables paging. The CR0 handler wrote PG through and touched
+neither `ia_32e_mode_guest` nor LMA, so the entry presented LME 1,
+LMA 0, PG 1.
+
+Also worth keeping, because it makes the obvious shortcut wrong:
+**reading IA32_EFER in root mode does not tell you the guest's LME.**
+With no load-IA32_EFER VM-*exit* control anywhere here, SDM 30.5
+(`:204822`) loads host EFER.LME from the host address-space size
+control, which is 1 - so `RDMSR` reports LME set on every processor
+regardless of the guest. Only the VMCS field is authoritative, and
+only with `save_ia32_efer` on.
+
+And the CR0 exit that exposed all this was **luck**: the guest/host
+mask was NE alone, and Windows' CR0 happens to set NE. A stub that had
+set NE earlier would have enabled paging with no exit at all. CR0.PG
+now joins the mask.
+
+### Result: the entry is accepted, and the guest now dies executing
+
+    [109] sipi          qual=0x1  active  cs=0x0100 rip=0x0
+    [110] cr-access               active  cs=0x0030 rip=0x16fe
+    [111] triple-fault            active  cs=0x0030 rip=0x16fe
+
+The refusal is gone - no `vm_entry_failure` this run - and the failure
+is now a **triple fault at the same instruction**. So the processor is
+entered legally and faults executing, which is a different problem
+from the one just fixed and one step further along.
+
+Five defects have now been found and fixed on this path, all measured:
+the bogus exit instruction length, `jc` catching only half of VMX
+failure, the queued start-up replayed onto a running processor, EFER
+surviving INIT, and the long-mode switch going untracked. The
+application processor gets further after each. It is not yet running.
+
