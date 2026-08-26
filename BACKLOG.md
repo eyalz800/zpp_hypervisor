@@ -51143,3 +51143,44 @@ condition is already satisfied. A frozen RIP on a satisfied loop means
 the samples are landing in a hot path the processor keeps re-entering,
 not that it is stuck at one instruction.
 
+### The application processor is reset back to firmware, and spins there
+
+Two measurements that together retire "the processor is slow" and
+"the processor is stuck in `KiInitializeKernel`", both said above.
+
+**It burns full CPU while taking almost no exits.** Per-thread times
+on the host, same run:
+
+    CPU 0/KVM   utime 0  stime 35,971
+    CPU 1/KVM   utime 0  stime 52,496
+
+The application processor's thread has *more* CPU time than the boot
+processor's while producing about six exits a second. So it is neither
+halted nor descheduled - it is spinning at full speed in code that
+takes no exits.
+
+**And it has gone back to firmware.** Sampled over about forty
+seconds it alternates between
+
+    RIP 0x7fb6b030  CR3 0x7fb6a000
+    RIP 0x7ef5faf1  CR3 0x7fc01000
+
+Both firmware contexts, and `0x7ef5faf1` sits beside the UEFI
+`MpInitLib` parking-loop instruction pointers measured earlier in the
+same boot. So the sequence is: adopted by this VMM, started, reaches
+Windows' `KiInitializeKernel`, and is then **reset back to firmware** -
+which is what an INIT does - where it spins in a pause-style loop that
+takes no exits, unlike the CPUID-based one.
+
+That reframes the question from "why is it slow" to **"who INITs it
+after it has started"**. Candidates worth separating: Windows or the
+guest hypervisor abandoning a processor that missed a deadline, this
+VMM's own INIT emulation firing spuriously, or a start-up IPI being
+applied twice.
+
+Also worth keeping: a sample is a sample. It was recorded as "frozen
+at `KiInitializeKernel+0x8b1` across every sample" one turn before
+this, and forty seconds later it was somewhere else entirely. Sampling
+a processor three times over ten seconds does not establish that it is
+stuck.
+
