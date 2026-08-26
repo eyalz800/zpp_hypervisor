@@ -3562,6 +3562,47 @@ def main():
                "vtl_block_writer_rip", "vtl_block_write_address",
                "vtl_block_write_value"]
     off = gdb_offsets(args.elf, members)
+    # The start-up and local-APIC state, which this reader has been
+    # carrying offsets for and printing nowhere.
+    #
+    # **This is the gap that made a whole class of failure unreadable.**
+    # A dump taken after a guest hypervisor tried to start its second
+    # virtual processor showed an INIT and a start-up IPI as the last two
+    # records in the target's exit ring and then nothing - and not one
+    # number in the dump said whether this VMM had seen the interrupt
+    # command that produced them, whether it swallowed it, queued it,
+    # handed it over or passed it to hardware, or whether the target then
+    # halted on an unhandled exit or a refused VM entry. Every one of
+    # those is a member of the singleton and was already in memory.
+    #
+    # Optional and merged rather than added to `members`, because that
+    # call is not optional: a name a deployed binary predates would take
+    # the whole dump down instead of one section.
+    off.update(gdb_offsets(args.elf, [
+        "ipi_last_command", "ipi_init_seen", "ipi_start_up_seen",
+        "ipi_refused_shorthand", "ipi_refused_logical",
+        "apic_page_commands_filtered", "apic_writes_undecoded",
+        "watched_apic_page", "all_processors_started",
+        "unresponsive_processors", "number_of_known_processors",
+        "processor_virtualized", "started_by_guest_start_up_ipi",
+        "start_up_launched", "resume_activity_state",
+        "queued_start_up", "start_up_handoff",
+        # What this VMM did to the guest's own clock. `guest_tick_floored`
+        # is the count of times the second-level guest's periodic timer
+        # count was replaced with the floor - so a run with the switch on
+        # and this counter at zero changed nothing, and a run with it
+        # non-zero is not a run of an honest configuration.
+        "guest_tick_floored", "guest_timer_stretched",
+        # The third permission reading. `vtl_protect_host_perms` is our
+        # own first-level table and `shadow_ept_lookup` is the composed
+        # shadow; those two are *meant* to differ. Only the guest
+        # hypervisor's own eptp12 says whether it asked for the
+        # protection that is installed - see nested_entry.cpp, which
+        # records it and calls it "the only reading that separates 'it
+        # protected them' from 'our composition is wrong'".
+        "vtl_protect_guest_perms", "vtl_protect_guest_status",
+        "vtl_protect_status_seen",
+    ], optional=True))
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
     # Derived from the type rather than carried here, for the reason
@@ -3820,7 +3861,41 @@ def main():
     monitor.queue(instance + off["unhandled_exit"], 19)
     if "ap_fault" in off:
         monitor.queue(instance + off["ap_fault"], 14)
-    monitor.queue(instance + off["vm_entry_failure"], 6)
+    # Eighteen words, which is every member the record has. Six was the
+    # number when this line was written and the record has since grown the
+    # activity and interruptibility state, the entry controls, the code
+    # segment and - the fields that matter for a processor that dies at
+    # its start-up IPI - `cpu`, `virtual_processor`, `from_trampoline` and
+    # `start_up_vector`. Reading six of eighteen is how a refused VM entry
+    # on an application processor reads as no record at all.
+    monitor.queue(instance + off["vm_entry_failure"], 18)
+    # Scalars, one word each.
+    for name in ("ipi_last_command", "ipi_init_seen", "ipi_start_up_seen",
+                 "ipi_refused_shorthand", "ipi_refused_logical",
+                 "apic_page_commands_filtered", "apic_writes_undecoded",
+                 "watched_apic_page", "unresponsive_processors",
+                 "number_of_known_processors"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    # Byte arrays and a single byte. `max_cpus` of them fit in one word,
+    # which is why these are read as one word and unpacked rather than
+    # indexed - reading `processor_virtualized[cpu]` as a quadword reads
+    # eight processors' flags and calls them one.
+    for name in ("processor_virtualized", "started_by_guest_start_up_ipi",
+                 "start_up_launched", "all_processors_started"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    for name in ("resume_activity_state", "queued_start_up",
+                 "start_up_handoff", "guest_tick_floored",
+                 "guest_timer_stretched"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("vtl_protect_guest_perms", "vtl_protect_guest_status"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus * 8)
+    if "vtl_protect_status_seen" in off:
+        monitor.queue(instance + off["vtl_protect_status_seen"],
+                      args.cpus * 16)
     for cpu in range(args.cpus):
         monitor.queue(instance + off["exit_trace"] + cpu * ring * entry_size,
                       ring * entry_size // 8)
@@ -4504,12 +4579,28 @@ def main():
                 for k, pf in enumerate(pfns):
                     hp = read('vtl_protect_host_perms', (cpu * 8) + k) or 0
                     hs = read('vtl_protect_host_status', (cpu * 8) + k) or 0
+                    # Three tables, not two, and the third is the one
+                    # that decides. `hp` is our own first-level table,
+                    # which maps guest RAM read-write-execute by
+                    # construction and is *supposed* to disagree with a
+                    # protected shadow - so "ours GRANT write" on its own
+                    # is not a finding. `gp` is the guest hypervisor's
+                    # own eptp12: it agreeing with the shadow means this
+                    # VMM installed what was asked for, and it
+                    # disagreeing means the composition is wrong.
+                    gp = read('vtl_protect_guest_perms', (cpu * 8) + k)
+                    gs = read('vtl_protect_guest_status', (cpu * 8) + k)
+                    guest = ("" if gp is None else
+                             f"  eptp12: status {gs} perms "
+                             f"{NAMES.get(gp & 7, '?')}"
+                             + ("   <- AGREES: the guest hypervisor asked "
+                                "for this" if (gp & 7) == 1 else
+                                "   <- DISAGREES with the shadow: our "
+                                "composition, not its request"))
                     print(f"            0x{pf:x}  shadow r--   "
                           f"our own tables: status {hs} perms "
                           f"{NAMES.get(hp & 7, '?')}"
-                          + ("   <- OURS drops write too"
-                             if (hp & 2) == 0 else
-                             "   <- ours GRANT write; the shadow does not"))
+                          f"{guest}")
             print(f"        last frame status {read('vtl_protect_pfn_status', cpu)} "
                   f"perms 0x{read('vtl_protect_pfn_perms', cpu):x}")
         print("      the first exit after a protection answer, by reason:")
@@ -4974,6 +5065,106 @@ def main():
               f"{read('host_exception', 1):x} rip 0x{read('host_exception', 2):x} "
               f"cs 0x{read('host_exception', 3):x} cr2 0x"
               f"{read('host_exception_cr2', 0):x}")
+
+    # **Why a processor stopped, which nothing above can say.**
+    #
+    # `record_exit` runs on the resume path, so a processor that never
+    # resumes leaves no ring entry - and the two records that *are*
+    # written immediately before it stops were read by this script and
+    # printed by none of it. A ring whose last entry is a start-up IPI
+    # followed by silence is exactly the case these settle, and without
+    # them "it took the IPI and executed nothing" and "it took the IPI
+    # and was refused entry" are the same picture.
+    u_reason = read('unhandled_exit', 1)
+    if read('unhandled_exit', 0):
+        print(f"\nUNHANDLED EXIT - a processor stopped here")
+        print(f"  reason 0x{u_reason:x} qualification 0x"
+              f"{read('unhandled_exit', 2):x} "
+              f"linear 0x{read('unhandled_exit', 3):x}")
+        print(f"  rip 0x{read('unhandled_exit', 4):x} "
+              f"cs 0x{read('unhandled_exit', 5):x} "
+              f"cr0 0x{read('unhandled_exit', 11):x} "
+              f"cr3 0x{read('unhandled_exit', 15):x} "
+              f"cr4 0x{read('unhandled_exit', 12):x} "
+              f"efer 0x{read('unhandled_exit', 13):x}")
+        print(f"  gdtr 0x{read('unhandled_exit', 6):x}/"
+              f"0x{read('unhandled_exit', 7):x} "
+              f"idtr 0x{read('unhandled_exit', 8):x}/"
+              f"0x{read('unhandled_exit', 9):x} "
+              f"cs ar 0x{read('unhandled_exit', 10):x}")
+        print(f"  rdi 0x{read('unhandled_exit', 16):x} "
+              f"rsi 0x{read('unhandled_exit', 17):x} "
+              f"rsp 0x{read('unhandled_exit', 18):x}")
+    elif u_reason is not None:
+        print("\nunhandled exit: never - no processor stopped on one")
+
+    if read('vm_entry_failure', 0):
+        print(f"\nVM ENTRY FAILURE - a processor was refused entry")
+        print(f"  cpu {read('vm_entry_failure', 14)} "
+              f"vp {read('vm_entry_failure', 15)} "
+              f"from-trampoline {read('vm_entry_failure', 16)} "
+              f"start-up vector {read('vm_entry_failure', 17)}")
+        print(f"  reason 0x{read('vm_entry_failure', 1):x} "
+              f"qualification 0x{read('vm_entry_failure', 2):x} "
+              f"instruction error {read('vm_entry_failure', 3)}")
+        print(f"  activity {read('vm_entry_failure', 4)} "
+              f"interruptibility 0x{read('vm_entry_failure', 5):x} "
+              f"entry controls 0x{read('vm_entry_failure', 6):x}")
+        print(f"  cr0 0x{read('vm_entry_failure', 7):x} "
+              f"cr4 0x{read('vm_entry_failure', 8):x} "
+              f"rflags 0x{read('vm_entry_failure', 9):x} "
+              f"rip 0x{read('vm_entry_failure', 10):x} "
+              f"cs 0x{read('vm_entry_failure', 11):x} "
+              f"base 0x{read('vm_entry_failure', 12):x} "
+              f"ar 0x{read('vm_entry_failure', 13):x}")
+    elif read('vm_entry_failure', 1) is not None:
+        print("vm entry failure: never - no entry was refused")
+
+    # What this VMM saw of the guest's own interrupt command register,
+    # and what it did about each start-up sequence.
+    if 'ipi_init_seen' in off:
+        print("\nstart-up IPIs, as this VMM saw them")
+        print(f"  local apic page watched at 0x{read('watched_apic_page'):x}"
+              + ("   <- NOT WATCHED: no xAPIC interrupt command reaches "
+                 "this VMM" if not read('watched_apic_page') else ""))
+        print(f"  commands decoded off the page {read('apic_page_commands_filtered'):,}"
+              f"  undecoded writes {read('apic_writes_undecoded'):,}")
+        print(f"  INIT seen {read('ipi_init_seen'):,}   "
+              f"start-up seen {read('ipi_start_up_seen'):,}   "
+              f"refused broadcast {read('ipi_refused_shorthand'):,}   "
+              f"refused logical {read('ipi_refused_logical'):,}")
+        print(f"  last command written 0x{read('ipi_last_command'):x}")
+        print(f"  processors known to this VMM "
+              f"{read('number_of_known_processors')}   "
+              f"unresponsive at an EPT rendezvous "
+              f"{read('unresponsive_processors'):,}")
+        virt = read('processor_virtualized') or 0
+        bysipi = read('started_by_guest_start_up_ipi') or 0
+        launched = read('start_up_launched') or 0
+        print("  cpu  virtualized  by-guest-sipi  launched  "
+              "activity  queued-vector  hand-off")
+        for cpu in range(args.cpus):
+            print(f"  {cpu:3d}  {(virt >> (8 * cpu)) & 1:11d}  "
+                  f"{(bysipi >> (8 * cpu)) & 1:13d}  "
+                  f"{(launched >> (8 * cpu)) & 1:8d}  "
+                  f"{read('resume_activity_state', cpu):8d}  "
+                  f"0x{read('queued_start_up', cpu):11x}  "
+                  f"0x{read('start_up_handoff', cpu):x}")
+        print("  activity 3 is wait-for-SIPI; a queued vector still set "
+              "is one this VMM swallowed and never delivered")
+
+    # Whether this run told the guest the truth about its own clock.
+    if 'guest_tick_floored' in off:
+        floored = sum((read('guest_tick_floored', c) or 0)
+                      for c in range(args.cpus))
+        stretched = sum((read('guest_timer_stretched', c) or 0)
+                        for c in range(args.cpus))
+        print(f"\nthe guest's periodic timer count, rewritten by this VMM: "
+              f"floored {floored:,}, stretched {stretched:,}"
+              + ("   <- this run is NOT an honest configuration; "
+                 "BACKLOG/CLAUDE.md record that lying about the tick "
+                 "ends in a bugcheck or a shutdown"
+                 if (floored or stretched) else "   <- untouched"))
 
     # The refusal, by number, before anything else. `l2_entries` at zero
     # with `exits` climbing is a second level that never started, and

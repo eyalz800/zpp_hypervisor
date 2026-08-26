@@ -318,19 +318,18 @@ class QueuedRecordLengths(unittest.TestCase):
             "the unhandled_exit record has members, so the tail of the "
             "record is missing or the read runs into what follows it")
 
-    @unittest.expectedFailure
     def test_vm_entry_failure_word_count(self):
-        """Known wrong, and recorded rather than fixed here.
+        """Was queued as 6 words against a record of 18, and is not now.
 
-        The record is queued as 6 words and has considerably more. It is
-        harmless today only because nothing reads past the sixth, which is
-        precisely the state the exit-reason stride was in before somebody
-        looked at a second processor.
+        The decorator this used to carry said "turns red when the script
+        is fixed, which is the moment to delete the decorator", and that
+        is what happened: the reader now queues the whole record, so the
+        four fields nobody could see - `cpu`, `virtual_processor`,
+        `from_trampoline` and `start_up_vector` - are readable.
 
-        Marked expected-failure rather than deleted: a test that asserts
-        the wrong number would be a second copy of the bug, and a test
-        that skips says nothing. This one turns red when the script is
-        fixed, which is the moment to delete the decorator.
+        Those four are exactly what a processor that fails entry after a
+        start-up IPI writes, so the record was blind in the one case it
+        exists for.
         """
         members = cxx_member_words(self.header, "vm_entry_failure")
         self.assertEqual(self._queued_words("vm_entry_failure"),
