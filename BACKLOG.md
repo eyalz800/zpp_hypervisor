@@ -53620,3 +53620,56 @@ could be applied to a sequence the guest had already satisfied. Neither
 was the blocker, and both have negative controls in the test suite so
 they cannot silently rot.
 
+## Two independent failures, finally separated: the reset is ours, the stall is not
+
+`-DZPP_INTERCEPT_APIC=OFF`, two processors, nesting on. **The machine
+does not reset.** `VM status: running`, 995,005 second-level entries and
+climbing, where every previous two-processor boot ended in
+`paused (shutdown)`.
+
+    apic=1, 2 cpus:   paused (shutdown), reproducibly, five boots
+    apic=0, 2 cpus:   running
+
+So **the reset is caused by this VMM's own APIC and start-up-IPI
+interception**, and nothing else. That was the highest-discrimination
+single boot available and it came back positive.
+
+The cost is stated rather than hidden: with the interception off, cpu 1
+records **0 exits** - it came up outside this VMM, unvirtualized. So
+this is a diagnosis, not the goal. It says *where* the defect is; it
+does not meet the requirement, which is two processors **virtualized**.
+
+### The evidence that pointed here, from the census
+
+    cpu 0 ept-violation 363,839  57.9% of all its exits
+    cpu 0 ept-violation pages: 0xfee00000  90.0%
+    INIT seen 3   start-up seen 3
+
+Two things. The boot processor was spending **58% of its exits** on EPT
+violations against the watched local APIC page - against 3.8-5.5% in
+every one-processor run. And **Hyper-V sent three INIT/SIPI pairs**
+while cpu 1 recorded `init 1, sipi 1`: two whole bring-up attempts were
+consumed inside our interception.
+
+With the watch off, EPT violations fall to 11.9% and the reset is gone.
+
+### The stall is a different failure and survives this
+
+    cpu 0, apic=0, 2 cpus: still Phase1Initialization, 995,005 entries
+
+`Phase1Initialization` is still the only scheduled thread, exactly as in
+every one-processor run. **Phase 1 not completing is independent of the
+APIC interception, of the processor count, and of the reset.** It is
+also independent of VMCS shadowing, of the tick floor, and of `evmk`,
+each of which moved other things and not this.
+
+So the goal needs both:
+
+1. the interception fixed so two processors can be virtualized without
+   the guest hypervisor's bring-up being eaten - now localised to
+   `interrupt_command.cpp` / `start_up.cpp` / `local_apic_write.cpp`,
+2. phase 1 completing at all, which is present with one processor and
+   has never depended on any of it.
+
+Recording them as two, because for several sessions they were one.
+
