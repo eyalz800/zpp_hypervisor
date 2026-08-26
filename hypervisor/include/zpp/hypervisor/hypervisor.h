@@ -10360,6 +10360,15 @@ private:
         std::uint64_t guest_ia32_efer{};
         std::uint64_t entry_controls{};
         std::uint64_t guest_cr3{};
+
+        /* The general-purpose registers the faulting instruction was
+         * addressing through. The application processor dies on
+         * `jmp far [rdi+0x66]`, and whether that operand is reachable
+         * cannot be asked without RDI. Filled from the exit context by
+         * the caller, since on_unhandled_exit is not given one. */
+        std::uint64_t guest_rdi{};
+        std::uint64_t guest_rsi{};
+        std::uint64_t guest_rsp{};
     } unhandled_exit{};
 
     /**

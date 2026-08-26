@@ -2613,6 +2613,9 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // says to read first - so a second member would duplicate
         // the weaker half of the evidence.
         record_exit(cpuid, full_reason, context);
+        this->unhandled_exit.guest_rdi = context.rdi;
+        this->unhandled_exit.guest_rsi = context.rsi;
+        this->unhandled_exit.guest_rsp = context.rsp;
         on_unhandled_exit(full_reason);
         break;
     }
@@ -2780,7 +2783,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         bool re_execute = true;
         if (!on_io_instruction(context, re_execute)) {
             record_exit(cpuid, full_reason, context);
-            on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rdi = context.rdi;
+            this->unhandled_exit.guest_rsi = context.rsi;
+            this->unhandled_exit.guest_rsp = context.rsp;
+            this->unhandled_exit.guest_rdi = context.rdi;
+        this->unhandled_exit.guest_rsi = context.rsi;
+        this->unhandled_exit.guest_rsp = context.rsp;
+        on_unhandled_exit(full_reason);
             break;
         }
 
@@ -2839,7 +2848,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // it wrote.
         if (((0 != number) && (4 != number)) || (0 != access)) {
             record_exit(cpuid, full_reason, context);
-            on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rdi = context.rdi;
+            this->unhandled_exit.guest_rsi = context.rsi;
+            this->unhandled_exit.guest_rsp = context.rsp;
+            this->unhandled_exit.guest_rdi = context.rdi;
+        this->unhandled_exit.guest_rsi = context.rsi;
+        this->unhandled_exit.guest_rsp = context.rsp;
+        on_unhandled_exit(full_reason);
             break;
         }
 
@@ -3187,7 +3202,13 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // MTF exit with no step in progress means someone else
             // set it and there is no correct way to continue.
             record_exit(cpuid, full_reason, context);
-            on_unhandled_exit(full_reason);
+            this->unhandled_exit.guest_rdi = context.rdi;
+            this->unhandled_exit.guest_rsi = context.rsi;
+            this->unhandled_exit.guest_rsp = context.rsp;
+            this->unhandled_exit.guest_rdi = context.rdi;
+        this->unhandled_exit.guest_rsi = context.rsi;
+        this->unhandled_exit.guest_rsp = context.rsp;
+        on_unhandled_exit(full_reason);
         }
         advance_rip = false;
         break;
@@ -3839,6 +3860,9 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // the resume below would advance RIP past an instruction that
         // never took effect.
         record_exit(cpuid, full_reason, context);
+        this->unhandled_exit.guest_rdi = context.rdi;
+        this->unhandled_exit.guest_rsi = context.rsi;
+        this->unhandled_exit.guest_rsp = context.rsp;
         on_unhandled_exit(full_reason);
     }
     }
