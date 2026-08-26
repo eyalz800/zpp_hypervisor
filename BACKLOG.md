@@ -51399,3 +51399,49 @@ enter with".
   `l2_entry_outcome::entered`, `record_l2_entry_event` and
   `running_l2[cpu] = true` each have exactly one site.
 
+## The entry at linear 2 is on the BOOT processor, in long mode
+
+The census that records the segment a lowest-RIP entry is an offset
+into, over a full boot:
+
+    cpu 0 entered-at census: agreed 90,350, differed 0, lowest 0x2
+    cpu 0 lowest-rip entry, at entry 90,233: rip 0x2, long mode
+        vmcs02 cs 0x0010 base 0x0 limit 0x0 ar 0x209b
+        vmcs02 cr0 0x80050033
+        vmcs12 cs 0x0010 base 0x0 cr0 0x80050033
+        vmcs02 CARRIES EXACTLY what vmcs12 asked for
+        linear entry address 0x2 (base + rip)
+
+Four things settled at once, and two of them retract entries above:
+
+- **It is long mode with CS `0x10`, not a real-mode start-up.** The
+  "RIP 0 and 2 are the expected first moments of a processor started
+  by a start-up IPI" reading is therefore wrong for this entry. It is
+  an ordinary second-level guest, running normally, resumed at 2.
+- **The segment state is innocent.** vmcs02 carries exactly what
+  vmcs12 asked for, and a separate audit established no stale base can
+  survive: every base is in `guest_state_fields`, the per-field
+  deferral only elides a write the guest hypervisor did not dirty, and
+  VMPTRLD/VMCLEAR/VMXOFF all flush before invalidating.
+- **It is the boot processor**, at entry 90,233 of ~90,350 - so this
+  happens once, late, after tens of thousands of correct entries. Not
+  a bring-up problem at all. Everything above that reads this as an
+  application-processor start-up failure has the wrong processor.
+- **vmcs12's own guest RIP field held 2**, and this VMM maintains that
+  shadow. So the corruption is ours, one level up from where it was
+  being looked for.
+
+`0 + 2` is the obvious arithmetic: a guest RIP of zero advanced by a
+two-byte VM-exit instruction length. That is the hypothesis under test
+next; it is not yet established.
+
+### A correction to the architectural premise, worth keeping
+
+SDM 29.3.1.2 requires a segment base to equal `selector << 4` only
+where **RFLAGS.VM is 1**, not where CR0.PE is 0. For an unrestricted
+real-mode guest the base and the selector are independent VMCS fields
+and a mismatch is legal - VM entry will not reject it. So "the guest
+runs at linear RIP instead of `vector << 12 | RIP`" is a shape the
+hardware would never have caught for us, and the only way to see it is
+to record both fields, which is what that census now does.
+
