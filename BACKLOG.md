@@ -52634,3 +52634,38 @@ failure, the queued start-up replayed onto a running processor, EFER
 surviving INIT, and the long-mode switch going untracked. The
 application processor gets further after each. It is not yet running.
 
+### The faulting instruction is the far jump, not the CR0 write
+
+Read straight out of guest memory at the address the record names -
+`unhandled_exit` holds `reason 0x2`, `guest_rip 0x16fe`,
+`cs_selector 0x30`, and with CS base 0 that is linear `0x16fe`:
+
+    0x16f3:  0f 30        wrmsr                  <- sets IA32_EFER.LME, never exits
+    0x16fb:  0f 22 c0     mov cr0, eax           <- the control-register exit
+    0x16fe:  ff 6f 66     jmp far [rdi+0x66]     <- triple faults
+
+So the sequence in the guest's own stub is exactly the canonical
+mode switch - set LME, enable paging, far jump to reload CS - and it
+is **the far jump** that dies, not the CR0 write we now handle.
+
+That is a much sharper target. A far jump loads a code selector from a
+descriptor table, so what has to be right at that instant is the
+GDTR we present and the descriptor it points at, along with the CS
+access rights and the long-mode state the new selector implies. The
+`mov cr0` before it is now handled correctly - the entry after it is
+accepted, which it was not before the long-mode fix.
+
+Two notes on method, since both cost time here:
+
+- **The log ring wraps long before it can be read.** The application
+  processor fails inside its first 112 exits and the boot processor
+  then takes two hundred thousand, so the triple-fault diagnostics -
+  which do exist and did print earlier - are evicted even from a dump
+  taken four minutes in. The **records** survive: `unhandled_exit`
+  and `vm_entry_failure` are members, read at the singleton plus a
+  DWARF member offset, and they answered immediately both times the
+  log could not.
+- **Reading the guest's own instruction bytes ends the guessing.**
+  Three iterations described this failure by register state alone. One
+  `xp` at the faulting address named the instruction.
+
