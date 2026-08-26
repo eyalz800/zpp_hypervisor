@@ -2244,6 +2244,77 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     if (cpu < max_cpus) {
         auto rip = this->vmcs.guest_rip();
 
+        // And whether that is the address vmcs12 asked for.
+        //
+        // **The one question the table below cannot answer.** It records
+        // which addresses the second-level guest is entered at, and every
+        // address in it reads as an ordinary number whether the level
+        // above chose it or this VMM composed it. Read against vmcs12 the
+        // pair either agrees or it does not, and a disagreement is proof
+        // - not evidence - that vmcs02 was entered somewhere nobody asked
+        // for. See `l2_entry_rip_agreed`.
+        //
+        // Free on the path that agrees: `rip` is already in hand for the
+        // table, and `vmcs12::read` is a subscript into module memory
+        // rather than a VMREAD. The three VMCS reads in the record below
+        // are paid once per processor and only when it fires.
+        auto rip12 = this->guest_vmcs12[cpu].read(
+            arch::x86_64::vmx::vmcs::field::guest_rip);
+
+        if (rip == rip12) {
+            this->l2_entry_rip_agreed[cpu] =
+                this->l2_entry_rip_agreed[cpu] + 1;
+        } else {
+            this->l2_entry_rip_differed[cpu] =
+                this->l2_entry_rip_differed[cpu] + 1;
+
+            if (0 == this->l2_entry_rip_mismatch[cpu].occurred) {
+                auto & record = this->l2_entry_rip_mismatch[cpu];
+
+                record.entries = this->l2_entries[cpu];
+                record.rip02 = rip;
+                record.rip12 = rip12;
+                record.activity12 = this->guest_vmcs12[cpu].read(
+                    arch::x86_64::vmx::vmcs::field::guest_activity_state);
+                record.cs_selector = this->vmcs.guest_cs_selector();
+                record.cs_base = this->vmcs.guest_cs_base();
+                record.hot_state_rip = this->hot_state_saved[cpu][0];
+                record.hot_state_valid_then =
+                    this->hot_state_valid[cpu] ? 1 : 0;
+                record.vmcs12_address = this->guest_current_vmcs[cpu];
+
+                // Last, so a reader that finds it set finds the rest
+                // filled in.
+                record.occurred = 1;
+
+                log("cpu {} second level entered at {} while vmcs12 "
+                    "asked for {}, activity {}",
+                    cpu,
+                    rip,
+                    rip12,
+                    record.activity12);
+                log("cpu {} entered-at mismatch: cs {} base {}, hot rip "
+                    "{} valid {}, vmcs12 {}",
+                    cpu,
+                    record.cs_selector,
+                    record.cs_base,
+                    record.hot_state_rip,
+                    record.hot_state_valid_then,
+                    record.vmcs12_address);
+            }
+        }
+
+        // The smallest address ever entered at, and the flag that makes
+        // a zero in it readable. See `l2_entry_rip_lowest`: without the
+        // flag, zero-initialised storage says "entered at zero" and
+        // "never entered" with the same word.
+        if (0 == this->l2_entry_rip_lowest_seen[cpu]) {
+            this->l2_entry_rip_lowest_seen[cpu] = 1;
+            this->l2_entry_rip_lowest[cpu] = rip;
+        } else if (rip < this->l2_entry_rip_lowest[cpu]) {
+            this->l2_entry_rip_lowest[cpu] = rip;
+        }
+
         // Cleared every so often, so the table describes a *recent*
         // window rather than the first eight addresses of the boot.
         //

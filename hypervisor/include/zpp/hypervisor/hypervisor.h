@@ -5847,6 +5847,97 @@ private:
                                              [l2_entry_rip_slots]{};
     volatile std::uint64_t l2_entry_rip_other[max_cpus]{};
 
+    /**
+     * Whether the address a second-level guest is *entered* at is the
+     * address vmcs12 asked to be entered at, asked on every entry.
+     *
+     * **Two fields, and the point is that they may disagree.** The table
+     * above records the addresses entered at, and a table of addresses
+     * cannot tell one the level above chose from one composed here -
+     * both read as perfectly ordinary numbers. This VMM has exactly one
+     * place that writes vmcs02's guest RIP from vmcs12,
+     * `build_vmcs02`'s `put_hot(0, ...)`, and that write is *elided*
+     * whenever `hot_state_saved` claims vmcs02 already holds the value;
+     * it also has a resume path that advances the same field by
+     * `vm_exit_instruction_length`, which SDM 30.2.5 leaves undefined
+     * for every exit outside its list. Either one going wrong enters the
+     * guest at an address nothing asked for, and neither leaves any
+     * other trace.
+     *
+     * So the two are compared where the answer is still checkable:
+     * vmcs02 is current, its guest state is loaded, and the cached
+     * vmcs12 is a memory read away. `agreed` and `differed` sum to the
+     * entry count, which is what makes this self-falsifying - `differed`
+     * reading zero beside a large `agreed` states "this never happens"
+     * as loudly as the alternative states the opposite.
+     *
+     * `lowest` is the smallest address ever entered at, and
+     * `lowest_seen` is what makes a zero in it mean something:
+     * zero-initialised storage cannot otherwise tell "entered at address
+     * zero" from "never entered at all", and separating those two is
+     * half of what this member is for.
+     * @{
+     */
+    volatile std::uint64_t l2_entry_rip_agreed[max_cpus]{};
+    volatile std::uint64_t l2_entry_rip_differed[max_cpus]{};
+    volatile std::uint64_t l2_entry_rip_lowest[max_cpus]{};
+    volatile std::uint64_t l2_entry_rip_lowest_seen[max_cpus]{};
+    /** @} */
+
+    /**
+     * The first entry on each processor whose address vmcs02 held was
+     * not the address vmcs12 asked for, in full.
+     *
+     * One per processor and only the first, for the reason the log ring
+     * gives everywhere else: the failure being chased repeats, and a
+     * record that is overwritten describes the last repeat rather than
+     * the one that explains the boot. Check `occurred` first - every
+     * other field is meaningless until it is set.
+     *
+     * The three VMCS reads below are paid **once per processor and only
+     * on a mismatch**, so an entry path that never mismatches costs two
+     * loads and a compare.
+     */
+    struct l2_entry_rip_record
+    {
+        std::uint64_t occurred;
+
+        /** `l2_entries` when it happened, so the record can be placed
+         *  against the exit ring and the table above. */
+        std::uint64_t entries;
+
+        /** What vmcs02 was about to run. */
+        std::uint64_t rip02;
+
+        /** What vmcs12 asked for. */
+        std::uint64_t rip12;
+
+        /** vmcs12's activity state, which is what says whether this
+         *  virtual processor was ever started: 3 is wait-for-SIPI, and
+         *  a vmcs12 in it carries no meaningful RIP at all. */
+        std::uint64_t activity12;
+
+        /** The segment the address is in, so that a real-mode start-up
+         *  entry - CS base non-zero, RIP small - is not read as a
+         *  corrupt one. @{ */
+        std::uint64_t cs_selector;
+        std::uint64_t cs_base;
+        /** @} */
+
+        /** What `build_vmcs02`'s elision believed vmcs02 held, and
+         *  whether it believed anything: together they say whether the
+         *  write was skipped and on what grounds. @{ */
+        std::uint64_t hot_state_rip;
+        std::uint64_t hot_state_valid_then;
+        /** @} */
+
+        /** Which vmcs12 it was, so a record names a virtual processor
+         *  rather than a slot. */
+        std::uint64_t vmcs12_address;
+    };
+
+    l2_entry_rip_record l2_entry_rip_mismatch[max_cpus]{};
+
     /** What the guest hypervisor arms as its TPR threshold, by value.
      * All zero means it never asks to be told, so the undelivered
      * dispatch vector is its business rather than this VMM's. */

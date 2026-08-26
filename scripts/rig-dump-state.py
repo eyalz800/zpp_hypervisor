@@ -630,6 +630,86 @@ def dump_entry_rips(args, elf, instance):
             print(f"  0x{rip:016x}  {count:>10}  "
                   f"{100.0 * count / total:5.1f}%")
 
+    dump_entry_rip_agreement(args, elf, instance)
+
+
+def dump_entry_rip_agreement(args, elf, instance):
+    """Whether the guest was entered where vmcs12 asked it to be.
+
+    The table above cannot answer this: an address composed here reads
+    exactly like an address the level above chose.  `differed` reading
+    zero beside a large `agreed` is the statement "this never happens",
+    and it is meant to be as readable as the alternative - so this
+    prints on every dump, including the one where nothing is wrong.
+
+    `lowest_seen` is what makes a zero `lowest` mean something.  Without
+    it, "entered at address zero" and "never entered at all" are the
+    same word in zero-initialised storage.
+    """
+    members = ["l2_entry_rip_agreed", "l2_entry_rip_differed",
+               "l2_entry_rip_lowest", "l2_entry_rip_lowest_seen",
+               "l2_entry_rip_mismatch"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates the census.  Lose the section,
+        # not the dump.
+        return
+
+    fields = ["occurred", "entries", "rip02", "rip12", "activity12",
+              "cs_selector", "cs_base", "hot_state_rip",
+              "hot_state_valid_then", "vmcs12_address"]
+    stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_rip_mismatch[0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in members[:4]:
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["l2_entry_rip_mismatch"],
+                 args.cpus * stride // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    ACTIVITY_NAME = {0: "active", 1: "hlt", 2: "shutdown",
+                     3: "wait-for-sipi"}
+
+    for cpu in range(args.cpus):
+        agreed = word("l2_entry_rip_agreed", cpu)
+        differed = word("l2_entry_rip_differed", cpu)
+        if not word("l2_entry_rip_lowest_seen", cpu):
+            print(f"\ncpu {cpu} entered-at census: no second-level entry "
+                  f"was ever made")
+            continue
+
+        lowest = word("l2_entry_rip_lowest", cpu)
+        verdict = ("NEVER entered anywhere vmcs12 did not ask for"
+                   if 0 == differed else
+                   f"*** {differed:,} entries at an address vmcs12 did "
+                   f"NOT ask for ***")
+        print(f"\ncpu {cpu} entered-at census: agreed {agreed:,}, "
+              f"differed {differed:,}, lowest 0x{lowest:x}")
+        print(f"  {verdict}")
+
+        base = (instance + off["l2_entry_rip_mismatch"] + cpu * stride)
+        record = {name: got.get(base + 8 * i, 0)
+                  for i, name in enumerate(fields)}
+        if not record["occurred"]:
+            continue
+
+        activity = record["activity12"]
+        print(f"  first mismatch at entry {record['entries']:,}: "
+              f"vmcs02 rip 0x{record['rip02']:x}, "
+              f"vmcs12 asked 0x{record['rip12']:x}")
+        print(f"    vmcs12 activity {activity} "
+              f"({ACTIVITY_NAME.get(activity, '?')}), "
+              f"cs 0x{record['cs_selector']:04x} "
+              f"base 0x{record['cs_base']:x}")
+        print(f"    hot-state rip 0x{record['hot_state_rip']:x} "
+              f"valid {record['hot_state_valid_then']}, "
+              f"vmcs12 0x{record['vmcs12_address']:x}")
+
 
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.

@@ -4551,6 +4551,29 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
         // true of the other two inactive states, which is why only they
         // are refused or held.
         vmcs.write(field::guest_activity_state, activity12);
+
+        // **And the record of what vmcs02 holds, or the next elision
+        // compares against a value nothing ever wrote.**
+        //
+        // `hot_state_saved` is documented as "what vmcs02's guest-state
+        // fields actually hold", and `build_vmcs02`'s `put_hot(4, ...)`
+        // skips its write whenever slot 4 already reads `active`. That
+        // put `active` into the record a few hundred instructions ago;
+        // the line above then wrote `hlt` into the field and left the
+        // record still saying `active`. The two outcomes that follow a
+        // build without reaching this line - a refusal and a
+        // wait-for-SIPI park - leave that disagreement standing.
+        //
+        // Benign today only because this same line rewrites the field on
+        // every entered path, so an elided write is always followed by a
+        // correct one. That is a property of the call order rather than
+        // of the record, and the record is what the next reader trusts.
+        // The identical break for slot 3 is argued at length in
+        // `save_l2_state`, where it was reachable and wrong.
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][4] = activity12;
+        }
+
         record_l2_entry_event(cpu);
         return l2_entry_outcome::entered;
     }
@@ -9391,6 +9414,23 @@ hypervisor::on_l2_exit(std::size_t cpu,
     //
     // No RIP advance - a TPR-below-threshold exit happens at an
     // instruction boundary and retires nothing.
+    //
+    // **And the assignment that says so, which this comment claimed and
+    // did not make.** `advance_rip` arrives here holding its default of
+    // `true`, so returning `handled` without clearing it sent
+    // `resume_guest` down its advancing branch with **vmcs02 current**:
+    // `context.rip += vm_exit_instruction_length()` and then
+    // `vmcs.guest_rip(context.rip)`, which moves the second-level
+    // guest's instruction pointer past an instruction it never executed.
+    //
+    // What it moves by is not a length at all. SDM 30.2.5 lists the
+    // exits for which the VM-exit instruction-length field is defined
+    // and ends "All VM exits other than those listed in the above items
+    // leave this field undefined" (`.references/sdm.txt:204135`); a
+    // TPR-below-threshold exit is on none of those items, so the field
+    // holds whatever the last instruction-caused exit left in it. Every
+    // other `handled` return in this function assigns the flag; this was
+    // the one that relied on a comment.
     if constexpr (nested_vmx::window_on_tpr) {
         if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
             (basic_reason::tpr_below_threshold == reason.basic())) {
@@ -9399,6 +9439,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
             this->window_granted_on_drop[cpu] += 1;
             this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
 
+            advance_rip = false;
             return l2_exit_outcome::handled;
         }
     }
