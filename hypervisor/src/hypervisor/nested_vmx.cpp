@@ -1108,10 +1108,23 @@ void hypervisor::flush_guest_vmcs12(std::size_t cpu)
     // could do about it - the instruction that provoked the flush has
     // already been decided - and the address was validated when it became
     // current, so a failure here means the guest unmapped its own VMCS.
-    static_cast<void>(write_guest_physical(
+    //
+    // **Not reported is not the same as not counted.** This write is the
+    // only thing that persists a vmcs12, and the region is the only copy
+    // of one between the processor that had it and the processor that
+    // asks for it next - so a failure here is indistinguishable, from
+    // every later reader, from a vmcs12 whose RIP was always zero. See
+    // `note_vmcs12_flush`.
+    auto written = write_guest_physical(
         this->guest_current_vmcs[cpu],
         std::span(reinterpret_cast<const std::byte *>(&shadow),
-                  sizeof(shadow))));
+                  sizeof(shadow)));
+
+    note_vmcs12_flush(
+        cpu,
+        this->guest_current_vmcs[cpu],
+        shadow.read(arch::x86_64::vmx::vmcs::field::guest_rip),
+        written.has_value());
 }
 
 bool hypervisor::on_guest_vmclear(std::size_t cpu,
@@ -1356,19 +1369,30 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     // this is the fourth and last writer of vmcs12's RIP, and it is the
     // one that can carry a value neither level wrote in this VMM's
     // lifetime - the region is whatever `flush_guest_vmcs12` left there.
-    if (auto rip12 = loaded.read(
-            arch::x86_64::vmx::vmcs::field::guest_rip);
-        rip12 < low_rip_threshold) {
-        note_low_guest_rip(
-            cpu,
-            low_rip_source::loaded_by_vmptrld,
-            this->guest_vmcs12[cpu].read(
-                arch::x86_64::vmx::vmcs::field::guest_rip),
-            rip12,
-            0,
-            0,
-            *pointer);
+    auto rip12 = loaded.read(arch::x86_64::vmx::vmcs::field::guest_rip);
+    auto rip12_before =
+        this->guest_vmcs12[cpu].read(arch::x86_64::vmx::vmcs::field::guest_rip);
+
+    if (rip12 < low_rip_threshold) {
+        note_low_guest_rip(cpu,
+                           low_rip_source::loaded_by_vmptrld,
+                           rip12_before,
+                           rip12,
+                           0,
+                           0,
+                           *pointer);
     }
+
+    // And the region's own history, which `low_rip_source` cannot carry:
+    // whether *this* VMM ever managed to write this region, and which
+    // processor did it last. A low RIP loaded out of a region no flush
+    // ever succeeded on is a vmcs12 that migrated between processors
+    // through a page nobody filled; a low RIP loaded out of a region
+    // whose last successful flush persisted a high one is memory
+    // disagreeing with what was written. Those want opposite fixes and
+    // are indistinguishable without the second field. See
+    // `note_vmcs12_load`.
+    note_vmcs12_load(cpu, *pointer, rip12, rip12_before);
 
     this->guest_vmcs12[cpu] = loaded;
     set_guest_current_vmcs(cpu, *pointer);

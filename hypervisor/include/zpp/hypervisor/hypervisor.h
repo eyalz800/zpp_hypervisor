@@ -6508,6 +6508,599 @@ private:
     }
     /** @} */
 
+    /**
+     * The exit information a reflection hands the guest hypervisor, and
+     * the region traffic that decides what vmcs12 holds by the time it
+     * is handed one.
+     *
+     * **Two questions, one census, because either alone confirms
+     * itself.** The instrument above watches what this VMM *serves* a
+     * VMREAD and established that it never served an address below one
+     * page. That leaves exactly two ways the guest hypervisor can end up
+     * asking for a second-level entry at 0 or 2:
+     *
+     * - it computed one, and the only number a hypervisor adds to a RIP
+     *   is the VM-exit instruction length. SDM 30.2.5 defines that field
+     *   for a listed set of exits and says in as many words that "all VM
+     *   exits other than those listed in the above items leave this field
+     *   undefined" (`.references/sdm.txt:204137`). `reflect_l2_exit`
+     *   copies vmcs02's value into vmcs12 unconditionally for every
+     *   reflected exit that is not an entry failure
+     *   (`nested_entry.cpp:4989`), so an undefined value is forwarded as
+     *   though it were defined - and on the start-up-IPI reflection the
+     *   second-level guest never ran, so the value is a *previous* exit's
+     *   entirely.
+     * - it was handed one, because vmcs12's RIP was already low when the
+     *   reflection wrote the rest of the exit information around it.
+     *
+     * The second half censuses the **region**, which is the only storage
+     * a vmcs12 has between one processor and the next. `guest_vmcs12` is
+     * indexed by processor and a VMCS is identified by its physical
+     * address, so a vmcs12 that moves - VMCLEAR here, VMPTRLD there -
+     * exists only as whatever `flush_guest_vmcs12` last wrote to the
+     * region. Three things about that path are invisible today and all
+     * three produce exactly "entered at RIP 0":
+     *
+     * - the flush's `write_guest_physical` failure is discarded by name
+     *   (`nested_vmx.cpp:1111`), so a region that was never written looks
+     *   identical to one that was,
+     * - `on_guest_vmclear` of a region that is *not* current here writes
+     *   four bytes of launch state and nothing else
+     *   (`nested_vmx.cpp:1179`), so the owning processor's cache is not
+     *   flushed and its `guest_current_vmcs` is left pointing at it,
+     * - `on_guest_vmptrld` detects a region current on another processor,
+     *   logs one line and proceeds (`nested_vmx.cpp:1258`).
+     *
+     * So the region table below records, per region rather than per
+     * processor, who last flushed it, whether that flush's write
+     * succeeded, and what RIP it persisted - and the load census compares
+     * what a VMPTRLD read against it. A load that finds a low RIP in a
+     * region no flush ever succeeded on is the migration failure; a load
+     * that finds a low RIP in a region whose last successful flush
+     * persisted a high one is memory disagreeing with what was written,
+     * which is a different bug and wants a different fix.
+     *
+     * Reading it, per processor:
+     *
+     * - **every counter zero** - no reflection ever carried a low RIP or
+     *   an undefined instruction length, and no VMPTRLD ever loaded a low
+     *   RIP. That is the negative, and the dump prints it in words.
+     * - `reflect_length_undefined` non-zero - this VMM is telling the
+     *   guest hypervisor the length of an instruction for an exit that
+     *   did not happen because of one.
+     * - `vmcs12_load_unflushed` non-zero - a region was made current
+     *   whose contents this VMM never successfully wrote, so every field
+     *   in it including the RIP is whatever was in that page.
+     * - `vmcs12_load_foreign` non-zero - a vmcs12 migrated between
+     *   processors, which is the case `guest_vmcs12` being per processor
+     *   cannot represent.
+     * - `vmcs12_flush_failures` non-zero - the one write that persists a
+     *   vmcs12 failed, silently, and the next VMPTRLD of that region will
+     *   read whatever was there before.
+     *
+     * Cost when nothing fires: one compare per reflection, and on the
+     * VMPTRLD and flush paths a scan of eight slots under a lock that is
+     * taken about four times per trust-level round trip. Deliberately not
+     * behind a build switch, for the reason `low_rip_source` gives - the
+     * event happens once at the end of a seven-minute boot.
+     * @{
+     */
+
+    /**
+     * Whether SDM 30.2.5 defines the VM-exit instruction length for a
+     * basic exit reason.
+     *
+     * Three answers rather than two, and the third is what keeps a
+     * positive reading unambiguous. `conditional` is for the reasons the
+     * section defines the field for *only* when the exit was encountered
+     * during delivery of a software interrupt, privileged software
+     * exception or software exception - exception-or-NMI, task switch,
+     * APIC access, EPT violation, page-modification log full and the
+     * SPP-related event. Whether that condition held is not something
+     * this VMM can cheaply reconstruct, so those are excluded from the
+     * count instead of being guessed at in either direction.
+     *
+     * The `defined` list is the instruction list in
+     * `.references/sdm.txt:204104-204113` verbatim, restricted to the
+     * basic exit reasons this architecture layer names, plus RDRAND and
+     * RDSEED which appear in the same list and have reasons of their own.
+     */
+    enum class exit_length_defined : std::uint64_t
+    {
+        no = 0,
+        yes = 1,
+        conditional = 2,
+    };
+
+    static constexpr exit_length_defined exit_length_defined_for(
+        std::uint64_t basic)
+    {
+        using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+
+        switch (static_cast<basic_reason>(basic)) {
+        case basic_reason::cpuid:
+        case basic_reason::getsec:
+        case basic_reason::hlt:
+        case basic_reason::invd:
+        case basic_reason::invlpg:
+        case basic_reason::rdpmc:
+        case basic_reason::rdtsc:
+        case basic_reason::rsm:
+        case basic_reason::vmcall:
+        case basic_reason::vmclear:
+        case basic_reason::vmlaunch:
+        case basic_reason::vmptrld:
+        case basic_reason::vmptrst:
+        case basic_reason::vmread:
+        case basic_reason::vmresume:
+        case basic_reason::vmwrite:
+        case basic_reason::vmxoff:
+        case basic_reason::vmxon:
+        case basic_reason::control_register_access:
+        case basic_reason::mov_debug_register:
+        case basic_reason::io_instruction:
+        case basic_reason::rdmsr:
+        case basic_reason::wrmsr:
+        case basic_reason::mwait:
+        case basic_reason::monitor:
+        case basic_reason::pause:
+        case basic_reason::gdtr_or_idtr:
+        case basic_reason::ldtr_or_tr:
+        case basic_reason::invept:
+        case basic_reason::rdtscp:
+        case basic_reason::invvpid:
+        case basic_reason::wbinvd:
+        case basic_reason::xsetbv:
+        case basic_reason::rdrand:
+        case basic_reason::invpcid:
+        case basic_reason::vmfunc:
+        case basic_reason::encls:
+        case basic_reason::rdseed:
+        case basic_reason::xsaves:
+        case basic_reason::xrstors:
+            return exit_length_defined::yes;
+
+        case basic_reason::exception_or_nmi:
+        case basic_reason::task_switch:
+        case basic_reason::apic_access:
+        case basic_reason::ept_violation:
+        case basic_reason::page_modification_log_full:
+        case basic_reason::spp_related_event:
+            return exit_length_defined::conditional;
+
+        default:
+            return exit_length_defined::no;
+        }
+    }
+
+    struct reflect_info_record
+    {
+        /** Set last, so a reader that finds it set finds the rest
+         *  filled in. */
+        std::uint64_t occurred;
+
+        /** `l2_entries` on this processor at the time. */
+        std::uint64_t entries;
+
+        /** The whole exit reason as reflected, entry-failure bit
+         *  included. */
+        std::uint64_t reason;
+
+        /** The VM-exit instruction length written into vmcs12. */
+        std::uint64_t length;
+
+        /** vmcs12's guest RIP as the guest hypervisor will find it. */
+        std::uint64_t rip;
+
+        /** Whether `save_l2_state` ran for this reflection. Zero means
+         *  the entry-failure path, which SDM 29.8 requires to leave the
+         *  guest-state area alone - so a stale RIP there is correct and
+         *  a low one is the level above's own. */
+        std::uint64_t saved;
+    };
+
+    /** Whether SECONDARY_EXEC_VMCS_SHADOWING is currently set in this
+     *  processor's own VMCS. Not the same as `vmcs_shadowing_enabled`,
+     *  which is one flag for the whole machine - see the stand-down in
+     *  `note_shadowing_ineffective`. */
+    volatile std::uint64_t vmcs_shadowing_armed[max_cpus]{};
+
+    /** Processors that still had it armed when it was stood down, and
+     *  which can therefore never have it cleared. Zero means the hazard
+     *  the stand-down leaves behind is unreachable on this machine. */
+    volatile std::uint64_t vmcs_shadowing_stranded{};
+
+    /** Every reflection, and the two things wrong with one. */
+    volatile std::uint64_t reflect_infos[max_cpus]{};
+    volatile std::uint64_t reflect_rip_low[max_cpus]{};
+    volatile std::uint64_t reflect_length_undefined[max_cpus]{};
+
+    /** Of the undefined ones, the subset where the length is non-zero -
+     *  the only ones a guest hypervisor adding it can notice. */
+    volatile std::uint64_t reflect_length_undefined_nonzero[max_cpus]{};
+
+    reflect_info_record reflect_rip_low_first[max_cpus]{};
+    reflect_info_record reflect_length_first[max_cpus]{};
+    reflect_info_record reflect_info_last[max_cpus]{};
+
+    /** One log line per processor per kind. */
+    volatile std::uint64_t reflect_rip_reported[max_cpus]{};
+    volatile std::uint64_t reflect_length_reported[max_cpus]{};
+
+    /**
+     * Records the exit information one reflection is handing over.
+     *
+     * Called with both values already in hand, so it adds no VMCS access
+     * and no branch that was not already taken.
+     */
+    void note_reflected_exit_info(std::size_t cpu,
+                                  std::uint64_t reason,
+                                  std::uint64_t length,
+                                  std::uint64_t rip,
+                                  bool saved)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        constexpr std::uint64_t basic_mask = 0xffff;
+
+        reflect_info_record record{};
+        record.entries = this->l2_entries[cpu];
+        record.reason = reason;
+        record.length = length;
+        record.rip = rip;
+        record.saved = saved ? 1 : 0;
+        record.occurred = 1;
+
+        this->reflect_infos[cpu] = this->reflect_infos[cpu] + 1;
+        this->reflect_info_last[cpu] = record;
+
+        if (rip < low_rip_threshold) {
+            if (0 == this->reflect_rip_low[cpu]) {
+                this->reflect_rip_low_first[cpu] = record;
+            }
+
+            this->reflect_rip_low[cpu] = this->reflect_rip_low[cpu] + 1;
+
+            if (0 == this->reflect_rip_reported[cpu]) {
+                this->reflect_rip_reported[cpu] = 1;
+
+                log("cpu {} reflected exit {} with vmcs12 rip {}, length "
+                    "{}, saved {}, at l2 entry {}",
+                    cpu,
+                    reason,
+                    rip,
+                    length,
+                    record.saved,
+                    record.entries);
+            }
+        }
+
+        if (exit_length_defined::no !=
+            exit_length_defined_for(reason & basic_mask)) {
+            return;
+        }
+
+        if (0 == this->reflect_length_undefined[cpu]) {
+            this->reflect_length_first[cpu] = record;
+        }
+
+        this->reflect_length_undefined[cpu] =
+            this->reflect_length_undefined[cpu] + 1;
+
+        if (0 == length) {
+            return;
+        }
+
+        this->reflect_length_undefined_nonzero[cpu] =
+            this->reflect_length_undefined_nonzero[cpu] + 1;
+
+        if (0 != this->reflect_length_reported[cpu]) {
+            return;
+        }
+
+        this->reflect_length_reported[cpu] = 1;
+
+        log("cpu {} reflected exit {} carrying instruction length {}, "
+            "which sdm 30.2.5 leaves undefined for it - vmcs12 rip {}, "
+            "at l2 entry {}",
+            cpu,
+            reason,
+            length,
+            rip,
+            record.entries);
+    }
+
+    /**
+     * What is known about one vmcs12 *region*, keyed by its physical
+     * address rather than by a processor.
+     *
+     * Eight slots and no eviction. The guest hypervisor was censused
+     * alternating between exactly two regions on one processor - see the
+     * comment in `on_guest_vmptrld` - so eight covers four processors'
+     * worth before `vmcs12_region_overflow` starts counting, and an
+     * overflow is itself the answer to "how many vmcs12s are in play".
+     */
+    struct vmcs12_region_record
+    {
+        /** The region's physical address, or zero for a free slot. */
+        std::uint64_t pointer;
+
+        /** The processor that last flushed it, plus one, so zero means
+         *  "no flush has ever been attempted on this region". */
+        std::uint64_t flushed_by;
+
+        /** The processor that last made it current, plus one. */
+        std::uint64_t loaded_by;
+
+        std::uint64_t flushes;
+        std::uint64_t flush_failures;
+        std::uint64_t loads;
+
+        /** The RIP the last *successful* flush persisted, and whether
+         *  any flush has ever succeeded. Without the second, a region
+         *  whose RIP is legitimately zero and one that was never written
+         *  read identically. */
+        std::uint64_t flushed_rip;
+        std::uint64_t flushed_ever;
+    };
+
+    static constexpr std::size_t vmcs12_region_slots = 8;
+
+    vmcs12_region_record vmcs12_regions[vmcs12_region_slots]{};
+    volatile std::uint64_t vmcs12_region_overflow{};
+
+    /** Shared by every processor, and taken only on the VMPTRLD,
+     *  VMCLEAR and VMXOFF paths - about four times per trust-level round
+     *  trip, never from an exit this VMM handles itself. */
+    zpp::spin_lock vmcs12_region_lock{};
+
+    struct vmcs12_region_event
+    {
+        /** Set last, so a reader that finds it set finds the rest
+         *  filled in. */
+        std::uint64_t occurred;
+
+        /** `l2_entries` on this processor at the time. */
+        std::uint64_t entries;
+
+        /** The region's physical address. */
+        std::uint64_t pointer;
+
+        /** The RIP written to it, or read out of it. */
+        std::uint64_t rip;
+
+        /** On a load, what the cache held before it was replaced. On a
+         *  flush, the RIP the previous successful flush persisted. */
+        std::uint64_t previous;
+
+        /** The processor that last flushed it, plus one. Zero means no
+         *  flush was ever attempted, which is the migration reading. */
+        std::uint64_t flushed_by;
+
+        /** Whether any flush of this region has ever succeeded. */
+        std::uint64_t flushed_ever;
+    };
+
+    volatile std::uint64_t vmcs12_flushes[max_cpus]{};
+    volatile std::uint64_t vmcs12_flush_failures[max_cpus]{};
+    volatile std::uint64_t vmcs12_flush_rip_low[max_cpus]{};
+
+    volatile std::uint64_t vmcs12_loads[max_cpus]{};
+    volatile std::uint64_t vmcs12_load_rip_low[max_cpus]{};
+
+    /** Loads of a region another processor flushed last, and loads of a
+     *  region no flush ever succeeded on. The second is the one that
+     *  says the contents are not this VMM's. */
+    volatile std::uint64_t vmcs12_load_foreign[max_cpus]{};
+    volatile std::uint64_t vmcs12_load_unflushed[max_cpus]{};
+
+    /** Loads where the region's RIP disagrees with what the last
+     *  successful flush of that region persisted. */
+    volatile std::uint64_t vmcs12_load_disagreed[max_cpus]{};
+
+    vmcs12_region_event vmcs12_flush_low_first[max_cpus]{};
+    vmcs12_region_event vmcs12_flush_failed_first[max_cpus]{};
+    vmcs12_region_event vmcs12_load_low_first[max_cpus]{};
+    vmcs12_region_event vmcs12_load_last[max_cpus]{};
+
+    volatile std::uint64_t vmcs12_flush_reported[max_cpus]{};
+    volatile std::uint64_t vmcs12_load_reported[max_cpus]{};
+
+    /**
+     * The slot describing one region, claiming a free one if it is the
+     * first time this region has been seen. Null when they are all
+     * taken, which is counted rather than evicted.
+     *
+     * The lock is the caller's to hold.
+     */
+    vmcs12_region_record * vmcs12_region_slot(std::uint64_t pointer)
+    {
+        for (auto & each : this->vmcs12_regions) {
+            if (each.pointer == pointer) {
+                return &each;
+            }
+        }
+
+        for (auto & each : this->vmcs12_regions) {
+            if (0 == each.pointer) {
+                each.pointer = pointer;
+                return &each;
+            }
+        }
+
+        this->vmcs12_region_overflow = this->vmcs12_region_overflow + 1;
+        return nullptr;
+    }
+
+    /**
+     * Records one attempt by `flush_guest_vmcs12` to persist a vmcs12
+     * into its region.
+     *
+     * `written` is the result of the region write, which that function
+     * discards - so this is the only account of a flush that did not
+     * happen.
+     */
+    void note_vmcs12_flush(std::size_t cpu,
+                           std::uint64_t pointer,
+                           std::uint64_t rip,
+                           bool written)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        vmcs12_region_event event{};
+        event.entries = this->l2_entries[cpu];
+        event.pointer = pointer;
+        event.rip = rip;
+
+        this->vmcs12_region_lock.lock();
+
+        if (auto * slot = vmcs12_region_slot(pointer)) {
+            event.previous = slot->flushed_rip;
+            event.flushed_by = slot->flushed_by;
+            event.flushed_ever = slot->flushed_ever;
+
+            slot->flushes = slot->flushes + 1;
+            slot->flushed_by = cpu + 1;
+
+            if (written) {
+                slot->flushed_rip = rip;
+                slot->flushed_ever = 1;
+            } else {
+                slot->flush_failures = slot->flush_failures + 1;
+            }
+        }
+
+        this->vmcs12_region_lock.unlock();
+
+        event.occurred = 1;
+        this->vmcs12_flushes[cpu] = this->vmcs12_flushes[cpu] + 1;
+
+        if (rip < low_rip_threshold) {
+            if (0 == this->vmcs12_flush_rip_low[cpu]) {
+                this->vmcs12_flush_low_first[cpu] = event;
+            }
+
+            this->vmcs12_flush_rip_low[cpu] =
+                this->vmcs12_flush_rip_low[cpu] + 1;
+        }
+
+        if (written) {
+            return;
+        }
+
+        if (0 == this->vmcs12_flush_failures[cpu]) {
+            this->vmcs12_flush_failed_first[cpu] = event;
+        }
+
+        this->vmcs12_flush_failures[cpu] =
+            this->vmcs12_flush_failures[cpu] + 1;
+
+        if (0 != this->vmcs12_flush_reported[cpu]) {
+            return;
+        }
+
+        this->vmcs12_flush_reported[cpu] = 1;
+
+        log("cpu {} could not write vmcs12 back to region {} - rip {} "
+            "is lost, at l2 entry {}",
+            cpu,
+            pointer,
+            rip,
+            event.entries);
+    }
+
+    /**
+     * Records one region read by `on_guest_vmptrld`, against what this
+     * VMM last managed to write there.
+     */
+    void note_vmcs12_load(std::size_t cpu,
+                          std::uint64_t pointer,
+                          std::uint64_t rip,
+                          std::uint64_t previous)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        vmcs12_region_event event{};
+        event.entries = this->l2_entries[cpu];
+        event.pointer = pointer;
+        event.rip = rip;
+        event.previous = previous;
+
+        auto foreign = false;
+        auto disagreed = false;
+
+        this->vmcs12_region_lock.lock();
+
+        if (auto * slot = vmcs12_region_slot(pointer)) {
+            event.flushed_by = slot->flushed_by;
+            event.flushed_ever = slot->flushed_ever;
+
+            foreign = (0 != slot->flushed_by) &&
+                      ((cpu + 1) != slot->flushed_by);
+            disagreed =
+                (0 != slot->flushed_ever) && (slot->flushed_rip != rip);
+
+            slot->loads = slot->loads + 1;
+            slot->loaded_by = cpu + 1;
+        }
+
+        this->vmcs12_region_lock.unlock();
+
+        event.occurred = 1;
+        this->vmcs12_loads[cpu] = this->vmcs12_loads[cpu] + 1;
+        this->vmcs12_load_last[cpu] = event;
+
+        if (foreign) {
+            this->vmcs12_load_foreign[cpu] =
+                this->vmcs12_load_foreign[cpu] + 1;
+        }
+
+        if (0 == event.flushed_ever) {
+            this->vmcs12_load_unflushed[cpu] =
+                this->vmcs12_load_unflushed[cpu] + 1;
+        }
+
+        if (disagreed) {
+            this->vmcs12_load_disagreed[cpu] =
+                this->vmcs12_load_disagreed[cpu] + 1;
+        }
+
+        if (rip >= low_rip_threshold) {
+            return;
+        }
+
+        if (0 == this->vmcs12_load_rip_low[cpu]) {
+            this->vmcs12_load_low_first[cpu] = event;
+        }
+
+        this->vmcs12_load_rip_low[cpu] =
+            this->vmcs12_load_rip_low[cpu] + 1;
+
+        if (0 != this->vmcs12_load_reported[cpu]) {
+            return;
+        }
+
+        this->vmcs12_load_reported[cpu] = 1;
+
+        log("cpu {} vmptrld of region {} loaded rip {} over {} - last "
+            "flushed by cpu {} (plus one), ever flushed {}, at l2 entry "
+            "{}",
+            cpu,
+            pointer,
+            rip,
+            previous,
+            event.flushed_by,
+            event.flushed_ever,
+            event.entries);
+    }
+    /** @} */
+
     /** What the guest hypervisor arms as its TPR threshold, by value.
      * All zero means it never asks to be told, so the undelivered
      * dispatch vector is its business rather than this VMM's. */

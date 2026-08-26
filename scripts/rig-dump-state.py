@@ -1052,6 +1052,294 @@ def dump_served_rip(args, elf, instance):
             if last["occurred"]:
                 show("last ", last)
 
+    dump_reflect_info(args, elf, instance)
+    dump_vmcs12_regions(args, elf, instance)
+
+
+def dump_reflect_info(args, elf, instance):
+    """The exit information a reflection hands the guest hypervisor.
+
+    Two questions in one census, because either alone confirms itself.
+    A low RIP in vmcs12 at the moment of reflection is an entry at that
+    address a moment later.  An instruction length reported for an exit
+    SDM 30.2.5 leaves it undefined for is the one number a hypervisor is
+    entitled to add to a RIP - `0 + 2` being exactly what the failure
+    looks like.
+
+    Every counter zero is the negative and prints as plainly as any
+    positive.
+    """
+    members = ["reflect_infos", "reflect_rip_low",
+               "reflect_length_undefined",
+               "reflect_length_undefined_nonzero",
+               "reflect_rip_low_first", "reflect_length_first",
+               "reflect_info_last", "vmcs_shadowing_armed",
+               "vmcs_shadowing_stranded"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates this census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "reason", "length", "rip", "saved"]
+    (stride,) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->reflect_info_last[0]"])
+
+    counters = ["reflect_infos", "reflect_rip_low",
+                "reflect_length_undefined",
+                "reflect_length_undefined_nonzero",
+                "vmcs_shadowing_armed"]
+    records = ["reflect_rip_low_first", "reflect_length_first",
+               "reflect_info_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member], args.cpus * stride // 8)
+    reader.queue(instance + off["vmcs_shadowing_stranded"], 1)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        print(f"    {label}: reason 0x{r['reason']:x}, length "
+              f"{r['length']}, vmcs12 rip 0x{r['rip']:x}, "
+              f"save_l2_state {'ran' if r['saved'] else 'SKIPPED'}, "
+              f"at l2 entry {r['entries']:,}")
+
+    stranded = got.get(instance + off["vmcs_shadowing_stranded"], 0)
+
+    for cpu in range(args.cpus):
+        total = count("reflect_infos", cpu)
+        low = count("reflect_rip_low", cpu)
+        undefined = count("reflect_length_undefined", cpu)
+        nonzero = count("reflect_length_undefined_nonzero", cpu)
+
+        print(f"\ncpu {cpu} exit information REFLECTED to the guest "
+              "hypervisor:")
+
+        if not total:
+            print("    nothing was ever reflected on this processor")
+            continue
+
+        print(f"    {total:>12,}  reflections")
+        print(f"    {low:>12,}  with a vmcs12 rip below 0x1000")
+        print(f"    {undefined:>12,}  for a reason sdm 30.2.5 leaves the "
+              "length undefined")
+        print(f"    {nonzero:>12,}  of those with a NON-ZERO length "
+              "reported")
+
+        if not low and not nonzero:
+            print("    *** THIS NEVER HAPPENED: no reflection on this "
+                  "processor carried a rip below one page, and none "
+                  "reported a non-zero instruction length for an exit "
+                  "the architecture leaves it undefined for. Both "
+                  "arithmetic routes to a low entry rip are dead here. "
+                  "***")
+        else:
+            if low:
+                print("    *** vmcs12 already held a low rip when the "
+                      "reflection wrote the exit information around it - "
+                      "the guest hypervisor was handed it, not asked to "
+                      "compute it ***")
+                first = record("reflect_rip_low_first", cpu)
+                if first["occurred"]:
+                    show("first low ", first)
+            if nonzero:
+                print("    *** this VMM reported an instruction length "
+                      "for an exit that was not caused by an "
+                      "instruction - a guest hypervisor adding it to the "
+                      "rip produces exactly rip + length ***")
+                first = record("reflect_length_first", cpu)
+                if first["occurred"]:
+                    show("first undef", first)
+
+        last = record("reflect_info_last", cpu)
+        if last["occurred"]:
+            show("last      ", last)
+
+        armed = count("vmcs_shadowing_armed", cpu)
+        print(f"    vmcs shadowing currently armed on this processor: "
+              f"{'yes' if armed else 'no'}")
+
+    if stranded:
+        print(f"\n*** {stranded} processor(s) still had vmcs shadowing "
+              "armed when it was stood down. The control is per "
+              "processor and the flag is not, so those processors keep "
+              "answering the guest hypervisor's reads out of a region "
+              "this VMM has stopped maintaining. ***")
+    else:
+        print("\nvmcs shadowing stand-down: THIS NEVER HAPPENED - no "
+              "processor was left holding the control when it was stood "
+              "down, so the frozen-region hazard is unreachable here")
+
+
+def dump_vmcs12_regions(args, elf, instance):
+    """The region a vmcs12 lives in between one processor and the next.
+
+    `guest_vmcs12` is indexed by processor and a VMCS is identified by
+    its physical address, so a vmcs12 that migrates - VMCLEAR here,
+    VMPTRLD there - exists only as whatever `flush_guest_vmcs12` last
+    wrote into the region.  That write's failure is discarded by name at
+    the call site, so a region that was never written and one whose RIP
+    really is zero read identically from every later reader.
+
+    This censuses both ends: what each flush persisted and whether it
+    landed, and what each VMPTRLD found against it.  Two fields, so
+    "the region held zero" can be told apart from "this VMM never wrote
+    the region".
+    """
+    members = ["vmcs12_flushes", "vmcs12_flush_failures",
+               "vmcs12_flush_rip_low", "vmcs12_loads",
+               "vmcs12_load_rip_low", "vmcs12_load_foreign",
+               "vmcs12_load_unflushed", "vmcs12_load_disagreed",
+               "vmcs12_flush_low_first", "vmcs12_flush_failed_first",
+               "vmcs12_load_low_first", "vmcs12_load_last",
+               "vmcs12_regions", "vmcs12_region_overflow"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        return
+
+    fields = ["occurred", "entries", "pointer", "rip", "previous",
+              "flushed_by", "flushed_ever"]
+    slot_fields = ["pointer", "flushed_by", "loaded_by", "flushes",
+                   "flush_failures", "loads", "flushed_rip",
+                   "flushed_ever"]
+
+    (stride, slot_stride, slots) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmcs12_load_last[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmcs12_regions[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vmcs12_regions / "
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vmcs12_regions[0]"])
+
+    counters = ["vmcs12_flushes", "vmcs12_flush_failures",
+                "vmcs12_flush_rip_low", "vmcs12_loads",
+                "vmcs12_load_rip_low", "vmcs12_load_foreign",
+                "vmcs12_load_unflushed", "vmcs12_load_disagreed"]
+    records = ["vmcs12_flush_low_first", "vmcs12_flush_failed_first",
+               "vmcs12_load_low_first", "vmcs12_load_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member], args.cpus * stride // 8)
+    reader.queue(instance + off["vmcs12_regions"],
+                 slots * slot_stride // 8)
+    reader.queue(instance + off["vmcs12_region_overflow"], 1)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        owner = ("never flushed" if not r["flushed_by"]
+                 else f"cpu {r['flushed_by'] - 1}")
+        print(f"    {label}: region 0x{r['pointer']:x}, rip 0x{r['rip']:x}"
+              f", previous 0x{r['previous']:x}")
+        print(f"      last flushed by {owner}, ever flushed "
+              f"{'yes' if r['flushed_ever'] else 'NO'}, at l2 entry "
+              f"{r['entries']:,}")
+
+    total_bad = 0
+
+    for cpu in range(args.cpus):
+        flushes = count("vmcs12_flushes", cpu)
+        failures = count("vmcs12_flush_failures", cpu)
+        flush_low = count("vmcs12_flush_rip_low", cpu)
+        loads = count("vmcs12_loads", cpu)
+        load_low = count("vmcs12_load_rip_low", cpu)
+        foreign = count("vmcs12_load_foreign", cpu)
+        unflushed = count("vmcs12_load_unflushed", cpu)
+        disagreed = count("vmcs12_load_disagreed", cpu)
+
+        print(f"\ncpu {cpu} vmcs12 region traffic:")
+
+        if not flushes and not loads:
+            print("    this processor never flushed or loaded a vmcs12 "
+                  "region")
+            continue
+
+        print(f"    {flushes:>12,}  flushes attempted")
+        print(f"    {failures:>12,}  flushes that FAILED to write the "
+              "region")
+        print(f"    {flush_low:>12,}  flushes that persisted a rip below "
+              "0x1000")
+        print(f"    {loads:>12,}  vmptrld region loads")
+        print(f"    {load_low:>12,}  that loaded a rip below 0x1000")
+        print(f"    {foreign:>12,}  of a region another processor "
+              "flushed last")
+        print(f"    {unflushed:>12,}  of a region NO flush ever succeeded "
+              "on")
+        print(f"    {disagreed:>12,}  where the region disagreed with the "
+              "last flush of it")
+
+        total_bad += failures + load_low + unflushed + disagreed
+
+        if failures:
+            r = record("vmcs12_flush_failed_first", cpu)
+            if r["occurred"]:
+                show("first failed flush", r)
+        if flush_low:
+            r = record("vmcs12_flush_low_first", cpu)
+            if r["occurred"]:
+                show("first low flush  ", r)
+        if load_low:
+            r = record("vmcs12_load_low_first", cpu)
+            if r["occurred"]:
+                show("first low load   ", r)
+        r = record("vmcs12_load_last", cpu)
+        if r["occurred"]:
+            show("last load        ", r)
+
+    print("\nvmcs12 regions seen, by physical address:")
+    overflow = got.get(instance + off["vmcs12_region_overflow"], 0)
+    for i in range(slots):
+        base = instance + off["vmcs12_regions"] + i * slot_stride
+        slot = {name: got.get(base + 8 * j, 0)
+                for j, name in enumerate(slot_fields)}
+        if not slot["pointer"]:
+            continue
+        owner = ("never" if not slot["flushed_by"]
+                 else f"cpu {slot['flushed_by'] - 1}")
+        holder = ("never" if not slot["loaded_by"]
+                  else f"cpu {slot['loaded_by'] - 1}")
+        print(f"    0x{slot['pointer']:x}: {slot['flushes']:,} flushes "
+              f"({slot['flush_failures']:,} failed), {slot['loads']:,} "
+              f"loads, last flushed by {owner}, last loaded by {holder}")
+        print(f"      last persisted rip 0x{slot['flushed_rip']:x}, ever "
+              f"flushed {'yes' if slot['flushed_ever'] else 'NO'}")
+    if overflow:
+        print(f"    ({overflow:,} regions did not fit the table)")
+
+    if not total_bad:
+        print("\n*** THIS NEVER HAPPENED: every vmcs12 flush wrote its "
+              "region, no vmptrld loaded a rip below one page, no region "
+              "was made current that this VMM had never written, and no "
+              "region ever disagreed with the last flush of it. The "
+              "migration route to an entry at rip 0 is dead. ***")
+    else:
+        print("\n*** the region path is implicated - read the counters "
+              "above: `unflushed` non-zero is a vmcs12 whose contents "
+              "this VMM never wrote, `disagreed` non-zero is memory "
+              "losing what was written, and `flushes that FAILED` is the "
+              "write that was discarded at the call site ***")
+
 
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.

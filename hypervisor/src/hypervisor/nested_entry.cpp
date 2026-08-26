@@ -5014,6 +5014,22 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                 ~interruption_valid);
     }
 
+    // The whole exit information block, as the guest hypervisor will
+    // find it, censused in one place because either half of it alone
+    // confirms itself. See `note_reflected_exit_info`: a low RIP here is
+    // an entry at that address a moment later, and an instruction length
+    // for an exit SDM 30.2.5 leaves it undefined for is the one number a
+    // hypervisor is entitled to add to a RIP.
+    //
+    // Read out of the cache rather than re-derived - two subscripts into
+    // module memory, no VMREAD - and after every write above, so it
+    // describes what is being handed over rather than what was intended.
+    note_reflected_exit_info(cpu,
+                             reason.value(),
+                             shadow.read(field::vm_exit_instruction_length),
+                             shadow.read(field::guest_rip),
+                             !reason.entry_failure());
+
     if (cpu < max_cpus) {
         this->phase_cycles[cpu][13] += arch::x86_64::rdtsc() - info_start;
         this->phase_calls[cpu][13] += 1;

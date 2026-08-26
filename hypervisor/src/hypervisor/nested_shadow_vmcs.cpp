@@ -219,6 +219,40 @@ void hypervisor::note_shadowing_ineffective(std::size_t cpu,
             "shadowed fields; standing it down and saving the copies",
             seen);
 
+        // **The control is per processor and the flag is not, so record
+        // who is left holding it.**
+        //
+        // `set_vmcs_shadowing` writes `this->vmcs`, which is *this*
+        // processor's, and the next line makes every later call on every
+        // processor return immediately. A processor that had already
+        // armed the control - it is armed from `on_guest_vmptrld`, so any
+        // processor with a vmcs12 current has - therefore keeps
+        // SECONDARY_EXEC_VMCS_SHADOWING set and a live link pointer for
+        // the rest of the boot, while `copy_vmcs12_to_shadow` and
+        // `copy_shadow_to_vmcs12` stop maintaining the region. Where the
+        // control *is* in force that is a frozen region answering the
+        // guest hypervisor's reads without an exit.
+        //
+        // Counted rather than fixed, because the fix depends on which it
+        // is: if this reads zero the hazard is unreachable - the
+        // stand-down happens in milliseconds and application processors
+        // have no vmcs12 yet - and nothing needs changing. If it reads
+        // non-zero, `set_vmcs_shadowing` has to stop keying on the flag
+        // it is about to clear.
+        for (std::size_t other{}; other < max_cpus; ++other) {
+            if ((other == cpu) || (0 == this->vmcs_shadowing_armed[other])) {
+                continue;
+            }
+
+            this->vmcs_shadowing_stranded =
+                this->vmcs_shadowing_stranded + 1;
+
+            log("cpu {} still has vmcs shadowing armed as cpu {} stands "
+                "it down",
+                other,
+                cpu);
+        }
+
         set_vmcs_shadowing(cpu, false);
         this->vmcs_shadowing_enabled = false;
     }
@@ -571,6 +605,16 @@ void hypervisor::set_vmcs_shadowing(std::size_t cpu, bool enabled)
             this->vmcs.secondary_processor_based_vm_execution_controls(
                 controls & ~static_cast<std::uint64_t>(shadowing));
             this->vmcs.vmcs_link_pointer(~std::uint64_t{});
+        }
+
+        // What this processor's own VMCS now says, which
+        // `vmcs_shadowing_enabled` cannot: that flag is one bool for the
+        // whole machine and this control is per processor. See the
+        // stand-down in `note_shadowing_ineffective`, which clears the
+        // flag and can therefore only ever clear one processor's
+        // control.
+        if (cpu < max_cpus) {
+            this->vmcs_shadowing_armed[cpu] = enabled ? 1 : 0;
         }
     }
 }
