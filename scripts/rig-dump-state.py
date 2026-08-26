@@ -1667,6 +1667,251 @@ def dump_interrupt_window(args, elf, instance):
                   "lost after the window, not because of it.")
 
 
+def dump_dropped_requests(args, elf, instance):
+    """The low-priority vector's whole life: asked, pending, delivered,
+    DROPPED.
+
+    Needs `-DZPP_COUNT_DROPS=ON`; the counters do not exist otherwise and
+    every one of them reads zero, which is why the first thing printed is
+    whether the instrument ran at all.  This project has taken all-zero
+    counters as evidence about the machine three times when they were
+    evidence about the build.
+
+    What the five numbers separate, which "9,627 delivered against
+    411,669 asked" cannot:
+
+    - `coalesced` is expected to be most of `asked`.  A local APIC's
+      request register is a bitmap, so a second request for a vector
+      already in it is architecturally the same request (SDM 12.8.4).
+      The gap between asked and delivered is therefore not loss by
+      itself, and reading it as loss is how this ratio got its
+      reputation.
+    - `blocked` is correct behaviour: the guest was at a priority that
+      refuses the vector, or had interrupts off.  Nothing is owed.
+    - `DROPPED` is the fault, and it is the only one of the five that
+      is.  The guest could have taken it, nothing was staged, and
+      nothing in vmcs02 could produce an exit at which the level above
+      might stage it - no interrupt window, no TPR threshold.  The
+      request is not deferred; it is lost until something unrelated
+      happens to exit.
+
+    `dropped` counts requests and `drop_moments` counts entries, and the
+    pair is the point: one request abandoned for a million entries and a
+    million requests each abandoned once are different faults, and a
+    single counter cannot tell them apart.
+    """
+    members = ["pending_vector_asked", "pending_vector_coalesced",
+               "pending_vector_entries_pending",
+               "pending_vector_delivered", "pending_vector_dropped",
+               "pending_vector_drop_moments", "pending_vector_blocked",
+               "pending_vector_unreadable",
+               "pending_vector_instrument_entries",
+               "window_deferred_count", "window_granted_on_drop",
+               "window_armed_at_drop", "window_already_armed_at_drop",
+               "window_threshold_arm_entries",
+               "window_threshold_refused", "l2_given_vector",
+               "l2_tpr_threshold_seen"]
+    off = gdb_offsets(elf, members)
+
+    threshold_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_tpr_threshold_seen[0] / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        if member in ("l2_given_vector", "l2_tpr_threshold_seen"):
+            continue
+        reader.queue(instance + off[member], args.cpus)
+    # 32 bit counters, two to a quadword; `l2_given_vector` is the
+    # delivered-vector histogram this section reports the total of.
+    reader.queue(instance + off["l2_given_vector"], args.cpus * 256 // 2)
+    reader.queue(instance + off["l2_tpr_threshold_seen"],
+                 args.cpus * threshold_slots)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def given(cpu, vector):
+        pair = got.get(instance + off["l2_given_vector"]
+                       + 8 * ((cpu * 256 + vector) // 2), 0)
+        return (pair >> (32 * (vector % 2))) & 0xffffffff
+
+    print("\nthe dispatch vector, from the ask to the delivery")
+
+    live = sum(word("pending_vector_instrument_entries", cpu)
+               for cpu in range(args.cpus))
+
+    if not live:
+        print("  *** THIS NEVER HAPPENED: the instrument did not look "
+              "at one second-level entry on any processor. That is a "
+              "statement about the BUILD, not about the guest - check "
+              "`dropcnt=` in `strings <hypervisor> | grep 'zpp "
+              "switches'`, and if it reads 0 nothing below was ever "
+              "counted. Do not read a zero here as 'nothing was "
+              "dropped'. ***")
+        return
+
+    for cpu in range(args.cpus):
+        entries = word("pending_vector_instrument_entries", cpu)
+        if not entries:
+            continue
+
+        asked = word("pending_vector_asked", cpu)
+        coalesced = word("pending_vector_coalesced", cpu)
+        pending = word("pending_vector_entries_pending", cpu)
+        delivered = word("pending_vector_delivered", cpu)
+        dropped = word("pending_vector_dropped", cpu)
+        moments = word("pending_vector_drop_moments", cpu)
+        blocked = word("pending_vector_blocked", cpu)
+        unreadable = word("pending_vector_unreadable", cpu)
+
+        print(f"\ncpu {cpu}  {entries:,} second-level entries looked at")
+
+        if not asked:
+            print("  *** THIS NEVER HAPPENED: the guest did not ask "
+                  "this processor for one self-directed vector below "
+                  "the dispatch class. Either it is not the processor "
+                  "running Windows, or the synthetic interrupt command "
+                  "register is not how it asks - and every number "
+                  "below is then vacuously zero. ***")
+            continue
+
+        distinct = asked - coalesced
+        print(f"  asked      {asked:>12,}   "
+              f"({coalesced:,} coalesced into one already outstanding, "
+              f"so {distinct:,} distinct requests)")
+        print(f"  pending    {pending:>12,}   "
+              f"entries made with one outstanding")
+        print(f"  delivered  {delivered:>12,}   "
+              f"entries whose entry-interruption field carried it")
+        print(f"  blocked    {blocked:>12,}   "
+              f"entries the priority or RFLAGS.IF correctly refused")
+        if unreadable:
+            print(f"  unreadable {unreadable:>12,}   "
+                  f"*** the virtual-APIC page could not be read, so "
+                  f"these entries have no verdict either way - not a "
+                  f"drop and not a block ***")
+
+        print(f"  DROPPED    {dropped:>12,}   "
+              f"requests abandoned with nothing armed "
+              f"({moments:,} entry-moments)")
+
+        if not dropped:
+            print("  *** THIS NEVER HAPPENED: not one request was "
+                  "abandoned. Every moment the guest could have taken "
+                  "the vector, something in vmcs02 was armed that "
+                  "could produce the exit to deliver it. This is the "
+                  "number the fix exists to reach and it is reached. "
+                  "***")
+        else:
+            share = 100.0 * dropped / distinct if distinct else 0.0
+            print(f"  *** {dropped:,} of {distinct:,} distinct requests "
+                  f"({share:.1f}%) reached a moment the guest could "
+                  f"have taken the vector with NOTHING armed to deliver "
+                  f"it. Each averages {moments / dropped:.0f} entries "
+                  f"abandoned. This is the defect ZPP_DELIVER_ON_DROP "
+                  f"exists to remove - check `drop=` in the build "
+                  f"manifest before reading it as evidence the fix "
+                  f"failed. ***")
+
+        # **The cost line, and it is read before the benefit line.**
+        # Two interventions have now taken the dispatch vector from
+        # 9,627 to 11 while taking the CLOCK from 388,241 to 5,550, and
+        # both times the harm was invisible in any counter aimed at
+        # 0x2f. A total that has fallen means delivery of everything
+        # has fallen and the guest is doing less work, whatever the
+        # vector under investigation did.
+        carried = sum(given(cpu, v) for v in range(256))
+        dispatch = given(cpu, 0x2f)
+        clock = given(cpu, 0xd1)
+
+        print(f"\n  vectors vmcs02 actually carried {carried:,} "
+              f"(0x2f {dispatch:,}, 0xd1 {clock:,})")
+        print("  baseline for comparison, both switches off, one "
+              "processor: 404,029 carried, 0x2f 9,627, 0xd1 388,241")
+
+        if carried and carried < 100000:
+            print("  *** COST, READ THIS FIRST: the total carried is "
+                  "far below the 404,029 baseline. Delivery of "
+                  "EVERYTHING has collapsed, not just the vector under "
+                  "test, and a low ask count below is then an effect of "
+                  "that and not a measurement of the guest. This is "
+                  "what withholding the interrupt window does. Check "
+                  "`window withheld` on the next line: it must be 0. "
+                  "***")
+
+        # The mechanism's own account, which says whether the fix is
+        # even running rather than whether it worked.
+        deferred = word("window_deferred_count", cpu)
+        granted = word("window_granted_on_drop", cpu)
+        arm_entries = word("window_threshold_arm_entries", cpu)
+        armed = word("window_armed_at_drop", cpu)
+        already = word("window_already_armed_at_drop", cpu)
+        threshold_refused = word("window_threshold_refused", cpu)
+
+        print(f"  window withheld {deferred:,} (MUST be 0), threshold "
+              f"armed on {arm_entries:,} entries, priority drops "
+              f"reported {granted:,}")
+        print(f"  at the drop: window already live {already:,}, window "
+              f"written by this VMM {armed:,}")
+
+        if deferred:
+            print(f"  *** {deferred:,} WINDOWS WITHHELD. Under "
+                  f"ZPP_DELIVER_ON_DROP this must be zero - it takes "
+                  f"nothing away. A non-zero reading means "
+                  f"ZPP_WINDOW_ON_TPR is on instead or as well; check "
+                  f"`windowtpr=` in the build manifest. Withholding is "
+                  f"the move measured twice as harmful. ***")
+        if arm_entries and not granted:
+            print("  *** the threshold was armed and the processor "
+                  "NEVER reported a drop. TPR virtualization is not "
+                  "happening: SDM 32.1.2 gives MOV to CR8 as the only "
+                  "trigger available here, so either the guest lowers "
+                  "its priority some other way or vmcs02 carries "
+                  "CR8-load exiting and the MOV exits instead of "
+                  "virtualizing (SDM 32.3). ***")
+        if threshold_refused:
+            print(f"  {threshold_refused:,} entries where the level "
+                  f"above was holding a blocked vector and no threshold "
+                  f"could be armed - it had set its own, or no TPR "
+                  f"shadow. Nothing was taken away in those; the "
+                  f"mechanism is simply inapplicable there.")
+
+        # **Why its own threshold never fires**, which is a separate
+        # defect from anything above and is settled by one histogram.
+        # SDM 32.1.2: `IF VTPR[7:4] < TPR threshold THEN cause VM exit`.
+        # Nothing is less than zero, so a threshold of 0 is a
+        # notification that cannot arrive - and the level above writes
+        # tpr_threshold on 11% of its VMWRITEs while the exit fires 33
+        # times in 3.6 million. This histogram was read by this script
+        # and printed by nothing for the whole investigation.
+        rows = [(got.get(instance + off["l2_tpr_threshold_seen"]
+                         + 8 * (cpu * threshold_slots + i), 0), i)
+                for i in range(threshold_slots)]
+        rows = [r for r in rows if r[0]]
+
+        if rows:
+            total = sum(c for c, _ in rows)
+            zero = next((c for c, i in rows if i == 0), 0)
+            print(f"\n  TPR threshold the level above armed, per entry "
+                  f"({total:,})")
+            for count, value in sorted(rows, reverse=True):
+                mark = ("  <- CANNOT EVER FIRE, SDM 32.1.2"
+                        if value == 0 else "")
+                print(f"    threshold {value:>2}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%{mark}")
+            if zero == total:
+                print("  *** SETTLED: the level above left the TPR "
+                      "threshold at ZERO on every entry. `VTPR[7:4] < "
+                      "0` is false for every value, so its own "
+                      "TPR-below-threshold notification could never "
+                      "have arrived, on any processor, ever. That is "
+                      "why it arms one and holds an interrupt it never "
+                      "delivers - and it is a fact about the level "
+                      "above, not a bug in this VMM. ***")
+
+
 def dump_synthetic_msrs(args, elf, instance):
     """Which synthetic MSRs the second-level guest writes, and how often.
 
@@ -4896,7 +5141,7 @@ def main():
     # the rig killed every section after it, silently, and the dump just
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
-                    dump_interrupt_window,
+                    dump_interrupt_window, dump_dropped_requests,
                     dump_synthetic_msrs, dump_reference_tsc,
                     dump_tick_account, dump_l1_host_audit,
                     dump_guest_state_shadow, dump_regions,

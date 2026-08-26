@@ -2054,6 +2054,94 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             }
         }
 
+        // **Arm a threshold where the level above left none, and take
+        // nothing away.** See `nested_vmx::deliver_on_drop`.
+        //
+        // `primary` is deliberately not touched here. The first version
+        // of this switch withheld the interrupt window while the
+        // priority blocked the vector, exactly as `window_on_tpr` above
+        // does, and that is the move that has now been measured twice
+        // and is wrong both times. One processor, one boot, against the
+        // same binary with the switch off:
+        //
+        //     switch   0x2f     0xd1      all vectors   guest asks
+        //     off      9,627    388,241   404,029       411,669
+        //     on          11      5,550     5,938            12
+        //
+        // The clock collapsed with everything else, and the ask count
+        // collapsed *because* of it - a guest that receives no clock
+        // queues no deferred calls and asks for nothing. `window
+        // withheld 460,323` is the harmful line. **In this VMM the
+        // interrupt window is the primary delivery mechanism for every
+        // vector**, wasteful as its 1,500,914 exits are, and the TPR
+        // threshold is an addition to it and not a replacement for it.
+        //
+        // What is added: a threshold at the dispatch class, on entries
+        // where the level above is holding something it cannot deliver
+        // and has left the threshold at zero. A threshold of zero can
+        // never fire - SDM 32.1.2's TPR virtualization is
+        // `IF VTPR[7:4] < TPR threshold THEN cause VM exit`
+        // (`.references/sdm.txt:206566`), and nothing is less than zero
+        // - so this replaces an impossible condition with a possible
+        // one and removes no exit that was happening before.
+        //
+        // The class is the vector's own, which is the quantity KVM
+        // writes in `vmx_update_cr8_intercept`
+        // (`.references/kvm/vmx.c:6728`, `tpr_threshold = (irr == -1 ||
+        // tpr < irr) ? 0 : irr`, over an `irr` that
+        // `update_cr8_intercept` has already shifted down by four,
+        // `.references/kvm/x86.c:10193`).
+        if constexpr (nested_vmx::deliver_on_drop) {
+            constexpr std::uint8_t dispatch_class = 0x20;
+            constexpr std::uint64_t dispatch_threshold = 0x2f >> 4;
+
+            if (cpu < max_cpus) {
+                // The level above asks for an interrupt window exactly
+                // when it is holding something, so this is the only
+                // reading available here of "is there anything to
+                // deliver". It is the same discriminator
+                // `l2_no_event_window_asked` already uses.
+                auto holding =
+                    0 != (primary & primary_interrupt_window);
+
+                // A priority this VMM could not read admits
+                // everything, so an unreadable page arms nothing -
+                // failing safe here means leaving the machine exactly
+                // as the default build leaves it.
+                auto blocked =
+                    entry_vtpr_read && (dispatch_class <= entry_vtpr);
+
+                // Only over a priority known to be at or above the
+                // class, so SDM 29.2.1.1's entry check - bits 3:0 of
+                // the threshold not greater than bits 7:4 of VTPR,
+                // `.references/sdm.txt:202124` - holds by construction
+                // and needs no second test. And only where the level
+                // above set the TPR shadow and left the threshold at
+                // zero, so nothing of its own is overwritten; KVM
+                // refuses the same case outright in
+                // `vmx_update_cr8_intercept`, which returns early when
+                // `is_guest_mode(vcpu) && nested_cpu_has(vmcs12,
+                // CPU_BASED_TPR_SHADOW)` (`.references/kvm/vmx.c:6723`).
+                if (holding && blocked &&
+                    (0 != (primary & primary_tpr_shadow)) &&
+                    (0 == tpr_threshold12)) {
+                    threshold02 = dispatch_threshold;
+                    this->window_threshold_armed[cpu] = true;
+                    this->window_threshold_arm_entries[cpu] += 1;
+                } else {
+                    // Nothing to report, or nothing this VMM may
+                    // report it with. `threshold02` still holds
+                    // vmcs12's own value, so this entry is byte for
+                    // byte the one the default build would have made.
+                    this->window_threshold_armed[cpu] = false;
+
+                    if (holding && blocked) {
+                        this->window_threshold_refused[cpu] += 1;
+                    }
+                }
+            }
+        }
+
         write_vmcs02_control(cpu, field::tpr_threshold, threshold02);
 
         // A histogram of what the guest hypervisor arms, because the
@@ -3353,7 +3441,8 @@ bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
         // priority came down. See `window_threshold_armed`; without this
         // the exit would be reflected to a level above that never set a
         // threshold and cannot account for it.
-        if constexpr (nested_vmx::window_on_tpr) {
+        if constexpr (nested_vmx::window_on_tpr ||
+                      nested_vmx::deliver_on_drop) {
             return (cpu < max_cpus) && this->window_threshold_armed[cpu];
         } else {
             return false;
@@ -9675,6 +9764,89 @@ hypervisor::on_l2_exit(std::size_t cpu,
         }
     }
 
+    // The priority drop this VMM armed a threshold for, answered by
+    // **making sure the window is live in vmcs02 before resuming**.
+    // See `nested_vmx::deliver_on_drop`.
+    //
+    // Since nothing is withheld any more the window is normally already
+    // there, and `window_already_armed_at_drop` is expected to be almost
+    // all of the count. The write is kept for the case that is not
+    // normal and is the one that matters: the level above cleared its
+    // window request between the arming entry and this exit, and would
+    // then be woken by nothing at all at the instant its held vector
+    // became deliverable. That is the shape of every failure in this
+    // investigation, so it is closed rather than argued about.
+    //
+    // KVM arms it in the live VMCS and does nothing else:
+    // `vmx_enable_irq_window` is `exec_controls_setbit(to_vmx(vcpu),
+    // CPU_BASED_INTR_WINDOW_EXITING)` (`.references/kvm/vmx.c:4937`),
+    // and `kvm_check_and_inject_events` calls it again on every entry
+    // while `kvm_cpu_has_injectable_intr` still holds
+    // (`.references/kvm/x86.c:10445`). The vector is never consumed by
+    // a failed attempt - `kvm_apic_has_interrupt` only reads the
+    // request register (`.references/kvm/lapic.c:2934`) - so the cost
+    // of being early is a retry rather than a lost interrupt.
+    //
+    // Through `write_vmcs02_control` rather than a bare VMWRITE, so the
+    // control cache agrees with the field. A direct write would leave
+    // the cache holding the old value, and the next `build_vmcs02`
+    // computing that same old value would *elide* its write - so a
+    // control this VMM set here would survive into an entry that meant
+    // not to have it, silently and only sometimes.
+    if constexpr (nested_vmx::deliver_on_drop) {
+        if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
+            (basic_reason::tpr_below_threshold == reason.basic())) {
+            this->window_threshold_armed[cpu] = false;
+            this->window_granted_on_drop[cpu] += 1;
+
+            // The threshold back down first. Left standing over a
+            // priority that has now fallen below it - which is why this
+            // exit fired - it is a VM-entry consistency check (SDM
+            // 29.2.1.1, `.references/sdm.txt:202124`) and the entry is
+            // refused outright. The entry that follows does not go
+            // through `build_vmcs02`, so here is the only place it can
+            // be done. Measured before this existed on the first
+            // version of the switch: the processor died in
+            // `nested_vmlaunch` with `#PF` at a tiny address, and the
+            // first success of the mechanism was what killed it.
+            //
+            // vmcs02 is current here, which is what both writes turn on.
+            write_vmcs02_control(cpu,
+                                 field::tpr_threshold,
+                                 this->nested_tpr_threshold[cpu]);
+            this->window_threshold_disarmed[cpu] += 1;
+
+            constexpr auto primary_field =
+                field::primary_processor_based_vm_execution_controls;
+
+            auto primary02 = this->vmcs.read(primary_field);
+
+            if (0 != (primary02 & primary_interrupt_window)) {
+                // Already live. Counted rather than assumed, because
+                // "the window is always there" is exactly the sort of
+                // claim this tree has been wrong about, and the two
+                // counters together say which case the machine is in.
+                this->window_already_armed_at_drop[cpu] += 1;
+            } else {
+                write_vmcs02_control(
+                    cpu,
+                    primary_field,
+                    arch::x86_64::vmx::adjust_msr(
+                        this->cached_vmx_msr(
+                            arch::x86_64::vmx::msr::
+                                true_processor_based_controls),
+                        primary02 | primary_interrupt_window));
+
+                this->window_armed_at_drop[cpu] += 1;
+            }
+
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+    }
+
     if (l0_wants_l2_exit(cpu, reason, context)) {
         this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
         return l2_exit_outcome::deferred;
@@ -11205,6 +11377,53 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 (context.rax & 0xffffffff) | (context.rdx << 32);
 
             auto vtpr = record_interrupt_request(cpu, command);
+
+            // The ask half of the drop account, recorded whatever this
+            // VMM then does with the write. See
+            // `nested_vmx::count_dropped_requests`.
+            //
+            // The two spellings of "me" are the ones established
+            // below and measured there: destination shorthand 01, and
+            // shorthand 00 with a physical destination of APIC id 0,
+            // which is what this guest actually writes on every one of
+            // 297,465 recorded commands. Anything else is another
+            // processor's and not this account's.
+            //
+            // Only vectors below the dispatch class, because the whole
+            // question is a vector the priority can block. A clock
+            // vector at class 13 is admitted at almost every priority
+            // and has never been the one going missing.
+            if constexpr (nested_vmx::count_dropped_requests) {
+                constexpr std::uint64_t shorthand_mask = 3ull << 18;
+                constexpr std::uint64_t shorthand_self = 1ull << 18;
+                constexpr std::uint64_t destination_shift = 32;
+                constexpr std::uint64_t priority_class = 4;
+                constexpr std::uint64_t dispatch_class = 0x2f >> 4;
+
+                auto shorthand = command & shorthand_mask;
+                auto destination = command >> destination_shift;
+                auto vector = command & 0xff;
+
+                auto to_self = (shorthand_self == shorthand) ||
+                               ((0 == shorthand) && (0 == destination));
+
+                if ((cpu < max_cpus) && to_self && (0 != vector) &&
+                    ((vector >> priority_class) <= dispatch_class)) {
+                    this->pending_vector_asked[cpu] += 1;
+
+                    if (0 != this->pending_vector_now[cpu]) {
+                        // Already in the level above's request
+                        // register, so this is architecturally the
+                        // same request - SDM 12.8.4 - and counting it
+                        // as a second one is how `asked` against
+                        // `delivered` came to look like a loss.
+                        this->pending_vector_coalesced[cpu] += 1;
+                    } else {
+                        this->pending_vector_now[cpu] =
+                            static_cast<std::uint8_t>(vector);
+                    }
+                }
+            }
 
             // Held until the guest's own priority allows it. See
             // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the

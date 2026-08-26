@@ -116,6 +116,14 @@ option(ZPP_WINDOW_ON_TPR
     "Arm the guest hypervisor's interrupt window on a task-priority drop rather than on every interruptible moment. Interrupt-window exiting fires on RFLAGS.IF and ignores the task priority, so a hypervisor holding an interrupt the guest's priority blocks polls forever - measured at 3,055,183 requests. This defers the window until the priority actually drops, using the TPR threshold as the trigger. Off by default: it delays an interrupt whose priority the guest would have admitted, which is a behaviour change and not merely an optimisation."
     OFF)
 
+option(ZPP_DELIVER_ON_DROP
+    "Arm a TPR threshold where the guest hypervisor left none, and take NOTHING away. Withholding the interrupt window has now been measured twice and is wrong both times: it took vector 0x2f from 9,627 to 11 and the CLOCK from 388,241 to 5,550 in the same run, so it does not merely fail to help the vector being chased, it stops delivery of everything. In this VMM the interrupt window is the primary delivery mechanism for every vector and its 1,500,914 exits are load bearing. On, `primary` is untouched - every entry carries the controls the default build would give it, and window_deferred_count must read zero - and a threshold at the dispatch class is ADDED on entries where the level above is holding a vector the priority blocks and left the threshold at zero. A threshold of zero can never fire (SDM 32.1.2: IF VTPR[7:4] < TPR threshold), which is why its own notification never arrives; l2_tpr_threshold_seen is the check. At the drop the threshold is written back down and the window is ensured live in vmcs02 before the resume. Off by default so an A/B is one variable; a static assertion refuses it together with ZPP_WINDOW_ON_TPR."
+    OFF)
+
+option(ZPP_COUNT_DROPS
+    "Account for the low-priority vector the guest asks for, from the ask to the delivery: asked, coalesced, pending at entry, delivered, and DROPPED - entries made while it was outstanding, at a priority that admits it, with nothing staged and nothing armed that could cause an exit at which the level above might stage it. The last is the number this work exists to take to zero and is the only counter in this tree that names a moment rather than an event. Only counts, so it is safe on in both arms of an A/B; not free - one guest-memory read and one VMREAD per second-level entry - which is why it is a switch."
+    OFF)
+
 option(ZPP_VMCS_CENSUS
     "Census every VMCS access by field and by caller. Free when an access is an exit to the layer below at about 4,600 cycles; the dominant cost once the enlightened VMCS makes an access a load or a store, measured at 1,606 cycles an access against roughly ten for the access itself. Off makes the field and caller tables read zero."
     ON)
@@ -296,6 +304,8 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     -DZPP_WINDOW_ON_TPR=$<BOOL:${ZPP_WINDOW_ON_TPR}>
+    -DZPP_DELIVER_ON_DROP=$<BOOL:${ZPP_DELIVER_ON_DROP}>
+    -DZPP_COUNT_DROPS=$<BOOL:${ZPP_COUNT_DROPS}>
     -DZPP_VMCS_CENSUS=$<BOOL:${ZPP_VMCS_CENSUS}>
     -DZPP_EVMCS_TO_KVM=$<BOOL:${ZPP_EVMCS_TO_KVM}>
     -DZPP_EVMCS_MIXED=$<BOOL:${ZPP_EVMCS_MIXED}>

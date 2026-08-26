@@ -2219,6 +2219,152 @@ inline constexpr bool evmcs_mixed =
  */
 inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
 
+#ifndef ZPP_DELIVER_ON_DROP
+#define ZPP_DELIVER_ON_DROP 0
+#endif
+
+/**
+ * Arm a TPR threshold where the level above left none, and **take
+ * nothing away**.
+ *
+ * ### What this switch is not, and the two measurements that decided it
+ *
+ * It is not `window_on_tpr` repaired. The first version of it was, and
+ * it was measured on the rig and was worse. One processor, one boot,
+ * against the same binary with the switch off:
+ *
+ *     switch                0x2f     0xd1      all vectors   guest asks
+ *     both off              9,627    388,241   404,029       411,669
+ *     first deliver_on_drop    11      5,550     5,938            12
+ *
+ * The dispatch vector did not move and **the clock collapsed with it**,
+ * 388,241 to 5,550. So the harm is not specific to the vector being
+ * chased: withholding the interrupt window stops delivery of
+ * everything. The guest then does almost no work, which is why it asks
+ * only twelve times - the ask count is an effect of the intervention,
+ * not a measurement of the guest. Synthetic interrupt-command writes
+ * fell from 1,452,927 to 12 for the same reason.
+ *
+ * That is now measured twice, since `window_on_tpr` did the same thing
+ * for the same reason, and the conclusion is the one both runs support:
+ * **in this VMM the interrupt window is the primary delivery mechanism
+ * for every vector.** Its 1,500,914 exits are wasteful and they are
+ * load bearing. `window withheld 460,323` was the harmful line, and no
+ * repair to what happens *after* the withholding can pay for it.
+ *
+ * ### Why the TPR threshold delivers nothing, which is a separate defect
+ *
+ * The level above arms a threshold - it writes `tpr_threshold` on 11%
+ * of its VMWRITEs - and the exit fires 33 times in 3.6 million. The
+ * architecture says why, and it is not subtle. SDM 32.1.2, TPR
+ * virtualization (`.references/sdm.txt:206566`):
+ *
+ *     IF "virtual-interrupt delivery" is 0
+ *     THEN
+ *       IF VTPR[7:4] < TPR threshold
+ *       THEN cause VM exit due to TPR below threshold;
+ *
+ * **A threshold of zero can never fire**, because nothing is less than
+ * zero. `l2_tpr_threshold_seen` histograms exactly this value and is
+ * the check: all of it in bucket 0 settles the question outright.
+ *
+ * And the exit has only one trigger available in this configuration.
+ * SDM 32.1.2 lists three operations that perform TPR virtualization -
+ * MOV to CR8, a write to offset 080H on the APIC-access page, and
+ * WRMSR with ECX = 808H - of which the second needs "virtualize APIC
+ * accesses" (SDM 32.4) and the third needs "virtualize x2APIC mode"
+ * (SDM 32.5, `.references/sdm.txt:207200`), neither of which this VMM
+ * offers. VM entry is a fourth trigger and needs the first of those
+ * too (SDM 29.7.7). So MOV to CR8 is the whole of it, and only where
+ * the level above did not also ask for CR8-load exiting - SDM 32.3
+ * treats specially only a MOV to CR8 "that does not fault or cause a
+ * VM exit" (`.references/sdm.txt:206830`).
+ *
+ * ### What is on
+ *
+ * `primary` is untouched, so every entry carries exactly the controls
+ * the default build would have given it, and `window_deferred_count`
+ * must read zero. Added on top:
+ *
+ * - a threshold at the dispatch class on entries where the level above
+ *   is holding something (it is asking for an interrupt window) that
+ *   the guest's priority blocks, **and** it left the threshold at zero,
+ *   **and** it set the TPR shadow. An impossible condition becomes a
+ *   possible one; no exit that was happening stops happening.
+ * - at that exit, the threshold is written back down (left standing it
+ *   is a VM-entry consistency check, SDM 29.2.1.1,
+ *   `.references/sdm.txt:202124`) and the interrupt window is ensured
+ *   live in vmcs02 before the resume. Normally it is already there and
+ *   `window_already_armed_at_drop` counts that; the write exists for
+ *   the case where the level above cleared its request in between and
+ *   would otherwise be woken by nothing at all.
+ *
+ * The class is the vector's own, which is the quantity KVM writes in
+ * `vmx_update_cr8_intercept` (`.references/kvm/vmx.c:6728`,
+ * `tpr_threshold = (irr == -1 || tpr < irr) ? 0 : irr` over an `irr`
+ * already shifted down by four in `update_cr8_intercept`,
+ * `.references/kvm/x86.c:10193`). The refusal to touch a threshold the
+ * level above owns is KVM's too, at `.references/kvm/vmx.c:6723`.
+ *
+ * ### What would say it is working, and what would say it is not
+ *
+ * Working: `0x2f` rises from 9,627 while `0xd1` stays near 388,241 and
+ * the total carried stays near 404,029, and `pending_vector_dropped`
+ * falls. Not working, and the thing to check first: total carried
+ * falling at all. This switch may not cost a single delivery, and if it
+ * does, it is doing the thing both previous attempts did.
+ *
+ * **Off by default**, so an A/B against it is one variable. Independent
+ * of `window_on_tpr` rather than a modifier of it; both on is refused
+ * by a static assertion, since they drive the same state and one of
+ * them withholds.
+ */
+inline constexpr bool deliver_on_drop = (0 != ZPP_DELIVER_ON_DROP);
+
+static_assert(!(window_on_tpr && deliver_on_drop),
+              "ZPP_WINDOW_ON_TPR and ZPP_DELIVER_ON_DROP drive the same "
+              "per-processor state and must not both be on");
+
+#ifndef ZPP_COUNT_DROPS
+#define ZPP_COUNT_DROPS 0
+#endif
+
+/**
+ * Account for the low-priority vector the guest asks for, from the ask
+ * to the delivery, with a name for the failure that has no other one.
+ *
+ * Four numbers per processor, on one basis, so they can be subtracted
+ * from each other:
+ *
+ * - **asked** - writes of the synthetic interrupt command register that
+ *   name this processor and a vector below the dispatch class.
+ * - **pending at entry** - entries into the second-level guest made
+ *   while one of those is still outstanding.
+ * - **delivered** - entries whose entry-interruption field carries it.
+ * - **dropped** - entries made while it was outstanding, at a priority
+ *   that admits it, with nothing staged **and** nothing armed that
+ *   could cause an exit at which the level above might stage it: no
+ *   interrupt window in vmcs02 and no TPR threshold of this VMM's.
+ *
+ * The last is the number this work exists to take to zero, and it is
+ * the only one of the four that is a fault rather than a rate. Every
+ * other counter in this tree observes where an event was *put*;
+ * `dropped` observes a moment at which the machine had every reason to
+ * deliver one and no mechanism left to.
+ *
+ * `asked` deliberately exceeds `delivered` by a large factor even when
+ * nothing is wrong: a request already in the level above's interrupt
+ * request register coalesces with the new one, which is what
+ * `coalesced` counts, so the two are not meant to be equal.
+ *
+ * **Off by default and safe to turn on in both arms of an A/B**, since
+ * it only counts. It is not free - one guest-memory read and one
+ * VMREAD per second-level entry - which is why it is a switch from the
+ * day it was written rather than from the day somebody notices, this
+ * tree having already paid for that lesson once in `census_exits`.
+ */
+inline constexpr bool count_dropped_requests = (0 != ZPP_COUNT_DROPS);
+
 inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
 
 /**

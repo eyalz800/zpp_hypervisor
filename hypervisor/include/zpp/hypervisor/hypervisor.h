@@ -4989,6 +4989,20 @@ private:
     void record_l2_entry_event(std::size_t cpu);
 
     /**
+     * The drop account for one second-level entry, taken at the last
+     * instant before it. `staged` is vmcs02's entry-interruption
+     * information field as it will be entered with.
+     * See `nested_vmx::count_dropped_requests` and the members.
+     *
+     * Called from `resume_guest` rather than `record_l2_entry_event`
+     * because that one runs only on the level above's own VMLAUNCH and
+     * VMRESUME, and the entry this instrument exists to watch - the one
+     * after a TPR-below-threshold exit this VMM handled - does not go
+     * through it.
+     */
+    void note_pending_vector(std::size_t cpu, std::uint64_t staged);
+
+    /**
      * Records the segment and mode state accompanying a new lowest
      * second-level entry address. See `l2_entry_lowest_record` for why
      * the address on its own cannot be read.
@@ -7533,6 +7547,122 @@ private:
     /**
      * @}
      */
+
+    /**
+     * Entries where `deliver_on_drop` armed a threshold of its own,
+     * and entries where it wanted to and could not.
+     *
+     * `arm_entries` is the denominator for `window_granted_on_drop`:
+     * armed against fired. **It is not a count of drops** - the
+     * threshold stays armed across every entry until the priority
+     * falls, so many armed entries share one drop, and the ratio is a
+     * duty cycle rather than a hit rate.
+     *
+     * `refused` counts entries where the level above was holding
+     * something the priority blocked and this VMM could not arm a
+     * threshold anyway: it had set its own threshold, or it had not set
+     * the TPR shadow. Both are cases where nothing may be overwritten -
+     * KVM refuses the identical case in `vmx_update_cr8_intercept`,
+     * returning early when `is_guest_mode(vcpu) && nested_cpu_has(
+     * vmcs12, CPU_BASED_TPR_SHADOW)`. A large reading here says the
+     * mechanism is inapplicable rather than broken, which is a
+     * different finding and wants a different fix.
+     * @{
+     */
+    std::uint64_t window_threshold_arm_entries[max_cpus]{};
+    std::uint64_t window_threshold_refused[max_cpus]{};
+    /** @} */
+
+    /**
+     * What vmcs02's interrupt-window control held at the instant the
+     * processor reported the priority drop.
+     *
+     * `already` is the expected case and should be nearly all of
+     * `window_granted_on_drop`: `deliver_on_drop` withholds nothing, so
+     * the window the level above asked for is still there. `armed` is
+     * the case that is not expected and is the reason the write is
+     * made at all - the level above cleared its window request between
+     * the arming entry and this exit, and would then be woken by
+     * nothing whatever at the one instant its held vector became
+     * deliverable.
+     *
+     * **Read them as the proof that nothing is being withheld.** If
+     * `armed` is large the machine is not in the state this switch
+     * believes it is in, and the first thing to check is that
+     * `window_deferred_count` still reads zero.
+     * @{
+     */
+    std::uint64_t window_armed_at_drop[max_cpus]{};
+    std::uint64_t window_already_armed_at_drop[max_cpus]{};
+    /** @} */
+    /** @} */
+
+    /**
+     * The low-priority vector's whole life, from the guest asking for
+     * it to a second-level entry carrying it, on one basis so the five
+     * numbers can be subtracted from each other.
+     * See `nested_vmx::count_dropped_requests`.
+     *
+     * The question they exist to settle is the one every counter in
+     * this tree so far has been unable to: **411,669 asks against
+     * 9,627 arrivals** is a ratio, and a ratio cannot say whether the
+     * missing ones were coalesced, refused for a reason, or dropped on
+     * the floor. Those want opposite work.
+     *
+     * - `asked` - writes of the synthetic interrupt command register
+     *   naming this processor with a vector below the dispatch class.
+     * - `coalesced` - asks made while one was already outstanding. A
+     *   local APIC's interrupt request register is a bitmap, so a
+     *   second request for a vector already in it is *architecturally*
+     *   the same request - SDM 12.8.4 - and this is expected to be
+     *   most of `asked`. It exists so the gap between `asked` and
+     *   `delivered` is not read as loss.
+     * - `entries_pending` - entries into the second-level guest made
+     *   while one is outstanding.
+     * - `delivered` - entries whose entry-interruption field carries
+     *   it, which retires the outstanding request.
+     * - `dropped` - **the number this exists to take to zero.**
+     *   Outstanding requests that reached a second-level entry made at
+     *   a virtual task priority that admits the vector, with the guest
+     *   interruptible, with no event staged, and with neither an
+     *   interrupt window in vmcs02 nor a TPR threshold of this VMM's
+     *   armed. Nothing in the machine can produce an exit at which the
+     *   level above could deliver it, so the request is not deferred,
+     *   it is lost until something unrelated happens to exit.
+     * - `drop_moments` - the same condition counted per entry rather
+     *   than per request, so it can be many times `dropped`. The pair
+     *   is deliberate and follows the rule this tree learned the hard
+     *   way from censusing one field: `dropped` says *how many
+     *   requests* were abandoned and `drop_moments` says *how long*
+     *   each was abandoned for, and one alone cannot tell a single
+     *   request stuck for a million entries from a million requests
+     *   each stuck once. Those are different faults.
+     *
+     * `blocked` is the honest denominator beside it: entries made with
+     * one outstanding at a priority that refuses it. Those are correct
+     * behaviour and must not be confused with `dropped`, which is what
+     * a single "not delivered" counter would have done.
+     *
+     * `pending_vector_now` is the outstanding vector itself, zero when
+     * none, and `instrument_entries` is the proof of life - it counts
+     * every entry the instrument looked at, so all-zero counters can be
+     * told from an instrument that never ran. Without it "dropped 0" is
+     * indistinguishable from a binary built with the switch off, which
+     * is precisely the reading this project has taken as evidence three
+     * times.
+     * @{
+     */
+    std::uint64_t pending_vector_asked[max_cpus]{};
+    std::uint64_t pending_vector_coalesced[max_cpus]{};
+    std::uint64_t pending_vector_entries_pending[max_cpus]{};
+    std::uint64_t pending_vector_delivered[max_cpus]{};
+    std::uint64_t pending_vector_dropped[max_cpus]{};
+    std::uint64_t pending_vector_drop_moments[max_cpus]{};
+    std::uint64_t pending_vector_blocked[max_cpus]{};
+    std::uint64_t pending_vector_unreadable[max_cpus]{};
+    std::uint64_t pending_vector_instrument_entries[max_cpus]{};
+    std::uint8_t pending_vector_now[max_cpus]{};
+    bool pending_vector_drop_marked[max_cpus]{};
     /** @} */
 
     std::uint64_t l2_no_event_window_asked[max_cpus]{};
