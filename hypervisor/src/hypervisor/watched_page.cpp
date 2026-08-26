@@ -543,6 +543,23 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     }
                     this->filtered_writes = this->filtered_writes + 1;
 
+                    // Named on any processor but the first. A refused
+                    // write is one this VMM swallows: the guest's
+                    // store never happens and it is resumed as though
+                    // it had. That is right for a start-up IPI being
+                    // redirected and wrong for anything else, and the
+                    // per-processor emulated count includes refusals,
+                    // so a swallowed write is invisible in it.
+                    if ((0 != cpu) && (cpu < max_cpus)) {
+                        log("cpu {} refused apic write: offset {} "
+                            "value {} size {} rip {}",
+                            cpu,
+                            address & page_offset_mask,
+                            *intended_value,
+                            static_cast<std::uint64_t>(store->size),
+                            context.rip);
+                    }
+
                     // **The processor's length wins, and a disagreement
                     // is not fatal.** SDM 25.9.4
                     // (.references/sdm.txt:200400): the VM-exit
