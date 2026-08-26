@@ -1021,6 +1021,95 @@ inline constexpr std::uint64_t ap_fault_vectors =
     (1ull << 6) | (1ull << 8) | (1ull << 11) | (1ull << 12) |
     (1ull << 13) | (1ull << 14);
 
+#ifndef ZPP_PROBE_APS
+#define ZPP_PROBE_APS 0
+#endif
+
+// Whether the boot processor periodically probes every other launched
+// processor with a non-maskable interrupt, and records what answered.
+//
+// **The question this exists to answer.** An application processor that
+// stops producing exits is not necessarily a processor that stopped.
+// The guest's own trampoline enables protected mode with a `mov cr0`
+// that sets PE and not PG, and `setup_vmcs` puts PG in the CR0
+// guest/host mask and not PE, so with unrestricted guest that write does
+// not exit and nothing else in the trampoline does either. So four
+// completely different states produce the identical reading of "no
+// exits", and every instrument in this tree reported them the same way:
+//
+//   (i)   executing guest code that has no reason to exit,
+//   (ii)  halted - `hlt_exiting` is inside `trap_the_quiet_instructions`
+//         and so is armed only under ZPP_GUEST_TESTS,
+//   (iii) shut down after a triple fault,
+//   (iv)  stopped inside this VMM, in a halt loop.
+//
+// **A non-maskable interrupt separates all four, and nothing else
+// available here does.** The reason is that it is the only event that
+// reaches a processor which is executing nothing, and the *place* it is
+// answered is itself the measurement:
+//
+//   answered by a VM exit  - the processor is in non-root operation, and
+//       the activity state saved with that exit says which of (i), (ii)
+//       and (iii) it was in. SDM 30.3.4: "the activity-state field is
+//       saved with the logical processor's activity state before the VM
+//       exit", and SDM 30.1: when an unblocked event causes a VM exit
+//       *directly* - which an NMI with "NMI exiting" set does - "a
+//       return to the active state occurs only after the VM exit
+//       completes". So a halted processor records activity state 1
+//       rather than 0, and the halt is not consumed by reading it.
+//   answered at the host interrupt descriptor table - `on_host_exception`
+//       counts it and returns, which is case (iv). NMI exiting governs
+//       non-root operation only, so this is the answer from a processor
+//       that is inside this VMM.
+//   not answered at all - the processor is in the wait-for-SIPI state,
+//       where "NMIs are blocked. The NMI is not delivered and no VM exit
+//       occurs" (SDM 28.1, the list of events in non-root operation).
+//
+// **Why not the VMX-preemption timer**, which is the other instrument
+// that fires without the guest's cooperation: this rig does not have
+// one. `setup_vmcs` records the measured capability -
+// IA32_VMX_TRUE_PINBASED_CTLS is 0x0000003f00000016 and bit 6 is absent
+// from the allowed-one half - and `hypervisor.h`'s note on the
+// injection-time histogram says the same thing from the other end: "KVM
+// does not offer the VMX-preemption timer, so its clock never ticks and
+// it reads zero samples on a build that has it switched on". NMI exiting
+// is bit 3, which that same MSR does permit, and `setup_vmcs` already
+// sets it unconditionally - so this needs no control that can be
+// refused.
+//
+// **Why not the monitor trap flag**: it samples only a processor that is
+// executing, so it cannot distinguish (i) from (ii), (iii) or (iv) - the
+// three cases where nothing retires. It also costs one exit per
+// instruction.
+//
+// **Why not `hlt_exiting` for application processors**: it answers (ii)
+// alone, and leaves (i), (iii) and (iv) identical to each other.
+//
+// The mechanism is not new. `send_wake_nmi` and the `wake_requested`
+// de-duplication latch have been carrying the extended-page-table
+// rendezvous' probes for as long as that has existed; this adds a second
+// driver for them and records what came back.
+//
+// **What it costs, and why it is off by default.** One VM exit on the
+// probed processor per round, which is an exit the guest would not
+// otherwise have taken. Nothing is injected and nothing is synthesised -
+// the wake is consumed by the latch in the exception-or-NMI case, RIP is
+// not advanced, and a halted processor re-enters its halt because the
+// activity state is saved and restored rather than written - so the
+// guest sees no architectural change. It still costs time, so a run with
+// it on is an instrumented run rather than a comparable one.
+inline constexpr bool probe_aps = (0 != ZPP_PROBE_APS);
+
+// How many exits the driving processor takes between probe rounds.
+//
+// Counted rather than timed, for the reason the heartbeat in `resume.cpp`
+// gives: a count is free and reading the time stamp counter on every exit
+// is not. At the measured 5,300 exits a second on this rig a round is a
+// little under two seconds, which is fast enough that a reader watching
+// two consecutive dumps sees movement and slow enough that the probed
+// processor's extra exit is lost in the noise.
+inline constexpr std::uint64_t probe_ap_exits = 8192;
+
 #ifndef ZPP_HONEST_EXIT_LENGTH
 #define ZPP_HONEST_EXIT_LENGTH 1
 #endif

@@ -55,6 +55,54 @@ void hypervisor::send_wake_nmi(std::uint64_t apic)
     ++this->wake_nmis_sent;
 }
 
+void hypervisor::probe_application_processors(std::size_t cpu)
+{
+    for (std::size_t other{}; other < max_cpus; ++other) {
+        // Not this one. A processor driving this is by definition
+        // executing, and an NMI it sent itself would be answered by its
+        // own exit path as though it were evidence about somebody else.
+        if (other == cpu) {
+            continue;
+        }
+
+        // Only processors that were actually launched. One that never
+        // was has no VMCS, has never been in non-root operation, and is
+        // parked wherever the firmware left it - so an interrupt sent to
+        // it measures the firmware, not this VMM. Same test the
+        // rendezvous applies, and for a related reason.
+        if (!this->start_up_launched[other].load(
+                std::memory_order_acquire)) {
+            continue;
+        }
+
+        // A probe still outstanding is one nobody answered, which is the
+        // wait-for-SIPI reading this instrument exists to produce. Clear
+        // the latch and send nothing this round.
+        //
+        // **The clearing is not tidiness, it is what keeps the
+        // extended-page-table rendezvous working.** That function shares
+        // this latch and calls `send_wake_nmi` only when the exchange
+        // finds it clear, so a latch left set by an unanswered probe
+        // would disable its only means of taking a silent processor out
+        // of whatever it is doing - permanently, and for the processor
+        // most likely to need it. `tests/ept_rendezvous` was written for
+        // exactly that failure arriving from the other direction.
+        if (this->wake_requested[other].exchange(
+                true, std::memory_order_acq_rel)) {
+            this->wake_requested[other].store(false,
+                                              std::memory_order_release);
+            continue;
+        }
+
+        // Counted before the interrupt goes out, so a send that faults
+        // still leaves evidence that it was attempted. The counter is
+        // this instrument's alone; the two that record answers are not.
+        this->ap_probe_sent[other] = this->ap_probe_sent[other] + 1;
+
+        send_wake_nmi(this->apic_id[other]);
+    }
+}
+
 bool hypervisor::wait_for_ept_acknowledgement(std::uint64_t budget,
                                               bool probe)
 {

@@ -1026,6 +1026,28 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if (is_nmi && (0 != cpu) && (cpu <= max_cpus) &&
             this->wake_requested[cpu - 1].exchange(
                 false, std::memory_order_acq_rel)) {
+            // This processor is in non-root operation, and the activity
+            // state saved with this exit says what it was doing.
+            //
+            // Read here rather than left to the resume path's own
+            // sample, which writes the same three fields on every exit:
+            // that one cannot be attributed to a probe, so on a
+            // processor still taking exits it describes something else
+            // by the time anybody reads it. See the declaration.
+            //
+            // The activity state is the load-bearing field and it is
+            // read, not inferred. SDM 30.3.4 saves it "with the logical
+            // processor's activity state before the VM exit", and SDM
+            // 30.1 keeps a halted processor in the HLT state until this
+            // exit completes, because an NMI with "NMI exiting" set
+            // causes the exit *directly*. So 1 here means the processor
+            // was halted, and reading it does not end the halt - entry
+            // restores the state from the same field.
+            auto slot = (cpu - 1);
+            this->ap_wake_exit[slot] = this->ap_wake_exit[slot] + 1;
+            this->ap_probe_activity[slot] = vmcs.guest_activity_state();
+            this->ap_probe_rip[slot] = vmcs.guest_rip();
+            this->ap_probe_cs[slot] = vmcs.guest_cs_selector();
             break;
         }
 

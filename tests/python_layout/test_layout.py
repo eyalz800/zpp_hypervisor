@@ -617,5 +617,118 @@ class FrozenExitCountReadings(unittest.TestCase):
             "own guest")
 
 
+class ApLivenessProbeReadings(unittest.TestCase):
+    """The six members that say what a silent application processor is
+    doing, and the two lists that both have to name them.
+
+    **The failure this pins is a reader that resolves a member and never
+    fetches it.** `gdb_offsets` is the only place a name is checked
+    against the ELF and the `scalars` loop is the only place one is
+    actually read, so a name in `members` alone resolves to a real offset
+    whose word is never queued, and `read()` returns `None` for the rest
+    of the boot - which prints as a plausible zero rather than as an
+    error. The reverse, a name in `scalars` alone, is a `KeyError` and is
+    loud. The script's own comment at the `members` list records that
+    this has already cost a run, and `FrozenExitCountReadings` above
+    cannot catch it: its check is `'"name"' in source`, which one list
+    satisfies on its own.
+
+    So this asserts membership of each list separately.
+
+    The members themselves are the liveness probe: four states - a
+    processor executing guest code with no reason to exit, one halted,
+    one shut down, one stopped inside this VMM - are indistinguishable in
+    every other instrument in this tree, and are separated only by where
+    a non-maskable interrupt is answered.
+    """
+
+    MEMBERS = ["ap_probe_sent", "ap_wake_exit", "ap_wake_root",
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
+
+    @staticmethod
+    def _list_named(source, name, terminator):
+        """The text of one bracketed list in `rig-dump-state.py`.
+
+        Sliced by its terminating statement rather than by bracket
+        matching, because the lists carry comments containing brackets.
+        """
+        start = source.index("    {} = [".format(name))
+        end = source.index(terminator, start)
+        return source[start:end]
+
+    def test_header_declares_every_member(self):
+        source = read(HEADER)
+        missing = [name for name in self.MEMBERS
+                   if not re.search(
+                       r"volatile\s+std::uint64_t\s+" + re.escape(name)
+                       + r"\[max_cpus\]", source)]
+        self.assertEqual(
+            [], missing,
+            "hypervisor.h no longer declares as a per-cpu array: "
+            + ", ".join(missing))
+
+    def test_every_member_is_in_the_offsets_list(self):
+        members = self._list_named(
+            read(DUMP_STATE), "members",
+            "off = gdb_offsets(args.elf, members)")
+        missing = [name for name in self.MEMBERS
+                   if '"{}"'.format(name) not in members]
+        self.assertEqual(
+            [], missing,
+            "rig-dump-state.py's `members` list no longer names, so "
+            "`gdb_offsets` never resolves an offset for: "
+            + ", ".join(missing))
+
+    def test_every_member_is_in_the_queue_list(self):
+        scalars = self._list_named(
+            read(DUMP_STATE), "scalars", "for name in scalars:")
+        missing = [name for name in self.MEMBERS
+                   if '"{}"'.format(name) not in scalars]
+        self.assertEqual(
+            [], missing,
+            "rig-dump-state.py's `scalars` list no longer names, so the "
+            "offset resolves and the word is never fetched and reads as "
+            "a plausible zero: " + ", ".join(missing))
+
+    def test_the_reader_reports_a_verdict_per_processor(self):
+        # The counters alone are not the instrument - the reading is
+        # which of the four states they mean, and a table of six numbers
+        # with no verdict is one the next reader has to re-derive.
+        source = read(DUMP_STATE)
+        for reading in ("halted",
+                        "shut down after a triple fault",
+                        "wait-for-SIPI",
+                        "inside this VMM"):
+            self.assertIn(
+                reading, source,
+                "rig-dump-state.py no longer names the `{}` reading of "
+                "the liveness probe".format(reading))
+
+    def test_the_reader_distinguishes_unbuilt_from_unanswered(self):
+        # A switched-off instrument and a processor that answers nothing
+        # are the same six zeroes. The manifest separates them, and the
+        # reader has to say so rather than leaving it to be guessed -
+        # the same trap `apfault=` already records.
+        source = read(DUMP_STATE)
+        self.assertIn(
+            "probe=0", source,
+            "rig-dump-state.py no longer tells a build without the "
+            "liveness probe apart from a processor that answered none")
+
+    def test_the_switch_is_in_the_build_manifest(self):
+        # Four edits make a switch, and this is the fourth. A cache
+        # reading ON is not evidence; the binary saying so is.
+        source = read(os.path.join(
+            ROOT, "hypervisor", "src", "hypervisor", "build_switches.cpp"))
+        self.assertIn(
+            "'p', 'r', 'o', 'b', 'e', '='", source,
+            "build_switches.cpp no longer reports `probe=`, so a binary "
+            "cannot be asked whether the liveness probe is compiled in")
+        self.assertIn(
+            "digit(nested_vmx::probe_aps)", source,
+            "build_switches.cpp no longer reports the liveness probe "
+            "from the constant the code branches on")
+
+
 if __name__ == "__main__":
     unittest.main()

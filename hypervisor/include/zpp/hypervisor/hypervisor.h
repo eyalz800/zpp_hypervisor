@@ -941,6 +941,31 @@ private:
     void send_wake_nmi(std::uint64_t apic);
 
     /**
+     * Probes every other launched processor with a non-maskable
+     * interrupt, so one that has stopped producing exits can be told
+     * apart from one that has stopped.
+     *
+     * Driven from the exit path of whichever processor is still exiting,
+     * one round every `nested_vmx::probe_ap_exits` exits. See
+     * `nested_vmx::probe_aps` for why a non-maskable interrupt is the
+     * only mechanism here that reaches a processor which is executing
+     * nothing, and `ap_wake_exit` for how the answer is read.
+     *
+     * **It shares `wake_requested` with the extended-page-table
+     * rendezvous, and must therefore leave the latch the way that
+     * function needs to find it.** A probe that is never answered - which
+     * is exactly the wait-for-SIPI case this exists to identify - would
+     * otherwise leave the latch set for ever, and `send_wake_nmi` is
+     * called only when the exchange finds it clear. That would switch off
+     * the rendezvous' one mechanism for taking a silent processor out of
+     * whatever it is doing, which is the defect `tests/ept_rendezvous`
+     * was written for. So a round that finds its own previous probe still
+     * outstanding clears the latch and sends nothing, and the round after
+     * that sends again.
+     */
+    void probe_application_processors(std::size_t cpu);
+
+    /**
      * Sends a start-up IPI to one processor, in whichever local APIC mode
      * this one is actually in.
      *
@@ -986,6 +1011,78 @@ private:
      * inference in the exclusion rather than an observation.
      */
     std::uint64_t unresponsive_processors{};
+
+    /**
+     * What answered a wake interrupt on each processor, and where it was
+     * when it did.
+     *
+     * **Read the three counters together, and read them as deltas across
+     * two dumps.** A single one of them cannot say which of the four
+     * states a processor is in, and one cumulative reading cannot say
+     * whether it is still in it. The whole instrument is the disagreement
+     * between them - see `nested_vmx::probe_aps` for the derivation and
+     * for the SDM citations:
+     *
+     *   `ap_probe_sent` rises, `ap_wake_exit` rises - the processor is
+     *       executing in non-root operation. `ap_probe_activity` then
+     *       says which kind: 0 active and running guest code, 1 halted,
+     *       2 shut down after a triple fault. `ap_probe_rip` and
+     *       `ap_probe_cs` say where.
+     *   `ap_probe_sent` rises, `ap_wake_root` rises - the processor is
+     *       inside this VMM. NMI exiting governs non-root operation
+     *       only, so the interrupt arrived at the host interrupt
+     *       descriptor table instead of causing an exit.
+     *   `ap_probe_sent` rises, neither answer moves - the processor is
+     *       in the wait-for-SIPI state, where an NMI is blocked outright,
+     *       or the interrupt is not reaching it at all. Those two are not
+     *       separated here, which is the one soft spot in this.
+     *   `ap_probe_sent` does not rise - nothing probed this processor.
+     *       Check `probe=` in `zpp switches` before reading anything
+     *       else, because a switched-off instrument and a processor that
+     *       answers nothing look identical in the other five fields.
+     *
+     * **`ap_wake_exit` and `ap_wake_root` count every wake interrupt,
+     * not only this instrument's.** The extended-page-table rendezvous
+     * sends its own through the same `send_wake_nmi` and they are
+     * consumed by the same latch, so the answer counters can move while
+     * `ap_probe_sent` stands still, and `sent` is a lower bound on what
+     * was aimed at the processor rather than an equal. They are named for
+     * what they measure rather than for what this instrument wanted them
+     * to measure, because a counter that is read as the second thing when
+     * it is the first is how this tree has already lost several sessions.
+     *
+     * `ap_probe_activity`, `ap_probe_rip` and `ap_probe_cs` describe the
+     * **last** wake answered by an exit and nothing else. They are
+     * separate from `resume_activity_state` and its pair on purpose:
+     * those are rewritten by every exit, so on a processor that is still
+     * exiting they describe whatever happened most recently, and on one
+     * that has stopped they are frozen at an exit that may be minutes
+     * old. Neither state can be told from the other without a counter
+     * that moves, which is what `ap_wake_exit` is for.
+     *
+     * volatile because nothing in this program reads them; without it
+     * the stores are dead and the optimizer removes them.
+     * @{
+     */
+    volatile std::uint64_t ap_probe_sent[max_cpus]{};
+    volatile std::uint64_t ap_wake_exit[max_cpus]{};
+    volatile std::uint64_t ap_wake_root[max_cpus]{};
+    volatile std::uint64_t ap_probe_activity[max_cpus]{};
+    volatile std::uint64_t ap_probe_rip[max_cpus]{};
+    volatile std::uint64_t ap_probe_cs[max_cpus]{};
+    /** @} */
+
+    /**
+     * How many exits the driving processor has taken towards the next
+     * probe round.
+     *
+     * Per processor and separate from `heartbeat_exits_seen`, which
+     * counts the same exits for a different consumer. Sharing one counter
+     * between two periodic jobs ties their intervals together, and the
+     * heartbeat's interval is chosen against what the disk channel costs
+     * rather than against what a probe costs.
+     */
+    std::uint64_t probe_exits_seen[max_cpus]{};
 
     /**
      * How many exits each processor has taken, for the heartbeat.

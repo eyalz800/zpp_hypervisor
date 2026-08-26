@@ -234,6 +234,10 @@ option(ZPP_TRAP_AP_FAULTS
        "Diagnostic. Intercept an application processor's first exception in the window opened by the write that enables paging, so the fault that kills it is recorded with its vector, error code and - for a page fault - its faulting linear address, instead of arriving as a bare triple fault. The capture disarms itself and resumes without advancing RIP or injecting anything, so the guest re-executes and the boot ends as it did before. Read hypervisor::ap_fault as a pair: armed 1 with occurred 0 means the trap was in place and caught nothing, which says the triple fault is not a guest exception at that instruction at all."
        OFF)
 
+option(ZPP_PROBE_APS
+       "Diagnostic. Have whichever processor is still exiting periodically probe every other launched processor with a non-maskable interrupt, and record whether the answer came back as a VM exit, at the host interrupt descriptor table, or not at all. That is the only distinction available here between an application processor that is executing guest code with no reason to exit, one that is halted, one that has shut down, and one that is stopped inside this VMM - all four of which otherwise read as 'takes no exits'. Costs one extra VM exit on the probed processor per round and injects nothing. See nested_vmx.h for the SDM citations and for why the VMX-preemption timer cannot do this on a rig whose IA32_VMX_TRUE_PINBASED_CTLS withholds bit 6."
+       OFF)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report a VM-exit instruction length to the guest hypervisor only for exit reasons where the SDM defines it"
        ON)
@@ -436,6 +440,7 @@ ExternalProject_Add(hypervisor
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
         -DZPP_TRAP_AP_FAULTS=${ZPP_TRAP_AP_FAULTS}
+        -DZPP_PROBE_APS=${ZPP_PROBE_APS}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
@@ -555,6 +560,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
         -DZPP_TRAP_AP_FAULTS=${ZPP_TRAP_AP_FAULTS}
+        -DZPP_PROBE_APS=${ZPP_PROBE_APS}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}

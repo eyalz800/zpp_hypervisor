@@ -947,6 +947,24 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         arm_controller_poll(cpuid, diag::esp_block_sink::ready());
     }
 
+    // The liveness probe, driven by whichever processor is still
+    // exiting.
+    //
+    // It has to hang off an exit path because there is no other clock
+    // here - and that is not the limitation it looks like. A processor
+    // that has stopped exiting cannot drive anything, which is the whole
+    // premise; a processor that is still exiting is exactly the one in a
+    // position to ask about the others. With every processor silent
+    // nothing probes anything, and nothing could have.
+    if constexpr (nested_vmx::probe_aps) {
+        if (auto cpu = (cpuid + 1); (0 != cpu) && (cpu <= max_cpus)) {
+            auto & seen = this->probe_exits_seen[cpu - 1];
+            if (0 == (++seen % nested_vmx::probe_ap_exits)) {
+                probe_application_processors(cpu - 1);
+            }
+        }
+    }
+
     // A heartbeat, so the channel has something to carry.
     //
     // Without it the log is silent whenever nothing goes wrong, which

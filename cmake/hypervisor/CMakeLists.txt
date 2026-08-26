@@ -76,6 +76,10 @@ option(ZPP_TRAP_AP_FAULTS
        "Diagnostic. Record an application processor's first exception after it enables paging instead of letting it arrive as a bare triple fault. See the root CMakeLists and nested_vmx.h."
        OFF)
 
+option(ZPP_PROBE_APS
+       "Diagnostic. Probe silent application processors with a non-maskable interrupt and record what answered. See the root CMakeLists and nested_vmx.h."
+       OFF)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report an exit instruction length only where the SDM defines it"
        ON)
@@ -343,6 +347,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_INIT_CLEARS_EFER=$<BOOL:${ZPP_INIT_CLEARS_EFER}>
     -DZPP_TRACK_LONG_MODE_SWITCH=$<BOOL:${ZPP_TRACK_LONG_MODE_SWITCH}>
     -DZPP_TRAP_AP_FAULTS=$<BOOL:${ZPP_TRAP_AP_FAULTS}>
+    -DZPP_PROBE_APS=$<BOOL:${ZPP_PROBE_APS}>
     -DZPP_HONEST_EXIT_LENGTH=$<BOOL:${ZPP_HONEST_EXIT_LENGTH}>
     -DZPP_L2_STARTUP_SPIN=$<BOOL:${ZPP_L2_STARTUP_SPIN}>
     -DZPP_STEP_AP_WATCHED_WRITES=$<BOOL:${ZPP_STEP_AP_WATCHED_WRITES}>

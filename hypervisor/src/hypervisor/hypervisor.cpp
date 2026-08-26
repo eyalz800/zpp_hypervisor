@@ -500,6 +500,26 @@ void hypervisor::on_host_exception(
     if (non_maskable_interrupt == frame.vector) {
         this->host_nmi_count = this->host_nmi_count + 1;
         this->host_nmi_rip = frame.rip;
+
+        // And per processor, which the two counters above cannot be.
+        //
+        // This is the whole of case (iv) in `nested_vmx::probe_aps`: a
+        // wake answered *here* rather than by a VM exit says the target
+        // is inside this VMM, because NMI exiting governs non-root
+        // operation only. A single shared counter says an NMI was taken
+        // somewhere and cannot name the processor, which on a machine
+        // where one processor is wedged and another is running is the
+        // only thing worth knowing.
+        //
+        // `this_processor()` is valid in root operation, which this is.
+        // Deliberately not the latch: the latch is cleared by the exit
+        // path, and clearing it here would make a probe answered in root
+        // mode indistinguishable from one answered by an exit - which is
+        // precisely the distinction being drawn. It is left set, and the
+        // next probe round clears it.
+        if (auto here = this_processor(); here < max_cpus) {
+            this->ap_wake_root[here] = this->ap_wake_root[here] + 1;
+        }
         return;
     }
 

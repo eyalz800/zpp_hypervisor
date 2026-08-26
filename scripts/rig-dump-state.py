@@ -3936,7 +3936,12 @@ def main():
                # plausible zero. The two lists are the same fact and
                # want to be one, which is the next thing to do here.
                "resumes_reached", "l2_start_up_waits",
-               "ept_violation_unclaimed"]
+               "ept_violation_unclaimed",
+               # The application-processor liveness probe. Six members,
+               # and they have to be read together - see the comment at
+               # the printer and `nested_vmx::probe_aps`.
+               "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
     off = gdb_offsets(args.elf, members)
     # The start-up and local-APIC state, which this reader has been
     # carrying offsets for and printing nowhere.
@@ -4091,7 +4096,16 @@ def main():
                # counter is the only thing that separates them, and
                # `hypervisor.h` says so at its declaration.
                "resumes_reached", "l2_start_up_waits",
-               "ept_violation_unclaimed"]
+               "ept_violation_unclaimed",
+               # One word per processor each, so the plain scalar queue
+               # covers them. Listed here *as well as* in `members`
+               # above: `gdb_offsets` is the only place a name is
+               # checked against the ELF, and this loop is the only
+               # place one is actually fetched, so a name in one list
+               # and not the other is either a KeyError or a silent
+               # `None`. That mismatch has already cost a run.
+               "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
     # The phase rows are [cpu][phase_count], so each processor's row has
@@ -4417,6 +4431,68 @@ def main():
                  if (exits - reached) == 1 else
                  ("   <- IMPOSSIBLE: more exits than handlers left"
                   if (exits - reached) > 1 else "")))
+
+    # The application-processor liveness probe.
+    #
+    # **This answers the one question "takes no exits" cannot.** Four
+    # completely different states produce an identical silence in every
+    # other instrument here - a processor executing guest code that has
+    # no reason to exit, one halted, one shut down, and one stopped
+    # inside the VMM itself - and the place a non-maskable interrupt is
+    # answered separates them. See `nested_vmx::probe_aps` for the SDM
+    # citations.
+    #
+    # Read as a delta across two dumps, never cumulatively. A cumulative
+    # reading says a processor answered at some point in the boot, which
+    # is not the question.
+    #
+    # `wake-exit` and `wake-root` count *every* wake interrupt, including
+    # the extended-page-table rendezvous' own, so they can move while
+    # `sent` stands still. `sent` is a lower bound on what was aimed at
+    # the processor, not an equal - the columns are named for what they
+    # measure rather than for what the probe wanted them to measure.
+    ACTIVITY_READING = {
+        0: "active - executing guest code",
+        1: "halted",
+        2: "shut down after a triple fault",
+        3: "wait-for-SIPI",
+    }
+    probed = any((read('ap_probe_sent', cpu) or 0) or
+                 (read('ap_wake_exit', cpu) or 0) or
+                 (read('ap_wake_root', cpu) or 0)
+                 for cpu in range(args.cpus))
+    print("\ncpu  probes-sent  wake-exit  wake-root  activity  cs:rip")
+    if not probed:
+        # The two readings that look identical, separated by the
+        # manifest rather than guessed at - the same trap the fault
+        # trap below records.
+        print("  nothing probed. If `probe=0` in `zpp switches` this "
+              "instrument was not built;")
+        print("  if `probe=1` then no processor ever reached a probe "
+              "round, which means the")
+        print("  driving processor stopped exiting too.")
+    for cpu in range(args.cpus):
+        sent = read('ap_probe_sent', cpu) or 0
+        by_exit = read('ap_wake_exit', cpu) or 0
+        by_root = read('ap_wake_root', cpu) or 0
+        activity = read('ap_probe_activity', cpu)
+        rip = read('ap_probe_rip', cpu) or 0
+        cs = read('ap_probe_cs', cpu) or 0
+
+        if by_exit:
+            verdict = ACTIVITY_READING.get(activity,
+                                           f"activity {activity}")
+        elif by_root:
+            verdict = "inside this VMM"
+        elif sent:
+            verdict = "answered nothing - wait-for-SIPI, or not delivered"
+        else:
+            verdict = "never probed"
+
+        print(f"{cpu:3d}  {sent:-11d}  {by_exit:-9d}  {by_root:-9d}  "
+              f"{'-' if activity is None else activity:>8}  "
+              f"0x{cs:04x}:0x{rip:x}")
+        print(f"     <- {verdict}")
 
     # The application-processor fault trap, read as a pair.
     #

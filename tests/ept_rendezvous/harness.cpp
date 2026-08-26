@@ -317,6 +317,118 @@ void test_a_passive_wait_does_not_give_up()
           "passive.latch-untouched");
 }
 
+// ------------------------ 7. the liveness probe reaches the right set
+//
+// `probe_application_processors` is the second driver of the same wake
+// interrupt, and this is the shape of one round: every *other* launched
+// processor, once each, counted where a reader can see it.
+//
+// Self is excluded because a processor driving this is by definition
+// executing, so an interrupt it sent itself would come back through its
+// own exit path and be recorded as evidence about somebody else.
+void test_a_probe_round_reaches_every_other_launched_processor()
+{
+    std::println("\na probe round reaches every other launched processor");
+
+    reset();
+    two_processors_one_behind();
+
+    g_vmm.probe_application_processors(0);
+
+    check(1 == g_vmm.wake_nmis_sent, "round.sent-exactly-one");
+    check(1 == g_vmm.ap_probe_sent[1], "round.counted-against-target");
+    check(0 == g_vmm.ap_probe_sent[0], "round.did-not-probe-itself");
+    check(g_vmm.wake_requested[1].load(std::memory_order_acquire),
+          "round.latched-the-target");
+
+    // Addressed to the target's APIC id, not to its slot. The two are
+    // equal in this fixture only because the fixture sets them equal, so
+    // the check is on the register the interrupt actually carries.
+    auto writes = zpp::arch::x86_64::g_mmio_write_count.load();
+    check(2 == writes, "round.two-register-writes");
+    if (2 == writes) {
+        check((1u << 24) == zpp::arch::x86_64::g_mmio_writes[0].value,
+              "round.addressed-to-apic-id-1");
+        check(0x4400 == zpp::arch::x86_64::g_mmio_writes[1].value,
+              "round.is-an-nmi");
+    }
+}
+
+// ------------------- 8. a processor that never launched is not probed
+//
+// It has never been in non-root operation, so an interrupt sent to it
+// measures the firmware rather than this VMM, and the silence it would
+// answer with is not the silence this instrument reads.
+void test_the_probe_skips_an_unlaunched_processor()
+{
+    std::println("\nthe probe skips an unlaunched processor");
+
+    reset();
+    two_processors_one_behind();
+    g_vmm.start_up_launched[1] = false;
+
+    g_vmm.probe_application_processors(0);
+
+    check(0 == g_vmm.wake_nmis_sent, "unlaunched.no-probe-sent");
+    check(0 == g_vmm.ap_probe_sent[1], "unlaunched.nothing-counted");
+}
+
+// ------- 9. an unanswered probe must not starve the rendezvous. THE ONE
+//
+// This is the check the whole design turns on, and it is the same defect
+// `test_a_latched_probe_still_times_out` pins arriving from the other
+// direction.
+//
+// The state this instrument exists to report - a processor in the
+// wait-for-SIPI state, where an NMI is blocked outright and no exit
+// occurs - is precisely the state in which nothing ever clears the
+// latch. `send_wake_nmi` is called only when the exchange finds the latch
+// clear, so a probe left latched disables *both* drivers for that
+// processor for the rest of the boot: this one stops counting, and the
+// extended-page-table rendezvous loses its only means of taking a silent
+// processor out of whatever it is doing.
+//
+// So a round that finds its own previous probe outstanding clears the
+// latch and sends nothing, and the round after that sends again. The
+// counter therefore keeps rising against a processor that answers
+// nothing, which is what makes "sent rises, neither answer moves"
+// readable as a state rather than as a dead instrument.
+void test_an_unanswered_probe_does_not_starve_the_rendezvous()
+{
+    std::println("\nan unanswered probe does not starve the rendezvous");
+
+    reset();
+    two_processors_one_behind();
+
+    // Round one: a real interrupt, and the target answers nothing -
+    // which is what the wait-for-SIPI state does.
+    g_vmm.probe_application_processors(0);
+    check(1 == g_vmm.wake_nmis_sent, "starve.round-one-sent");
+
+    // Round two: finds its own probe outstanding. Sends nothing, and
+    // un-latches.
+    g_vmm.probe_application_processors(0);
+    check(1 == g_vmm.wake_nmis_sent, "starve.round-two-sent-nothing");
+    check(!g_vmm.wake_requested[1].load(std::memory_order_acquire),
+          "starve.round-two-un-latched");
+
+    // Round three: able to send again. Without the un-latch above this
+    // is the round that never happens, and the counter stops moving on
+    // exactly the processor the instrument was aimed at.
+    g_vmm.probe_application_processors(0);
+    check(2 == g_vmm.wake_nmis_sent, "starve.round-three-sent-again");
+    check(2 == g_vmm.ap_probe_sent[1], "starve.counted-both-sends");
+
+    // And the rendezvous can still probe, which is the property that
+    // must not be broken by adding a second driver to a shared latch.
+    // It finds the latch set from round three, so its own give-up path
+    // is what has to clear it - the case test 1 covers.
+    auto answered = g_vmm.wait_for_ept_acknowledgement(budget, true);
+    check(answered, "starve.rendezvous-still-returns");
+    check(!g_vmm.wake_requested[1].load(std::memory_order_acquire),
+          "starve.rendezvous-left-it-clear");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- main
@@ -328,6 +440,9 @@ int main()
     test_one_processor_never_waits();
     test_an_unlaunched_processor_is_skipped();
     test_a_passive_wait_does_not_give_up();
+    test_a_probe_round_reaches_every_other_launched_processor();
+    test_the_probe_skips_an_unlaunched_processor();
+    test_an_unanswered_probe_does_not_starve_the_rendezvous();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
     return (0 == g_failures) ? 0 : 1;

@@ -328,6 +328,14 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // the whole output of the instrument.
         ' ', 'a', 'p', 'f', 'a', 'u', 'l', 't', '=',
         digit(nested_vmx::trap_ap_faults),
+        // The application-processor liveness probe, for exactly the
+        // reason the fault trap above is here: `ap_probe_sent` reading
+        // zero means either that nothing probed or that this was never
+        // built, and those are the same six zeroes in a dump. This is
+        // the field that separates them, and the reader says so rather
+        // than guessing.
+        ' ', 'p', 'r', 'o', 'b', 'e', '=',
+        digit(nested_vmx::probe_aps),
         '\0'};
 
 } // namespace zpp::hypervisor
