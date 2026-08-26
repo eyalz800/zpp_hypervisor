@@ -873,6 +873,26 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_STEP_AP_WATCHED_WRITES
+#define ZPP_STEP_AP_WATCHED_WRITES 0
+#endif
+
+// Settles whether the write *emulation* is what kills a processor
+// other than the first, in one comparison rather than field by field.
+// Every field checks out - thirteen writes decoded, every applied
+// offset equal to the decoded one and all of them an ordinary
+// bring-up set, no instruction-length disagreement, none refused,
+// none stepped, and the host in xAPIC mode so the store reaches the
+// device - and the processor still dies with the watch armed and
+// lives with it dropped.
+//
+// On, those processors take the monitor-trap fallback instead: the
+// page is opened, the guest executes its own instruction, and the
+// watch is restored. Survival then means the emulation was at fault;
+// death means it was not, and neither answer needs another field.
+inline constexpr bool step_ap_watched_writes =
+    (0 != ZPP_STEP_AP_WATCHED_WRITES);
+
 #ifndef ZPP_DROP_WATCH_ON_START_UP
 #define ZPP_DROP_WATCH_ON_START_UP 0
 #endif

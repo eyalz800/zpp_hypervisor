@@ -467,7 +467,14 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 ? (0 != (qualification & qualification_operand_access))
                 : address_known;
 
-        if (auto store = (emulate_watched_page_writes && operand_access)
+        // See `nested_vmx::step_ap_watched_writes`: with it on, every
+        // processor but the first falls through to the monitor-trap
+        // step below and executes its own instruction.
+        auto may_emulate =
+            emulate_watched_page_writes &&
+            (!nested_vmx::step_ap_watched_writes || (0 == cpu));
+
+        if (auto store = (may_emulate && operand_access)
                              ? instruction
                              : std::nullopt) {
             // A store that crosses the end of the watched page would be

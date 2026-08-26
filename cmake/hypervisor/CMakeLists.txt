@@ -64,6 +64,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture. OFF. See the root CMakeLists and nested_vmx.h."
     OFF)
 
+option(ZPP_STEP_AP_WATCHED_WRITES
+       "Step, rather than emulate, watched-page writes on processors other than the first"
+       OFF)
+
 option(ZPP_DROP_WATCH_ON_START_UP
        "Drop the local APIC page watch as soon as a start-up has been applied"
        OFF)
@@ -301,6 +305,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # because it was never built. Adding an option is three edits here,
     # not two, and the third is the only one the compiler sees.
     -DZPP_STEP_VTL=$<BOOL:${ZPP_STEP_VTL}>
+    -DZPP_STEP_AP_WATCHED_WRITES=$<BOOL:${ZPP_STEP_AP_WATCHED_WRITES}>
     -DZPP_DROP_WATCH_ON_START_UP=$<BOOL:${ZPP_DROP_WATCH_ON_START_UP}>
     -DZPP_WATCH_AP_PAGE_TABLE=$<BOOL:${ZPP_WATCH_AP_PAGE_TABLE}>
     -DZPP_APPLY_QUEUED_START_UP=$<BOOL:${ZPP_APPLY_QUEUED_START_UP}>
