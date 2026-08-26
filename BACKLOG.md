@@ -53522,3 +53522,39 @@ on this run it prints *NOT a livelock*, ratio 0.986. The rip verdict now
 discriminates on `served`/`rewound` and flags torn records. The baseline
 line now says it was taken with shadowing off.
 
+## Steady state, measured as a delta: the guest is running, not wedged
+
+Two dumps sixty seconds apart on one live guest - shadowing on,
+`evmk=0`, `drop=0`, `dropcnt=1`, `qstart=1`, one processor. The first
+delta measurement in this investigation, and it changes the reading:
+
+| | first | second | per second |
+|---|---|---|---|
+| exits | 1,494,422 | 2,210,854 | **11,940** |
+| second-level entries | 505,683 | 862,929 | **5,954** |
+| `HvCallVtlCall` | 23,936 | 24,547 | **10.2** |
+| thread samples | 114 | 201 | 1.4 |
+
+Nearly six thousand second-level entries a second, and the trust-level
+machinery turning at ten calls a second. **Nothing here is wedged.**
+
+### A reading of my own that has to go with it
+
+"The only thread is `Phase1Initialization`, therefore it is stuck" has
+been repeated through several entries above and **does not follow**.
+`Phase1Initialization` is the thread that runs the *whole* of phase 1;
+seeing it for minutes is what a slow phase 1 looks like, not what a
+stalled one looks like. It is the same error as the livelock banner one
+section up: a state that is *consistent* with the hypothesis was read
+as *evidence for* it.
+
+What would actually distinguish them is progress inside phase 1, and
+the instruments in this dump do not measure that. The entry-RIP set
+cannot: it is dominated by the clock path whether the guest is working
+or waiting, which this file already records.
+
+So the honest position is that the one-processor configuration is
+**slow, and not yet shown to be stalled**, and the cheapest test of the
+difference is to leave it running far longer than any run so far - every
+sample in this session was taken between three and eight minutes.
+
