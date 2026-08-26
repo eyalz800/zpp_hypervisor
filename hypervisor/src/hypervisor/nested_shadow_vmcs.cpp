@@ -820,15 +820,30 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
             // it with what this VMM last published. That is the one way
             // vmcs12's RIP can go backwards without anybody moving it,
             // so it is counted. See `low_rip_source`.
-            if ((field::guest_rip == entry) &&
-                (value < low_rip_threshold)) {
-                note_low_guest_rip(cpu,
-                                   low_rip_source::collected_from_shadow,
-                                   cached.read(encoding),
-                                   value,
-                                   0,
-                                   0,
-                                   this->guest_current_vmcs[cpu]);
+            if (field::guest_rip == entry) {
+                auto before = cached.read(encoding);
+
+                if (value < low_rip_threshold) {
+                    note_low_guest_rip(
+                        cpu,
+                        low_rip_source::collected_from_shadow,
+                        before,
+                        value,
+                        0,
+                        0,
+                        this->guest_current_vmcs[cpu]);
+                }
+
+                // **And the case a low-address filter cannot see.** The
+                // line above fires only below one page, so the region
+                // imposing a *plausible* stale address over the one the
+                // guest hypervisor had just VMWRITTEN is invisible to
+                // it - and that is the same defect with the evidence
+                // removed. This counts the overwrite itself, which is
+                // also what lets a served RIP be attributed to the
+                // region rather than to any of `low_rip_source`'s
+                // writers. See `note_collected_guest_rip`.
+                note_collected_guest_rip(cpu, before, value);
             }
 
             cached.write(encoding, value);

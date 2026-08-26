@@ -6260,6 +6260,254 @@ private:
     }
     /** @} */
 
+    /**
+     * What this VMM *serves* the guest hypervisor for the second-level
+     * instruction pointer, as against what it *stores*.
+     *
+     * **Every instrument above this one watches stores.** `low_rip_source`
+     * counts the four writers of vmcs12's RIP and the three that advance
+     * vmcs02's, and it established that the guest hypervisor VMWROTE `2`
+     * itself over a valid address. It cannot say what the guest
+     * hypervisor *read* to arrive at `2`, because nothing was watching
+     * the read side - and `0 + 2` is what a two-byte instruction length
+     * added to a zero RIP produces.
+     *
+     * So this censuses the other direction. Two things are recorded
+     * rather than one, for the reason the "census two fields" rule
+     * exists: the value served is `guest_vmcs12[cpu]` **by
+     * construction** - `on_guest_vmread` has exactly one source
+     * (`nested_vmx.cpp`, the `guest_vmcs12[cpu].read(encoding)` line) and
+     * `on_guest_vmwrite` writes the same slot through the same
+     * width-honouring pair - so "served == cached" is a tautology and an
+     * instrument that only checked it would confirm itself.
+     *
+     * The field that *can* disagree is the **hardware shadow region**.
+     * `copy_shadow_to_vmcs12` overwrites the cache's copy of every
+     * `shadow_read_write_fields` entry, `guest_rip` among them, from that
+     * region - at `flush_guest_vmcs12` and again on **every** second-level
+     * entry from `on_guest_vmlaunch`. Where the control is advertised and
+     * stripped underneath, which is this rig, the guest hypervisor's
+     * store exited and reached the cache while the region holds only what
+     * `copy_vmcs12_to_shadow` last published, so that overwrite is a
+     * third storage silently deciding what a later VMREAD will be served.
+     *
+     * Reading it, per processor:
+     *
+     * - **`served` zero and `low` zero** - this VMM never handed the guest
+     *   hypervisor a second-level RIP below one page. That kills the
+     *   "we served a zero" hypothesis outright, and it is the reading the
+     *   dump prints in words.
+     * - `low` non-zero with `from_region` non-zero - the low value this
+     *   VMM served is the one `copy_shadow_to_vmcs12` put in the cache,
+     *   and the defect is the overwrite rather than the read.
+     * - `low` non-zero with `from_region` zero - the cache held a low RIP
+     *   that the region did not impose, so one of the `low_rip_source`
+     *   writers put it there and that census names which.
+     * - `changed` non-zero at all is the overwrite happening, whatever
+     *   the values: the guest hypervisor's own VMWRITE of RIP is being
+     *   discarded on the next entry. `rewound` counts the subset where
+     *   the region's value was the smaller of the two.
+     *
+     * Cost: on the VMREAD path, one compare of an encoding already in a
+     * register against a constant, and on the collect path, nothing that
+     * is not already in hand. Deliberately not behind a build switch, for
+     * the reason `low_rip_source` gives - the event happens once at the
+     * end of a seven-minute boot and a switch that was off costs the run.
+     * @{
+     */
+    struct rip_service_record
+    {
+        /** Set last, so a reader that finds it set finds the rest
+         *  filled in. */
+        std::uint64_t occurred;
+
+        /** `l2_entries` on this processor at the time. */
+        std::uint64_t entries;
+
+        /** What went to the destination operand, or - on the collect
+         *  path - what the hardware shadow region held. */
+        std::uint64_t served;
+
+        /** What `guest_vmcs12[cpu]` held. On the collect path this is
+         *  the value the region was about to overwrite. */
+        std::uint64_t cached;
+
+        /** The region's last collected RIP at the time, so a served
+         *  value can be attributed to it without a second dump. */
+        std::uint64_t region;
+
+        /** `vmcs_shadowing_enabled` then, because it decides whether the
+         *  collect path runs at all and it is stood down mid-boot. */
+        std::uint64_t shadowing;
+    };
+
+    /** Every VMREAD of `guest_rip` this VMM answered. */
+    volatile std::uint64_t vmread_rip_served[max_cpus]{};
+
+    /** Of those, the ones below `low_rip_threshold`, and the ones that
+     *  were exactly zero. Zero is the value the arithmetic needs. */
+    volatile std::uint64_t vmread_rip_low[max_cpus]{};
+    volatile std::uint64_t vmread_rip_zero[max_cpus]{};
+
+    /** Of the low ones, those equal to the last value the hardware
+     *  shadow region imposed on the cache - the attribution. */
+    volatile std::uint64_t vmread_rip_from_region[max_cpus]{};
+
+    rip_service_record vmread_rip_first[max_cpus]{};
+    rip_service_record vmread_rip_last[max_cpus]{};
+
+    /** The first low one, kept whole and never overwritten, because it
+     *  is the one the sequence around it can still be read for. */
+    rip_service_record vmread_rip_low_first[max_cpus]{};
+
+    /** `copy_shadow_to_vmcs12` collecting `guest_rip`: how many times,
+     *  how many changed the cache, and how many moved it backwards. */
+    volatile std::uint64_t shadow_rip_collects[max_cpus]{};
+    volatile std::uint64_t shadow_rip_changed[max_cpus]{};
+    volatile std::uint64_t shadow_rip_rewound[max_cpus]{};
+
+    /** The last value the region imposed, which is what a served value
+     *  is compared against. Not volatile-read on the hot path. */
+    std::uint64_t shadow_rip_region_last[max_cpus]{};
+
+    rip_service_record shadow_rip_first[max_cpus]{};
+    rip_service_record shadow_rip_last[max_cpus]{};
+
+    /** One log line per processor per kind, so an event repeating
+     *  thousands of times a second cannot evict the sequence around the
+     *  first one - the same rule `low_rip_reported` follows. */
+    volatile std::uint64_t vmread_rip_reported[max_cpus]{};
+    volatile std::uint64_t shadow_rip_reported[max_cpus]{};
+
+    /**
+     * Records one VMREAD of `guest_rip` served to the guest hypervisor.
+     *
+     * Called with the value already computed, so it adds no read of any
+     * VMCS field and no branch that was not already taken.
+     */
+    void note_served_guest_rip(std::size_t cpu, std::uint64_t served)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        auto region = this->shadow_rip_region_last[cpu];
+
+        rip_service_record record{};
+        record.entries = this->l2_entries[cpu];
+        record.served = served;
+        record.cached = served;
+        record.region = region;
+        record.shadowing = this->vmcs_shadowing_enabled ? 1 : 0;
+        record.occurred = 1;
+
+        if (0 == this->vmread_rip_served[cpu]) {
+            this->vmread_rip_first[cpu] = record;
+        }
+
+        this->vmread_rip_served[cpu] = this->vmread_rip_served[cpu] + 1;
+        this->vmread_rip_last[cpu] = record;
+
+        if (served >= low_rip_threshold) {
+            return;
+        }
+
+        if (0 == this->vmread_rip_low[cpu]) {
+            this->vmread_rip_low_first[cpu] = record;
+        }
+
+        this->vmread_rip_low[cpu] = this->vmread_rip_low[cpu] + 1;
+
+        if (0 == served) {
+            this->vmread_rip_zero[cpu] = this->vmread_rip_zero[cpu] + 1;
+        }
+
+        // The attribution, and the whole reason a second field is kept:
+        // a low value equal to what the region last imposed came from
+        // the overwrite, not from any of `low_rip_source`'s writers.
+        if ((0 != this->shadow_rip_changed[cpu]) && (served == region)) {
+            this->vmread_rip_from_region[cpu] =
+                this->vmread_rip_from_region[cpu] + 1;
+        }
+
+        if (0 != this->vmread_rip_reported[cpu]) {
+            return;
+        }
+
+        this->vmread_rip_reported[cpu] = 1;
+
+        log("cpu {} served second-level rip {} to a guest vmread, "
+            "region last imposed {}, shadowing {}, at l2 entry {}",
+            cpu,
+            served,
+            region,
+            record.shadowing,
+            record.entries);
+    }
+
+    /**
+     * Records one collection of `guest_rip` out of the hardware shadow
+     * region, whether or not the value is low.
+     *
+     * `note_low_guest_rip` already covers the case where the region
+     * imposes an address below one page. This covers the case that
+     * cannot be seen from a low-address filter at all: the region
+     * imposing a **plausible but stale** address over a fresher one the
+     * guest hypervisor had just written, which is the same defect with
+     * the evidence removed.
+     */
+    void note_collected_guest_rip(std::size_t cpu,
+                                  std::uint64_t cached,
+                                  std::uint64_t region)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        this->shadow_rip_region_last[cpu] = region;
+        this->shadow_rip_collects[cpu] =
+            this->shadow_rip_collects[cpu] + 1;
+
+        if (cached == region) {
+            return;
+        }
+
+        rip_service_record record{};
+        record.entries = this->l2_entries[cpu];
+        record.served = region;
+        record.cached = cached;
+        record.region = region;
+        record.shadowing = this->vmcs_shadowing_enabled ? 1 : 0;
+        record.occurred = 1;
+
+        if (0 == this->shadow_rip_changed[cpu]) {
+            this->shadow_rip_first[cpu] = record;
+        }
+
+        this->shadow_rip_changed[cpu] =
+            this->shadow_rip_changed[cpu] + 1;
+        this->shadow_rip_last[cpu] = record;
+
+        if (region < cached) {
+            this->shadow_rip_rewound[cpu] =
+                this->shadow_rip_rewound[cpu] + 1;
+        }
+
+        if (0 != this->shadow_rip_reported[cpu]) {
+            return;
+        }
+
+        this->shadow_rip_reported[cpu] = 1;
+
+        log("cpu {} shadow region imposed second-level rip {} over {} "
+            "at l2 entry {}",
+            cpu,
+            region,
+            cached,
+            record.entries);
+    }
+    /** @} */
+
     /** What the guest hypervisor arms as its TPR threshold, by value.
      * All zero means it never asks to be told, so the undelivered
      * dispatch vector is its business rather than this VMM's. */

@@ -907,6 +907,151 @@ def dump_low_rip_sources(args, elf, instance):
         if last["occurred"]:
             show("last ", last)
 
+    dump_served_rip(args, elf, instance)
+
+
+def dump_served_rip(args, elf, instance):
+    """What this VMM SERVED for the second-level rip, not what it stored.
+
+    The census above watches stores and established that the guest
+    hypervisor VMWROTE `2` itself.  It cannot say what the guest
+    hypervisor READ to arrive at `2`, and `0 + 2` is a two-byte
+    instruction length added to a zero rip.  This is the read side.
+
+    Two numbers, because one cannot tell you it is aimed at the wrong
+    field.  The value served is `guest_vmcs12[cpu]` by construction -
+    `on_guest_vmread` has one source and `on_guest_vmwrite` writes the
+    same slot - so "served == cached" is a tautology.  The field that
+    can disagree is the hardware shadow region, which
+    `copy_shadow_to_vmcs12` copies over the cache on every second-level
+    entry, `guest_rip` included.
+
+    The verdict lines are written so that a negative reads as plainly
+    as a positive.
+    """
+    members = ["vmread_rip_served", "vmread_rip_low", "vmread_rip_zero",
+               "vmread_rip_from_region", "shadow_rip_collects",
+               "shadow_rip_changed", "shadow_rip_rewound",
+               "vmread_rip_first", "vmread_rip_last",
+               "vmread_rip_low_first", "shadow_rip_first",
+               "shadow_rip_last"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates this census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "served", "cached", "region",
+              "shadowing"]
+    (record_stride,) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmread_rip_first[0]"])
+
+    counters = ["vmread_rip_served", "vmread_rip_low",
+                "vmread_rip_zero", "vmread_rip_from_region",
+                "shadow_rip_collects", "shadow_rip_changed",
+                "shadow_rip_rewound"]
+    records = ["vmread_rip_first", "vmread_rip_last",
+               "vmread_rip_low_first", "shadow_rip_first",
+               "shadow_rip_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member],
+                     args.cpus * record_stride // 8)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * record_stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        print(f"    {label}: served 0x{r['served']:x}, cache held "
+              f"0x{r['cached']:x}, region last imposed "
+              f"0x{r['region']:x}")
+        print(f"      shadowing {'on' if r['shadowing'] else 'off'}, "
+              f"at l2 entry {r['entries']:,}")
+
+    for cpu in range(args.cpus):
+        served = count("vmread_rip_served", cpu)
+        low = count("vmread_rip_low", cpu)
+        zero = count("vmread_rip_zero", cpu)
+        from_region = count("vmread_rip_from_region", cpu)
+        collects = count("shadow_rip_collects", cpu)
+        changed = count("shadow_rip_changed", cpu)
+        rewound = count("shadow_rip_rewound", cpu)
+
+        print(f"\ncpu {cpu} second-level rip SERVED to guest vmread:")
+
+        if not served:
+            print("    the guest hypervisor never VMREAD the rip field "
+                  "here - nothing was served, so nothing served can "
+                  "explain the 2")
+        else:
+            print(f"    {served:>12,}  vmread of guest_rip answered")
+            print(f"    {low:>12,}  answered below 0x1000")
+            print(f"    {zero:>12,}  answered EXACTLY ZERO")
+
+            if not low:
+                print("    *** THIS NEVER HAPPENED: this VMM never "
+                      "served a second-level rip below one page. The "
+                      "'we served a zero' hypothesis is dead. ***")
+            else:
+                print(f"    {from_region:>12,}  of the low ones equal "
+                      "the value the shadow region imposed")
+                if from_region:
+                    print("    *** the low rip this VMM served is the "
+                          "one copy_shadow_to_vmcs12 put in the cache - "
+                          "the defect is the OVERWRITE, not the read "
+                          "***")
+                else:
+                    print("    *** the low rip this VMM served was NOT "
+                          "imposed by the region - one of the "
+                          "low_rip_source writers put it in the cache "
+                          "***")
+
+            first = record("vmread_rip_first", cpu)
+            if first["occurred"]:
+                show("first", first)
+            low_first = record("vmread_rip_low_first", cpu)
+            if low_first["occurred"]:
+                show("low  ", low_first)
+            last = record("vmread_rip_last", cpu)
+            if last["occurred"]:
+                show("last ", last)
+
+        print(f"\ncpu {cpu} shadow region imposing rip on the cache:")
+        if not collects:
+            print("    copy_shadow_to_vmcs12 never collected the rip "
+                  "field here - shadowing was off or stood down before "
+                  "any entry")
+            continue
+
+        print(f"    {collects:>12,}  collected guest_rip from the "
+              "region")
+        print(f"    {changed:>12,}  CHANGED the cached value")
+        print(f"    {rewound:>12,}  moved it BACKWARDS")
+
+        if not changed:
+            print("    *** THIS NEVER HAPPENED: the region never "
+                  "disagreed with the cache, so no guest VMWRITE of rip "
+                  "was ever discarded ***")
+        else:
+            print("    *** the guest hypervisor's own VMWRITE of rip is "
+                  "being discarded on the entry that follows it ***")
+            first = record("shadow_rip_first", cpu)
+            if first["occurred"]:
+                show("first", first)
+            last = record("shadow_rip_last", cpu)
+            if last["occurred"]:
+                show("last ", last)
+
 
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.

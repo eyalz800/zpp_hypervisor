@@ -1457,6 +1457,22 @@ bool hypervisor::on_guest_vmread(std::size_t cpu,
 
     auto value = this->guest_vmcs12[cpu].read(encoding);
 
+    // **The read side, which every instrument before this one was blind
+    // to.** `low_rip_source` counts the writers of vmcs12's RIP and
+    // established that the guest hypervisor stored `2` itself; it cannot
+    // say what it read to get there, and `0 + 2` is a two-byte
+    // instruction length added to a zero. This is the only point at
+    // which a value leaves this VMM for the guest hypervisor's
+    // destination operand, so it is the only place the question can be
+    // asked. See `note_served_guest_rip` for why it records the shadow
+    // region beside the value rather than the cache, which is the same
+    // storage this line reads and so cannot disagree with it.
+    if (static_cast<std::uint64_t>(
+            arch::x86_64::vmx::vmcs::field::guest_rip) ==
+        encoding.value()) {
+        note_served_guest_rip(cpu, value);
+    }
+
     if (operand.is_register) {
         set_guest_register(context, operand.register_1, value);
         vmx_succeed();
