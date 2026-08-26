@@ -52047,3 +52047,47 @@ on every priority drop**, and the window is currently doing that job
 badly rather than not at all. `411,669` asks against `9,627` arrivals
 is the number to move.
 
+## The interrupt window is how *everything* is delivered
+
+`ZPP_DELIVER_ON_DROP` was built on the diagnosis that the TPR-drop
+exit arms nothing - which its own instrument then confirmed:
+
+    cpu 0  841,118 second-level entries looked at
+      asked 12, pending 835, delivered 11, blocked 640
+      DROPPED 7 (172 entry-moments)
+      *** 7 of 11 distinct requests (63.6%) reached a moment the guest
+          could have taken the vector with NOTHING armed ***
+      window withheld 460,323, priority drops reported 1,693
+
+The diagnosis is right and the fix is wrong, and the reason is in the
+comparison rather than in either number above:
+
+| | `0x2f` | `0xd1` clock | total carried | guest asks |
+|---|---|---|---|---|
+| default | 9,627 | 388,241 | 404,029 | 411,669 |
+| `drop=1` | 11 | **5,550** | **5,938** | **12** |
+
+**The clock collapsed with it, 388,241 to 5,550.** Withholding the
+interrupt window does not fail to help one vector - it stops delivery
+of *every* vector, after which the guest does almost no work, which is
+why it "asks" twelve times and writes the synthetic interrupt command
+register twelve times instead of 1,452,927. **The ask count is an
+effect, not a cause**, and reading it as one is what made this look
+like two separate collapses.
+
+So, stated plainly because two switches have now died of it:
+**in this VMM the interrupt window is the primary delivery mechanism
+for every vector, and the TPR threshold delivers essentially nothing.**
+`ZPP_WINDOW_ON_TPR` and `ZPP_DELIVER_ON_DROP` share one fatal move -
+they take the window away - and both collapse the guest.
+
+Two things follow:
+
+- The 1,500,914 window exits are wasteful **and load-bearing**. Their
+  cost is not the problem to solve first.
+- That the threshold delivers nothing is now a **separate confirmed
+  defect**: 6,955 TPR-below exits in the default build produce
+  essentially no deliveries. Either the pending vector is never
+  injected at that exit or the threshold never matches. That is the
+  thing to fix, additively, with the window left exactly as it is.
+
