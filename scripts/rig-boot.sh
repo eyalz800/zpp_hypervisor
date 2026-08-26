@@ -41,6 +41,22 @@ GDB_PORT=${GDB_PORT:-1234}
 # than instead of them. The launcher appends $ZPP_QEMU_EXTRA verbatim, so
 # this is composed here and the caller's own value is never the whole of
 # it.
+# Which launcher on the rig starts the guest. `boot-zpp.sh` is the one
+# every measurement uses: identical to `boot.sh` except that the guest
+# boots this VMM's UEFI loader first, off a virtual FAT drive at
+# bootindex 0, and that loader chainloads Windows.
+#
+# `ZPP_LAUNCHER=boot.sh` therefore boots the SAME Windows on the SAME
+# disk with this VMM absent, which is the control this tree went a very
+# long way without running. Note CLAUDE.md's warning before comparing
+# them: the two differ in more than our loader - `boot.sh` passes
+# `hv-passthrough`, uses a different QEMU binary and gives the guest
+# 1.5 GB more memory - so a difference between them is not attributable
+# to this VMM until those are equalised. As a first question it is still
+# worth everything: "does this Windows reach a login screen on this rig
+# at all" has no other way to be asked.
+LAUNCHER=${ZPP_LAUNCHER:-boot-zpp.sh}
+
 EXTRA=${ZPP_QEMU_EXTRA:-}
 
 # `-no-reboot -no-shutdown` by default, because a guest that resets takes
@@ -183,7 +199,7 @@ rig 120 "
     export ZPP_QEMU_EXTRA='$CHANNELS $EXTRA'
     ${CPUS:+export ZPP_CPUS=$CPUS}
     ${CPU_EXTRA:+export ZPP_CPU_EXTRA='$CPU_EXTRA'}
-    setsid nohup sudo -E ./boot-zpp.sh > /home/tc/zpp/boot.log 2>&1 < /dev/null &
+    setsid nohup sudo -E ./$LAUNCHER > /home/tc/zpp/boot.log 2>&1 < /dev/null &
     sleep 3" > /dev/null 2>&1 || true
 
 # --- and now prove all three are actually there ------------------------
