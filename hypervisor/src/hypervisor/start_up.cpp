@@ -410,9 +410,23 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // control cleared below and leaves LME alone when CR0.PG is being
     // loaded as zero, which it is here. Writing the field would look like
     // it cleared EFER when it does nothing at all.
-    vmcs.vm_entry_controls(
+    auto entry_controls =
         vmcs.vm_entry_controls() &
-        ~arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest);
+        ~arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest;
+
+    // See `nested_vmx::init_clears_efer`. The paragraph above is right
+    // that writing the field alone does nothing; the answer is to ask
+    // for it to be loaded as well, which is what SDM Table 12-1's
+    // "IA32_EFER 0H after INIT" requires of us here. Without it a
+    // restarted processor keeps the host's LME and its own stub lands
+    // in long mode when it enables paging.
+    if constexpr (nested_vmx::init_clears_efer) {
+        entry_controls |=
+            arch::x86_64::vmx::vm_entry_controls::load_ia32_efer;
+        vmcs.guest_ia32_efer(0);
+    }
+
+    vmcs.vm_entry_controls(entry_controls);
 
     vmcs.guest_rflags(rflags_after_init);
     vmcs.guest_rsp(0);

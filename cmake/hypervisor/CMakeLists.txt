@@ -64,6 +64,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture. OFF. See the root CMakeLists and nested_vmx.h."
     OFF)
 
+option(ZPP_INIT_CLEARS_EFER
+       "Clear IA32_EFER on the start-up path, per SDM Table 12-1"
+       OFF)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report an exit instruction length only where the SDM defines it"
        ON)
@@ -328,6 +332,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # because it was never built. Adding an option is three edits here,
     # not two, and the third is the only one the compiler sees.
     -DZPP_STEP_VTL=$<BOOL:${ZPP_STEP_VTL}>
+    -DZPP_INIT_CLEARS_EFER=$<BOOL:${ZPP_INIT_CLEARS_EFER}>
     -DZPP_HONEST_EXIT_LENGTH=$<BOOL:${ZPP_HONEST_EXIT_LENGTH}>
     -DZPP_L2_STARTUP_SPIN=$<BOOL:${ZPP_L2_STARTUP_SPIN}>
     -DZPP_STEP_AP_WATCHED_WRITES=$<BOOL:${ZPP_STEP_AP_WATCHED_WRITES}>

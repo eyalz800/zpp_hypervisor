@@ -873,6 +873,29 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_INIT_CLEARS_EFER
+#define ZPP_INIT_CLEARS_EFER 0
+#endif
+
+// Whether the start-up path clears IA32_EFER, as SDM Table 12-1 says
+// INIT does.
+//
+// It did not, and the comment beside the omission explained why it
+// could not: without the "load IA32_EFER" VM-entry control the guest
+// field is ignored, and entry leaves EFER.LME alone when CR0.PG is
+// loaded as zero, which is what this path does. So an application
+// processor restarted by the guest keeps whatever LME the host had.
+//
+// Measured consequence, two processors and no nesting: the processor
+// takes its start-up IPI - vector 1, so CS base 0x1000 - runs the
+// guest's own stub, reaches protected mode at CS 0x30, and triple
+// faults at RIP 0x16fe. A stub that enables paging expecting 32-bit
+// protected mode gets long mode instead if LME is already set.
+//
+// On, the control is requested and the field written, so the value is
+// no longer ignored.
+inline constexpr bool init_clears_efer = (0 != ZPP_INIT_CLEARS_EFER);
+
 #ifndef ZPP_HONEST_EXIT_LENGTH
 #define ZPP_HONEST_EXIT_LENGTH 1
 #endif

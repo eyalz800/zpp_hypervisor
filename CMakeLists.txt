@@ -222,6 +222,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture - the stack, the code window, the VP assist page, the shared and spin regions. OFF: it is the last candidate for 137.6 VMCS reads a vmcall, which is 19% of the machine. The cheap register census beside it stays either way. See nested_vmx.h."
     OFF)
 
+option(ZPP_INIT_CLEARS_EFER
+       "Clear IA32_EFER when applying start-up state, as SDM Table 12-1 requires after INIT"
+       OFF)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report a VM-exit instruction length to the guest hypervisor only for exit reasons where the SDM defines it"
        ON)
@@ -421,6 +425,7 @@ ExternalProject_Add(hypervisor
         -DZPP_TRACE_AP_ENTRY=${ZPP_TRACE_AP_ENTRY}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
@@ -537,6 +542,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_TRACE_AP_ENTRY=${ZPP_TRACE_AP_ENTRY}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}

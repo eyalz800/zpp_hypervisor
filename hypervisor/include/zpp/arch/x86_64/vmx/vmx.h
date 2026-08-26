@@ -429,6 +429,13 @@ enum type : std::uint64_t
     // the registers, which for DR7 is always 400H.
     load_debug_controls = (1ull << 2),
     ia_32e_mode_guest = (1ull << 9),
+    // SDM Table 25-9 bit 15. Loads IA32_EFER from the guest field on
+    // entry. Without it the field is ignored entirely, and entry
+    // leaves EFER.LME alone whenever CR0.PG is loaded as zero - which
+    // is exactly the start-up path, so an application processor that
+    // is restarted keeps whatever LME it had. SDM Table 12-1 gives
+    // IA32_EFER as 0 after INIT.
+    load_ia32_efer = (1ull << 15),
 };
 } // namespace vm_entry_controls
 
