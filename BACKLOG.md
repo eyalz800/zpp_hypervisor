@@ -51445,3 +51445,57 @@ runs at linear RIP instead of `vector << 12 | RIP`" is a shape the
 hardware would never have caught for us, and the only way to see it is
 to record both fields, which is what that census now does.
 
+## The guest hypervisor writes the 2 itself
+
+The census that tags every write of a second-level RIP below one page
+by which of the seven writers did it:
+
+    cpu 1 low second-level rip census (below 0x1000):
+                   4  on_guest_vmwrite       guest  -> vmcs12
+                   3  on_guest_vmptrld       memory -> vmcs12
+        no advance ever landed below one page: every low address was
+        COPIED, not computed here
+        last : on_guest_vmwrite       guest  -> vmcs12
+          wrote 0x2 over 0xfffff8042eca0176, at l2 entry 35
+
+**Hyper-V VMWROTE `0x2` into vmcs12's guest RIP itself**, over a
+perfectly valid `0xfffff8042eca0176`. We copied it faithfully - the
+census says every low address was copied and none computed here, which
+kills the `0 + 2` arithmetic hypothesis outright.
+
+That also retires, for the third time, the idea that this VMM composes
+a bad entry state. It does not: `differed 0`, segments copied, RIP
+copied.
+
+**But `2` is still what `0 + 2` produces**, and the guest hypervisor
+advances a RIP the same way this VMM does - VMREAD the field, add the
+exit instruction length, VMWRITE it back. So the live hypothesis is now
+one level up and inverted: **our VMREAD handed Hyper-V a zero** for a
+field whose shadow held the right value, and Hyper-V did the
+arithmetic. That is a defect in what we *serve*, not in what we store,
+and nothing measured so far would have caught it.
+
+### The shadowing A/B is not clean, and is recorded as such
+
+`ZPP_NESTED_SHADOW_VMCS=OFF` (the option is *not* `ZPP_SHADOW_VMCS`;
+the first attempt set a name that does not exist and the manifest still
+read `shadowvmcs=1`, which is exactly why the manifest is printed):
+
+| | cpu 0 lowest entry rip | cpu 1 |
+|---|---|---|
+| shadowing on | `0x2` | 35 second-level entries |
+| shadowing off | `0x1ad6874` | **0 second-level entries**, 98 exits |
+
+The `0x2` is absent with shadowing off - and so is every second-level
+entry on the processor that produced it. **A configuration where the
+failing path never runs cannot exonerate anything.** Restored to ON.
+
+### Also seen, and not yet judged
+
+At an early entry the segment census reported
+`vmcs02 cs 0x0010` against `vmcs12 cs 0x0000` - "composed, not
+copied". That is consistent with the per-field deferral working as
+designed, vmcs12's cached selector simply never having been written by
+the guest hypervisor, but it has not been checked. Worth resolving
+before it becomes another confident wrong reading.
+
