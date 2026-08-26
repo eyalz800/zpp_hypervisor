@@ -50980,3 +50980,33 @@ the argument for `SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES` - a
 per-VMCS control - recorded earlier from the KVM review and not acted
 on.
 
+### Not the reference TSC page, and not shared launch state
+
+Two candidates for the fast-fail that only appears once a second
+processor actually runs, both refuted.
+
+**Time.** One reference TSC page is published partition-wide, computed
+on the boot processor, while the TSC offset is a per-VMCS field - so
+two processors cannot both be described by it, and Hyper-V checks its
+clocks against each other (`HalpWatchdogCheckPreResetNMI`, bugcheck
+`0x1CA`, recorded above). Measured with `ZPP_PUBLISH_REFERENCE_TSC=OFF`
+and the watch dropped: 1,094 exits and 50 second-level entries on the
+second processor, inside the same 977-to-3,080 band as with it on.
+Not the cause.
+
+**Shared launch state.** `initialize_registers` captures `os_tr`,
+`guest_ldtr`, the descriptor table pointers and `guest_cr3` into
+members that are shared rather than per processor, which would be a
+serious multicore bug - an adopted processor's task register and page
+table root overwriting the boot processor's record of the guest. It is
+already guarded: `if (!from_trampoline) initialize_registers()`, with a
+comment saying exactly that. Closed.
+
+The audit that found it was worth running anyway and is worth
+repeating when a new member is added: list every member declared
+without `[max_cpus]` and count reads of it in the exit and nested
+paths. Everything else it turned up is either partition-wide by nature
+(`vmcs_shadowing_enabled`, set once from a capability MSR), a fixed
+index (`guest_tr`), or a diagnostic (`vp_assist_l2_physical`, written
+and never read).
+
