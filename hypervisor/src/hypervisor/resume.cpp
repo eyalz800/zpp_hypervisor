@@ -462,6 +462,126 @@ void hypervisor::emit_disk_telemetry(std::size_t cpu)
         this->l2_injected_vector[cpu][clock_vector]);
 }
 
+void hypervisor::note_pending_vector(std::size_t cpu, std::uint64_t staged)
+{
+    if constexpr (!nested_vmx::count_dropped_requests) {
+        (void)cpu;
+        (void)staged;
+        return;
+    } else {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        constexpr std::uint64_t injection_valid = 1ull << 31;
+        constexpr std::uint64_t vector_mask = 0xff;
+        constexpr std::uint64_t priority_class = 4;
+        constexpr std::uint64_t interrupt_enable = 1ull << 9;
+        constexpr std::uint64_t blocking_sti_or_mov_ss = 0x3;
+        constexpr std::uint64_t virtual_task_priority = 0x80;
+        constexpr std::uint64_t primary_tpr_shadow = 1ull << 21;
+        constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+
+        using field = arch::x86_64::vmx::vmcs::field;
+
+        auto & vmcs = this->vmcs;
+
+        // Proof of life. Without it "dropped 0" cannot be told from a
+        // binary built with the switch off, and this project has read
+        // an all-zero counter as a fact about the machine three times.
+        this->pending_vector_instrument_entries[cpu] += 1;
+
+        auto vector = std::uint64_t{this->pending_vector_now[cpu]};
+
+        if (0 == vector) {
+            return;
+        }
+
+        this->pending_vector_entries_pending[cpu] += 1;
+
+        if ((0 != (staged & injection_valid)) &&
+            (vector == (staged & vector_mask))) {
+            // Delivered, and retired only here. An entry that carries
+            // it is the only evidence it arrived; every other point on
+            // the path is a claim about where it was put.
+            this->pending_vector_now[cpu] = 0;
+            this->pending_vector_drop_marked[cpu] = false;
+            this->pending_vector_delivered[cpu] += 1;
+            return;
+        }
+
+        // Not delivered. Three reasons, and only one is a fault -
+        // which is why this is four counters rather than one.
+        std::uint8_t vtpr{};
+        auto page = this->nested_virtual_apic_address[cpu];
+
+        auto read = (0 != page) &&
+                    read_guest_physical(
+                        page + virtual_task_priority,
+                        std::as_writable_bytes(std::span(&vtpr, 1)));
+
+        if (!read) {
+            // No page, no priority, no verdict. Counted apart so an
+            // unreadable virtual-APIC page cannot masquerade as either
+            // a drop or a legitimate block.
+            this->pending_vector_unreadable[cpu] += 1;
+            return;
+        }
+
+        auto blocking = vmcs.read(field::guest_interruptibility_state);
+
+        auto interruptible =
+            (0 != (vmcs.guest_rflags() & interrupt_enable)) &&
+            (0 == (blocking & blocking_sti_or_mov_ss));
+
+        // SDM 12.8.4: admitted only where the vector's priority class
+        // is **strictly greater** than the task priority's.
+        auto admitted = (vector >> priority_class) >
+                        (std::uint64_t{vtpr} >> priority_class);
+
+        if (!admitted || !interruptible) {
+            // Correct behaviour. The guest is at a priority that
+            // refuses the vector, or has interrupts off, and nothing
+            // is owed. Keeping this apart from the fault below is the
+            // whole reason a single "not delivered" counter would have
+            // been useless.
+            this->pending_vector_blocked[cpu] += 1;
+            return;
+        }
+
+        // Anything that could still produce the exit at which the
+        // level above would stage it. The window is its own mechanism;
+        // the threshold is this VMM's, and `window_threshold_armed` is
+        // the only place that is ever set.
+        auto primary =
+            vmcs.primary_processor_based_vm_execution_controls();
+
+        auto armed = (0 != (primary & primary_interrupt_window)) ||
+                     ((0 != (primary & primary_tpr_shadow)) &&
+                      this->window_threshold_armed[cpu]);
+
+        if (armed) {
+            return;
+        }
+
+        // **The fault.** The guest can take it, it is not staged, and
+        // nothing in vmcs02 will cause an exit at which it could be.
+        // The request is not deferred - it is lost until some
+        // unrelated exit happens to be reflected.
+        //
+        // Counted twice on purpose, per request and per entry: one
+        // request abandoned for a million entries and a million
+        // requests each abandoned once are different faults and a
+        // single counter cannot tell them apart.
+        this->pending_vector_drop_moments[cpu] += 1;
+
+        if (!this->pending_vector_drop_marked[cpu]) {
+            this->pending_vector_drop_marked[cpu] = true;
+            this->pending_vector_dropped[cpu] += 1;
+        }
+    }
+}
+
 void hypervisor::resume_guest(std::uint64_t cpuid,
                               arch::x86_64::context & context,
                               arch::x86_64::vmx::exit_reason full_reason,
@@ -1194,6 +1314,22 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                 this->l2_entries_carrying_nothing[cpu] =
                     this->l2_entries_carrying_nothing[cpu] + 1;
             }
+            }
+
+            // The drop account, taken at the last instant before the
+            // entry so it describes what the guest will actually run
+            // under. See `nested_vmx::count_dropped_requests`.
+            //
+            // **Here rather than in `record_l2_entry_event`**, which is
+            // where `l2_given_vector` is counted, because that runs
+            // only from `enter_or_park_l2` - the path the *level
+            // above's* VMLAUNCH and VMRESUME take. An exit this VMM
+            // handles itself is resumed straight through here without
+            // it, and the entry that follows a tpr-below-threshold exit
+            // is exactly one of those. An instrument that could not see
+            // that entry could not see the defect it exists to name.
+            if constexpr (nested_vmx::count_dropped_requests) {
+                note_pending_vector(slot - 1, entry_event_now());
             }
         }
     }
