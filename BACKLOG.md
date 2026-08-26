@@ -52008,3 +52008,42 @@ Two traps to record, because each returned confident nonsense first:
   `WaitIrql=0x99` - because the list head is not a thread. Stop on the
   head rather than trusting the count.
 
+## The whole chain, joined up at last
+
+This file already contained the chain and it was written down before
+any of this investigation: **no deferred calls -> the storage stack
+never starts -> `stornvme` never touches the controller -> no MSI-X.**
+What was missing was the other end of it, and the guest's own scheduler
+supplied it: `smss.exe` waiting on `WrPageOut`. The two halves are one
+story.
+
+    deferred calls starve
+      -> the storage stack never finishes starting
+      -> page writes never complete
+      -> smss.exe blocks on WrPageOut, for ever
+
+And the delivery numbers say how badly they starve, on one processor:
+
+| | `0x2f` delivered | `0xd1` (clock) delivered | processes |
+|---|---|---|---|
+| `windowtpr=0` | **9,627** | 388,241 | 4, incl. `smss.exe` |
+| `windowtpr=1` | **11** | 3,904 | 3 |
+
+Two things follow, and the second reverses the working assumption.
+
+- **Forty clock interrupts are delivered for every dispatch
+  interrupt.** On hardware the deferred call runs as the clock handler
+  drops its priority, so the two rates should be comparable. They are
+  off by a factor of forty, which is the starvation, quantified.
+- **`ZPP_WINDOW_ON_TPR` does not merely fail to help - it removes the
+  delivery path.** 9,627 deliveries become 11. The wasteful interrupt
+  window, all 1,500,914 of it, was *how the dispatch vector was
+  getting in*; the TPR threshold it substitutes delivers essentially
+  nothing. That is why the guest reached three processes instead of
+  four, and it is the opposite of what the exit counts suggested.
+
+So the target is not "stop the window storm". It is **deliver `0x2f`
+on every priority drop**, and the window is currently doing that job
+badly rather than not at all. `411,669` asks against `9,627` arrivals
+is the number to move.
+
