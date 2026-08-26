@@ -3926,7 +3926,17 @@ def main():
                "l2_vmfunc_calls", "l2_vmfunc_refused",
                "vtl_block_page", "vtl_block_writes",
                "vtl_block_writer_rip", "vtl_block_write_address",
-               "vtl_block_write_value"]
+               "vtl_block_write_value",
+               # These three are queued below and were added to the
+               # queue list without being added here, which is not a
+               # typo worth passing over: `gdb_offsets` is the only
+               # place a name is checked against the ELF, so a name
+               # missing from it is a `KeyError` at queue time - loud,
+               # and the reason the reader failed rather than printing a
+               # plausible zero. The two lists are the same fact and
+               # want to be one, which is the next thing to do here.
+               "resumes_reached", "l2_start_up_waits",
+               "ept_violation_unclaimed"]
     off = gdb_offsets(args.elf, members)
     # The start-up and local-APIC state, which this reader has been
     # carrying offsets for and printing nowhere.

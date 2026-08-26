@@ -53790,3 +53790,58 @@ function that causes exits is over-represented by construction, and the
 clock path causes exits. What the numbers support is *where the guest
 is when we see it*, not how it divides its time.
 
+## The second processor is spinning in first-level guest code, and the vector 0x2 is ours
+
+Three theories died on one dump, and the reader gained the columns that
+killed them.
+
+    cpu  exits    resumes-reached  in-handler  sipi-waits  unclaimed
+      0   588,061         588,061           0           0          0
+      1       192             192           0           0          0
+
+- **`sipi-waits 0`** - cpu 1 is not waiting for a second-level start-up
+  IPI, so retiring the local-APIC watch cannot be what stopped it. The
+  regression theory in the section above is **refuted**.
+- **`in-handler 0`** (`exits - resumes_reached`) - it completed every
+  handler it entered, so it is not stopped inside this VMM.
+- **exits frozen at 192** with no `hlt` exit - `hlt_exiting` is only
+  armed under `ZPP_GUEST_TESTS`, so a halt would be invisible, but
+  `resumes_reached == exits` means it was resumed after its last exit.
+
+So cpu 1 is **out in its own first-level guest, spinning on memory**,
+and nothing about our interception path reaches it there.
+
+**Proved independently from the histogram**, which is the stronger form:
+cpu 1's reasons sum to exactly 192 = `exit_total[1]`, and contain **no
+VMLAUNCH, no VMRESUME, no VMXON**. Those exit unconditionally in
+non-root operation, so cpu 1 never entered VMX operation at the first
+level at all - it could not have reached `enter_or_park_l2`, and
+`wait_for_l2_start_up_ipi` was never called for it. That is why
+`l2-entries 0`, and it is not the watch.
+
+### Where vector 0x2 comes from, which nobody had established
+
+    start_up.cpp:740: send_start_up_ipi(apic_id[slot],
+                                        this->start_up_memory >> 12);
+
+**Our own start-up IPI carries our trampoline's page number as its
+vector.** And the guest's own last command was `0xc4687` - vector
+`0x87`, delivery mode 6, a start-up IPI - while the log records
+`start-up applied on cpu 0x2 vector 0x87 by launch`.
+
+So the two vectors have different senders: **`0x87` is Hyper-V's and
+`0x2` is this VMM's.** Every ring in this investigation that ended
+`sipi … cs=0x0200` was a processor we had restarted into *our*
+trampoline, and every entry about "the wrong trampoline" that treated
+`0x2` as the guest's choice was reading our own command back.
+
+The sequence in the last run is `[99] init wait-sipi rip 0x7fb6b030`
+then `[100] sipi active cs=0x0200`, and then nothing. A processor that
+this VMM had already adopted and launched at Hyper-V's vector `0x87` is
+INIT'd by Hyper-V and then restarted by us into our own trampoline.
+
+**That is the thing to look at next**, and it is a much sharper
+question than any asked so far: what does `start_application_processor`
+do when the target is already `processor_virtualized`, and what does the
+trampoline do to a processor that has already climbed it once?
+
