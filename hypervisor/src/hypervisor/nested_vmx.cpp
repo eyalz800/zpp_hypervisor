@@ -2032,6 +2032,65 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
     return true;
 }
 
+void hypervisor::record_l2_entry_lowest(std::size_t cpu,
+                                        std::uint64_t rip)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    using field = arch::x86_64::vmx::vmcs::field;
+
+    auto & record = this->l2_entry_lowest[cpu];
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    record.entries = this->l2_entries[cpu];
+    record.rip = rip;
+
+    // vmcs02's, which is what the processor is about to act on. Read
+    // out of the VMCS rather than remembered from where it was written,
+    // for the reason `record_l2_entry_event` gives one screen up: every
+    // other account of a field is a claim about the field.
+    record.cs_selector = this->vmcs.guest_cs_selector();
+    record.cs_base = this->vmcs.guest_cs_base();
+    record.cs_limit = this->vmcs.guest_cs_limit();
+    record.cs_access_rights = this->vmcs.guest_cs_access_rights();
+    record.cr0 = this->vmcs.guest_cr0();
+    record.efer = this->vmcs.guest_ia32_efer();
+    record.rflags = this->vmcs.guest_rflags();
+
+    // And vmcs12's, which is a subscript into module memory rather than
+    // a VMREAD. The pair is the instrument: equal means vmcs02 carries
+    // what the level above asked for, and that reads as clearly as the
+    // alternative.
+    record.cs_selector12 = shadow.read(field::guest_cs_selector);
+    record.cs_base12 = shadow.read(field::guest_cs_base);
+    record.cr0_12 = shadow.read(field::guest_cr0);
+
+    constexpr std::uint64_t selector_to_base_shift = 4;
+
+    record.base_is_selector_times_16 =
+        (record.cs_base == (record.cs_selector << selector_to_base_shift))
+            ? 1
+            : 0;
+
+    // Last, so a reader that finds it set finds the rest filled in.
+    record.occurred = 1;
+
+    log("cpu {} lowest second-level entry rip {}, cs {} base {}, cr0 {}",
+        cpu,
+        rip,
+        record.cs_selector,
+        record.cs_base,
+        record.cr0);
+    log("cpu {} lowest entry: vmcs12 cs {} base {} cr0 {}, rflags {}",
+        cpu,
+        record.cs_selector12,
+        record.cs_base12,
+        record.cr0_12,
+        record.rflags);
+}
+
 bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
                                    basic_reason reason,
                                    arch::x86_64::context & context)
@@ -2308,11 +2367,26 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
         // a zero in it readable. See `l2_entry_rip_lowest`: without the
         // flag, zero-initialised storage says "entered at zero" and
         // "never entered" with the same word.
-        if (0 == this->l2_entry_rip_lowest_seen[cpu]) {
+        auto new_lowest = (0 == this->l2_entry_rip_lowest_seen[cpu]) ||
+                          (rip < this->l2_entry_rip_lowest[cpu]);
+
+        if (new_lowest) {
             this->l2_entry_rip_lowest_seen[cpu] = 1;
             this->l2_entry_rip_lowest[cpu] = rip;
-        } else if (rip < this->l2_entry_rip_lowest[cpu]) {
-            this->l2_entry_rip_lowest[cpu] = rip;
+
+            // And the segment that address is an offset into, because
+            // the address alone cannot be read. See
+            // `l2_entry_lowest_record`: RIP 0 is what a start-up IPI
+            // asks for, and whether that is a processor beginning
+            // normally or one about to execute the bottom of memory is
+            // decided entirely by CS base - which this records from
+            // vmcs02, beside what vmcs12 asked for, so the two can
+            // disagree.
+            //
+            // Seven VMCS reads, paid only when the minimum falls. It
+            // falls a handful of times in a boot and never rises, so
+            // this is not on the entry path in any measurable sense.
+            record_l2_entry_lowest(cpu, rip);
         }
 
         // Cleared every so often, so the table describes a *recent*

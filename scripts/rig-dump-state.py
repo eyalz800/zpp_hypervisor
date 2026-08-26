@@ -710,6 +710,105 @@ def dump_entry_rip_agreement(args, elf, instance):
               f"valid {record['hot_state_valid_then']}, "
               f"vmcs12 0x{record['vmcs12_address']:x}")
 
+    dump_entry_lowest_segment(args, elf, instance)
+
+
+def dump_entry_lowest_segment(args, elf, instance):
+    """The segment the lowest entry address is an offset into.
+
+    `lowest 0x0` above reads as a fault and is not one on its own: a
+    processor started by a start-up IPI begins at RIP 0 with CS base
+    `vector << 12`, so the linear address is the base and the RIP says
+    nothing without it.  This prints the pair, from vmcs02 and from
+    vmcs12, and lets them disagree - equal is the whole of "nothing is
+    wrong here", and it is meant to read as plainly as the alternative.
+
+    Note which rule is being checked.  SDM 29.3.1.2 requires
+    `base == selector << 4` only when RFLAGS.VM is 1, not when CR0.PE is
+    0, so a real-mode unrestricted guest whose base is anything else is
+    legal.  The interesting shape is narrower: a non-zero selector with
+    a base of zero, which puts the guest at linear `RIP` instead of
+    `vector << 12 | RIP`.
+    """
+    off = gdb_offsets(elf, ["l2_entry_lowest"], optional=True)
+    if "l2_entry_lowest" not in off:
+        # A deployed binary that predates this record.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "rip", "cs_selector", "cs_base",
+              "cs_limit", "cs_access_rights", "cr0", "efer", "rflags",
+              "cs_selector12", "cs_base12", "cr0_12",
+              "base_is_selector_times_16"]
+    stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_lowest[0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["l2_entry_lowest"],
+                 args.cpus * stride // 8)
+    got = reader.run()
+
+    for cpu in range(args.cpus):
+        base = instance + off["l2_entry_lowest"] + cpu * stride
+        r = {name: got.get(base + 8 * i, 0)
+             for i, name in enumerate(fields)}
+        if not r["occurred"]:
+            continue
+
+        pe = r["cr0"] & 1
+        lma = (r["efer"] >> 10) & 1
+        vm = (r["rflags"] >> 17) & 1
+        mode = ("real" if not pe else
+                "long" if lma else
+                "virtual-8086" if vm else "protected")
+
+        print(f"\ncpu {cpu} lowest-rip entry, at entry "
+              f"{r['entries']:,}: rip 0x{r['rip']:x}, {mode} mode")
+        print(f"    vmcs02 cs 0x{r['cs_selector']:04x} "
+              f"base 0x{r['cs_base']:x} limit 0x{r['cs_limit']:x} "
+              f"ar 0x{r['cs_access_rights']:x}")
+        print(f"    vmcs02 cr0 0x{r['cr0']:x} (PE={pe}), "
+              f"efer 0x{r['efer']:x} (LMA={lma}), "
+              f"rflags 0x{r['rflags']:x} (VM={vm})")
+        print(f"    vmcs12 cs 0x{r['cs_selector12']:04x} "
+              f"base 0x{r['cs_base12']:x} cr0 0x{r['cr0_12']:x}")
+
+        # The instrument proper: two sources for the same three fields.
+        copied = (r["cs_selector"] == r["cs_selector12"] and
+                  r["cs_base"] == r["cs_base12"] and
+                  r["cr0"] == r["cr0_12"])
+        print("    vmcs02 CARRIES EXACTLY what vmcs12 asked for"
+              if copied else
+              "    *** vmcs02 DIFFERS from vmcs12 - composed, not "
+              "copied ***")
+
+        # And the architectural shape, reported only where it means
+        # something.  `base == selector << 4` is required of a
+        # virtual-8086 guest and of nothing else.
+        shifted = r["base_is_selector_times_16"]
+        if vm:
+            if shifted:
+                print("    base == selector<<4: yes")
+            else:
+                print("    *** base != selector<<4, which SDM 29.3.1.2 "
+                      "requires of a virtual-8086 guest ***")
+        elif not pe:
+            if shifted:
+                print("    base == selector<<4: yes - an ordinary "
+                      "real-mode start-up state")
+            elif r["cs_base"] == 0 and r["cs_selector"] != 0:
+                print("    *** base 0 with a non-zero selector: the "
+                      "guest runs at linear 0x"
+                      f"{r['rip']:x}, not 0x"
+                      f"{(r['cs_selector'] << 4) + r['rip']:x} ***")
+            else:
+                print("    base != selector<<4, which is legal in real "
+                      "mode - only virtual-8086 requires it")
+        else:
+            print(f"    linear entry address 0x{r['cs_base'] + r['rip']:x}"
+                  " (base + rip)")
+
 
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.

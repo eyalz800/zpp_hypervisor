@@ -4989,6 +4989,13 @@ private:
     void record_l2_entry_event(std::size_t cpu);
 
     /**
+     * Records the segment and mode state accompanying a new lowest
+     * second-level entry address. See `l2_entry_lowest_record` for why
+     * the address on its own cannot be read.
+     */
+    void record_l2_entry_lowest(std::size_t cpu, std::uint64_t rip);
+
+    /**
      * The base of the page-aligned PE image containing an address, found
      * by scanning back for `MZ`, and the name from its export directory.
      * Zero when neither is found within the bound.
@@ -5937,6 +5944,87 @@ private:
     };
 
     l2_entry_rip_record l2_entry_rip_mismatch[max_cpus]{};
+
+    /**
+     * The segment and mode state accompanying the *lowest* address each
+     * processor was ever entered at.
+     *
+     * `l2_entry_rip_lowest` says a processor was entered at RIP 0, and on
+     * its own that reads as a fault. It is not: a processor started by a
+     * start-up IPI begins at `000VV000H`, "where VV is the vector
+     * contained in the SIPI message" (SDM 11.4.4,
+     * .references/sdm.txt:166063) - which is RIP 0 with CS base
+     * `vector << 12`, the three fields KVM's
+     * `kvm_vcpu_deliver_sipi_vector` writes and the three
+     * `apply_start_up` writes here. So a small RIP is the *expected*
+     * shape of an application processor's first moments and says nothing
+     * at all without the segment it is an offset into. A linear address
+     * is `base + RIP`, and only the pair decides where the guest
+     * actually executes.
+     *
+     * So the pair is recorded, and with it the two things that say which
+     * rule applies: CR0.PE, because a real-mode guest's linear address is
+     * `base + RIP` while a protected-mode one's comes from a descriptor;
+     * and RFLAGS.VM, because SDM 29.3.1.2 requires the base to be "the
+     * selector field shifted left 4 bits" **only** "if the guest will be
+     * virtual-8086" (.references/sdm.txt:202472), and 29.3.1.2 defines
+     * that as "the VM flag (bit 17) is 1 in the RFLAGS field"
+     * (.references/sdm.txt:202453) - the VM flag and *not* CR0.PE. A
+     * real-mode unrestricted guest may carry any base it likes, so
+     * `base != selector << 4` there is legal, and is reported as an
+     * observation rather than a fault.
+     *
+     * **Two sources, so they can disagree.** vmcs02's fields say where
+     * the processor is about to execute; vmcs12's say where the guest
+     * hypervisor asked it to. Equal is the whole of "nothing is wrong
+     * here", and it reads as clearly as the alternative - which is the
+     * property the entered-at census next door was built for and this
+     * extends to the segment the address lives in.
+     *
+     * Written only when a new minimum is seen, which is a handful of
+     * times in a boot because the minimum only ever falls. The seven
+     * VMCS reads are paid there and nowhere else.
+     */
+    struct l2_entry_lowest_record
+    {
+        /** Set last, so a reader that finds it set finds the rest
+         *  filled in. `l2_entry_rip_lowest_seen` answers the same
+         *  question for the address alone; this one covers the record. */
+        std::uint64_t occurred;
+
+        /** `l2_entries` when this minimum was set. */
+        std::uint64_t entries;
+
+        /** The address itself, which is `l2_entry_rip_lowest` at the
+         *  moment this record was written. */
+        std::uint64_t rip;
+
+        /** What vmcs02 carries, which is what the processor acts on. @{ */
+        std::uint64_t cs_selector;
+        std::uint64_t cs_base;
+        std::uint64_t cs_limit;
+        std::uint64_t cs_access_rights;
+        std::uint64_t cr0;
+        std::uint64_t efer;
+        std::uint64_t rflags;
+        /** @} */
+
+        /** What vmcs12 asked for, for the same three. A difference here
+         *  is proof that vmcs02 was composed rather than copied. @{ */
+        std::uint64_t cs_selector12;
+        std::uint64_t cs_base12;
+        std::uint64_t cr0_12;
+        /** @} */
+
+        /** Whether vmcs02's CS base is the selector shifted left four -
+         *  the real-mode relationship. Required by SDM 29.3.1.2 only
+         *  when RFLAGS.VM is 1; recorded unconditionally because the
+         *  question being asked is "does this look like a start-up
+         *  state", not "is the entry legal". */
+        std::uint64_t base_is_selector_times_16;
+    };
+
+    l2_entry_lowest_record l2_entry_lowest[max_cpus]{};
 
     /** What the guest hypervisor arms as its TPR threshold, by value.
      * All zero means it never asks to be told, so the undelivered
