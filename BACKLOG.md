@@ -50708,3 +50708,48 @@ Left off by default: it removes a triple fault and introduces a stall,
 so neither setting reaches the login screen yet and a run with it on is
 not comparable with one without.
 
+### It is not a deadlock, and it is not wait-for-SIPI
+
+Both retracted, and both were inferences from VMM-side counters rather
+than readings of the machine. `l2-activity` says **active**, not
+wait-for-SIPI, so "a second-level processor parked waiting for its
+start-up" was never measured; and the two processors are not waiting
+on each other.
+
+Read from the QEMU monitor on the wedged guest, which perturbs nothing:
+
+    CPU#0 RIP=fffff807161a0307 RFL=00000046 CPL=0 HLT=0
+    CPU#1 RIP=fffff8071619868f RFL=00000007 CPL=0 HLT=0
+
+Frozen at those exact addresses across three samples nine seconds
+apart, both with **IF clear**. The monitor on this build cannot
+disassemble ("Asm output not supported on this arch"), so the bytes
+were read with `x/24xb` and decoded by hand:
+
+- **CPU 0**, at `...0307`: `lock incl [rip+0x99695]` / `jmp +2` /
+  `pause`, and `0307` is the compare at the top of that `pause` loop.
+  An ordinary spinlock acquire.
+- **CPU 1**, at `...868f`: `mov ecx,[rip+0x96d59]` / `call +0x52544` /
+  `int3` / **`pause` / `jmp -4`**. An infinite pause loop after a
+  fatal call.
+
+So the application processor **hit a fatal path inside the guest
+hypervisor and parked itself**, and the boot processor then spins for
+ever on a lock it will never be given. The word loaded into ECX at
+that site is `0xc0000409`, `STATUS_STACK_BUFFER_OVERRUN` - the
+`__fastfail` code. Recorded as *the constant that call site loads*
+rather than as a live status, because this exact value has already
+been mistaken once in this tree for a live bugcheck when it was a
+static initializer in `securekernel.exe`.
+
+Neither processor takes a single external-interrupt or exception-NMI
+exit in its whole life, on either CPU, so those are delivered without
+exiting and exit counts cannot say whether an interrupt arrived. That
+is why the IF=0 reading came from the monitor and not from a counter.
+
+**What this changes:** the failure is no longer ours to see from a
+triple fault. The guest hypervisor detects something wrong and stops
+deliberately, 37 second-level entries in. The next question is what it
+checked - which means the call target at `...161EABD0` and what state
+it was given - and not why a descriptor table went missing.
+
