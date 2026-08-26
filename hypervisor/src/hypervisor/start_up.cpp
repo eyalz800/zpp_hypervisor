@@ -593,8 +593,8 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     if constexpr (nested_vmx::drop_watch_on_start_up) {
         if (!this->all_processors_started.load(
                 std::memory_order_relaxed)) {
-            this->all_processors_started.store(
-                true, std::memory_order_relaxed);
+            this->all_processors_started.store(true,
+                                               std::memory_order_relaxed);
             log("start-up applied on cpu {}, dropping the local apic "
                 "page watch now rather than after the quiet period",
                 vmcs.vpid());
@@ -1173,14 +1173,48 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 
     this->started_by_start_up_ipi[cpu] = false;
 
-    // Only worth waiting for if the interrupt command register is an MSR,
-    // which it is only in x2APIC mode. In xAPIC mode it is a location on
-    // the APIC page and the MSR bitmap never sees it, so waiting would
-    // burn the whole timeout before falling back for nothing.
-    auto x2apic = x2apic_enabled();
+    // **The APIC mode is deliberately not part of this decision any
+    // more, and removing it is the fix.**
+    //
+    // This used to read `x2apic_enabled() && nested`, on the stated
+    // grounds that "the interrupt command register is an MSR, which it is
+    // only in x2APIC mode; in xAPIC mode it is a location on the APIC
+    // page and the MSR bitmap never sees it, so waiting would burn the
+    // whole timeout before falling back for nothing".
+    //
+    // That premise was true when it was written and was falsified three
+    // days later. `b3ca36c` added the conjunct on 2026-08-04; `540d8b6`
+    // added the xAPIC interception on 2026-08-07, and it is live today:
+    // `filter_local_apic_write` and `on_local_apic_write` both key on
+    // offset 0x300 of the watched APIC page, read the two dwords back out
+    // of the page and compose them into the same shape the x2APIC MSR
+    // carries, expressly "so one decision function serves both". A
+    // command written in xAPIC mode reaches `on_interrupt_command`, and
+    // therefore reaches the hand-off, exactly as an MSR write does.
+    //
+    // What the stale conjunct cost, measured on the rig - an xAPIC
+    // machine, `rdmsr 0x1b` on the target reading 0xfee00800 with EXTD
+    // clear:
+    //
+    //     guest start-up ipi for cpu 1, activity 0 is not wait-for-sipi,
+    //         queued vector 0x87
+    //     guest start-up ipi for cpu 1, vector 0x2, to hardware
+    //
+    // The sender queued the vector and swallowed the guest's write - see
+    // `start_up_processor`, which returns `adopted` for that - while the
+    // target went down the hardware branch, which had no consumer for the
+    // queue at all until `ZPP_APPLY_QUEUED_START_UP`. So the vector was
+    // destroyed by the one processor that could have used it, and the
+    // processor was later started at a vector from a different sequence.
+    //
+    // Nothing is lost on a machine that really cannot be handed a vector:
+    // the wait is bounded and falls back to the architectural path, and
+    // the queue is drained into the hand-off before the first spin, so
+    // the case this rig is actually in - the vector already queued by the
+    // time the target arrives - costs no iterations at all.
 
-    // And only worth waiting for when the hardware path cannot be
-    // trusted, which is precisely when something is virtualizing *us*.
+    // Worth waiting for when the hardware path cannot be trusted, which
+    // is precisely when something is virtualizing *us*.
     //
     // The architectural wait-for-SIPI path below is correct, cheaper and
     // better tested: it is what real hardware implements and what the
@@ -1209,7 +1243,7 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // Whether the software wait was taken at all, which is the one thing
     // worth saying about this on the way out: it is what a sender's
     // decision has to have agreed with.
-    auto waited = x2apic && nested;
+    auto waited = nested;
 
     // Both facts about this processor are published *before* the wait
     // below, and that ordering is the whole of this fix.
@@ -1253,13 +1287,17 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // cannot both deliver: a sender racing this exchange either wins
         // the compare-exchange below on `software_wait`, or finds the
         // queue already emptied here.
+        //
+        // The valid bit is tested rather than the whole word, so that a
+        // slot holding anything other than a vector cannot be read as
+        // vector zero - which would start this processor at physical
+        // address zero, an address nobody chose.
         if (auto queued = this->queued_start_up[cpu].exchange(
                 0, std::memory_order_acq_rel);
-            0 != queued) {
+            0 != (queued & queued_start_up_valid)) {
             auto expected = start_up_handoff_state::software_wait;
             static_cast<void>(handoff.compare_exchange_strong(
-                expected,
-                start_up_handoff_state::deliver(queued & 0xff)));
+                expected, start_up_handoff_state::deliver(queued & 0xff)));
         }
 
         // Bounded so a processor cannot spin forever on an INIT whose
@@ -1313,12 +1351,12 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
 
         // **And a vector that arrived before this processor was ready
         // must be applied here, on this path too.** The consumption used
-        // to live only in the software-wait branch above, and this is
-        // the branch that is actually taken: `waited` is
-        // `x2apic && nested`, and `nested` is the hypervisor-present bit
-        // in CPUID leaf 1, which this VMM does not set by default. So
-        // every adopted processor arrives here, and every queued vector
-        // sat unread.
+        // to live only in the software-wait branch above, and this was
+        // the branch every processor took, because `waited` carried a
+        // stale conjunct on the APIC mode - see the paragraph above it.
+        // With that removed this branch is bare metal and Bochs only,
+        // where a queued vector is rare rather than universal, and the
+        // consumption stays because rare is not never.
         //
         // Measured, that is not hypothetical - it is the whole failure:
         //
@@ -1335,23 +1373,23 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
         // nothing is going to come and collect it: on this path the
         // processor returns to wait for a hardware start-up IPI that has
         // already been sent and refused.
-        // **Held, not applied - an experiment, and the switch says so.**
         //
-        // Applying it here is what made the boot move, and it is also
-        // what starts the processor twice: the ring shows two `init`
-        // exits carrying `cs=0x8700` then `cs=0x0200`, so vector 0x87 is
-        // applied and then vector 0x02 overwrites it. A start-up IPI to
-        // a processor that is already running is ignored by hardware,
-        // and this VMM does not ignore it.
-        //
-        // So the question is whether the queued application is load
-        // bearing or whether the hardware start-up IPI that follows
-        // would have started it anyway - and the only way to know is to
-        // not apply it and see whether the processor still starts.
+        // **What made applying it dangerous is fixed elsewhere.** The
+        // ring showed two `init` exits carrying `cs=0x8700` then
+        // `cs=0x0200`, vector 0x87 applied and then 0x02 over it, and
+        // the 0x02 came out of this slot: it was queued by the *second*
+        // start-up IPI of a sequence this VMM had already satisfied, sat
+        // in the mailbox with nothing to say which sequence it belonged
+        // to, and was then applied to the next INIT. A vector cannot
+        // carry that by itself, so the sender clears the slot when it
+        // sees the INIT - `on_interrupt_command`, and the same rule
+        // `kvm_apic_accept_events` applies when it takes one. What is
+        // left here is a vector the guest sent *after* that INIT, which
+        // is the one this processor is waiting for.
         if (!nested_vmx::apply_queued_start_up) {
             if (auto queued = this->queued_start_up[cpu].load(
                     std::memory_order_acquire);
-                0 != queued) {
+                0 != (queued & queued_start_up_valid)) {
                 log("cpu {} init: holding queued start-up vector {} "
                     "rather than applying it",
                     cpu,
@@ -1359,7 +1397,7 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
             }
         } else if (auto queued = this->queued_start_up[cpu].exchange(
                        0, std::memory_order_acq_rel);
-                   0 != queued) {
+                   0 != (queued & queued_start_up_valid)) {
             log("cpu {} init: applying start-up ipi vector {} that "
                 "arrived before this processor was waiting",
                 cpu,

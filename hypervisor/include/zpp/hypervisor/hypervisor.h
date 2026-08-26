@@ -2083,11 +2083,54 @@ private:
     bool start_up_broadcast(std::uint64_t vector);
 
     /**
+     * Discards any start-up vector still held for the targets of the
+     * given INIT command.
+     *
+     * This is the ordering rule `queued_start_up` could not carry on its
+     * own, and it belongs to the sender because only the sender sees the
+     * INIT and the start-up IPI in the order the guest wrote them.
+     *
+     * KVM keeps both in one word, `apic->pending_events`, and
+     * `kvm_apic_accept_events` clears a pending start-up IPI when it
+     * takes an INIT - a vector sent before an INIT is not for the life
+     * that INIT begins. Here the two arrive by different routes and the
+     * target cannot do the clearing itself: `emulate_init_signal` records
+     * why, at length, from a measurement - this VMM sees the start-up IPI
+     * *before* the target reaches its INIT exit, so clearing there threw
+     * away the only vector that was ever going to arrive.
+     *
+     * Clearing it here instead puts the two writes in guest order on the
+     * one processor that observes both, which is what the reverted flag
+     * attempt in `on_interrupt_command` could not do.
+     *
+     * Not the flag attempt: nothing is set, nothing is injected and no
+     * INIT is applied to anybody. A vector the guest has superseded is
+     * dropped, and dropping it is what hardware does.
+     */
+    void discard_start_up_for_init(std::uint64_t command);
+
+    /**
      * Returns the index this VMM tracks the processor with the given local
      * APIC id under, allocating one if this is the first time it has been
      * named. Returns nothing when there is no room left.
      */
     std::optional<std::size_t> processor_slot(std::uint64_t apic_id);
+
+    /**
+     * The same lookup without the allocation: the index this VMM already
+     * tracks the given local APIC id under, or nothing if it has never
+     * been named.
+     *
+     * Separate from `processor_slot` rather than a flag on it, because
+     * the two answer different questions and one of them must not have
+     * the side effect. The INIT path uses this: an INIT for a processor
+     * this VMM has never seen has nothing to clear, and spending a slot
+     * to discover that would credit a table entry to a destination that
+     * may be a logical address rather than an identifier - `c6349a4`,
+     * which is the defect tests/local_apic's first case pins.
+     */
+    std::optional<std::size_t>
+    known_processor_slot(std::uint64_t apic_id);
 
     /**
      * Lays out the memory the loader reserved below one megabyte: the
@@ -8202,10 +8245,17 @@ private:
      * "a start-up IPI for this processor is discarded rather than
      * queued".
      *
-     * Cleared at the top of `emulate_init_signal` so a vector queued for
-     * an earlier bring-up cannot be applied to a later one, which is the
-     * same reason KVM's `kvm_apic_accept_events` clears a pending
-     * start-up IPI when it takes an INIT.
+     * **Cleared by the sender, in `discard_start_up_for_init`, and not by
+     * the target.** A vector queued for an earlier bring-up must not be
+     * applied to a later one - the same rule KVM's
+     * `kvm_apic_accept_events` applies when it takes an INIT - and this
+     * comment used to say `emulate_init_signal` did it at the top of the
+     * INIT. It did, it was reverted, and the reversal is recorded there
+     * with the measurement: this VMM sees the start-up IPI *before* the
+     * target reaches its INIT exit, so clearing on the target threw away
+     * the only vector that was ever going to arrive. The sender sees the
+     * INIT and the start-up IPI in the order the guest wrote them, so it
+     * is the only place the clear can go.
      */
     std::atomic<std::uint64_t> queued_start_up[max_cpus]{};
 

@@ -38,6 +38,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <thread>
@@ -459,6 +460,222 @@ void init_level_de_assert_starts_nothing()
         check(!state->started_by_guest_start_up_ipi[i],
               "init level de-assert flags no processor as started");
     }
+}
+
+// === INIT supersedes a start-up IPI queued before it ===================
+//
+// `queued_start_up` holds one vector per processor for the window between
+// a target's INIT and its INIT exit, and nothing in the word says which
+// INIT-SIPI-SIPI sequence the vector belongs to. `emulate_init_signal`
+// cannot supply that: it records, from a measurement, that clearing the
+// slot at the top of an INIT threw away the *live* vector, because this
+// VMM sees the start-up IPI before the target reaches its INIT exit.
+//
+// So the sender clears it, which is the ordering KVM gets from
+// `apic->pending_events` - `kvm_apic_accept_events` drops a pending
+// start-up IPI when it takes an INIT. The measured failure it closes is
+// the second start-up IPI of a satisfied sequence being queued against a
+// running processor and then applied to the *next* INIT: vector 0x2 held
+// over from one sequence started the processor at 0x2000, where the guest
+// hypervisor has nothing.
+
+/**
+ * The vector a slot is holding, or nothing.
+ */
+std::optional<std::uint64_t>
+queued_vector(zpp::hypervisor::hypervisor & state, std::size_t slot)
+{
+    auto held = state.queued_start_up[slot].load();
+    if (0 == (held & zpp::hypervisor::hypervisor::queued_start_up_valid)) {
+        return {};
+    }
+    return held & 0xff;
+}
+
+/**
+ * Puts a vector in a slot's mailbox the way `start_up_processor` does.
+ */
+void queue_vector(zpp::hypervisor::hypervisor & state,
+                  std::size_t slot,
+                  std::uint64_t vector)
+{
+    state.queued_start_up[slot].store(
+        zpp::hypervisor::hypervisor::queued_start_up_valid | vector);
+}
+
+void init_discards_a_superseded_start_up_vector()
+{
+    auto state = make(0, {0, 1, 2, 3});
+
+    // A processor this VMM already tracks, holding the vector left over
+    // from the sequence before - which is exactly the state the rig was
+    // measured in.
+    state->apic_id[1] = 1;
+    state->number_of_known_processors = 2;
+    queue_vector(*state, 1, 0x2);
+
+    auto command =
+        icr{.delivery_mode = delivery_init, .destination = 1}.value();
+
+    auto answer = state->on_interrupt_command(command);
+
+    check(answer.has_value(),
+          "an init that discards a stale vector is still passed through");
+    if (answer) {
+        check_equal(command, *answer, "and passed through unmodified");
+    }
+    check(!queued_vector(*state, 1).has_value(),
+          "the start-up vector queued before the init is discarded - a "
+          "vector sent for the previous life must not start the next one");
+    check_equal(2,
+                state->number_of_known_processors,
+                "and no slot is allocated to discover it");
+}
+
+/**
+ * The boot processor's own mailbox is not touched by an INIT naming
+ * somebody else. A clear that reached every slot would look like it
+ * worked in every case above and would drop a live vector for a
+ * processor the guest was starting at the same moment.
+ */
+void init_discards_only_for_its_own_target()
+{
+    auto state = make(0, {0, 1, 2, 3});
+    state->apic_id[1] = 1;
+    state->apic_id[2] = 2;
+    state->number_of_known_processors = 3;
+    queue_vector(*state, 1, 0x2);
+    queue_vector(*state, 2, 0x87);
+
+    state->on_interrupt_command(
+        icr{.delivery_mode = delivery_init, .destination = 1}.value());
+
+    check(!queued_vector(*state, 1).has_value(),
+          "the named target's vector is discarded");
+    check_equal(0x87,
+                queued_vector(*state, 2).value_or(0),
+                "and a processor the init did not name keeps its own");
+}
+
+/**
+ * An INIT for an identifier this VMM has never seen clears nothing and,
+ * critically, allocates nothing. `c6349a4` is the defect that made
+ * `processor_slot` spend an entry on a destination that was not an
+ * identifier at all, and this path must not reopen it.
+ */
+void init_for_an_unknown_processor_allocates_nothing()
+{
+    auto state = make(0, {0, 1, 2, 3});
+
+    state->on_interrupt_command(
+        icr{.delivery_mode = delivery_init, .destination = 0x33}.value());
+
+    check_equal(1,
+                state->number_of_known_processors,
+                "an init for an unknown identifier allocates no slot");
+}
+
+/**
+ * INIT level de-assert supersedes nothing, because it starts nothing.
+ * `439abb5` was reverted in part for acting on exactly this command, and
+ * a clear that fired here would drop a vector the guest had just sent.
+ */
+void init_level_de_assert_discards_nothing()
+{
+    auto state = make(0, {0, 1, 2, 3});
+    state->apic_id[1] = 1;
+    state->number_of_known_processors = 2;
+    queue_vector(*state, 1, 0x87);
+
+    auto command = icr{.delivery_mode = delivery_init,
+                       .level_assert = false,
+                       .trigger_level = true,
+                       .destination = 1}
+                       .value();
+
+    state->on_interrupt_command(command);
+
+    check_equal(0x87,
+                queued_vector(*state, 1).value_or(0),
+                "init level de-assert leaves a queued start-up vector "
+                "alone - it starts nothing, so it supersedes nothing");
+
+    // And the de-assert is the *only* form excluded, which is the wider
+    // half of the same condition. KVM's `APIC_DM_INIT` case reads
+    // `if (!trig_mode || level)` (.references/kvm/lapic.c:1365), so an
+    // edge-triggered command with the level bit clear is still an INIT.
+    // A test on the level bit alone would ignore it, and this pins the
+    // difference between the two conditions rather than leaving it to be
+    // rediscovered.
+    auto edge = make(0, {0, 1, 2, 3});
+    edge->apic_id[1] = 1;
+    edge->number_of_known_processors = 2;
+    queue_vector(*edge, 1, 0x87);
+
+    edge->on_interrupt_command(icr{.delivery_mode = delivery_init,
+                                   .level_assert = false,
+                                   .trigger_level = false,
+                                   .destination = 1}
+                                   .value());
+
+    check(!queued_vector(*edge, 1).has_value(),
+          "an edge-triggered init with the level bit clear is still an "
+          "init, and still supersedes a queued start-up vector");
+}
+
+/**
+ * A broadcast INIT is how Windows starts its processors, so the clear has
+ * to resolve one - and it has to exclude the sender, which is not a
+ * processor anybody is waiting to start.
+ */
+void broadcast_init_discards_every_target_but_the_sender()
+{
+    auto state = make(5, {0, 1, 2, 3});
+    state->apic_id[0] = 5;
+    state->apic_id[1] = 1;
+    state->apic_id[2] = 2;
+    state->number_of_known_processors = 3;
+    queue_vector(*state, 0, 0x11);
+    queue_vector(*state, 1, 0x22);
+    queue_vector(*state, 2, 0x33);
+
+    state->on_interrupt_command(
+        icr{.delivery_mode = delivery_init,
+            .shorthand = shorthand_all_excluding_self}
+            .value());
+
+    check_equal(0x11,
+                queued_vector(*state, 0).value_or(0),
+                "a broadcast init excludes the sender's own slot");
+    check(!queued_vector(*state, 1).has_value(),
+          "and discards the vector held for every other known processor");
+    check(!queued_vector(*state, 2).has_value(),
+          "including the last of them");
+}
+
+/**
+ * A logical destination is a bitmask matched against each APIC's LDR and
+ * DFR, not an identifier. The start-up path refuses one rather than
+ * guessing, and this must refuse it the same way: clearing the slot that
+ * a bitmask happens to coincide with would drop a live vector for a
+ * processor the guest never named.
+ */
+void logical_init_discards_nothing()
+{
+    auto state = make(0, {0, 1, 2, 3});
+    state->apic_id[1] = 1;
+    state->number_of_known_processors = 2;
+    queue_vector(*state, 1, 0x87);
+
+    state->on_interrupt_command(icr{.delivery_mode = delivery_init,
+                                    .logical_destination = true,
+                                    .destination = 1}
+                                    .value());
+
+    check_equal(0x87,
+                queued_vector(*state, 1).value_or(0),
+                "an init in logical destination mode discards nothing - "
+                "the destination field is not an identifier");
 }
 
 // === Start-up, physical destination ====================================
@@ -1188,6 +1405,12 @@ int main()
     passthrough_delivery_modes();
     init_is_forwarded_and_counted();
     init_level_de_assert_starts_nothing();
+    init_discards_a_superseded_start_up_vector();
+    init_discards_only_for_its_own_target();
+    init_for_an_unknown_processor_allocates_nothing();
+    init_level_de_assert_discards_nothing();
+    broadcast_init_discards_every_target_but_the_sender();
+    logical_init_discards_nothing();
     start_up_physical_adopted();
     start_up_physical_needs_hardware();
     start_up_field_extraction();

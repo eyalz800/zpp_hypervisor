@@ -81,6 +81,115 @@ hypervisor::processor_slot(std::uint64_t apic_id)
     return slot;
 }
 
+std::optional<std::size_t>
+hypervisor::known_processor_slot(std::uint64_t apic_id)
+{
+    // The scan half of `processor_slot`, under the same lock and without
+    // the append. See the declaration for why the allocation must not
+    // happen on this caller's behalf.
+    this->start_up_lock.lock();
+    scope_exit unlock{[&] { this->start_up_lock.unlock(); }};
+
+    for (std::size_t slot{}; slot < this->number_of_known_processors;
+         ++slot) {
+        if (this->apic_id[slot] == apic_id) {
+            return slot;
+        }
+    }
+
+    return {};
+}
+
+void hypervisor::discard_start_up_for_init(std::uint64_t command)
+{
+    constexpr std::uint64_t level_assert = 1ull << 14;
+    constexpr std::uint64_t trigger_mode_level = 1ull << 15;
+    constexpr std::uint64_t destination_logical = 1ull << 11;
+    constexpr std::uint64_t shorthand_shift = 18;
+    constexpr std::uint64_t shorthand_mask = 0x3;
+    constexpr std::uint64_t shorthand_none = 0;
+    constexpr std::uint64_t shorthand_self = 1;
+    constexpr std::uint64_t destination_shift = 32;
+
+    // INIT level de-assert starts nothing and supersedes nothing. SDM
+    // Figure 13-12, "101 (INIT Level De-assert)": "for this delivery mode
+    // the level flag must be set to 0 and trigger mode flag to 1". The
+    // command the rig recorded for it is 0x100008500, and `439abb5` was
+    // reverted in part because the flag it added was being set for
+    // exactly this.
+    //
+    // The pair, not the level bit alone, because that is the condition
+    // KVM applies and it is the wider one: `.references/kvm/lapic.c`'s
+    // `APIC_DM_INIT` case is `if (!trig_mode || level)`, so everything
+    // except level-triggered-and-clear is an INIT. Testing the level bit
+    // on its own would silently ignore an edge-triggered command with
+    // the level bit clear, which this is not entitled to do.
+    if ((0 != (command & trigger_mode_level)) &&
+        (0 == (command & level_assert))) {
+        return;
+    }
+
+    // A logical destination is an eight-bit message destination address
+    // matched against each APIC's own LDR and DFR, not an identifier, so
+    // there is nothing here that can resolve it - the start-up path
+    // refuses these for the same reason a few lines below, and refusing
+    // both keeps the pair consistent. A vector left held for such a
+    // target is the pre-existing behaviour, not a new hole.
+    if (0 != (command & destination_logical)) {
+        return;
+    }
+
+    auto discard = [this](std::size_t slot) {
+        if (auto queued = this->queued_start_up[slot].exchange(
+                0, std::memory_order_acq_rel);
+            0 != (queued & queued_start_up_valid)) {
+            log("guest init ipi for cpu {} discards the start-up vector "
+                "{} queued before it",
+                slot,
+                queued & 0xff);
+        }
+    };
+
+    auto shorthand = (command >> shorthand_shift) & shorthand_mask;
+
+    if (shorthand_none == shorthand) {
+        if (auto slot =
+                known_processor_slot(command >> destination_shift)) {
+            discard(*slot);
+        }
+        return;
+    }
+
+    // "Self" reaches one processor and it is the sender, which is not a
+    // processor anybody is waiting to start.
+    if (shorthand_self == shorthand) {
+        return;
+    }
+
+    // The two broadcasts. Resolved against the slots this VMM already
+    // tracks rather than against the platform roster, because the roster
+    // is a list of identifiers and what has to be cleared is a slot -
+    // and a processor with no slot has no mailbox to clear.
+    //
+    // Read before the lock is taken, because `local_apic_id` is a CPUID
+    // and the loop below holds `start_up_lock` - the same lock
+    // `processor_slot` appends the table under, so the count and the
+    // identifiers cannot move while they are being walked. Nothing
+    // inside the loop takes it, which it must not: it is not recursive.
+    auto self = local_apic_id();
+
+    this->start_up_lock.lock();
+    scope_exit unlock{[&] { this->start_up_lock.unlock(); }};
+
+    for (std::size_t slot{}; slot < this->number_of_known_processors;
+         ++slot) {
+        if (this->apic_id[slot] == self) {
+            continue;
+        }
+        discard(slot);
+    }
+}
+
 std::optional<std::uint64_t>
 hypervisor::on_interrupt_command(std::uint64_t command)
 {
@@ -183,6 +292,35 @@ hypervisor::on_interrupt_command(std::uint64_t command)
         // Restoring this needs a queue with the start-up IPI in it, in
         // the order the guest wrote them, which is what KVM's
         // `apic->pending_events` is. A flag is not that.
+        //
+        // **The queue exists now, and this is the half of KVM's ordering
+        // it was missing.** `queued_start_up` holds one vector per
+        // processor and nothing in it says which INIT-SIPI-SIPI sequence
+        // that vector belongs to. `emulate_init_signal` cannot supply
+        // that - it records, from a measurement, that clearing the slot
+        // at the top of an INIT threw away the live vector, because this
+        // VMM sees the start-up IPI before the target reaches its INIT
+        // exit. So the *sender* clears it, which puts the two writes in
+        // the order the guest made them on the one processor that sees
+        // both.
+        //
+        // Measured, and this is the failure it closes. Vector 0x87 is
+        // Hyper-V's trampoline; the second start-up IPI of the same
+        // sequence arrives after the target is already running and is
+        // queued because its activity record reads active:
+        //
+        //     guest start-up ipi for cpu 1, vector 0x2, to hardware
+        //     guest start-up ipi for cpu 1, activity 0x0 is not
+        //         wait-for-sipi, queued vector 0x2
+        //     guest init ipi, command 0x10000c500
+        //
+        // The 0x2 then sat in the mailbox until the *next* INIT drained
+        // it, and started the processor at 0x2000 where the guest
+        // hypervisor has nothing. Nothing is injected here and no INIT is
+        // applied to anybody: a vector the guest has superseded is
+        // dropped, which is what hardware does with it.
+        discard_start_up_for_init(command);
+
         return command;
     }
 

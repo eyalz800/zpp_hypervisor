@@ -1440,13 +1440,28 @@ struct init_target
 
 /**
  * Under a layer that discards a start-up IPI while this VMM is in root
- * mode, which is the only situation the software wait exists for: x2APIC,
- * because only then is the interrupt command register an MSR this VMM can
- * see, and something virtualizing us.
+ * mode, which is the only situation the software wait exists for.
+ *
+ * The APIC mode is set to x2APIC here as well, and it is **no longer part
+ * of the decision** - see `under_a_layer_in_xapic_mode` below, and the
+ * paragraph in `emulate_init_signal` that removed the conjunct. This
+ * helper keeps both because the cases that use it are about the wait
+ * itself rather than about how it is chosen.
  */
 static void nested_and_x2apic()
 {
     zpp::arch::x86_64::g_apic_base.store(0xfee00000 | (1ull << 10));
+    zpp::arch::x86_64::g_leaf_1_ecx =
+        zpp::arch::x86_64::hypervisor_present_bit;
+}
+
+/**
+ * Under a layer, with the local APIC in xAPIC mode - which is what the
+ * rig is, and what every measurement in this tree is taken on.
+ */
+static void under_a_layer_in_xapic_mode()
+{
+    zpp::arch::x86_64::g_apic_base.store(0xfee00000);
     zpp::arch::x86_64::g_leaf_1_ecx =
         zpp::arch::x86_64::hypervisor_present_bit;
 }
@@ -1623,6 +1638,21 @@ static void test_init_chooses_and_publishes_a_handoff()
     constexpr std::uint64_t wait_for_sipi = 3;
     constexpr std::size_t cpu = 1;
 
+    // **Both cases are "nothing underneath", and that is the whole of the
+    // condition now.** There used to be a third here, "under a layer, but
+    // in xAPIC mode", asserting that the APIC mode alone sent a nested
+    // machine down the hardware path. It did, and it was wrong: the
+    // premise - that this VMM cannot see an interrupt command register
+    // that is not an MSR - was falsified three days after it was written,
+    // by the xAPIC page watch in `local_apic_write.cpp`, which composes
+    // the two dwords into the same shape and calls the same decoder. That
+    // case now takes the software wait and is asserted in
+    // `test_init_waits_in_software_in_xapic_mode` below.
+    //
+    // What is left is the real condition: the hardware path is correct,
+    // cheaper and better tested, and fails in exactly one situation - a
+    // layer below that discards the start-up IPI while this VMM is in
+    // root mode. Bare metal is not that situation in either APIC mode.
     struct
     {
         const char * name;
@@ -1631,7 +1661,6 @@ static void test_init_chooses_and_publishes_a_handoff()
     } cases[]{
         {"bare metal", false, false},
         {"bare metal in x2APIC mode", true, false},
-        {"under a layer, but in xAPIC mode", false, true},
     };
 
     for (auto & entry : cases) {
@@ -1693,6 +1722,169 @@ static void test_init_chooses_and_publishes_a_handoff()
               g_vmm.start_up_processor(7, 0x30),
           "and a sender arriving after the fall-back issues the guest's "
           "own start-up IPI rather than swallowing it");
+}
+
+// ------- 7b. the software wait is chosen in xAPIC mode too
+//
+// The rig is an xAPIC machine - the target's own `rdmsr 0x1b` reads
+// 0xfee00800, EXTD clear - running under KVM, and the hand-off decision
+// used to read `x2apic_enabled() && nested`. So `waited` was false there,
+// the target went down the hardware branch, and the queue it left behind
+// had no consumer at all until `ZPP_APPLY_QUEUED_START_UP` was added to
+// drain it.
+//
+// What that cost is one pair of measured lines. The sender had already
+// swallowed the guest's write - `start_up_processor` returns `adopted`
+// when it queues - so the vector existed nowhere else:
+//
+//     guest start-up ipi for cpu 1, activity 0 is not wait-for-sipi,
+//         queued vector 0x87
+//     guest start-up ipi for cpu 1, vector 0x2, to hardware
+//
+// 0x87 is the guest hypervisor's trampoline and 0x2 is not, so the
+// processor came up where nothing was waiting for it.
+//
+// The premise the conjunct rested on - "in xAPIC mode the interrupt
+// command register is a location on the APIC page and the MSR bitmap
+// never sees it" - was true when `b3ca36c` wrote it on 2026-08-04 and
+// false from `540d8b6` on 2026-08-07, which watches the page and calls
+// the same decoder for a write to offset 0x300.
+static void test_init_waits_in_software_in_xapic_mode()
+{
+    std::println(
+        "\nthe software hand-off is chosen in xAPIC mode as well");
+
+    constexpr std::uint64_t wait_for_sipi = 3;
+    constexpr std::uint64_t active = 0;
+    constexpr std::size_t cpu = 1;
+
+    // The rig's shape exactly: a processor this VMM has already adopted,
+    // whose activity record still says `active` because it has not
+    // reached its INIT exit yet, and a vector the sender has therefore
+    // queued and swallowed.
+    reset();
+    under_a_layer_in_xapic_mode();
+    g_vmm.apic_id[cpu] = 7;
+    g_vmm.number_of_known_processors = 2;
+    g_vmm.processor_virtualized[cpu] = true;
+    g_vmm.resume_activity_state[cpu] = active;
+
+    auto answered = g_vmm.start_up_processor(7, 0x87);
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              answered,
+          "the sender queues the vector and swallows the guest's write, "
+          "which is what makes losing it unrecoverable");
+    check((zpp::hypervisor::hypervisor::queued_start_up_valid | 0x87) ==
+              g_vmm.queued_start_up[cpu].load(),
+          "and the vector is in the mailbox");
+
+    init_target target{cpu};
+    target.run();
+
+    check((0x87ull << 12) == target.cs_base.load(),
+          "the target drains the mailbox and starts at the vector the "
+          "guest asked for - in xAPIC mode, which is where the boot this "
+          "closes was measured");
+    check(active == target.activity_left.load(),
+          "and is runnable rather than parked, because a vector was "
+          "applied");
+    check(g_vmm.started_by_start_up_ipi[cpu],
+          "the start-up state was applied");
+    check(0 == g_vmm.queued_start_up[cpu].load(),
+          "and the mailbox is emptied by the application, so no later "
+          "INIT can find this vector still in it");
+
+    // The choice itself, rather than what it happened to produce. With
+    // an empty mailbox the two paths are told apart by which hand-off
+    // the target publishes, and that is only observable from another
+    // processor while the target is still inside its wait - after it,
+    // the software path has timed out and reads `hardware_wait` too.
+    //
+    // Asserted this way round on purpose. Reading the outcome instead
+    // would have proved nothing here: `apply_queued_start_up` drains the
+    // mailbox on the hardware branch as well, so a queued vector is
+    // applied either way and the two paths look identical from outside.
+    reset();
+    under_a_layer_in_xapic_mode();
+    g_vmm.apic_id[cpu] = 7;
+    g_vmm.number_of_known_processors = 2;
+    g_vmm.processor_virtualized[cpu] = true;
+    g_vmm.resume_activity_state[cpu] = active;
+
+    init_target listener{cpu};
+    std::thread thread{[&] { listener.run(); }};
+
+    check(eventually([&] {
+              return zpp::hypervisor::hypervisor::start_up_handoff_state::
+                         software_wait ==
+                     g_vmm.start_up_handoff[cpu].load();
+          }),
+          "an xAPIC machine under a layer publishes the *software* "
+          "hand-off - which is the whole of the fix, and was false while "
+          "the decision carried a conjunct on the APIC mode");
+
+    // Released rather than waited out, so the case costs no timeout.
+    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+              g_vmm.start_up_processor(7, 0x87),
+          "so a sender arriving mid-wait hands the vector over instead "
+          "of destroying it");
+    thread.join();
+    check((0x87ull << 12) == listener.cs_base.load(),
+          "and the target starts where the guest asked");
+
+    // And with nothing underneath the architectural path is still
+    // chosen, in xAPIC mode as before: the software wait costs up to two
+    // million iterations in root mode and bare metal has no reason to
+    // pay them. Asserted on an empty mailbox, so the parked state is the
+    // handler's own answer rather than the absence of a vector.
+    reset();
+    g_vmm.apic_id[cpu] = 7;
+    g_vmm.number_of_known_processors = 2;
+    g_vmm.processor_virtualized[cpu] = true;
+
+    init_target bare{cpu};
+    bare.run();
+
+    check(wait_for_sipi == bare.activity_left.load(),
+          "bare metal still parks in wait-for-SIPI and lets the hardware "
+          "deliver, which is what SDM 28.2 makes work");
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  hardware_wait == g_vmm.start_up_handoff[cpu].load(),
+          "and says so, so a sender issues the guest's own start-up IPI");
+}
+
+// ------- 7c. a mailbox that is not carrying a vector starts nobody
+//
+// The drain used to test the whole word against zero, so any non-zero
+// bookkeeping in the slot would have been read as `vector 0` and started
+// the processor at physical address zero - an address nobody chose,
+// which is the failure mode `emulate_init_signal` already refuses by
+// name for the hand-off word. The valid bit is what separates "vector
+// zero" from "no vector", and `start_up_handoff_state` exists for the
+// same distinction.
+static void test_a_mailbox_without_a_vector_starts_nobody()
+{
+    std::println("\na mailbox with no valid bit starts nobody");
+
+    constexpr std::uint64_t wait_for_sipi = 3;
+    constexpr std::size_t cpu = 1;
+
+    reset();
+    under_a_layer_in_xapic_mode();
+    g_vmm.apic_id[cpu] = 7;
+    g_vmm.number_of_known_processors = 2;
+    g_vmm.processor_virtualized[cpu] = true;
+
+    // Non-zero, and not a vector: the valid bit is clear.
+    g_vmm.queued_start_up[cpu].store(1ull << 32);
+
+    init_target target{cpu};
+    target.run();
+
+    check(wait_for_sipi == target.activity_left.load(),
+          "a slot with no valid bit is not a start-up IPI, so the target "
+          "parks rather than starting at vector zero");
+    check(!g_vmm.started_by_start_up_ipi[cpu], "and nothing was applied");
 }
 
 // -------------- 8. the firmware's start-up is not the guest's
@@ -2029,6 +2221,8 @@ int main()
     test_init_publishes_before_it_waits();
     test_handoff_race_is_exactly_once();
     test_init_chooses_and_publishes_a_handoff();
+    test_init_waits_in_software_in_xapic_mode();
+    test_a_mailbox_without_a_vector_starts_nobody();
     test_firmware_start_up_is_not_the_guest_s();
     test_start_up_ipi_follows_the_apic_mode();
     test_init_is_forwarded_and_nothing_more();
