@@ -53370,3 +53370,62 @@ not an absence of the first.
 `window_on_tpr` alone from this run. Separating them costs one boot and
 is worth it only if this line is picked up again.
 
+## The second processor was being started at the wrong address, and the log ring said so
+
+The machine stops at `paused (shutdown)` with memory intact, so the log
+ring is readable with no re-run. It contains the line the analysis
+predicted, verbatim:
+
+    start_up.cpp(905): guest start-up ipi for cpu 0x1, activity 0x0 is
+                       not wait-for-sipi, queued vector 0x87
+    start_up.cpp(966): guest start-up ipi for cpu 0x1, vector 0x2, to
+                       hardware, target hand-off 0x2
+
+Hyper-V sent a start-up IPI for cpu 1 carrying **vector 0x87**.
+`start_up_processor` found the target's activity reading active rather
+than wait-for-SIPI, **queued the vector and swallowed the write**. The
+drain for that queue sits behind `waited = x2apic && nested`, and this
+machine is in xAPIC - cpu 1's own `rdmsr 0x1b` reads `0xfee00800` with
+EXTD clear - so with `qstart=0` **a queued vector is a destroyed
+vector**. A later start-up IPI carrying vector `0x2` went to hardware
+instead.
+
+So the processor was being started at `0x2000` when Hyper-V's trampoline
+is at `0x87000`. That is why it executed and then asked this VMM for
+nothing: there is nothing of Hyper-V's at `0x2000` to ask.
+
+### `-DZPP_APPLY_QUEUED_START_UP=ON` fixes the address and does not fix the boot
+
+Gated on the log line above appearing, which it did. The applied state
+is in the ring and is correct:
+
+    zpp-state start-up-applied cpu 0x2: cs 0x8700 base 0x87000 limit 0xffff ar 0x9b
+
+**But the processor still stops**, and the *shape of the failure moved*:
+
+    before   [108] init  wait-sipi cs=0x0038 rip=0x7fb6b030
+             [109] sipi  active    cs=0x0200 rip=0x0
+    after    [108] init  active    cs=0x8700 rip=0x0
+
+An INIT arrives and leaves the processor **active**, not in
+wait-for-SIPI, and no start-up IPI follows it in the ring. The log has
+`guest start-up ipi for cpu 0x1, activity 0x0 is not wait-for-sipi,
+queued vector 0x2` *after* the hand-off, so a second INIT/SIPI pair is
+arriving on top of a processor this VMM has already started.
+
+That is an ordering defect in the INIT and start-up IPI emulation, and
+it is a **new** failure rather than the old one - which is progress:
+the address is right now, and the sequencing is what is left.
+
+### Four boots, and the count is deterministic
+
+    cpu 1 exits:  110, 110, 110, 109
+
+Across `evmk=1` and `evmk=0`, with shadowing off and on. The
+application processor's path does not vary, which is what makes it
+worth chasing rather than sampling.
+
+Also worth recording: with shadowing in force the same guest progress
+cost half the exits - 93,092 second-level entries for 599,005 exits,
+against 87,572 for 1,252,532. Same failure, same place, half the price.
+
