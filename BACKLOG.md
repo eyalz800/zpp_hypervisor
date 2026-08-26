@@ -52940,3 +52940,48 @@ invalidation in is what proves it. Until that run exists, **this
 desktop rests on a diagnostic switch**, and that is not somewhere to
 leave it.
 
+### The desktop no longer rests on a diagnostic switch
+
+The A/B the previous entry said was owed, run with one variable
+changed - `apfault=1` -> `apfault=0`, everything else identical, the
+INVVPID of `19baf06` in both:
+
+| | cpu 0 | cpu 1 | ap-fault record |
+|---|---|---|---|
+| `apfault=1`, desktop confirmed | 32,128 | 27,782 | vector 14 error 0x11 at 0x16fe |
+| `apfault=0`, invalidation alone | 31,935 | 27,655 | never armed - says nothing |
+
+**The application processor lives with the trap off.** No triple fault,
+no unhandled exit, no VM-entry failure, and the trap correctly reports
+itself as never armed rather than as a silent zero. The only thing
+holding that processor up is the `INVVPID` on the emulated CR0.PG
+transition.
+
+The two runs land within 200 exits of each other at the same point and
+quiesce the same way, which is as close as this rig gets to identical.
+That is the whole claim the trap was standing in for, and it is now
+carried by the invalidation the architecture requires instead of by an
+accident of taking one more exit.
+
+**A correction that narrows the defect rather than widening it.** Two
+entries above said this VMM's emulated INIT leaves the TLBs alone. It
+does not, and has not since `cd9d2c2`, which issues INVVPID
+single-context in `apply_start_up` citing SDM 12.1. So the measured
+page fault happened *with* the INIT flush in place: the stale
+translation is not carried across the INIT, it is established after it,
+by the emulated paging transition itself. `emulate_init_signal` is
+deliberately not the place for it - its own comment records that the
+INIT to start-up-IPI window is about 210 microseconds and that the
+architectural reset was moved out for exactly that reason.
+
+### Left open, and worth a line before it bites
+
+`enable_vpid` is requested through `adjust_msr`, which **silently drops
+the bit** on a processor that does not support it. `vmcs.vpid()` would
+still read `cpu + 1`, every INVVPID in this tree would tag something
+the hardware is not using, and the only symptom would be a stale
+translation - which is the failure that just cost four sessions. There
+is no capability readback, no `constexpr bool`, and no field in
+`build_switches.cpp`, so nothing would say so. Same class as everything
+in "A CMake cache reading ON is not evidence".
+
