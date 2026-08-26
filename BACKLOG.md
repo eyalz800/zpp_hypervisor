@@ -50753,3 +50753,41 @@ deliberately, 37 second-level entries in. The next question is what it
 checked - which means the call target at `...161EABD0` and what state
 it was given - and not why a descriptor table went missing.
 
+### Correction: 977/37 is not deterministic, and two samples said it was
+
+Recorded as "identical to the digit" on two boots. A third boot of the
+**same binary** gave 3,080 exits and 168 second-level entries. So the
+stopping point varies by a factor of four and the earlier claim was an
+artefact of the sample size - the same mistake as the single-boot
+findings above, one sample further along.
+
+Two boots agreeing is weak evidence when the thing measured is a race
+between two processors. Three is the minimum here, and the number to
+quote is a range.
+
+What is stable across all three, and is the real finding:
+
+- One processor reaches Hyper-V's fatal-report-and-park routine -
+  `mov ecx,[status]` / `call` / `int3` / `pause` / `jmp -4`, with the
+  status constant `0xc0000409` - and stops.
+- The other then waits for it for ever. Which spelling of "wait" it
+  uses varies: a spinlock `pause` loop in one boot, a
+  `test word [rdi+0x188],0x400` / `jz` flag poll in another, and a
+  `vmptrst`/`vmread` poll loop in the exit ring before that.
+- **Which physical processor plays which part varies between boots.**
+  The first write-up called the failing one "the AP"; on the third
+  boot it is the boot processor, and the application processor is the
+  one left waiting.
+
+The fatal path is unconditional once entered - the tail after
+`test byte [rip+0xa101e],1` / `jnz` falls into it either way - so the
+check that decided to enter it is further up the call chain. The stack
+holds three return addresses into the image, and without `hvix64`
+symbols they name nothing. That is the boundary: decoding the guest
+hypervisor's own consistency check by disassembly is not a good use of
+boots, and a better lever is needed than reading further into it.
+
+Not a regression from `ZPP_DROP_WATCH_ON_START_UP`: without it the
+processor never gets far enough to reach any of this, so this is the
+next failure rather than one the switch introduced.
+
