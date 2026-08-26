@@ -51771,3 +51771,53 @@ and its exits, 24,034,991 of them: `vmread` 51.5%, `vmwrite` 28.2%,
   second-level kernel's is, and that gap has now cost several
   investigations.
 
+## The single-processor stall is an interrupt-window livelock
+
+Read off the already-stalled guest with **no rebuild and nothing
+perturbed** - the counters had been incremented all along and
+`rig-dump-state.py` simply never printed them:
+
+    cpu 0  reflected 1,500,914  stale 0
+      class 2 (0x20-0x2f)  1,470,694  98.0%
+      1,477,927 of 1,500,915 (98.5%) fired at a priority that blocks 0x2f
+      *** LIVELOCK SHAPE ***
+
+against 6,955 TPR-below-threshold exits in the same run. `stale 0`
+rules out a control we failed to clear, so every one of those requests
+was real: the level above is woken by a window it cannot deliver into,
+and re-arms it on the next entry.
+
+**And `KiDpcInterruptBypass` is not a loop.** In the guest's own image
+it is straight-line code with no branch, and `+0x12` - the 50.4%
+address - is the first architecturally interruptible instruction after
+its `sti`. So that concentration is a *re-entry point*. Worse, the
+instruction two before it is `mov cr8, 2`: the window is granted at
+the one moment vector `0x2f`, a class-2 vector, cannot be taken.
+
+This was already measured in this tree and written into a switch's
+comment - "vector 0x2f requested 145,300 times and delivered ZERO, the
+virtual task priority never below 0x20 across 630,418 entries" - and
+then not acted on.
+
+### `ZPP_WINDOW_ON_TPR` removes the livelock and halts the processor
+
+It is the switch written for exactly this, and it had **three of its
+four edits**: option, forward, compiler list, and no field in
+`build_switches.cpp`. A cache reading ON looked like proof and the
+manifest could not contradict it - on the one switch that addresses
+the thing stopping the boot. It now reports `windowtpr=`.
+
+With it on, one processor:
+
+| | interrupt-window reflections | exits |
+|---|---|---|
+| off | 1,500,914 | 23,045,768 |
+| on | **3** | 262,290 |
+
+The livelock is gone outright. But the processor ends in
+`zpp::arch::x86_64::halt()` with **no `unhandled_exit` and no
+`vm_entry_failure` recorded**, and the log ends normally - so it stops
+in a path that does not report itself, which is its own defect. Off
+again on the rig until that is understood; a switch that trades a
+livelock for a silent stop is not yet a fix.
+
