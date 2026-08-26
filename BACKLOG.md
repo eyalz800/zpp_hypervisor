@@ -51317,3 +51317,37 @@ The application processor spinning on a raised `KiBarrierWait` is
 therefore a **consequence**, not the fault: the boot processor died
 before it could release the barrier.
 
+### The failure presents differently between boots
+
+Second boot of the same binary, and it did **not** reproduce the
+`0xD1`. Instead both processors sit in the Hyper-V image - CR3
+`0x8800002`, the guest hypervisor's - at module offsets `...0307` and
+`...868f`, which are exactly the spinlock and the fatal
+`mov ecx,[status]` / `call` / `int3` / `pause` / `jmp` park first seen
+days ago and then misattributed.
+
+So there are at least two presentations:
+
+| boot | boot processor | application processor |
+|---|---|---|
+| A | `HaliHaltSystem+0xc` after bugcheck `0xD1` at RIP `0x2` | spinning on a raised `KiBarrierWait` |
+| B | Hyper-V spinlock at `...0307` | Hyper-V fatal park at `...868f` |
+
+Both are downstream of something going wrong during application
+processor bring-up; which layer notices first varies. **Neither
+presentation should be treated as the bug**, and quoting one boot's
+symptom as "the" failure is what produced several of the wrong turns
+recorded above.
+
+Note also that a `KiBugCheckData` read only works while some processor
+has Windows' address space current. On boot B both processors were in
+the guest hypervisor's, and the read returned "Cannot access memory" -
+which is a mapping fact, not evidence about the guest's health.
+
+The Hyper-V image's base is **not** in our log - only the second-level
+kernel's is, from `nested_entry.cpp`'s "second-level guest kernel image
+at ..." line - and it sits far below it, so identifying that module
+needs a wider `MZ` scan than the 3 MB tried here. Worth adding a log
+line for it: every address in presentation B is unresolvable without
+it, and that is why those addresses were guessed at for so long.
+
