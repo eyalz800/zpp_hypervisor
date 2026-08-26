@@ -723,6 +723,24 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                         this->emulated_length_disagreement + 1;
                     this->emulated_length_reported = reported;
                     this->emulated_length_decoded = store->length;
+
+                    // Said out loud on any processor but the first.
+                    // The emulation advances RIP by the decoded
+                    // length, and for an EPT violation the VMCS
+                    // reports the true one - so a disagreement puts
+                    // the guest's instruction pointer inside an
+                    // instruction, which is a triple fault a few
+                    // instructions later and looks nothing like its
+                    // cause.
+                    if ((0 != cpu) && (cpu < max_cpus)) {
+                        log("cpu {} emulated length disagreement at "
+                            "offset {}: reported {} decoded {} rip {}",
+                            cpu,
+                            address & page_offset_mask,
+                            reported,
+                            store->length,
+                            context.rip);
+                    }
                     return false;
                 }
 
