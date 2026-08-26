@@ -52144,3 +52144,37 @@ indistinguishable, in an event counter, from a guest whose requests are
 being lost - and those want opposite fixes. **Count the thing, not the
 mentions of it.**
 
+## RETRACTED: the storage stack does start, and most of the driver set is loaded
+
+Walked `PsLoadedModuleList` on the stalled single-processor guest:
+
+    CLASSPNP.SYS  crashdmp.sys  dump_storport.sys  dump_stornvme.sys
+    dump_dumpfve.sys  cdrom.sys  filecrypt.sys  tbs.sys  UCPD.sys
+    Null.SYS  Beep.SYS  BasicDisplay.sys  BasicRender.sys  Npfs.SYS
+    Msfs.SYS  CimFS.SYS  tdx.sys  TDI.SYS  netbt.sys  afunix.sys
+    afd.sys  VBoxNetLwf.sys  vwififlt.sys  vfpext.sys  pacer.sys
+    ndiscap.sys  netbios.sys  Vid.sys  winhvr.sys  rdbss.sys
+    VBoxSup.sys  nsiproxy.sys  npsvctrig.sys  mssmbios.sys
+
+**`CLASSPNP.SYS` is loaded, and so are `dump_storport.sys` and
+`dump_stornvme.sys`** - which Windows constructs *after* the real
+storage path is working, since the crash-dump stack is a clone of it.
+Networking is up as well, and `Vid.sys` and `winhvr.sys` mean the
+Hyper-V infrastructure driver loaded.
+
+So the chain this file has asserted twice - *no deferred calls -> the
+storage stack never starts -> `stornvme` never touches the controller
+-> no MSI-X* - **is wrong at its second link too.** The first link was
+already broken by the delivery census. The storage stack starts, the
+drivers load, the guest reaches a fairly complete Phase 1, and it still
+stops with four processes and two `smss.exe` threads on `WrPageOut`.
+
+That is a far more specific failure than anything assumed so far: not a
+driver that never ran, not an interrupt never delivered, but a page
+write that is submitted into a working stack and never completes.
+
+`scripts/guest-modules.py` does the walk. It caches page-table entries
+because without that each module name costs four monitor round trips
+and the walk outlasts the boot; kernel space maps through very few
+tables, so the cache turns minutes into seconds.
+
