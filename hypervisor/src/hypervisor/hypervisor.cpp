@@ -3505,7 +3505,11 @@ hypervisor::wait_for_l2_start_up_ipi(std::size_t cpu)
     // indistinguishable from the wedged one this whole path exists to
     // prevent. `enter_or_park_l2` comes straight back on the guest
     // hypervisor's next VMLAUNCH.
-    constexpr std::uint32_t start_up_wait_attempts = 200000;
+    // See `nested_vmx::l2_startup_spin` for why zero is a candidate fix
+    // rather than a tuning: the guest hypervisor is what ends this park,
+    // and it cannot run while this processor spins in root operation.
+    constexpr std::uint32_t start_up_wait_attempts =
+        nested_vmx::l2_startup_spin ? 200000 : 0;
 
     for (std::uint32_t attempt{}; attempt < start_up_wait_attempts;
          ++attempt) {

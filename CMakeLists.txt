@@ -222,6 +222,10 @@ option(ZPP_VTL_CAPTURE
     "Take the deep per-switch trust-level capture - the stack, the code window, the VP assist page, the shared and spin regions. OFF: it is the last candidate for 137.6 VMCS reads a vmcall, which is 19% of the machine. The cheap register census beside it stays either way. See nested_vmx.h."
     OFF)
 
+option(ZPP_L2_STARTUP_SPIN
+       "Spin in root operation while a second-level processor waits for its start-up IPI (off: return immediately)"
+       ON)
+
 option(ZPP_STEP_AP_WATCHED_WRITES
        "Let processors other than the first execute their own watched-page writes by monitor trap step instead of emulating them"
        OFF)
@@ -398,6 +402,7 @@ ExternalProject_Add(hypervisor
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
         -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
@@ -509,6 +514,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_WATCH_VTL_BLOCK=${ZPP_WATCH_VTL_BLOCK}
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
+        -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
         -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}

@@ -873,6 +873,34 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_L2_STARTUP_SPIN
+#define ZPP_L2_STARTUP_SPIN 1
+#endif
+
+// Whether `wait_for_l2_start_up_ipi` spins before giving up its pass.
+//
+// **The spin can prevent its own release.** Two things end that park
+// and only one is an IPI. The other - and the one Hyper-V uses, since
+// it virtualises its own guest's local APIC and never writes ours - is
+// vmcs12's activity state going back to active, which
+// `enter_or_park_l2` re-reads on every pass. That write is made by the
+// *guest hypervisor*, which cannot run while this processor spins in
+// root operation, so every iteration is time the release cannot
+// happen.
+//
+// Measured at 200,000 iterations, two processors: the application
+// processor took about six exits a second - one per pass - while its
+// host thread burned more system time than the boot processor's. That
+// second half is L0's pause-loop exiting: a PAUSE in non-root trips
+// `ple_window` into `kvm_vcpu_on_spin`, which is host kernel work
+// charged to stime and invisible to this VMM's own exit count.
+//
+// Nothing is lost by not waiting: the mailbox holds a value rather
+// than an edge and stays published, so a vector deposited meanwhile is
+// found by the compare-exchange on the next pass. Only hand-off
+// latency changes, by one VMLAUNCH round trip.
+inline constexpr bool l2_startup_spin = (0 != ZPP_L2_STARTUP_SPIN);
+
 #ifndef ZPP_STEP_AP_WATCHED_WRITES
 #define ZPP_STEP_AP_WATCHED_WRITES 0
 #endif

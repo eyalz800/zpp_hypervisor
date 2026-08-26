@@ -4646,6 +4646,16 @@ hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
     // for what reading it settles.
     this->l2_start_up_waits[cpu] = this->l2_start_up_waits[cpu] + 1;
 
+    // Every 64th, so the rate is readable without a line per pass. A
+    // count rising at about six a second is the throttle described in
+    // `nested_vmx::l2_startup_spin`; a still count means this park is
+    // not where the processor is spending its time.
+    if (0 == (this->l2_start_up_waits[cpu] % 64)) {
+        log("cpu {} second-level start-up waits {}",
+            cpu,
+            this->l2_start_up_waits[cpu]);
+    }
+
     return l2_entry_outcome::retry;
 }
 
