@@ -873,6 +873,33 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 #define ZPP_APPLY_QUEUED_START_UP 1
 #endif
 
+#ifndef ZPP_HONEST_EXIT_LENGTH
+#define ZPP_HONEST_EXIT_LENGTH 1
+#endif
+
+// Whether a reflected exit carries an instruction length only where
+// SDM 30.2.5 defines one.
+//
+// Measured, one boot, two processors: of 91,841 reflections, **3,193
+// were for a reason the SDM leaves the field undefined, and all 3,193
+// reported a non-zero length** - reason 0x7, an interrupt window, with
+// length 7, and reason 0x30, an EPT violation, with length 5. Neither
+// exit is caused by an instruction, so the number is whatever a
+// previous exit left in vmcs02, and a guest hypervisor that advances a
+// RIP by it lands at an address nothing chose.
+//
+// The worst case is `start_up_ipi`, where the second-level guest never
+// executed at all and the field is a previous exit's length outright.
+//
+// Off restores the old behaviour - forward the field whatever the
+// reason - so the two are comparable. Hardware leaves the field
+// undefined rather than zero for these reasons, so zeroing it is not
+// strictly what a processor does; it is the one value that cannot be
+// mistaken for a length, and a guest that uses it is then wrong in a
+// way that shows rather than one that drifts.
+inline constexpr bool honest_exit_length =
+    (0 != ZPP_HONEST_EXIT_LENGTH);
+
 #ifndef ZPP_L2_STARTUP_SPIN
 #define ZPP_L2_STARTUP_SPIN 1
 #endif

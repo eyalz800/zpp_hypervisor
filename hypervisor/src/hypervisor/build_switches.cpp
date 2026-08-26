@@ -96,6 +96,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // so this is a correctness field and not a tuning one. It was
         // stale-OFF in `build/debug` for a session with nothing on the
         // deploy path able to say so.
+        ' ', 'e', 'x', 'l', 'e', 'n', '=',
+        digit(nested_vmx::honest_exit_length),
         ' ', 'l', '2', 's', 'p', 'i', 'n', '=',
         digit(nested_vmx::l2_startup_spin),
         ' ', 'a', 'p', 's', 't', 'e', 'p', '=',

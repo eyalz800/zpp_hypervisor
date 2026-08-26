@@ -4986,8 +4986,23 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
                      vmcs.read(field::vm_exit_interruption_information));
         shadow.write(field::vm_exit_interruption_error_code,
                      vmcs.read(field::vm_exit_interruption_error_code));
-        shadow.write(field::vm_exit_instruction_length,
-                     vmcs.read(field::vm_exit_instruction_length));
+        // Only where the SDM defines it. See
+        // `nested_vmx::honest_exit_length`: measured at 3,193
+        // reflections in one boot carrying a non-zero length for a
+        // reason SDM 30.2.5 leaves undefined, and a guest hypervisor
+        // advances a RIP by this number.
+        auto reported_length =
+            vmcs.read(field::vm_exit_instruction_length);
+
+        if constexpr (nested_vmx::honest_exit_length) {
+            if (exit_length_defined::no ==
+                exit_length_defined_for(
+                    static_cast<std::uint64_t>(reason.basic()))) {
+                reported_length = 0;
+            }
+        }
+
+        shadow.write(field::vm_exit_instruction_length, reported_length);
         shadow.write(field::vm_exit_instruction_information,
                      vmcs.read(field::vm_exit_instruction_information));
 
