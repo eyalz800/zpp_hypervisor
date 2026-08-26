@@ -52807,3 +52807,64 @@ it can: the VMCS exception bitmap is **never written in this tree**, so
 no exception has ever been visible, and setting it turns the invisible
 first fault into an exit carrying its vector and error code.
 
+### The second processor's page tables were always right. The cached translation was not
+
+One boot with `-DZPP_TRAP_AP_FAULTS=ON` ended four sessions of reading
+guest state:
+
+    ap-fault trap: cpu 1 vector 14 error 0x11 address 0x16fe rip 0x16fe
+                   cs 0x30 cr0 0x80050033 cr3 0x7feeb000 efer 0xd01
+
+Vector 14 is `#PF`. Error code `0x11` is **bit 0 set - the page is
+present** - plus **bit 4 set, instruction fetch**. The faulting linear
+address is RIP itself. So the fault is not the far jump, not the
+descriptor, not the far pointer, and not the target: it is the
+**instruction fetch of the instruction already being executed**, on a
+page that is present and correctly mapped.
+
+That is why none of the reading found it. Every layer checked was
+correct and every layer checked *is* correct - the guest's PML4, PDPT,
+PD and PT entries identity-map that page, the GDT entry is a valid
+64-bit code segment, the far pointer is well formed. **The paging
+structures were never the thing that was wrong. The translation cached
+from them was.**
+
+`setup_vmcs` writes `vpid(cpu + 1)` and `enable_vpid` is on, so this
+processor's translations are **tagged, and a tagged translation
+survives VM exit, VM entry, and - because this VMM emulates it rather
+than the hardware performing it - INIT.** That logical processor spent
+the whole boot before this running Windows in long mode under a
+different CR3. Those translations are still there, under the same tag,
+when its start-up stub turns paging on at a linear address the old
+address space also described.
+
+Two places emulate something the hardware would have flushed:
+
+- `emulate_init_signal` / `apply_start_up`. A real INIT invalidates the
+  TLBs; ours resets architectural state and leaves them.
+- the CR0.PG transition in the CR-access handler. A real `MOV to CR0`
+  that changes PG flushes; ours writes the field and returns. KVM's
+  `vmx_set_cr0` reaches `kvm_mmu_reset_context()` on exactly this
+  transition.
+
+**The instrument accidentally fixed the machine, which is itself the
+evidence.** It was built to change nothing - capture, disarm, inject
+nothing, do not advance RIP, let the guest fault again unintercepted.
+Instead the second processor lived: 15,318 exits at CPL3 and climbing,
+which Windows only produces on a processor that finished
+`KiSystemStartup` and joined the scheduler. An extra exit and entry
+between the faulting fetch and its retry was enough. A stale
+translation is the only defect that behaves that way - nothing about a
+bad descriptor or an unmapped page is repaired by taking one more exit.
+
+**So the recorded result "nested=0, 2 CPU: login screen, AP dead" is
+withdrawn.** With the trap on, both processors run.
+
+The fix is not the trap. It is `INVVPID` where the hardware would have
+invalidated - on the emulated INIT and on the emulated paging
+transition - and the trap is then supposed to become unnecessary. The
+test that settles it is a build with `apfault=0` and the invalidation
+in: if the second processor still lives, the invalidation is the fix;
+if it dies, the trap was doing something else and this account is
+wrong.
+
