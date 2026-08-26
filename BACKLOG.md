@@ -51351,3 +51351,51 @@ needs a wider `MZ` scan than the 3 MB tried here. Worth adding a log
 line for it: every address in presentation B is unresolvable without
 it, and that is why those addresses were guessed at for so long.
 
+### We do not enter at a RIP vmcs12 did not ask for
+
+The census, over a full boot with `ZPP_CENSUS_EXITS=ON` so the ring's
+fields are real:
+
+    cpu 0 entered-at census: agreed 88,142, differed 0, lowest 0x1ad6874
+      NEVER entered anywhere vmcs12 did not ask for
+    cpu 1 entered-at census: agreed 35,     differed 0, lowest 0x0
+      NEVER entered anywhere vmcs12 did not ask for
+
+**`differed` is zero on both.** So the `0x2` does not originate here:
+vmcs12 asked for it. The shared-vmcs12 detector - which only logs, and
+whose line is `vmptrld of ... which is current on cpu` - never fired
+either, so that hazard is not it.
+
+Note `cpu 1 lowest 0x0`. The seen-flag in that census exists so
+"entered at zero" and "never entered" are not the same word in zeroed
+storage, and it says entered. So the guest hypervisor genuinely asked
+us to run its application processor at RIP 0.
+
+**And that is very likely correct.** A processor started by a start-up
+IPI begins in real mode with CS selector `vector << 8`, CS base
+`vector << 12` and RIP 0 - `apply_start_up` does exactly this for a
+first-level processor. Two bytes in is RIP 2. So RIP 0 and 2 are the
+*expected* values for a second-level processor's first moments, and the
+fault at **linear** address 2 points instead at the segment state that
+accompanies them: a CS base of 0 where it should be `vector << 12`
+puts execution at linear 2 rather than `vector << 12 + 2`.
+
+That is the open question, and it is a different one from the last
+three: not "where did the RIP come from" but "what CS base did we
+enter with".
+
+### Two corrections that came out of the same audit
+
+- **The ring's `qual`, `activity_state` and `cs` fields are not
+  filled unless `ZPP_CENSUS_EXITS=ON`**, which is off by default. The
+  file already says so in one place; it was still read as evidence
+  here. Every ring line quoted above that argued from `cs=0x0000` or
+  `qual=0x0` argued from an unwritten field. Only the reason, the RIP
+  and the `[l1-rip]`/`[l2-rip]` tag were ever real.
+- `build_vmcs02` runs **before** `enter_or_park_l2`, and each has
+  exactly one production caller, so the unconditionally forced
+  `put_hot(4, active, ...)` is dead weight on every entered path
+  rather than a hazard. The park test is not bypassable:
+  `l2_entry_outcome::entered`, `record_l2_entry_event` and
+  `running_l2[cpu] = true` each have exactly one site.
+
