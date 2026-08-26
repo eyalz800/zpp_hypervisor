@@ -52507,3 +52507,45 @@ fixed: `guest_ia32_debugctl` is never reset by `apply_start_up` while
 `load_debug_controls` is on, so a restarted processor is given a stale
 DEBUGCTL.
 
+## The application processor's silent halt is an invalid-guest-state entry failure
+
+Found by walking the halted processor's own stack rather than the log,
+which had wrapped: `RSP` held a return address into
+`on_vm_entry_failure` (`hypervisor.cpp:5635`). The record itself,
+read at the singleton plus the DWARF member offset:
+
+    occurred       0x1
+    reason         0x80000021
+
+Bit 31 is the VM-entry-failure flag and `0x21` is 33 - **VM entry
+failed due to invalid guest state**. So the processor is not faulting
+and is not halted by an unhandled exit; **its next entry is refused by
+the consistency checks**, which is why nothing was recorded anywhere
+else.
+
+The sequence is now complete and every step is measured:
+
+    [107] init        wait-sipi
+    [108] sipi        qual=0x1  active  cs=0x0100 rip=0x0
+    [109] cr-access             active  cs=0x0030 rip=0x16fe
+          -> entry refused, reason 0x80000021, processor halted
+
+So the guest's stub takes its start-up IPI, runs, and writes a control
+register - the write that leaves real mode - and the state this VMM
+then presents for the next entry is not a legal guest state.
+
+The obvious candidates, none yet checked: the `ia-32e mode guest`
+entry control against the CR0.PG and EFER.LME it is now paired with,
+and the segment access rights, which `apply_start_up` wrote in their
+real-mode form and which SDM 27.3.1.2 constrains differently once
+CR0.PE is set.
+
+### How it was found, since the log could not say
+
+The log ring had wrapped - 4,095 lines of a 4,096 ring, and the
+failure happens in the first hundred exits - so the one line naming it
+had been evicted long before the dump. The stack had it anyway. **A
+halted processor's return address survives what the log does not**,
+and `RSP` plus `llvm-symbolizer` against the *matching* ELF answered in
+one read what a rebuilt instrument would have cost a boot.
+
