@@ -282,12 +282,39 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
     // that now permits it. It cannot loop, because the disarm happens once
     // - `watched_apic_page` is zero afterwards, so this block is not
     // reached again.
-    if constexpr (nested_vmx::disarm_apic_watch) {
-        if (this->all_processors_started.load(std::memory_order_relaxed) &&
-            (0 != this->watched_apic_page)) {
-            watch_local_apic(false);
-            return true;
-        }
+    // **The proof, which runs whatever the switches say.**
+    //
+    // `all_processors_started` used to have two ways to become true and
+    // both were guesses - a two-minute silence, and "somebody was given a
+    // start-up vector". This is the third and it is a proof: every
+    // identifier on the firmware's own roster has a slot that is running
+    // under this hypervisor, so there is no processor left for a start-up
+    // IPI to hand over unvirtualized, which is the only thing the watch
+    // exists to prevent. See `every_platform_processor_adopted`.
+    //
+    // Tested here rather than at the moment a processor marks itself
+    // virtualized, because here is where it is *worth* anything: this is
+    // the fault the watch charges for, so the proof is evaluated exactly
+    // when the cost is being paid, and only while the watch is armed. It
+    // is a scan of at most `max_cpus` per roster entry against two arrays
+    // that are already in cache on this path.
+    if ((0 != this->watched_apic_page) &&
+        !this->all_processors_started.load(std::memory_order_relaxed) &&
+        every_platform_processor_adopted()) {
+        this->all_processors_started.store(true,
+                                           std::memory_order_relaxed);
+        log("every processor on the platform roster of {} is adopted, so "
+            "the local apic page watch can no longer catch a start-up ipi "
+            "for a processor this vmm does not own",
+            this->number_of_platform_processors);
+    }
+
+    // Carried out on any of the three, and the return is what makes it
+    // safe - see the paragraph above about `unhandled_exit` reason 0x30.
+    if (this->all_processors_started.load(std::memory_order_relaxed) &&
+        (0 != this->watched_apic_page)) {
+        watch_local_apic(false);
+        return true;
     }
 
     for (auto & watch : this->watches) {

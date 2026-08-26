@@ -1399,15 +1399,40 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
  * started after the watch is dropped runs *outside* this VMM - which is
  * precisely the failure `BACKLOG.md` records under "The switch below leaked
  * out of its experiment", where seven of eight processors were lost that
- * way. Dropping it is safe only if no further processor starts, and nothing
- * here can prove that; the quiescence delay below is a heuristic, not a
- * proof.
+ * way. Dropping it is safe only if no further processor starts, and the
+ * quiescence delay below is a heuristic, not a proof.
  *
- * What would let this be on by default: an APIC-access page with
- * APIC-register virtualization, where SDM 32.4.3.2 has INIT and SIPI always
- * take the trap-like APIC-write exit while ordinary traffic stops exiting.
- * Then the interception gets cheaper *and* stronger and no heuristic is
- * needed.
+ * **"Nothing here can prove that" was wrong, and the proof is now in
+ * the tree.** `hypervisor::every_platform_processor_adopted` reads the
+ * firmware's own processor roster - handed over in `platform_apic_id`,
+ * and already relied on to resolve a broadcast start-up IPI - against
+ * `processor_virtualized`, and a roster whose every identifier has a
+ * virtualized slot leaves no processor for a start-up IPI to hand over
+ * unvirtualized. That runs unconditionally in `on_ept_violation` and is
+ * not gated on this switch; what stays behind this switch is the
+ * quiet-period *guess*, which is a different and weaker thing.
+ *
+ * The distinction matters because the guess cannot be repaired. Its
+ * clock, `last_start_up_ipi_tsc`, is advanced by every INIT and every
+ * start-up IPI - including the retries a guest sends *because* an
+ * adoption did not complete. So a boot that is going wrong holds the
+ * watch armed, and the watch is most of what makes it go wrong.
+ *
+ * **This used to say an APIC-access page with APIC-register
+ * virtualization would let it be on by default, "where SDM 32.4.3.2 has
+ * INIT and SIPI always take the trap-like APIC-write exit while ordinary
+ * traffic stops exiting". The first half is right; the second is not,
+ * and it was never looked up.** Read at `.references/sdm.txt:206998`,
+ * APIC-write emulation is decided per page offset: 300H always causes an
+ * APIC-write VM exit with virtual-interrupt delivery and IPI
+ * virtualization both clear, 310H and 080H cost nothing, 0B0H costs
+ * nothing only with virtual-interrupt delivery, and "any other page
+ * offset" - which includes 380H, the timer's initial count - "causes an
+ * APIC-write VM exit". The two hottest registers on this machine are
+ * 0B0H and 380H. So that mechanism buys fidelity, not cost.
+ *
+ * What lets this be on by default is the proof above, and it is on
+ * whatever this switch says.
  *
  * **It also used to stop the guest dead on the very first fault after the
  * drop, and that is fixed.** The disarm runs at the top of

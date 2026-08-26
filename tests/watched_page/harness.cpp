@@ -82,6 +82,16 @@ static bool g_command_swallows = false;
 static bool g_command_rewrites = false;
 static std::uint64_t g_command_rewrite_to = 0;
 
+/**
+ * What `every_platform_processor_adopted` answers here.
+ *
+ * The real one lives in `local_apic.cpp`, which this harness does not
+ * compile, and is tested for itself in `tests/local_apic`. What is under
+ * test *here* is what `on_ept_violation` does with the answer, so the
+ * answer is a knob.
+ */
+static bool g_roster_fully_adopted = false;
+
 // ------------------------------------------------------- shim defintions
 namespace zpp::arch::x86_64
 {
@@ -163,6 +173,11 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     }
 
     return command;
+}
+
+bool hypervisor::every_platform_processor_adopted()
+{
+    return g_roster_fully_adopted;
 }
 
 } // namespace zpp::hypervisor
@@ -366,6 +381,8 @@ static void reset()
     g_command_swallows = false;
     g_command_rewrites = false;
     g_command_rewrite_to = 0;
+    g_roster_fully_adopted = false;
+    self.all_processors_started.store(false);
     g_decode_refuses = false;
     g_decode_calls = 0;
     g_code_size = code_size::bits_64;
@@ -2461,6 +2478,101 @@ static void test_straddle_and_width()
  * two different quantities in one column, which is the mistake this
  * recording is shaped to avoid.
  */
+/**
+ * Dropping the local APIC page watch on a proof rather than on a guess.
+ *
+ * `on_ept_violation` opens by asking `every_platform_processor_adopted`,
+ * and drops the watch when the answer is yes - unconditionally, not
+ * behind `ZPP_DISARM_APIC_WATCH`, because a proof is not a heuristic.
+ * The real predicate is `tests/local_apic`'s subject; here it is a knob,
+ * and what is under test is the three things `on_ept_violation` has to
+ * get right around it.
+ *
+ * The third is the one that killed three boots before it was fixed and
+ * is the reason this is a test rather than a reading of the source: the
+ * disarm lands on a fault it has just made unhandleable, because the
+ * watch it clears is the only one for the page that faulted. Falling out
+ * of the block into the loop answers `false`, and both callers stop the
+ * processor for a `false`. It has to `return true` and let the guest
+ * re-execute against an entry that now permits the write.
+ */
+static void test_roster_drops_the_watch()
+{
+    std::println("\n-- the watch is dropped once the roster is adopted");
+
+    zpp::arch::x86_64::context registers{};
+    registers.rbx = base() + 0x300;
+    registers.rax = 0x000c4500;
+
+    // Not adopted: nothing changes, and this is the negative control for
+    // the whole section. Reverting the disarm leaves every check below
+    // passing and only these failing, so they are what say the drop is
+    // conditional at all.
+    {
+        reset();
+        mov_mem_reg32();
+        arm(notify_handler, nullptr);
+        hv().watched_apic_page = base();
+
+        auto handled = fault(
+            {.qualification = linear_valid | operand_access | data_write,
+             .linear = base() + 0x300,
+             .physical = base(),
+             .reported_length = 2},
+            registers);
+
+        check(handled, "an unadopted roster still handles the violation");
+        check(base() == hv().watched_apic_page,
+              "and leaves the watch armed");
+        check(!hv().all_processors_started.load(),
+              "and does not claim every processor has started");
+        check(1 == g_notified.size(),
+              "the write is emulated, which is what the watch is for");
+    }
+
+    // Adopted: the watch goes, the fault is answered, and the guest is
+    // resumed to re-execute its own instruction.
+    {
+        reset();
+        mov_mem_reg32();
+        arm(notify_handler, nullptr);
+        hv().watched_apic_page = base();
+        g_roster_fully_adopted = true;
+
+        auto handled = fault(
+            {.qualification = linear_valid | operand_access | data_write,
+             .linear = base() + 0x300,
+             .physical = base(),
+             .reported_length = 2},
+            registers);
+
+        check(handled,
+              "the fault the disarm lands on is answered rather than "
+              "fallen out of - `false` here stops the processor");
+        check(
+            hv().all_processors_started.load(),
+            "an adopted roster settles that every processor has started");
+        check(0 == hv().watched_apic_page, "and the watch is dropped");
+        check(g_notified.empty(),
+              "nothing is emulated on the way out - the guest re-executes "
+              "its own write against an entry that now permits it");
+
+        // And it cannot loop, which is the other half of `return true`
+        // being safe. `watched_apic_page` is zero now, so the block is
+        // not reached a second time and the page carries no watch.
+        auto again = fault(
+            {.qualification = linear_valid | operand_access | data_write,
+             .linear = base() + 0x300,
+             .physical = base(),
+             .reported_length = 2},
+            registers);
+
+        check(!again,
+              "a second fault on the same page finds nothing watching it, "
+              "which is the unclaimed case the caller counts and resumes");
+    }
+}
+
 static void test_apic_timer()
 {
     std::println("\n-- the local apic timer, and what a count means");
@@ -2681,6 +2793,7 @@ int main()
     test_filter_notify();
     test_local_apic();
     test_straddle_and_width();
+    test_roster_drops_the_watch();
     test_apic_timer();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);

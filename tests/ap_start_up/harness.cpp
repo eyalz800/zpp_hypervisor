@@ -580,9 +580,11 @@ static void test_handoff_is_obeyed()
         zpp::hypervisor::hypervisor::start_up_handoff_state::none);
 
     answered = g_vmm.start_up_processor(7, 0x10);
-    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               answered,
-          "a duplicate start-up IPI to a running processor is dropped");
+          "a duplicate start-up IPI to a running processor is forwarded, "
+          "not swallowed - the target discards it, and SDM 29.7.2 says "
+          "the target is who discards it");
     check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
               g_vmm.start_up_handoff[1].load(),
           "and nothing is written into its mailbox");
@@ -609,10 +611,12 @@ static void test_handoff_is_obeyed()
             software_wait);
 
     answered = g_vmm.start_up_processor(7, 0x08);
-    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               answered,
-          "a listener whose activity record says active is dropped - so "
-          "a target must publish that record before it waits");
+          "a listener whose activity record says active is not handed "
+          "the vector - so a target must publish that record before it "
+          "waits - and the guest's own write goes out, so the ordering "
+          "being wrong costs a queued vector rather than a processor");
     check(zpp::hypervisor::hypervisor::start_up_handoff_state::
                   software_wait == g_vmm.start_up_handoff[1].load(),
           "and its mailbox is untouched, which is what makes the drop "
@@ -850,15 +854,38 @@ static void test_handoff_is_exchanged_not_stored()
           "a processor that has accepted its start-up IPI holds no "
           "hand-off - apply_start_up clears the mailbox however the "
           "vector arrived");
-    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               g_vmm.start_up_processor(7, 0x2),
           "and the INIT-SIPI pair's second half, arriving late, is "
-          "dropped rather than re-applied - 439abb5's flag arrived here "
-          "instead and sent a running processor back to its entry point");
+          "forwarded rather than swallowed - the sender has delivered "
+          "nothing, so it may not claim to have");
     check(zpp::hypervisor::hypervisor::start_up_handoff_state::none ==
               g_vmm.start_up_handoff[1].load(),
-          "leaving the mailbox empty, so nothing is waiting to be found "
+          "leaving the hand-off empty, so nothing is waiting to be found "
           "by the next INIT either");
+
+    // **What stops the forwarded command re-applying anything is the
+    // duplicate guard, and this is the check that says so.** It is the
+    // whole safety argument for forwarding: the guest's write goes out,
+    // the target discards it while it is active, and even if some path
+    // did reach `apply_start_up` with it, the guard refuses. Before this
+    // that argument rested on the swallow, which is exactly what the
+    // sender was not entitled to do - 439abb5's flag arrived here
+    // instead and sent a running processor back to its entry point.
+    auto applications = g_vmm.start_up_applied[1];
+    auto declines = g_vmm.start_up_declined[1];
+
+    g_vmm.apply_start_up(context, 0x2, "sipi exit");
+
+    check((applications + 1) == g_vmm.start_up_applied[1],
+          "the counter counts an *entry* into apply_start_up, which is "
+          "why `start-ups applied 2` against one start-up-IPI exit has no "
+          "reading as two applications");
+    check((declines + 1) == g_vmm.start_up_declined[1],
+          "and the entry declined, so the pair separates the two and the "
+          "ledger closes without trace_ap_entry");
+    check(active == g_vmm.vmcs.guest_activity_state(),
+          "the running processor was not put back in wait-for-SIPI");
 }
 
 // ------------------------------------------ 5. the state an INIT leaves
@@ -1453,6 +1480,14 @@ static void nested_and_x2apic()
     zpp::arch::x86_64::g_apic_base.store(0xfee00000 | (1ull << 10));
     zpp::arch::x86_64::g_leaf_1_ecx =
         zpp::arch::x86_64::hypervisor_present_bit;
+
+    // And the interception armed, which is now part of the decision -
+    // `emulate_init_signal` will not wait for a hand-off that nothing is
+    // positioned to make. In x2APIC mode the mechanism is the MSR
+    // bitmap's bit for the interrupt command register, armed here
+    // through the real `intercept_interrupt_command` rather than by
+    // poking the flag, so the two cannot drift apart.
+    g_vmm.intercept_interrupt_command(true);
 }
 
 /**
@@ -1464,6 +1499,12 @@ static void under_a_layer_in_xapic_mode()
     zpp::arch::x86_64::g_apic_base.store(0xfee00000);
     zpp::arch::x86_64::g_leaf_1_ecx =
         zpp::arch::x86_64::hypervisor_present_bit;
+
+    // The xAPIC mechanism, which is the page watch. Set directly because
+    // arming it for real reaches the extended page tables, which this
+    // harness does not model - and `interrupt_command_intercepted` reads
+    // exactly this member, so what is being stood in for is one field.
+    g_vmm.watched_apic_page = 0xfee00000;
 }
 
 static void test_init_publishes_before_it_waits()
@@ -1760,8 +1801,8 @@ static void test_init_waits_in_software_in_xapic_mode()
 
     // The rig's shape exactly: a processor this VMM has already adopted,
     // whose activity record still says `active` because it has not
-    // reached its INIT exit yet, and a vector the sender has therefore
-    // queued and swallowed.
+    // reached its INIT exit yet, and a vector the sender therefore
+    // queues.
     reset();
     under_a_layer_in_xapic_mode();
     g_vmm.apic_id[cpu] = 7;
@@ -1770,13 +1811,23 @@ static void test_init_waits_in_software_in_xapic_mode()
     g_vmm.resume_activity_state[cpu] = active;
 
     auto answered = g_vmm.start_up_processor(7, 0x87);
-    check(zpp::hypervisor::hypervisor::start_up_result::adopted ==
+
+    // **The negative control for `f949649`.** This asserted `adopted`
+    // and said so in its own message - "which is what makes losing it
+    // unrecoverable" - which is the defect rather than the contract.
+    // Queuing is not delivering, so the guest's own write goes out and
+    // the mailbox becomes an optimisation whose loss costs nothing.
+    // Reverting the one-line change in `start_up_processor` fails here.
+    check(zpp::hypervisor::hypervisor::start_up_result::needs_hardware ==
               answered,
-          "the sender queues the vector and swallows the guest's write, "
-          "which is what makes losing it unrecoverable");
+          "the sender queues the vector and *forwards* the guest's "
+          "write, because it has delivered nothing and may not claim to "
+          "have - which is what makes losing the queue survivable");
     check((zpp::hypervisor::hypervisor::queued_start_up_valid | 0x87) ==
               g_vmm.queued_start_up[cpu].load(),
-          "and the vector is in the mailbox");
+          "and the vector is in the mailbox, which is still the path "
+          "that works while the target is in root mode and the layer "
+          "below is discarding the real IPI");
 
     init_target target{cpu};
     target.run();
@@ -1851,6 +1902,134 @@ static void test_init_waits_in_software_in_xapic_mode()
     check(zpp::hypervisor::hypervisor::start_up_handoff_state::
                   hardware_wait == g_vmm.start_up_handoff[cpu].load(),
           "and says so, so a sender issues the guest's own start-up IPI");
+}
+
+/**
+ * Under a layer, and with nothing watching the interrupt command
+ * register.
+ *
+ * **This is the case the software wait must not be taken in, and the
+ * negative control for the second conjunct on `waited`.** A software
+ * hand-off needs a sender that can make one, and only a sender that sees
+ * the guest's write to the interrupt command register can - the page
+ * watch in xAPIC mode, the MSR bitmap bit in x2APIC mode. With neither
+ * armed the wait is two million iterations of nothing, taken in root
+ * mode, which is precisely where the layer below is discarding the
+ * start-up IPI being waited for. Then it falls back to the path it
+ * should have taken at once.
+ *
+ * It could not arise while the watch was armed for the whole of every
+ * boot, and it arises the moment `every_platform_processor_adopted` is
+ * allowed to drop it - which is the point of dropping it. Reverting the
+ * conjunct makes the target publish `software_wait` here and burn the
+ * timeout, and this case fails.
+ *
+ * Same defect class as the conjunct `5729ef9` removed from this line.
+ * That one tested the APIC's mode and stopped deciding anything the day
+ * the page watch learned to decode the same register; the question was
+ * never which mode the APIC is in, it is whether this VMM is looking at
+ * it.
+ */
+static void test_no_interception_means_no_software_wait()
+{
+    std::println("\na hand-off nobody can make is not waited for");
+
+    constexpr std::uint64_t wait_for_sipi = 3;
+    constexpr std::size_t cpu = 1;
+
+    // Under a layer, so `nested` is true and the old decision would end
+    // here. The APIC is in xAPIC mode, so the MSR bitmap is not the
+    // mechanism - and `watched_apic_page` is left at zero, which is a
+    // machine whose watch has been dropped because every processor on
+    // the roster is already adopted.
+    reset();
+    zpp::arch::x86_64::g_apic_base.store(0xfee00000);
+    zpp::arch::x86_64::g_leaf_1_ecx =
+        zpp::arch::x86_64::hypervisor_present_bit;
+    g_vmm.apic_id[cpu] = 7;
+    g_vmm.number_of_known_processors = 2;
+    g_vmm.processor_virtualized[cpu] = true;
+
+    check(!g_vmm.interrupt_command_intercepted(),
+          "neither mechanism is armed, which is the precondition this "
+          "case is about");
+
+    init_target target{cpu};
+    target.run();
+
+    check(zpp::hypervisor::hypervisor::start_up_handoff_state::
+                  hardware_wait == g_vmm.start_up_handoff[cpu].load(),
+          "so the target publishes the hardware hand-off rather than "
+          "spinning for a sender that cannot exist");
+    check(wait_for_sipi == target.activity_left.load(),
+          "and parks in wait-for-SIPI, where SDM 28.2 turns the real "
+          "start-up IPI into a VM exit on it");
+    check(!g_vmm.started_by_start_up_ipi[cpu], "having applied nothing");
+
+    // **And the same machine with the watch armed takes the software
+    // wait, which is what makes this a test of the conjunct rather than
+    // of some other property of the setup.**
+    //
+    // Both configurations end in `hardware_wait` - one because it never
+    // waited, the other because it waited and timed out - so the final
+    // state cannot tell them apart. What can is whether a sender
+    // arriving while the target is inside the handler is ever able to
+    // hand a vector over. Counted over rounds rather than asserted once,
+    // in the shape `test_handoff_race_is_exactly_once` already uses,
+    // because the interleaving of two host threads is not reproducible
+    // and the invariant is.
+    constexpr int rounds = 16;
+
+    auto armed_handovers = 0;
+    auto unarmed_handovers = 0;
+
+    for (auto round = 0; round < rounds; ++round) {
+        auto watched = (0 == (round % 2));
+
+        reset();
+        zpp::arch::x86_64::g_apic_base.store(0xfee00000);
+        zpp::arch::x86_64::g_leaf_1_ecx =
+            zpp::arch::x86_64::hypervisor_present_bit;
+        if (watched) {
+            g_vmm.watched_apic_page = 0xfee00000;
+        }
+        g_vmm.apic_id[cpu] = 7;
+        g_vmm.number_of_known_processors = 2;
+        g_vmm.processor_virtualized[cpu] = true;
+        g_vmm.resume_activity_state[cpu] = 0;
+
+        init_target racing{cpu};
+        std::thread thread{[&] { racing.run(); }};
+
+        eventually([&] {
+            return zpp::hypervisor::hypervisor::start_up_handoff_state::
+                           software_wait ==
+                       g_vmm.start_up_handoff[cpu].load() ||
+                   racing.returned.load();
+        });
+
+        static_cast<void>(g_vmm.start_up_processor(7, 0x30));
+        thread.join();
+
+        if (g_vmm.started_by_start_up_ipi[cpu]) {
+            if (watched) {
+                ++armed_handovers;
+            } else {
+                ++unarmed_handovers;
+            }
+        }
+    }
+
+    check(0 == unarmed_handovers,
+          "with nothing watching the interrupt command register the "
+          "target never publishes a software hand-off, so no sender ever "
+          "hands it a vector (" +
+              std::to_string(unarmed_handovers) + " did)");
+    check(armed_handovers > 0,
+          "and with the page watched it does, so the two differ in the "
+          "decision and not in the setup (" +
+              std::to_string(armed_handovers) + " of " +
+              std::to_string(rounds / 2) + " handed over)");
 }
 
 // ------- 7c. a mailbox that is not carrying a vector starts nobody
@@ -1983,10 +2162,26 @@ static void test_firmware_start_up_is_not_the_guest_s()
     check(g_vmm.start_up_broadcast(0x8),
           "a broadcast to processors that are all running is still "
           "resolved");
-    check(0 == zpp::arch::x86_64::g_x2apic_icr_writes.load(),
-          "and every one of those start-up IPIs is dropped - identical "
-          "flags, opposite answers, so the decision is the activity state "
-          "and not the flag 95d9759 removed");
+    check(
+        (processors - 1) == zpp::arch::x86_64::g_x2apic_icr_writes.load(),
+        "and every one of those start-up IPIs is forwarded rather than "
+        "swallowed - the target is the one that discards a SIPI while it "
+        "is active (SDM 29.7.2), and a sender that swallows it has "
+        "destroyed a command it did not deliver");
+
+    // The distinction the case was written for survives the change and
+    // is now carried by the *third* answer rather than by this one: the
+    // same processors with the same flags, differing only in what they
+    // say they are doing, get a hand-off and no hardware IPI a few lines
+    // below where here they get a hardware IPI and no hand-off. That is
+    // still the activity state deciding, and not the flag 95d9759
+    // removed.
+    for (std::size_t slot = 1; slot < processors; ++slot) {
+        check((zpp::hypervisor::hypervisor::queued_start_up_valid | 0x8) ==
+                  g_vmm.queued_start_up[slot].load(),
+              "and each holds the vector in its mailbox as well, for the "
+              "case where the layer below discards the forwarded IPI");
+    }
 
     // The third answer, so that all three of the guard's outcomes are
     // covered by the same setup: a target that is parked in the software
@@ -2222,6 +2417,7 @@ int main()
     test_handoff_race_is_exactly_once();
     test_init_chooses_and_publishes_a_handoff();
     test_init_waits_in_software_in_xapic_mode();
+    test_no_interception_means_no_software_wait();
     test_a_mailbox_without_a_vector_starts_nobody();
     test_firmware_start_up_is_not_the_guest_s();
     test_start_up_ipi_follows_the_apic_mode();

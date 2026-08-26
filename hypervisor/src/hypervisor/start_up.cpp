@@ -321,6 +321,15 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
                 "asked by {}",
                 cpu,
                 from);
+
+            // Counted, because the increment at the top of this function
+            // has already happened and counts an entry rather than an
+            // application. Without this pair the two cannot be told
+            // apart from a dump, and a two-processor boot reporting
+            // "start-ups applied 2" against one start-up-IPI exit has no
+            // consistent reading at all. See the declaration.
+            this->start_up_declined[cpu] =
+                this->start_up_declined[cpu] + 1;
             return;
         }
         this->started_by_start_up_ipi[cpu] = true;
@@ -903,11 +912,65 @@ hypervisor::start_up_result hypervisor::start_up_processor(
                 queued_start_up_valid | vector, std::memory_order_release);
 
             log("guest start-up ipi for cpu {}, activity {} is not "
-                "wait-for-sipi, queued vector {}",
+                "wait-for-sipi, queued vector {} and forwarded",
                 *slot,
                 activity,
                 vector);
-            return start_up_result::adopted;
+
+            // **Queued is not delivered, so the guest's write goes out.**
+            //
+            // This returned `adopted` until now, which swallows the
+            // guest's store to the interrupt command register. That is a
+            // claim that this VMM delivered the command, and queuing is
+            // not delivering - it is a promise to deliver later, to a
+            // processor that may never come and ask. The promise is kept
+            // only if the target reaches `emulate_init_signal` and drains
+            // the mailbox; every other outcome destroys the command.
+            //
+            // Measured, and this is the shape of it. Nesting on, two
+            // processors, one variable: the guest hypervisor sent three
+            // INIT/start-up pairs and the target recorded one INIT exit
+            // and one start-up-IPI exit, so **two entire bring-up
+            // attempts were consumed inside this interception** - and
+            // this is the branch that consumes them, because a target
+            // that is running reports `active` and lands here. The guest
+            // then reset the machine, reproducibly, over five boots.
+            //
+            // Forwarding is correct, not a hedge, and the architecture
+            // says so from both ends:
+            //
+            // - A start-up IPI aimed at a processor that is not waiting
+            //   for one is discarded *by the target*, not by the sender.
+            //   SDM 29.7.2: "The active state blocks start-up IPIs
+            //   (SIPIs). SIPIs that arrive while a logical processor is
+            //   in the active state and in VMX non-root operation are
+            //   discarded and do not cause VM exits." So a forwarded
+            //   command reaching a running processor costs nothing and
+            //   produces nothing, which is exactly what the guest would
+            //   have got on bare metal.
+            // - A target that *is* parked in wait-for-SIPI in non-root
+            //   operation takes a start-up-IPI VM exit instead (SDM
+            //   28.2), which `emulate_start_up_ipi` handles. That is the
+            //   architectural delivery path, and the mailbox is only
+            //   ever a stand-in for it while the target is in root mode,
+            //   where the layer below discards the IPI - see
+            //   `emulate_init_signal`.
+            //
+            // The two cannot both start the processor. `apply_start_up`
+            // refuses a second application while `started_by_start_up
+            // _ipi` is set and this is not a launch, and only an INIT
+            // clears that - which is the same guard that already makes
+            // the conventional INIT-SIPI-SIPI sequence safe.
+            //
+            // What this gives up is the swallow, and the swallow was the
+            // liability: with it, losing the queued vector loses the
+            // processor, which is why `emulate_init_signal` had to be
+            // argued into keeping a vector across an INIT and why
+            // `discard_start_up_for_init` had to be written to take it
+            // away again. Without it the mailbox is an optimisation
+            // whose loss costs nothing, because the guest's own command
+            // is still on the wire.
+            return start_up_result::needs_hardware;
         }
 
         // Under the hypervisor and out of an INIT, so the target chose
@@ -1243,7 +1306,31 @@ void hypervisor::emulate_init_signal(arch::x86_64::context & context)
     // Whether the software wait was taken at all, which is the one thing
     // worth saying about this on the way out: it is what a sender's
     // decision has to have agreed with.
-    auto waited = nested;
+    //
+    // **Two conjuncts, and the second is new.** A software hand-off
+    // needs a sender that can make one, and a sender can only make one
+    // if it sees the guest's write to the interrupt command register.
+    // With neither the page watch nor the MSR bitmap bit armed, nothing
+    // does - so the wait below is two million iterations of nothing,
+    // taken in root mode where the layer underneath is discarding the
+    // very IPI being waited for, followed by the fallback that was going
+    // to happen anyway.
+    //
+    // It did not matter while the watch was armed for the whole of every
+    // boot. It matters now that `every_platform_processor_adopted` can
+    // drop it, which is the point of dropping it: once every processor
+    // is adopted, an INIT and its start-up IPI are ordinary VM exits on
+    // the target and the architectural path is the *only* one, so taking
+    // the software wait would add tens of milliseconds of a processor
+    // being dead to the guest, once per INIT, for nothing.
+    //
+    // Same defect class as the conjunct `5729ef9` removed from this
+    // line, in the other direction. That one - `x2apic_enabled()` -
+    // tested the APIC's mode, which stopped deciding anything the day
+    // `540d8b6` taught the page watch to decode the same register. The
+    // question was never which mode the APIC is in; it is whether this
+    // VMM is looking at it.
+    auto waited = nested && interrupt_command_intercepted();
 
     // Both facts about this processor are published *before* the wait
     // below, and that ordering is the whole of this fix.

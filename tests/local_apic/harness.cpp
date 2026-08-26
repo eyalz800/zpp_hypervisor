@@ -1174,6 +1174,126 @@ constexpr std::uint64_t x2apic_base =
     apic_page | apic_base_enabled | apic_base_extended;
 constexpr std::uint64_t disabled_base = apic_page;
 
+/**
+ * The proof that replaces the guess.
+ *
+ * `all_processors_started` had two ways to become true and both were
+ * heuristics - a two-minute silence on the interrupt command register,
+ * and "somebody somewhere was handed a start-up vector". The member's
+ * own comment said the fact "cannot be derived", and that was wrong: the
+ * loader hands over the firmware's roster, each processor records its
+ * own identifier in `main` and marks itself virtualized immediately
+ * before its launch, so "every processor on this machine is running
+ * under this hypervisor" is a join of two tables this VMM already keeps.
+ *
+ * What each case below pins is a way of getting that join wrong, and the
+ * second is the one that would be silent: `apic_id` zero-initializes and
+ * zero is a real identifier, so a roster entry for processor 0 would be
+ * satisfied by any empty slot if the scan did not require the slot to be
+ * virtualized first.
+ */
+void the_roster_is_the_proof()
+{
+    // Nothing adopted at all.
+    {
+        auto state = make(0, {0, 1});
+        check(!state->every_platform_processor_adopted(),
+              "a roster with nothing virtualized is not fully adopted");
+    }
+
+    // The boot processor only, which is the shape of the measured
+    // two-processor boot for as long as its application processor is
+    // still being started.
+    {
+        auto state = make(0, {0, 1});
+        state->processor_virtualized[0] = true;
+        check(!state->every_platform_processor_adopted(),
+              "one processor of two is not every processor");
+    }
+
+    // The trap. Slot 1 has never been used, so `apic_id[1]` is zero -
+    // and roster entry 0 is also zero. A scan that matched identifiers
+    // before asking whether the slot is virtualized would call this
+    // machine fully adopted on the strength of an empty slot.
+    {
+        auto state = make(0, {0, 1});
+        state->processor_virtualized[0] = true;
+        state->apic_id[0] = 0;
+        check(!state->every_platform_processor_adopted(),
+              "an empty slot whose default identifier happens to equal a "
+              "roster entry does not satisfy it");
+    }
+
+    // Both, by way of a slot the guest's own start-up IPI allocated
+    // rather than one `main` wrote - the two are the same table and this
+    // says so.
+    {
+        auto state = make(0, {0, 1});
+        state->processor_virtualized[0] = true;
+        auto slot = state->processor_slot(1);
+        check(slot.has_value(), "the second identifier takes a slot");
+        state->processor_virtualized[*slot] = true;
+        check(state->every_platform_processor_adopted(),
+              "every roster identifier with a virtualized slot is every "
+              "processor adopted");
+    }
+
+    // A slot beyond `number_of_known_processors`, which is what `main`
+    // produces: it writes `apic_id[cpuid]` for the processor it is
+    // running on and never touches the count. A scan bounded by the
+    // count would miss it and hold the watch armed for ever.
+    {
+        auto state = make(0, {0, 7});
+        state->processor_virtualized[0] = true;
+        state->apic_id[3] = 7;
+        state->processor_virtualized[3] = true;
+        check_equal(1,
+                    state->number_of_known_processors,
+                    "the slot was written past the known-processor count");
+        check(state->every_platform_processor_adopted(),
+              "and is still found, because the two tables have different "
+              "writers");
+    }
+
+    // No roster is not a proof of anything, and answering true would
+    // drop the watch on every loader that hands one over empty.
+    {
+        auto state = make(0, {});
+        state->processor_virtualized[0] = true;
+        check(!state->every_platform_processor_adopted(),
+              "an empty roster proves nothing and answers no");
+    }
+}
+
+/**
+ * Whether anything is positioned to see a write to the interrupt command
+ * register, which is what `emulate_init_signal` now requires before it
+ * will wait for a software hand-off.
+ */
+void the_interception_knows_whether_it_is_armed()
+{
+    auto state = make(0, {0, 1});
+
+    check(!state->interrupt_command_intercepted(),
+          "nothing is armed on a fresh machine");
+
+    state->intercept_interrupt_command(true);
+    check(state->interrupt_command_intercepted(),
+          "the x2APIC mechanism alone is enough");
+
+    state->intercept_interrupt_command(false);
+    check(!state->interrupt_command_intercepted(),
+          "and disarming it is noticed");
+
+    state->watched_apic_page = 0xfee00;
+    check(state->interrupt_command_intercepted(),
+          "the xAPIC mechanism alone is enough");
+
+    state->watched_apic_page = 0;
+    check(!state->interrupt_command_intercepted(),
+          "with neither armed, no sender can hand a vector over");
+}
+
 void the_bitmap_bit_is_the_one_the_architecture_names()
 {
     auto state = make();
@@ -1424,6 +1544,8 @@ int main()
     every_shorthand_takes_the_broadcast_path();
     slot_allocation();
     slot_allocation_is_bounded();
+    the_roster_is_the_proof();
+    the_interception_knows_whether_it_is_armed();
     the_bitmap_bit_is_the_one_the_architecture_names();
     each_mode_arms_its_own_mechanism();
     a_half_switched_machine_arms_both();

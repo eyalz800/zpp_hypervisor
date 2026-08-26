@@ -1895,6 +1895,19 @@ private:
     std::uint64_t watched_apic_page{};
 
     /**
+     * Whether the interrupt command register's bit is currently set in
+     * the shared MSR bitmap.
+     *
+     * The bitmap itself is the truth and reading a bit out of it would
+     * be the better test; it is recorded instead because the bit's
+     * position is `intercept_interrupt_command`'s business and every
+     * reader outside it has to be told which of the four sub-bitmaps and
+     * which range. One writer, under `apic_mode_lock`, in the one
+     * function that sets the bit.
+     */
+    bool interrupt_command_bitmap_armed{};
+
+    /**
      * The local APIC page this VMM's own page table maps, read from
      * IA32_APIC_BASE once before any guest ran.
      *
@@ -2081,6 +2094,56 @@ private:
      * swallowed.
      */
     bool start_up_broadcast(std::uint64_t vector);
+
+    /**
+     * Whether every processor on the platform's roster is running under
+     * this hypervisor.
+     *
+     * This is the proof `all_processors_started` was declared to want and
+     * was told did not exist. `platform_apic_id` is the firmware's own
+     * list of logical processors, copied at hand-over; `apic_id` is what
+     * each processor recorded about itself in `main`, or what
+     * `processor_slot` recorded on the guest's behalf; and
+     * `processor_virtualized` is written by a processor about itself,
+     * immediately before its launch. A roster identifier with a
+     * virtualized slot is therefore a processor this VMM owns.
+     *
+     * What it licenses, and it is only this: dropping the local APIC page
+     * watch. The watch exists to turn the *first* start-up IPI for a
+     * processor into one naming this VMM's own trampoline. A start-up IPI
+     * for a processor already adopted needs no interception at all - the
+     * target is in VMX non-root operation, so SDM 28.2 turns the delivery
+     * into a VM exit on it, which `emulate_start_up_ipi` handles. That is
+     * the same thing `nested_vmx::drop_watch_on_start_up` says in one
+     * line: "it is only needed *until* a processor has been adopted:
+     * after that its INIT arrives as a plain exit".
+     *
+     * Answers false when the roster is empty, which is a loader that
+     * supplied none. There is nothing to prove against then and the
+     * watch stays armed, which is the safe direction.
+     */
+    bool every_platform_processor_adopted();
+
+    /**
+     * Whether anything is currently positioned to see a guest's write to
+     * the interrupt command register - the page watch in xAPIC mode, the
+     * MSR bitmap bit in x2APIC mode.
+     *
+     * Read by `emulate_init_signal` to decide whether waiting for a
+     * software hand-off can possibly be answered. With neither armed
+     * there is no sender that can hand a vector over, so the wait is two
+     * million iterations of nothing followed by the fallback that was
+     * going to happen anyway.
+     *
+     * This is the same defect `5729ef9` fixed in the other direction. It
+     * removed `x2apic_enabled()` from that decision because the premise
+     * behind it had been falsified three days after it was written; what
+     * was never added is the conjunct that is actually load bearing,
+     * which is not the APIC's mode but whether this VMM is looking at it.
+     * It did not matter while the watch was armed for the life of every
+     * boot. It matters as soon as the watch can be dropped.
+     */
+    bool interrupt_command_intercepted();
 
     /**
      * Discards any start-up vector still held for the targets of the
@@ -8270,6 +8333,13 @@ private:
      * interception is switched off - inter-processor interrupts are hot on
      * a running system and there is no reason to keep paying for them once
      * no more processors are going to start.
+     *
+     * **Now proved rather than guessed at, and that is the change.** See
+     * `every_platform_processor_adopted`. The two heuristics that used to
+     * be the only way to set this - a quiet period, and "a start-up has
+     * been applied to somebody" - are still here behind their switches
+     * and are still heuristics; the proof runs unconditionally beside
+     * them.
      */
     std::atomic<bool> all_processors_started{};
 
@@ -8277,11 +8347,41 @@ private:
      * When the last start-up or INIT inter-processor interrupt was seen,
      * as a time-stamp counter reading, or zero if none has been.
      *
-     * The only evidence available that bring-up is over. Nothing tells a
-     * hypervisor how many processors its guest intends to start, so
-     * `all_processors_started` cannot be derived - it can only be guessed
-     * at from a long enough silence. See `nested_vmx::disarm_apic_watch`
-     * for why that guess is off by default.
+     * The quiet-period clock behind `nested_vmx::disarm_apic_watch`.
+     *
+     * **This used to say `all_processors_started` "cannot be derived - it
+     * can only be guessed at from a long enough silence", and that was
+     * wrong.** The loader hands over the firmware's own processor roster
+     * in `platform_apic_id`, and a processor that is in the roster and is
+     * `processor_virtualized` is one no start-up IPI can hand over
+     * unvirtualized - so "every processor has been started" is a
+     * property of two tables this VMM already keeps. What is genuinely
+     * underivable is how many processors the *guest* intends to use,
+     * which is a different and irrelevant question: the interception
+     * exists to catch the first start-up IPI for a processor this VMM
+     * does not yet own, and once it owns them all there is no such IPI.
+     *
+     * **The clock is also fed by the failure it is meant to survive.**
+     * Every INIT and every start-up IPI advances it, including the
+     * retries a guest sends *because* an adoption did not complete - and
+     * the watch is what makes those retries expensive. So a boot that is
+     * going wrong holds the quiet period open indefinitely, which is a
+     * heuristic that fails in the direction of its own worst case.
+     *
+     * **This paragraph nearly carried a second claim that is false, and
+     * it is recorded because it was two lines from being written down as
+     * measured.** The claim was that a one-processor guest sends no
+     * start-up IPI, so this stays zero, so the fallback clock in
+     * `filter_local_apic_write` expires about two minutes in and the
+     * watch is dropped for the rest of that boot - which would have
+     * explained a 3.8-5.5% extended-page-table share against 57.9% on
+     * two processors. Every step of that is true of the *code* and none
+     * of it happens in a default build: the whole block is
+     * `if constexpr (nested_vmx::disarm_apic_watch)`, and the manifest
+     * on both the debug and the release binary reads `apicoff=0`. The
+     * watch is never dropped in either configuration, so it cannot be
+     * the difference between them. Read `zpp switches:` off the binary
+     * that ran before explaining anything by a switch.
      */
     volatile std::uint64_t last_start_up_ipi_tsc{};
 
@@ -9429,7 +9529,33 @@ private:
     std::uint32_t l1_gs_index[max_cpus]{};
     std::uint64_t l1_gs_index_taken[max_cpus]{};
 
+    /**
+     * How many times `apply_start_up` was **entered** on this processor,
+     * and how many of those entries applied nothing.
+     *
+     * The names are the ones the dump prints and the first of them lies
+     * if it is read as "start-ups applied": the increment is at the top
+     * of the function, *before* the guard that refuses the second
+     * start-up IPI of an INIT-SIPI-SIPI sequence, so an entry that
+     * declined is counted with one that reset the whole guest state.
+     *
+     * That cost an afternoon of arithmetic. A two-processor boot
+     * reported `start-ups applied 2` for cpu 1 against exactly one
+     * start-up-IPI exit, and there is no assignment of the three
+     * callers - `launch`, `sipi exit`, and the three inside
+     * `emulate_init_signal` - that produces two applications and one
+     * exit. It is not two applications: it is two entries.
+     *
+     * `start_up_declined` is the difference, so the ledger closes
+     * without turning `nested_vmx::trace_ap_entry` on:
+     *
+     *     applications      = start_up_applied - start_up_declined
+     *     from a sipi exit  = exit_reason_counts[4]
+     *     from a launch     = 1 per adopted processor
+     *     from the INIT     = the remainder
+     */
     std::uint64_t start_up_applied[max_cpus]{};
+    std::uint64_t start_up_declined[max_cpus]{};
     std::uint64_t init_emulated[max_cpus]{};
 
     void note_cpuid_leaf(std::size_t cpu, std::uint32_t leaf)
