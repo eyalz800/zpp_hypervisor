@@ -1068,6 +1068,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     case basic_reason::cpuid: {
         std::uint32_t cpuid_result[4]{};
 
+        // CPUID is 88.2% of an application processor's exits - 6,751 of
+        // 7,658 - and only 35 of them are second-level entries, so this
+        // is the guest hypervisor itself spinning, not its guest. The
+        // leaf says what it is polling. The log ring collapses
+        // identical lines into one carrying [times=N], so a spin loop
+        // costs one line however long it runs.
+        if ((cpuid < max_cpus) && (0 != cpuid)) {
+            log("cpu {} cpuid leaf {} subleaf {} rip {}",
+                cpuid,
+                context.rax & 0xffffffffull,
+                context.rcx & 0xffffffffull,
+                vmcs.guest_rip());
+        }
+
         // The real instruction, whose answer is then edited - so
         // every bit this VMM has no opinion on is the hardware's.
         arch::x86_64::cpuid(context.rax, context.rcx, cpuid_result);
