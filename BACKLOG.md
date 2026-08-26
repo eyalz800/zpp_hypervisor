@@ -54060,3 +54060,73 @@ actually changed behaviour, since `waited` went false and
 `start_up.cpp:1508` says so in the ring. **That theory is untested, not
 refuted.**
 
+## The second processor is idle in MONITOR/MWAIT. It was never broken
+
+The NMI probe answered on the first boot, and the answer is
+unambiguous:
+
+    cpu  probes-sent  wake-exit  wake-root  activity  cs:rip
+      1           70         70          0         0  0x0038:0x7fb6b030
+
+Every probe came back through a **VM exit** with **activity 0**. So cpu
+1 is not halted, not shut down, not inside this VMM, and not in
+wait-for-SIPI - it is **executing guest code**. The four states that
+every previous instrument reported identically are now separated, and
+it is the first one.
+
+Reading the code it is executing, with `xp`, no boot:
+
+    0x7fb6b019  cli
+                mov  rax, rsp          <- 48 89 e0, REX.W: 64-bit code
+                sub  eax, 8
+                xor  ecx, ecx
+                xor  edx, edx
+                MONITOR
+                mov  rax, rbx
+                shl  eax, 4
+                MWAIT
+    0x7fb6b030  jmp  -25               <- back to the cli
+    0x7fb6b032  cli / hlt / jmp $-2    <- the give-up path, not taken
+
+**cpu 1 is in a `MONITOR`/`MWAIT` idle loop.** The `REX.W` prefixes say
+it is 64-bit code, so the processor reached long mode - every worry
+above about the trampoline, the vector, the descriptor and the paging
+transition is behind it.
+
+`ECX` is zero at the `MWAIT`, so interrupts are **not** break events
+while `EFLAGS.IF` is clear, and the loop clears it with `cli` every
+pass. **The only thing that can wake it is a write to the monitored
+address.** That is also why the probe worked at all: an NMI is
+non-maskable and does break `MWAIT`.
+
+### What this costs the last several sections
+
+**The application processor was never the failure.** It is idle,
+waiting correctly, for work that never arrives. Everything chased above
+- the swallowed start-up IPI, the queued vector, the trampoline
+address, the INIT/SIPI ordering, the APIC watch - was real, and some of
+it was worth fixing, but none of it was why the second processor does
+nothing.
+
+**The two failures this file separated are one after all, and the
+direction is the opposite of what was assumed.** cpu 0 is stuck in
+`Phase1Initialization`, so it never dispatches work to cpu 1; cpu 1
+therefore idles in `MWAIT` for ever; Hyper-V's rendezvous does not
+complete and the machine resets. **The application processor's silence
+is a consequence of the boot processor's stall, not an independent
+bug.**
+
+That also explains why the one-processor and two-processor
+configurations fail in ways that looked unrelated: they have the same
+cause, and the second processor merely makes it end in a reset instead
+of an idle loop.
+
+### What follows
+
+The whole question is now `Phase1Initialization` on cpu 0, and every
+instrument aimed at the application processor can be put down. The
+sharpest facts about it remain the ones from the profile and the
+synthetic MSR census: one EOI, one timer re-arm and one deferred-call
+request per clock tick, 1.6 million times, at 4.3 second-level entries
+per tick, with the guest reaching boot-graphics code between ticks.
+
