@@ -51737,3 +51737,37 @@ task-priority histograms and PASSIVE_LEVEL entries all looked healthy
 in this configuration, and the guest had been stopped in Phase 1 for
 twenty minutes.
 
+### Where the single-processor guest actually spends its time
+
+Resolved against ntkrnlmp.pdb, from the interrupt-landing census on
+the stalled one-processor run:
+
+    KiDpcInterruptBypass + 0x12            219,648   50.4%
+    <a non-ntoskrnl module>                118,784   27.3%
+    HalProcessorIdle + 0xf                  12,692    2.9%
+    MiCopyPage + 0x111                       4,872    1.1%
+    MiFreePageToSlabEntry + 0x67             4,429    1.0%
+    MiUpdateLargePageCandidateValue + 0x76   4,344    1.0%
+    KeReleaseSemaphoreEx + 0x41              3,139    0.7%
+    KeWaitForSingleObject + 0x219            2,638    0.6%
+
+and its exits, 24,034,991 of them: `vmread` 51.5%, `vmwrite` 28.2%,
+`vmresume` 8.0%, `wrmsr` 5.4%, `ept-violation` 3.7%, **`int-window`
+1.8% (440,263)**, `tpr-below` 6,955.
+
+- **Half the interrupted time is in the DPC interrupt path.** This
+  tree has recorded that exact shape once before, in the local APIC
+  watch era: "the guest looping end-of-interrupt inside
+  `KiDpcInterrupt` and making no progress", 27.6% of all exits then.
+  Different cause, same symptom, and the end-of-interrupt path is
+  emulated here - offset `0xb0`, and deliberately excluded from
+  logging along with the task priority and the timer's initial count.
+- The memory-manager symbols say it is doing real work rather than
+  spinning, and it does reach `HalProcessorIdle`.
+- 440,263 interrupt-window exits against 6,955 TPR-below-threshold.
+- The two unresolved hot addresses, 27.3% and 1.9%, are in another
+  module - the guest hypervisor or the secure kernel. **Neither
+  module's base is logged**, which is why they cannot be named; the
+  second-level kernel's is, and that gap has now cost several
+  investigations.
+
