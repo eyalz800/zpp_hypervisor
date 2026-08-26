@@ -51967,3 +51967,44 @@ attractive explanation: it was large, it was measurable, it was
 clearly wrong, and it was in the right area. It was still not the
 cause. `ZPP_WINDOW_ON_TPR` stays **off**.
 
+## smss.exe is blocked on page-out I/O
+
+Asked the guest directly, on the live stalled run, with offsets taken
+from `ntkrnlmp.pdb` rather than guessed - `_EPROCESS.ThreadListHead`
+`0x370`, `ActiveThreads` `0x380`, `_ETHREAD.ThreadListEntry` `0x578`,
+`_KTHREAD.State` `0x184`, `WaitReason` `0x283`, `WaitIrql` `0x186`:
+
+    smss.exe: ActiveThreads=3
+      thread 0: State=Waiting  WaitReason=UserRequest  WaitIrql=0x0
+      thread 1: State=Waiting  WaitReason=WrPageOut    WaitIrql=0x0
+      thread 2: State=Waiting  WaitReason=WrPageOut    WaitIrql=0x0
+
+**Two of its three threads are waiting on `WrPageOut`** - a page write
+that never completes. The session manager is blocked on storage, and
+the boot disk on this rig is a passed-through NVMe.
+
+That is the first direct answer to "what is it waiting for" in this
+whole investigation. Everything before it was inferred from exit
+counts, instruction pointers and priorities; this is the guest's own
+scheduler state saying it.
+
+It also **contradicts the ranking I was working to**, which put I/O
+last on the grounds that the guest was doing memory-manager work and
+reaching `HalProcessorIdle`, so "a guest blocked on a dead NVMe does
+not page and does not wake". Both observations were true and the
+conclusion was wrong: a guest can page *in* perfectly well and still
+have every page *out* stuck, and the idle wake-ups come from the clock
+regardless.
+
+Two traps to record, because each returned confident nonsense first:
+
+- **`xp` byte reads through this monitor path are unreliable.** Single
+  byte reads returned `0x12` for every field, and 16-byte name reads
+  carried an eight-byte junk prefix, so `State`, `WaitReason` and
+  `WaitIrql` all read as the same value and the process name never
+  compared equal. Read an **aligned qword and extract the byte**;
+  every field above came out correct immediately after that change.
+- The thread list walk runs one entry past the end - `State=30`,
+  `WaitIrql=0x99` - because the list head is not a thread. Stop on the
+  head rather than trusting the count.
+
