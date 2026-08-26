@@ -1350,6 +1350,26 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
     mark(17, flush_start);
 
     auto assign_start = arch::x86_64::rdtsc();
+
+    // A whole region read out of guest memory, which replaces every
+    // field including the instruction pointer. See `low_rip_source`:
+    // this is the fourth and last writer of vmcs12's RIP, and it is the
+    // one that can carry a value neither level wrote in this VMM's
+    // lifetime - the region is whatever `flush_guest_vmcs12` left there.
+    if (auto rip12 = loaded.read(
+            arch::x86_64::vmx::vmcs::field::guest_rip);
+        rip12 < low_rip_threshold) {
+        note_low_guest_rip(
+            cpu,
+            low_rip_source::loaded_by_vmptrld,
+            this->guest_vmcs12[cpu].read(
+                arch::x86_64::vmx::vmcs::field::guest_rip),
+            rip12,
+            0,
+            0,
+            *pointer);
+    }
+
     this->guest_vmcs12[cpu] = loaded;
     set_guest_current_vmcs(cpu, *pointer);
     mark(18, assign_start);
@@ -1708,6 +1728,27 @@ bool hypervisor::on_guest_vmwrite(std::size_t cpu,
     // **its** value, owed to vmcs02 on the next entry and not to be
     // overwritten by a later materialisation. See `guest_state_dirty`.
     mark_l2_guest_state_dirty(cpu, encoding.value());
+
+    // The guest hypervisor's own store of a low instruction pointer,
+    // which is the one writer that is not this VMM's doing. See
+    // `low_rip_source`: an application processor being started really
+    // is written this way, so this fires legitimately - and a boot where
+    // it is the *only* source that fires says the address came from
+    // above.
+    if ((static_cast<std::uint64_t>(
+             arch::x86_64::vmx::vmcs::field::guest_rip) ==
+         encoding.value()) &&
+        (value < low_rip_threshold)) {
+        note_low_guest_rip(
+            cpu,
+            low_rip_source::written_by_guest,
+            this->guest_vmcs12[cpu].read(encoding),
+            value,
+            0,
+            0,
+            this->guest_vmcs12[cpu].read(
+                arch::x86_64::vmx::vmcs::field::guest_cs_base));
+    }
 
     this->guest_vmcs12[cpu].write(encoding, value);
 

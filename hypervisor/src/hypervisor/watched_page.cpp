@@ -624,6 +624,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     // instruction and the disagreement would be silent.
                     context.rip = context.rip + length;
                     this->vmcs.guest_rip(context.rip);
+                    note_low_emulated_rip(cpu,
+                                          context.rip - length,
+                                          context.rip,
+                                          length);
                     return true;
                 }
 
@@ -782,6 +786,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 // moves with it for the same reason.
                 context.rip = context.rip + store->length;
                 this->vmcs.guest_rip(context.rip);
+                note_low_emulated_rip(cpu,
+                                      context.rip - store->length,
+                                      context.rip,
+                                      store->length);
                 return true;
             }
         }

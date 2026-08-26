@@ -809,6 +809,104 @@ def dump_entry_lowest_segment(args, elf, instance):
             print(f"    linear entry address 0x{r['cs_base'] + r['rip']:x}"
                   " (base + rip)")
 
+    dump_low_rip_sources(args, elf, instance)
+
+
+LOW_RIP_SOURCE_NAME = {
+    0: "save_l2_state          vmcs02 -> vmcs12",
+    1: "copy_shadow_to_vmcs12  region -> vmcs12",
+    2: "on_guest_vmwrite       guest  -> vmcs12",
+    3: "on_guest_vmptrld       memory -> vmcs12",
+    4: "resume_guest           advanced vmcs02",
+    5: "on_nested_cr8_access   advanced vmcs02",
+    6: "watched-page emulation advanced vmcs02",
+}
+
+
+def dump_low_rip_sources(args, elf, instance):
+    """Who wrote a second-level instruction pointer below one page.
+
+    The section above says a processor was entered at 0x2 and cannot say
+    who put the 2 there.  This can: vmcs12's RIP field has four writers
+    and vmcs02's has three more that *move* one, and each is counted
+    separately.  Sources 4, 5 and 6 are the arithmetic ones - they add a
+    VM-exit instruction length to an address - so a record with
+    `previous + length == written` is this VMM producing the address,
+    and `save_l2_state` alone with all three at zero is the processor
+    having saved it, which puts the corruption above this VMM.
+
+    Every counter zero is the negative and prints as plainly as any
+    positive.  A low address is not by itself a fault: an application
+    processor started by a start-up IPI legitimately begins at RIP 0.
+    """
+    members = ["low_rip_writes", "low_rip_first", "low_rip_last"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates the census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "source", "entries", "previous", "written",
+              "length", "reason", "detail"]
+    counter_stride, record_stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->low_rip_writes[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->low_rip_first[0]"])
+    sources = counter_stride // 8
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["low_rip_writes"],
+                 args.cpus * counter_stride // 8)
+    for member in ("low_rip_first", "low_rip_last"):
+        reader.queue(instance + off[member],
+                     args.cpus * record_stride // 8)
+    got = reader.run()
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * record_stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        name = LOW_RIP_SOURCE_NAME.get(r["source"], f"? {r['source']}")
+        print(f"    {label}: {name}")
+        print(f"      wrote 0x{r['written']:x} over 0x{r['previous']:x}"
+              f", length {r['length']}, reason 0x{r['reason']:x}, "
+              f"detail 0x{r['detail']:x}, at l2 entry {r['entries']:,}")
+        if r["length"] and (r["previous"] + r["length"] == r["written"]):
+            print(f"      *** ARITHMETIC: 0x{r['previous']:x} + "
+                  f"{r['length']} = 0x{r['written']:x} - this VMM "
+                  f"produced the address ***")
+
+    for cpu in range(args.cpus):
+        counts = [got.get(instance + off["low_rip_writes"] +
+                          cpu * counter_stride + 8 * i, 0)
+                  for i in range(sources)]
+
+        print(f"\ncpu {cpu} low second-level rip census "
+              f"(below 0x{0x1000:x}):")
+        if not any(counts):
+            print("    NOTHING wrote a second-level rip below one page - "
+                  "every source zero")
+            continue
+
+        for index, count in enumerate(counts):
+            if not count:
+                continue
+            name = LOW_RIP_SOURCE_NAME.get(index, f"? {index}")
+            print(f"    {count:>12,}  {name}")
+
+        arithmetic = sum(counts[4:])
+        if not arithmetic:
+            print("    no advance ever landed below one page: every low "
+                  "address was COPIED, not computed here")
+
+        first = record("low_rip_first", cpu)
+        if first["occurred"]:
+            show("first", first)
+        last = record("low_rip_last", cpu)
+        if last["occurred"]:
+            show("last ", last)
+
 
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.

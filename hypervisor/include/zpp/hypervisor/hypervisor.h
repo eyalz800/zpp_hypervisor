@@ -6026,6 +6026,240 @@ private:
 
     l2_entry_lowest_record l2_entry_lowest[max_cpus]{};
 
+    /**
+     * Every way a second-level instruction pointer below one page can
+     * come into being, told apart by which code wrote it.
+     *
+     * **`l2_entry_lowest` says a processor was entered at 2 and cannot
+     * say who put the 2 there.** vmcs12's RIP field has exactly four
+     * writers - `save_l2_state` copying vmcs02 back, `copy_shadow_to_
+     * vmcs12` collecting the hardware shadow region, `on_guest_vmwrite`
+     * taking the guest hypervisor's own store, and `on_guest_vmptrld`
+     * reading a region whole - and vmcs02's has three more that *move*
+     * one rather than copy it: `resume_guest`'s advance past a retired
+     * instruction, the CR8 emulation's advance before it reflects, and
+     * the watched-page emulation's advance after it carries a store out.
+     * The last three are the arithmetic ones, and the whole question is
+     * whether a low address arrived by arithmetic or was already there.
+     *
+     * So each is counted separately, and the first and last occurrence
+     * on each processor is kept whole. Reading it:
+     *
+     * - **every counter zero** - no instruction pointer below one page
+     *   was ever written on that processor, by anybody. That is the
+     *   negative, and it is as legible as any positive.
+     * - `advanced_*` non-zero with `previous + length == written` - this
+     *   VMM produced the address, and the record names which advance and
+     *   from what.
+     * - `saved_from_vmcs02` alone, with every `advanced_*` at zero - the
+     *   processor saved it, so the second-level guest really was there
+     *   and the corruption is upstream of this VMM.
+     * - `written_by_guest` - the guest hypervisor asked for it.
+     * - `collected_from_shadow` with `previous` a plausible address -
+     *   the hardware shadow region overwrote a fresher cached value,
+     *   which is the ordering hazard `copy_shadow_to_vmcs12` documents.
+     *
+     * A low address is **not** by itself a fault: a processor started by
+     * a start-up IPI begins at RIP 0 with CS base `vector << 12`, so an
+     * application processor's first moments belong here legitimately.
+     * `detail` carries CS base at the sites that have it, which is what
+     * separates that from a long-mode guest at address 2.
+     *
+     * Free when nothing fires: one compare of a value already in a
+     * register against a constant, at seven sites. It is deliberately
+     * *not* behind a build switch - the thing being chased happens once
+     * in ninety thousand entries at the end of a seven-minute boot, and
+     * a switch that was off for that boot would cost the whole run.
+     * @{
+     */
+    enum class low_rip_source : std::uint64_t
+    {
+        /** `save_l2_state`: vmcs02's saved RIP into vmcs12. */
+        saved_from_vmcs02 = 0,
+
+        /** `copy_shadow_to_vmcs12`: the hardware shadow region into
+         *  vmcs12. */
+        collected_from_shadow = 1,
+
+        /** `on_guest_vmwrite`: the guest hypervisor's own store. */
+        written_by_guest = 2,
+
+        /** `on_guest_vmptrld`: a whole region read out of guest
+         *  memory. */
+        loaded_by_vmptrld = 3,
+
+        /** `resume_guest`: RIP advanced past a retired instruction with
+         *  vmcs02 current. */
+        advanced_on_resume = 4,
+
+        /** `on_nested_cr8_access`: RIP advanced before reflecting a
+         *  TPR-below-threshold exit. */
+        advanced_for_cr8 = 5,
+
+        /** `watch_guest_page_writes`: RIP advanced after this VMM
+         *  carried out or refused the guest's store. */
+        advanced_by_emulation = 6,
+    };
+
+    /** How many sources there are, and the address below which one is
+     *  recorded. One page, because a start-up IPI's RIP 0 and a stray
+     *  small offset from it are the shapes being separated. */
+    static constexpr std::size_t low_rip_sources = 7;
+    static constexpr std::uint64_t low_rip_threshold = 0x1000;
+
+    struct low_rip_record
+    {
+        /** Set last, so a reader that finds it set finds the rest
+         *  filled in. */
+        std::uint64_t occurred;
+
+        /** Which of `low_rip_source` wrote it. */
+        std::uint64_t source;
+
+        /** `l2_entries` on this processor at the time. */
+        std::uint64_t entries;
+
+        /** What the field held before the write. For an advance this is
+         *  the RIP being advanced *from*, so `previous + length` is the
+         *  arithmetic being alleged. */
+        std::uint64_t previous;
+
+        /** What was written. */
+        std::uint64_t written;
+
+        /** The instruction length added, or zero where the write was a
+         *  copy rather than an advance. */
+        std::uint64_t length;
+
+        /** The exit reason in force. */
+        std::uint64_t reason;
+
+        /** Whatever the site can cheaply say about the address: CS base
+         *  where it has one, so a real-mode start-up entry is not
+         *  mistaken for a long-mode guest at the bottom of memory. */
+        std::uint64_t detail;
+    };
+
+    volatile std::uint64_t low_rip_writes[max_cpus][low_rip_sources]{};
+    low_rip_record low_rip_first[max_cpus]{};
+    low_rip_record low_rip_last[max_cpus]{};
+
+    /** One log line per processor per source, so an event that repeats
+     *  thousands of times a second cannot evict the sequence around the
+     *  first one. */
+    volatile std::uint64_t low_rip_reported[max_cpus][low_rip_sources]{};
+
+    /**
+     * Records one write of a second-level instruction pointer below
+     * `low_rip_threshold`, and does nothing at all for anything above
+     * it.
+     *
+     * Inline in the header rather than in a translation unit because the
+     * seven call sites are in five files and the host harnesses compile
+     * different subsets of them - a definition in any one of those files
+     * would fail to link in the harnesses that compile the others.
+     */
+    void note_low_guest_rip(std::size_t cpu,
+                            low_rip_source source,
+                            std::uint64_t previous,
+                            std::uint64_t written,
+                            std::uint64_t length,
+                            std::uint64_t reason,
+                            std::uint64_t detail)
+    {
+        if ((written >= low_rip_threshold) || (cpu >= max_cpus)) {
+            return;
+        }
+
+        auto which = static_cast<std::size_t>(source);
+        if (which >= low_rip_sources) {
+            return;
+        }
+
+        low_rip_record record{};
+        record.source = static_cast<std::uint64_t>(source);
+        record.entries = this->l2_entries[cpu];
+        record.previous = previous;
+        record.written = written;
+        record.length = length;
+        record.reason = reason;
+        record.detail = detail;
+        record.occurred = 1;
+
+        if (0 == this->low_rip_writes[cpu][which]) {
+            if (0 == this->low_rip_first[cpu].occurred) {
+                this->low_rip_first[cpu] = record;
+            }
+        }
+
+        this->low_rip_writes[cpu][which] =
+            this->low_rip_writes[cpu][which] + 1;
+        this->low_rip_last[cpu] = record;
+
+        if (0 != this->low_rip_reported[cpu][which]) {
+            return;
+        }
+
+        this->low_rip_reported[cpu][which] = 1;
+
+        log("cpu {} low second-level rip: source {} wrote {} over {}, "
+            "length {}, reason {}, detail {}, at l2 entry {}",
+            cpu,
+            record.source,
+            written,
+            previous,
+            length,
+            reason,
+            detail,
+            record.entries);
+    }
+
+    /**
+     * The watched-page emulation's own advance, which is the third
+     * arithmetic writer.
+     *
+     * Its own helper rather than a call to the one above because the
+     * site has neither the exit reason - it is always an extended
+     * page-table violation - nor a segment base in hand, and reading one
+     * unconditionally would put a VMREAD on the emulation path. The
+     * threshold is tested before the read, so a boot where this never
+     * fires pays one compare per emulated store.
+     *
+     * Recorded only while a second-level guest is running: with vmcs01
+     * current the RIP being moved is the first-level guest's and
+     * `save_l2_state` never sees it.
+     */
+    void note_low_emulated_rip(std::size_t cpu,
+                               std::uint64_t previous,
+                               std::uint64_t written,
+                               std::uint64_t length)
+    {
+        if constexpr (!nested_vmx::enabled) {
+            static_cast<void>(cpu);
+            static_cast<void>(previous);
+            static_cast<void>(written);
+            static_cast<void>(length);
+            return;
+        } else {
+            if ((written >= low_rip_threshold) || (cpu >= max_cpus) ||
+                !this->running_l2[cpu]) {
+                return;
+            }
+
+            note_low_guest_rip(
+                cpu,
+                low_rip_source::advanced_by_emulation,
+                previous,
+                written,
+                length,
+                static_cast<std::uint64_t>(
+                    arch::x86_64::vmx::exit_reason::basic_reason::
+                        ept_violation),
+                this->vmcs.guest_cs_base());
+        }
+    }
+    /** @} */
+
     /** What the guest hypervisor arms as its TPR threshold, by value.
      * All zero means it never asks to be told, so the undelivered
      * dispatch vector is its business rather than this VMM's. */

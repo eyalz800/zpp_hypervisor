@@ -810,9 +810,28 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
 
         for (auto entry : shadow_read_write_fields) {
             auto value = this->vmcs.read(entry);
-            cached.write(
-                vmcs_field_encoding(static_cast<std::uint64_t>(entry)),
-                value);
+            auto encoding =
+                vmcs_field_encoding(static_cast<std::uint64_t>(entry));
+
+            // The region is the truth for a shadowed field only while
+            // the control is genuinely in force; where it is advertised
+            // and stripped underneath, the guest hypervisor's store
+            // exited and reached `cached` instead, and this overwrites
+            // it with what this VMM last published. That is the one way
+            // vmcs12's RIP can go backwards without anybody moving it,
+            // so it is counted. See `low_rip_source`.
+            if ((field::guest_rip == entry) &&
+                (value < low_rip_threshold)) {
+                note_low_guest_rip(cpu,
+                                   low_rip_source::collected_from_shadow,
+                                   cached.read(encoding),
+                                   value,
+                                   0,
+                                   0,
+                                   this->guest_current_vmcs[cpu]);
+            }
+
+            cached.write(encoding, value);
             if (index < shadow_cache_capacity) {
                 this->shadow_cache[cpu][index] = value;
             }

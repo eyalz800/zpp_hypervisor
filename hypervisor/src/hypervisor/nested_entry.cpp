@@ -4887,7 +4887,29 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // current, so on that path it would copy the guest hypervisor's own
     // registers into its guest's state area.
     if (!reason.entry_failure()) {
+        // What vmcs12's RIP field held before the save, kept so the one
+        // write that can put a low address there is attributable. Two
+        // subscripts into module memory, not VMREADs. See
+        // `low_rip_source`.
+        auto rip12_before = shadow.read(field::guest_rip);
+
         save_l2_state(cpu);
+
+        // The threshold is tested here rather than inside the note, so
+        // that the VMREAD of the segment base is paid only by a
+        // reflection that has something to report. vmcs02 is still
+        // current - the switch back is further down - so the base read
+        // is the second-level guest's.
+        if (auto rip12 = shadow.read(field::guest_rip);
+            rip12 < low_rip_threshold) {
+            note_low_guest_rip(cpu,
+                               low_rip_source::saved_from_vmcs02,
+                               rip12_before,
+                               rip12,
+                               0,
+                               reason.value(),
+                               vmcs.guest_cs_base());
+        }
     }
 
     shadow.write(field::exit_reason, reason.value());
@@ -5315,8 +5337,42 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
         // The write has taken effect, so the exit is a trap rather than a
         // fault and the guest hypervisor must see its guest positioned
         // after the instruction.
-        this->vmcs.guest_rip(this->vmcs.guest_rip() +
-                             this->vmcs.vm_exit_instruction_length());
+        //
+        // **The length is defined for the exit that actually happened,
+        // and it was worth checking which exit that is.** SDM 30.2.5
+        // lists MOV CR among the fault-like exits the VM-exit
+        // instruction-length field is defined for, and footnote 1 on
+        // that list takes it away again for "trap-like VM exits
+        // following executions of the MOV to CR8 instruction when the
+        // 'use TPR shadow' VM-execution control is 1"
+        // (.references/sdm.txt:204137). The exit reaching here is
+        // `control_register_access`, which is the *fault-like* one
+        // produced by CR8-load exiting with no TPR shadow handed to the
+        // processor - see the call site in `exit_dispatch.cpp` - so the
+        // footnote does not apply and the field is the MOV's own
+        // length. What is reflected below is a synthesised
+        // TPR-below-threshold, for which the field is undefined anyway.
+        auto rip_before = this->vmcs.guest_rip();
+        auto advanced_by = this->vmcs.vm_exit_instruction_length();
+
+        this->vmcs.guest_rip(rip_before + advanced_by);
+
+        // One of the three arithmetic writers. See `low_rip_source`:
+        // the reflection below copies vmcs02's RIP into vmcs12, so an
+        // advance that lands low here is a low address in vmcs12 a
+        // moment later, and only this record can say the sum produced
+        // it.
+        if ((rip_before + advanced_by) < low_rip_threshold) {
+            note_low_guest_rip(
+                cpu,
+                low_rip_source::advanced_for_cr8,
+                rip_before,
+                rip_before + advanced_by,
+                advanced_by,
+                static_cast<std::uint64_t>(
+                    basic_reason::control_register_access),
+                this->vmcs.guest_cs_base());
+        }
 
         reflect_l2_exit(
             cpu,

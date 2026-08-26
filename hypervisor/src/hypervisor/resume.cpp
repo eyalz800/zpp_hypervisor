@@ -898,9 +898,35 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // documented as recording the former.
     std::uint64_t resume_rip{};
     if (advance_rip) {
-        context.rip += vmcs.vm_exit_instruction_length();
+        auto rip_before = context.rip;
+        auto advanced_by = vmcs.vm_exit_instruction_length();
+
+        context.rip += advanced_by;
         vmcs.guest_rip(context.rip);
         resume_rip = context.rip;
+
+        // The largest of the three arithmetic writers, and the only one
+        // on every exit. Recorded only while a second-level guest is
+        // running, because that is the case where the field being moved
+        // is vmcs02's and `save_l2_state` copies it into vmcs12 at the
+        // next reflection. See `low_rip_source`.
+        //
+        // `context.rip` came out of the VMCS at the top of the handler,
+        // so `rip_before` is what the processor saved, and
+        // `rip_before + advanced_by == resume_rip` is the sum being
+        // alleged.
+        if constexpr (nested_vmx::enabled) {
+            if ((context.rip < low_rip_threshold) && (cpuid < max_cpus) &&
+                this->running_l2[cpuid]) {
+                note_low_guest_rip(static_cast<std::size_t>(cpuid),
+                                   low_rip_source::advanced_on_resume,
+                                   rip_before,
+                                   context.rip,
+                                   advanced_by,
+                                   full_reason.value(),
+                                   vmcs.guest_cs_base());
+            }
+        }
     } else {
         resume_rip = vmcs.guest_rip();
     }
