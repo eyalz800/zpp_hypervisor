@@ -4058,7 +4058,30 @@ def main():
                # for a dozen sessions and this reader never did, so the
                # monitor path - the one that works on a wedged guest -
                # could not see the number that names a failed entry.
-               "nested_vmfail_count", "nested_last_vmfail"]
+               "nested_vmfail_count", "nested_last_vmfail",
+               # The three that say what a *frozen* exit count means,
+               # and none of them had a reader anywhere in this tree.
+               #
+               # `exit_total` alone cannot tell a processor spinning in
+               # its own guest apart from one stopped inside this VMM's
+               # handler, and those want opposite investigations. The
+               # difference against `resumes_reached` does, which is
+               # what `resume.cpp` says that counter is for: "Counted
+               # here, at the last point before control leaves this
+               # handler, so a frozen exit count can be read two ways
+               # round."
+               #
+               # `l2_start_up_waits` is the other half. A processor
+               # parked in `wait_for_l2_start_up_ipi` shows
+               # `l2_entries` **zero** for as long as it waits - the
+               # increment is on the `entered` branch only
+               # (`nested_vmx.cpp:2376`) - so "l2-entries 0" reads
+               # identically for "never attempted a second-level entry"
+               # and "attempts one every pass and is refused". This
+               # counter is the only thing that separates them, and
+               # `hypervisor.h` says so at its declaration.
+               "resumes_reached", "l2_start_up_waits",
+               "ept_violation_unclaimed"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
     # The phase rows are [cpu][phase_count], so each processor's row has
@@ -4346,6 +4369,44 @@ def main():
               f"{read('events_deferred', cpu):-8d}  "
               f"0x{read('pending_event', cpu):-6x}  "
               f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # And the three readings that say what a frozen row above *means*.
+    #
+    # Every column above is cumulative, so a processor that stopped and
+    # one that is between exits look identical in all of them. These
+    # separate the three states that produce the same still numbers:
+    #
+    # - `in-handler` is `exit_total - resumes_reached`.  Zero means the
+    #   processor finished every handler it entered, so it is out in its
+    #   own guest - spinning on memory, or not being scheduled - and a
+    #   still exit count is the *guest* having stopped exiting.  One
+    #   means an exit is in flight or ended in `on_unhandled_exit`,
+    #   which does not return; the processor is inside this VMM.  More
+    #   than one should be impossible and is worth saying so out loud.
+    # - `sipi-waits` is `l2_start_up_waits`.  Rising means the processor
+    #   is executing the level above's VMLAUNCH over and over and being
+    #   parked because vmcs12 says wait-for-SIPI.  **`l2-entries 0` says
+    #   nothing about this on its own**: the increment is on the
+    #   `entered` branch only, so a processor that never attempted an
+    #   entry and one refused on every pass both read zero there.
+    # - `unclaimed` is `ept_violation_unclaimed`: violations that
+    #   arrived after the watch that caused them was dropped.  Bounded
+    #   and resumed from, so a small number is the disarm race the
+    #   dispatcher documents and a growing one is a protection stuck on
+    #   with nothing left to answer it.
+    print("\ncpu  exits       resumes-reached  in-handler  sipi-waits  "
+          "unclaimed")
+    for cpu in range(args.cpus):
+        exits = read('exit_total', cpu) or 0
+        reached = read('resumes_reached', cpu) or 0
+        print(f"{cpu:3d}  {exits:-10d}  {reached:-15d}  "
+              f"{exits - reached:-10d}  "
+              f"{read('l2_start_up_waits', cpu) or 0:-10d}  "
+              f"{read('ept_violation_unclaimed', cpu) or 0:-9d}"
+              + ("   <- inside this VMM's exit handler"
+                 if (exits - reached) == 1 else
+                 ("   <- IMPOSSIBLE: more exits than handlers left"
+                  if (exits - reached) > 1 else "")))
 
     # The application-processor fault trap, read as a pair.
     #
@@ -5374,15 +5435,32 @@ def main():
                     "reflected-misconfig", "reflected-permission",
                     "watched", "unwatched", "installed",
                     "install-failed", "pointer-failed")
-    print("\ncpu 0 how each second-level fault was answered")
-    total = sum(read('l2_ept_dispositions', 0 * 10 + i) or 0
-                for i in range(len(DISPOSITIONS)))
-    for i, name in enumerate(DISPOSITIONS):
-        count = read('l2_ept_dispositions', 0 * 10 + i) or 0
-        if not count:
+    # **Every processor, not cpu 0.** The row was already being read for
+    # all of them - the queue above asks for `scalar_cpus * 10` words -
+    # and only the printing was pinned to the boot processor, so the one
+    # row nobody could see was the application processor's.
+    #
+    # `watched` is the load-bearing entry for anything about the local
+    # APIC: it counts second-level faults that this VMM's own tables
+    # refused and something here answered, which for the APIC page means
+    # a *second-level* guest writing the interrupt command register. A
+    # zero there says the guest hypervisor virtualises its guest's local
+    # APIC and never writes ours, which is what `nested_vmx.h` asserts
+    # beside `l2_startup_spin` - and it was an assertion about cpu 0's
+    # row, because cpu 0's row is the only one that has ever printed.
+    for cpu in range(args.cpus):
+        print(f"\ncpu {cpu} how each second-level fault was answered")
+        total = sum(read('l2_ept_dispositions', cpu * 10 + i) or 0
+                    for i in range(len(DISPOSITIONS)))
+        if not total:
+            print("  none - this processor took no second-level fault")
             continue
-        share = 100.0 * count / total if total else 0.0
-        print(f"  {name:<22s} {count:12,d}  {share:5.1f}%")
+        for i, name in enumerate(DISPOSITIONS):
+            count = read('l2_ept_dispositions', cpu * 10 + i) or 0
+            if not count:
+                continue
+            share = 100.0 * count / total
+            print(f"  {name:<22s} {count:12,d}  {share:5.1f}%")
     # **Which page.** `guest_physical` is recorded for every EPT violation
     # unconditionally - it is not behind ZPP_CENSUS_EXITS, unlike the
     # qualification - so the address is in the ring on every build and

@@ -480,5 +480,142 @@ class FramebufferMembers(unittest.TestCase):
                     os.path.basename(path), ", ".join(missing)))
 
 
+class RecordExitIsCalledOncePerExit(unittest.TestCase):
+    """`record_exit` on a path that also resumes counts the exit twice.
+
+    `hypervisor.h` states the invariant beside `exit_reason_counts`:
+    "Counted in record_exit, which runs exactly once per exit - the paths
+    that record before stopping do so instead of reaching the resume,
+    since on_unhandled_exit does not return."
+
+    `resume_guest` calls it for every exit that reaches the resume, so an
+    explicit call is only legal where the processor is about to stop.
+    Every other explicit call in this tree is `record_exit(...)`
+    immediately followed by `on_unhandled_exit(...)`, which is
+    `[[noreturn]]`.
+
+    One was not, and it is why this check exists: the EPT violation whose
+    watch had already been dropped used to record and then `break` to the
+    resume, so `exit_total[cpu]` and `exit_reason_counts[cpu][48]` were
+    both inflated by `ept_violation_unclaimed[cpu]`.
+
+    **The reader's own consistency check cannot catch that**, because it
+    compares the histogram's sum against the total and the double count
+    moves both. What it corrupts is the difference
+    `exit_total - resumes_reached`, which is the one reading that says
+    whether a processor is stopped *inside* this VMM - so the defect made
+    the answer to "is it in our handler or in its guest" wrong by exactly
+    the number of times a watch had been dropped under a fault in flight.
+
+    Checked at the source rather than by running anything: the double
+    count is invisible at run time by construction, which is what made it
+    survive.
+    """
+
+    SOURCES = ["exit_dispatch.cpp", "nested_entry.cpp", "hypervisor.cpp",
+               "resume.cpp", "watched_page.cpp", "nested_vmx.cpp"]
+
+    def test_every_explicit_call_precedes_a_stop(self):
+        offenders = []
+        for name in self.SOURCES:
+            path = os.path.join(ROOT, "hypervisor", "src", "hypervisor",
+                                name)
+            if not os.path.exists(path):
+                continue
+            lines = read(path).splitlines()
+            for index, line in enumerate(lines):
+                if not re.search(r"^\s*record_exit\(", line):
+                    continue
+                # The resume path's own call, which is the one that runs
+                # for every exit. Identified by its file rather than by
+                # its text, so renaming the arguments cannot smuggle a
+                # second one in beside it.
+                if name == "resume.cpp":
+                    continue
+                window = "\n".join(lines[index:index + 8])
+                if "on_unhandled_exit(" not in window:
+                    offenders.append("{}:{}".format(name, index + 1))
+
+        self.assertEqual(
+            [], offenders,
+            "record_exit is called on a path that goes on to resume, so "
+            "resume_guest records the same exit a second time: "
+            + ", ".join(offenders))
+
+
+class FrozenExitCountReadings(unittest.TestCase):
+    """The three counters that say what a still `exits` column means.
+
+    A processor whose exit count has stopped moving is in one of three
+    states and the summary table cannot tell them apart: out in its own
+    guest and not exiting, stopped inside this VMM's handler, or
+    executing the level above's VMLAUNCH on every pass and being parked.
+    Each wants a different investigation and all three look identical.
+
+    `resumes_reached`, `l2_start_up_waits` and `ept_violation_unclaimed`
+    separate them, and **none of the three had a reader anywhere in this
+    tree** - not `rig-dump-state.py`, not `zpp.gdb` - while
+    `l2_start_up_waits` in particular is the only thing that
+    distinguishes "never attempted a second-level entry" from "attempts
+    one every pass and is refused", both of which show `l2_entries` as
+    zero.
+
+    An instrument that exists and is not read is worth what an instrument
+    that does not exist is worth, and this pins that they are read.
+    """
+
+    MEMBERS = ["resumes_reached", "l2_start_up_waits",
+               "ept_violation_unclaimed"]
+
+    def test_header_declares_every_member(self):
+        source = read(HEADER)
+        missing = [name for name in self.MEMBERS
+                   if not re.search(
+                       r"std::uint64_t\s+" + re.escape(name)
+                       + r"\[max_cpus\]", source)]
+        self.assertEqual(
+            [], missing,
+            "hypervisor.h no longer declares as a per-cpu array: "
+            + ", ".join(missing))
+
+    def test_the_reader_asks_for_every_member(self):
+        source = read(DUMP_STATE)
+        missing = [name for name in self.MEMBERS
+                   if '"{}"'.format(name) not in source]
+        self.assertEqual(
+            [], missing,
+            "rig-dump-state.py no longer reads: " + ", ".join(missing))
+
+    def test_dispositions_are_printed_for_every_processor(self):
+        # The row was read for every processor and printed for cpu 0
+        # only, so `watched` - the entry that says whether a
+        # *second-level* guest ever wrote a page this VMM watches - has
+        # never been visible for an application processor. A claim about
+        # it was nonetheless recorded in nested_vmx.h.
+        source = read(DUMP_STATE)
+        self.assertNotIn(
+            "l2_ept_dispositions', 0 * 10", source,
+            "rig-dump-state.py prints the second-level fault "
+            "dispositions for cpu 0 only again")
+        self.assertIn(
+            "l2_ept_dispositions', cpu * 10", source,
+            "rig-dump-state.py no longer indexes the disposition row by "
+            "processor")
+
+    def test_the_reader_prints_the_difference(self):
+        # The subtraction itself, not the column heading. The heading
+        # also appears in the comment that explains it, so asserting on
+        # that would pass with the arithmetic deleted - which is the
+        # failure mode this whole file exists to stop, and it was
+        # measured here: dropping the print left the check green.
+        source = read(DUMP_STATE)
+        self.assertTrue(
+            re.search(r"exits\s*-\s*reached", source),
+            "rig-dump-state.py no longer prints `exit_total - "
+            "resumes_reached`, which is the reading that separates a "
+            "processor stopped inside this VMM from one spinning in its "
+            "own guest")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3458,7 +3458,31 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     this->ept_violation_unclaimed[cpuid] + 1;
             }
 
-            record_exit(cpuid, full_reason, context);
+            // **No `record_exit` here, and there used to be one.** It
+            // was correct while this branch stopped the processor -
+            // that is the shape of every other explicit call in this
+            // file, `record_exit` immediately followed by
+            // `on_unhandled_exit`, which does not return. When the
+            // branch was changed to resume instead, the call stayed,
+            // and a path that resumes reaches `resume_guest`, which
+            // records **every** exit at `resume.cpp:1061`.
+            //
+            // So each unclaimed violation was counted twice: once here
+            // and once there. `hypervisor.h`'s own comment on
+            // `exit_reason_counts` states the invariant this broke -
+            // "record_exit, which runs exactly once per exit - the
+            // paths that record before stopping do so instead of
+            // reaching the resume".
+            //
+            // What it cost as an instrument. `exit_total[cpu]` and
+            // `exit_reason_counts[cpu][48]` were both inflated by
+            // `ept_violation_unclaimed[cpu]`, and the reader's only
+            // consistency check - that the histogram sums to the total
+            // - cannot see it, because both sides move together. The
+            // difference `exit_total - resumes_reached` is the reading
+            // that says whether a processor is *inside* this handler
+            // right now, and this made that difference mean two things
+            // at once.
         }
         advance_rip = false;
         break;
