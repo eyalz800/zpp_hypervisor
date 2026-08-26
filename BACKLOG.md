@@ -52889,3 +52889,54 @@ before `guest-processes.py` can walk it; under nested=1 that came from
 the second-level kernel image log line, and with nesting off nothing
 prints it.
 
+## Windows reached the desktop on two processors under this VMM
+
+Observed on the rig's own display, 2026-08-26, on the boot described
+above: **the Windows desktop, with both processors live.** Not the
+login screen - past it.
+
+This is the first time it has happened. The configuration, stated in
+full because a result is worthless without it:
+
+    zpp switches: nested=0 ... apentry=1 apfault=1
+    ZPP_CPUS=2, boot-zpp.sh, -no-reboot -no-shutdown
+    loader eaa95cd27ab523367cc71cc158c0d163 on the ESP
+
+State at the time, from `rig-dump-state.py` against the deployed ELF:
+cpu 0 at 32,128 exits and cpu 1 at 27,782, both still climbing, both
+`active`, everything above cpu 1 at zero.
+
+**The user's eyes are the instrument here and nothing in this tree can
+replace them.** The display is a passed-through GPU, so QEMU answers
+`screendump` with "There is no console to take a screendump from", and
+every proxy this session reached for - the CPL3 exit count, the
+symmetric idle - was inference. They happened to be right. They were
+still inference, and the thing they were inferring was directly visible
+to somebody sitting in front of the machine.
+
+### What it does not mean
+
+`nested=0`, so **VMX is hidden and Hyper-V stood down**. That is the
+configuration `deploy-to-rig.sh` refuses by default, and its refusal
+text says exactly why: "Windows boots and the screen looks right -
+which is why this is refused rather than warned about." Virtualization
+based security is not running underneath this desktop.
+
+So what is proven is the half that was broken: **an application
+processor now survives its own bring-up**, which it did not before, and
+Windows schedules on it all the way to a usable desktop. What is not
+proven is the same thing with a guest hypervisor above us. Those were
+always two failures - `nested=1` on one processor stalls at `smss.exe`
+with four processes, and that stall is untouched by any of this.
+
+### The fix is still owed
+
+The trap is an instrument, not a repair. It works by accident: one
+extra exit between the faulting fetch and its retry displaces the stale
+translation. The invalidation the hardware would have performed -
+`INVVPID` on the emulated INIT and on the emulated CR0.PG transition -
+is what should hold this up, and a build with `apfault=0` and the
+invalidation in is what proves it. Until that run exists, **this
+desktop rests on a diagnostic switch**, and that is not somewhere to
+leave it.
+
