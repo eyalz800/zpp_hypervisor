@@ -238,12 +238,22 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
     // bit 5 executable. The exit ring's qualification is not filled
     // (census=0), so it cannot answer this.
     if ((0 != cpu) && (cpu < max_cpus)) {
+        // With the *host's* own IA32_APIC_BASE, read in root mode on
+        // this processor. `apply_guest_store` writes 0xfee00xxx as a
+        // host virtual address, which is the host's xAPIC MMIO window -
+        // and bit 10 set means x2APIC, where that window is
+        // architecturally unavailable and the store silently does
+        // nothing. A native write by the guest goes through EPT
+        // instead, so this is one of the few things that can differ
+        // between emulating these writes and not.
+        constexpr std::uint32_t ia32_apic_base = 0x1b;
         log("cpu {} ept violation on page {}, qualification {}, "
-            "watched apic page {}",
+            "watched apic page {}, host apic base {}",
             cpu,
             page,
             this->vmcs.exit_qualification(),
-            this->watched_apic_page);
+            this->watched_apic_page,
+            arch::x86_64::rdmsr(ia32_apic_base));
     }
 
     // Carried out here because this is the one place it is safe: the
