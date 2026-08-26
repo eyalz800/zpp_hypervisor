@@ -10359,6 +10359,7 @@ private:
         std::uint64_t guest_cr4{};
         std::uint64_t guest_ia32_efer{};
         std::uint64_t entry_controls{};
+        std::uint64_t guest_cr3{};
     } unhandled_exit{};
 
     /**

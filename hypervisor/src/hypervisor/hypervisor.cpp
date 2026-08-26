@@ -5470,6 +5470,7 @@ void hypervisor::on_unhandled_exit(arch::x86_64::vmx::exit_reason reason)
     record.guest_cr4 = vmcs.guest_cr4();
     record.guest_ia32_efer = vmcs.guest_ia32_efer();
     record.entry_controls = vmcs.vm_entry_controls();
+    record.guest_cr3 = vmcs.guest_cr3();
 
     // Written last, so a debugger that finds this set knows the rest of
     // the record is complete rather than half filled in.
