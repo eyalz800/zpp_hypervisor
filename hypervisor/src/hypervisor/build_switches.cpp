@@ -264,28 +264,6 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // are not comparable.
         ' ', 'w', 'i', 'n', 'd', 'o', 'w', 't', 'p', 'r', '=',
         digit(nested_vmx::window_on_tpr),
-        // The corrected form of the switch above. A correctness field
-        // for the same reason it is: on, the interrupt window is
-        // withheld while the priority blocks the vector and handed back
-        // at the drop the processor reports, so the level above is
-        // woken at a different moment and two runs that differ in it
-        // are not comparable.
-        //
-        // It is in the manifest from the first commit that has it,
-        // which is the whole lesson of the field above - that one had
-        // three of its four edits, and the cache reading ON was taken
-        // as proof for a switch nobody had built.
-        ' ', 'd', 'r', 'o', 'p', '=',
-        digit(nested_vmx::deliver_on_drop),
-        // The accounting behind it. A *tuning* field rather than a
-        // correctness one - it only counts - but it costs a guest read
-        // and a VMREAD per second-level entry, so a run with it on is
-        // slower than one without and the two should not be compared
-        // for rate. Read it as "were the four drop counters even
-        // compiled in": all four reading zero means this is 0, not
-        // that nothing was dropped.
-        ' ', 'd', 'r', 'o', 'p', 'c', 'n', 't', '=',
-        digit(nested_vmx::count_dropped_requests),
         // Clears the notification flag on a VTL1 entry, so the secure
         // kernel works instead of yielding. A deliberate lie to the
         // guest, so a run with it on describes a different machine.

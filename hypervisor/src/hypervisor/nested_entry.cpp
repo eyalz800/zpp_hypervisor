@@ -2054,83 +2054,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             }
         }
 
-        // **The same decision, taken once, from the byte this entry
-        // will actually run under.** See `nested_vmx::deliver_on_drop`.
-        //
-        // `window_on_tpr` above strips the interrupt window against
-        // `l2_entry_priority`, which was read at the *previous* entry,
-        // and then decides the threshold here against `entry_vtpr`,
-        // read from the virtual-APIC page a moment ago. When the
-        // priority fell between the two - which is exactly the
-        // transition the whole mechanism waits for - the first says
-        // "blocked, strip it" and the second says "already below,
-        // do not arm it", and the entry is made with neither. That is
-        // `window_threshold_withheld`, and it is a request dropped
-        // rather than deferred.
-        //
-        // Here `primary` has not been written to vmcs02 yet - that
-        // happens some three hundred lines below - so one read decides
-        // both, and the two cannot disagree.
-        //
-        // Note what is *not* changed: the window still comes from
-        // vmcs12 alone, so this only ever removes a window the level
-        // above asked for and never manufactures one.
-        if constexpr (nested_vmx::deliver_on_drop) {
-            constexpr std::uint8_t dispatch_class = 0x20;
-
-            // The vector's own priority class, which is what the
-            // threshold has to be. KVM computes the identical
-            // quantity in `vmx_update_cr8_intercept` -
-            // `.references/kvm/vmx.c:6728`, `tpr_threshold = (irr ==
-            // -1 || tpr < irr) ? 0 : irr` over an `irr` that
-            // `update_cr8_intercept` has already shifted down by four
-            // (`.references/kvm/x86.c:10193`).
-            constexpr std::uint64_t dispatch_threshold = 0x2f >> 4;
-
-            if (cpu < max_cpus) {
-                auto asked =
-                    0 != (primary & primary_interrupt_window);
-
-                // A priority this VMM could not read admits
-                // everything, so an unreadable page keeps the window
-                // rather than withholding it. Failing safe here means
-                // leaving the level above exactly the mechanism it
-                // asked for.
-                auto blocked =
-                    entry_vtpr_read && (dispatch_class <= entry_vtpr);
-
-                if (asked && blocked) {
-                    // Withheld, and replaced. The threshold is armed
-                    // over a priority known to be at or above the
-                    // class, so SDM 29.2.1.1's check - bits 3:0 of the
-                    // threshold not greater than bits 7:4 of VTPR,
-                    // `.references/sdm.txt:202124` - holds by
-                    // construction and needs no second test.
-                    //
-                    // Only where the level above set the TPR shadow
-                    // and left the threshold at zero, so nothing of
-                    // its own is overwritten. `on_l2_exit` puts
-                    // `nested_tpr_threshold` back at the drop.
-                    if ((0 != (primary & primary_tpr_shadow)) &&
-                        (0 == tpr_threshold12)) {
-                        primary &= ~primary_interrupt_window;
-                        threshold02 = dispatch_threshold;
-                        this->window_threshold_armed[cpu] = true;
-                        this->window_deferred_count[cpu] += 1;
-                    } else {
-                        this->window_threshold_refused[cpu] += 1;
-                    }
-                } else {
-                    // The priority admits the vector on this entry, so
-                    // the window the level above asked for is the
-                    // thing that delivers it and is left alone. Any
-                    // threshold of this VMM's is stale from here on:
-                    // `threshold02` already holds vmcs12's own.
-                    this->window_threshold_armed[cpu] = false;
-                }
-            }
-        }
-
         write_vmcs02_control(cpu, field::tpr_threshold, threshold02);
 
         // A histogram of what the guest hypervisor arms, because the
@@ -3430,8 +3353,7 @@ bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
         // priority came down. See `window_threshold_armed`; without this
         // the exit would be reflected to a level above that never set a
         // threshold and cannot account for it.
-        if constexpr (nested_vmx::window_on_tpr ||
-                      nested_vmx::deliver_on_drop) {
+        if constexpr (nested_vmx::window_on_tpr) {
             return (cpu < max_cpus) && this->window_threshold_armed[cpu];
         } else {
             return false;
@@ -9753,89 +9675,6 @@ hypervisor::on_l2_exit(std::size_t cpu,
         }
     }
 
-    // The same drop, answered by **giving the window here** instead of
-    // flagging it for a rebuild. See `nested_vmx::deliver_on_drop`.
-    //
-    // This is the defect that made `window_on_tpr` deliver eleven of
-    // 411,669. That path sets `window_armed_on_drop` and returns
-    // `handled`, and an exit this VMM handles is resumed straight into
-    // the second-level guest - `build_vmcs02` runs only from
-    // `nested_vmx.cpp`'s VMLAUNCH and VMRESUME handling, which needs
-    // the level above to run first. So at the one instant the guest's
-    // priority admits the vector, vmcs02 carries no interrupt window
-    // (it was stripped while the priority was up) and the threshold has
-    // just been taken back down. Nothing will exit. The guest runs on
-    // with the deferred call still queued until something unrelated
-    // happens to be reflected, and the moment is gone.
-    //
-    // KVM arms it in the live VMCS and does nothing else:
-    // `vmx_enable_irq_window` is `exec_controls_setbit(to_vmx(vcpu),
-    // CPU_BASED_INTR_WINDOW_EXITING)` (`.references/kvm/vmx.c:4937`),
-    // and `kvm_check_and_inject_events` calls it again on every entry
-    // while `kvm_cpu_has_injectable_intr` still holds
-    // (`.references/kvm/x86.c:10445`). The vector is never consumed by
-    // a failed attempt - `kvm_apic_has_interrupt` only reads the
-    // request register (`.references/kvm/lapic.c:2934`) - so the cost
-    // of being early is a retry rather than a lost interrupt.
-    //
-    // Through `write_vmcs02_control` rather than a bare VMWRITE, so the
-    // control cache agrees with the field. A direct write here would
-    // leave the cache holding the stripped value, and the next
-    // `build_vmcs02` computing the same stripped value would *elide*
-    // its write - so the window would survive into an entry that meant
-    // to withhold it, silently and only sometimes.
-    if constexpr (nested_vmx::deliver_on_drop) {
-        if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
-            (basic_reason::tpr_below_threshold == reason.basic())) {
-            this->window_threshold_armed[cpu] = false;
-            this->window_granted_on_drop[cpu] += 1;
-
-            // The threshold back down first, for the reason the branch
-            // above gives at length: left standing over a priority that
-            // has now fallen below it, it is a VM-entry consistency
-            // check (SDM 29.2.1.1, `.references/sdm.txt:202124`) and
-            // the entry is refused outright.
-            write_vmcs02_control(cpu,
-                                 field::tpr_threshold,
-                                 this->nested_tpr_threshold[cpu]);
-            this->window_threshold_disarmed[cpu] += 1;
-
-            // And the window, but only if the level above is still
-            // waiting for one. It has not run since the withholding,
-            // so this is expected to be true every time - and it is
-            // read rather than assumed, because a window this VMM
-            // manufactures is one `l1_wants_l2_exit` would decline
-            // (`int_window_stale`) and the ordinary dispatcher would
-            // then be handed an exit it has no case for.
-            constexpr auto primary_field =
-                field::primary_processor_based_vm_execution_controls;
-
-            auto primary12 = this->guest_vmcs12[cpu].read(primary_field);
-
-            if (0 != (primary12 & primary_interrupt_window)) {
-                auto primary02 = this->vmcs.read(primary_field);
-
-                write_vmcs02_control(
-                    cpu,
-                    primary_field,
-                    arch::x86_64::vmx::adjust_msr(
-                        this->cached_vmx_msr(
-                            arch::x86_64::vmx::msr::
-                                true_processor_based_controls),
-                        primary02 | primary_interrupt_window));
-
-                this->window_armed_at_drop[cpu] += 1;
-            } else {
-                this->window_armed_at_drop_refused[cpu] += 1;
-            }
-
-            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
-
-            advance_rip = false;
-            return l2_exit_outcome::handled;
-        }
-    }
-
     if (l0_wants_l2_exit(cpu, reason, context)) {
         this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
         return l2_exit_outcome::deferred;
@@ -11366,53 +11205,6 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 (context.rax & 0xffffffff) | (context.rdx << 32);
 
             auto vtpr = record_interrupt_request(cpu, command);
-
-            // The ask half of the drop account, recorded whatever this
-            // VMM then does with the write. See
-            // `nested_vmx::count_dropped_requests`.
-            //
-            // The two spellings of "me" are the ones established
-            // below and measured there: destination shorthand 01, and
-            // shorthand 00 with a physical destination of APIC id 0,
-            // which is what this guest actually writes on every one of
-            // 297,465 recorded commands. Anything else is another
-            // processor's and not this account's.
-            //
-            // Only vectors below the dispatch class, because the whole
-            // question is a vector the priority can block. A clock
-            // vector at class 13 is admitted at almost every priority
-            // and has never been the one going missing.
-            if constexpr (nested_vmx::count_dropped_requests) {
-                constexpr std::uint64_t shorthand_mask = 3ull << 18;
-                constexpr std::uint64_t shorthand_self = 1ull << 18;
-                constexpr std::uint64_t destination_shift = 32;
-                constexpr std::uint64_t priority_class = 4;
-                constexpr std::uint64_t dispatch_class = 0x2f >> 4;
-
-                auto shorthand = command & shorthand_mask;
-                auto destination = command >> destination_shift;
-                auto vector = command & 0xff;
-
-                auto to_self = (shorthand_self == shorthand) ||
-                               ((0 == shorthand) && (0 == destination));
-
-                if ((cpu < max_cpus) && to_self && (0 != vector) &&
-                    ((vector >> priority_class) <= dispatch_class)) {
-                    this->pending_vector_asked[cpu] += 1;
-
-                    if (0 != this->pending_vector_now[cpu]) {
-                        // Already in the level above's request
-                        // register, so this is architecturally the
-                        // same request - SDM 12.8.4 - and counting it
-                        // as a second one is how `asked` against
-                        // `delivered` came to look like a loss.
-                        this->pending_vector_coalesced[cpu] += 1;
-                    } else {
-                        this->pending_vector_now[cpu] =
-                            static_cast<std::uint8_t>(vector);
-                    }
-                }
-            }
 
             // Held until the guest's own priority allows it. See
             // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the
