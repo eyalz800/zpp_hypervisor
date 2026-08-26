@@ -52759,3 +52759,19 @@ memory rather than the guest's. A far jump pushes nothing, so it
 should not matter, but a guest whose stack pointer is one of our
 addresses is worth explaining rather than assuming.
 
+### Correction: the RSP in that record is ours, and it is supposed to be
+
+The entry above flagged `RSP 0x6940c400` at the fault as "inside this
+module's memory rather than the guest's" and asked for it to be
+explained. It is explained: **`context.rsp` is not the guest's stack
+pointer.** The guest's lives in the VMCS field `guest_rsp`; the
+context structure holds what the assembly entry stub saved, which is
+this VMM's own host stack. The value is exactly what it should be and
+there is nothing to explain.
+
+Worth keeping because the mistake is easy to repeat: the exit context
+and the guest state are two different things, and only some registers
+appear in both. The general-purpose registers are the context's; RSP,
+RIP, RFLAGS, CR0/3/4, the segments and the descriptor tables are the
+VMCS's.
+
