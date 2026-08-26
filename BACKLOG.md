@@ -52549,3 +52549,40 @@ halted processor's return address survives what the log does not**,
 and `RSP` plus `llvm-symbolizer` against the *matching* ELF answered in
 one read what a rebuilt instrument would have cost a boot.
 
+### The entry-failure record, read in full
+
+Read at the singleton plus the DWARF member offset. **The field
+alignment below was worked out by hand and is the weakest link -
+verify it from DWARF before building on it**, since my first reading
+of the same record was off by one and made `entry_controls` look like
+zero:
+
+    entry_controls    0x91ff        bit 15 load_ia32_efer SET,
+                                    bit 9 ia_32e_mode_guest CLEAR
+    guest_cr0         0x80050033    PE=1, PG=1
+    guest_cr4         0x352e78      PAE=1, VMXE=1, bit 17 PCIDE SET
+    guest_rflags      0x46
+    guest_rip         0x16fe
+    cs 0x30 base 0 rights 0xc09b    present, 32-bit code
+    cpu 1, virtual_processor 2, from_trampoline 1, start_up_vector 1
+
+Two readings I had to correct while doing this, both mine:
+
+- I first said bit 9 was set and called it the contradiction. It is
+  not: `0x91ff >> 9` is `0x48`, even. What is set at the top is bit
+  15, `load_ia32_efer` - the EFER fix working as intended.
+- The record has more fields than the six I read the first time, and
+  reading six of a seventeen-field record gave `entry_controls 0`,
+  which looked like a finding and was an artefact of stopping early.
+
+**The live suspect is `CR4.PCIDE`**, which the SDM permits only in
+IA-32e mode, set here while the IA-32e control is clear. That alone
+is an invalid guest state. `apply_start_up` writes CR4 as VMXE only,
+so a CR4 of `0x352e78` was either written by the guest's own stub or
+leaked in from the host or the boot processor - and a host CR4
+reaching an application processor's guest state would be the whole
+bug.
+
+Not yet confirmed. Every other SDM 27.3.1 field needs checking too,
+which is what the running audit is for.
+
