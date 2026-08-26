@@ -51184,3 +51184,86 @@ this, and forty seconds later it was somewhere else entirely. Sampling
 a processor three times over ten seconds does not establish that it is
 stuck.
 
+## Three parallel audits, two refuted on the machine, one that explains everything
+
+### Refuted: the second-level start-up park is not where the time goes
+
+An audit of every root-mode spin in the tree argued that
+`wait_for_l2_start_up_ipi` (`hypervisor.cpp:3508`) prevents its own
+release: two things end that park and only one is an IPI, the other
+being vmcs12's activity state going back to active - which the *guest
+hypervisor* writes, and it cannot run while the processor spins. The
+arithmetic was persuasive: 200,000 PAUSEs is ~166 ms, one exit a pass
+is ~6 a second, which is exactly what was measured, and PAUSE in
+non-root trips L0's pause-loop exiting into `kvm_vcpu_on_spin` - host
+work charged to stime, invisible to our exit count.
+
+**It does not happen.** The same audit named the counter that settles
+it, `l2_start_up_waits[cpu]`, now logged every 64th pass. Over a full
+boot the line never printed once, so that park is never entered.
+Recorded because the reasoning was sound and the conclusion wrong -
+and because the audit supplied its own falsifier, which is what made
+one boot enough.
+
+`ZPP_L2_STARTUP_SPIN` is kept (default ON, current behaviour) since
+the argument still holds *if* that park is ever entered.
+
+### Refuted: the processor is not spinning in our code
+
+A second audit found that `decode_guest_instruction` re-acquires the
+non-recursive `mapping_window_lock` through
+`translate_guest_linear` -> `l2_physical_to_l1` -> `read_guest_physical`,
+which would deadlock a processor in root operation at full CPU with no
+exits - exactly the measured signature.
+
+**The application processor's instruction pointer is never in this
+module.** Sampled repeatedly it reads Windows kernel or firmware
+addresses, never the `0x67...` range this module occupies. So the spin
+is in the guest. The lock recursion may still be real and is kept as a
+defect below; it is not this symptom.
+
+### What the guest is actually doing, proven against its own image
+
+The polled address was **wrong in the record above, by 0x5000**. The
+load is `mov eax,[rip+0x46baa9]` at RVA `0xb5b1e1`, so the target is
+`0xb5b1e7 + 0x46baa9 = 0xfc6c90`, not `0xfc1c90`. **The "reads zero"
+measurement was taken from an unrelated page and proves nothing** -
+discard it.
+
+At `0xfc6c90` is **`KiBarrierWait`**, in section `ALMOSTRO`, four
+bytes. `KiInitializeKernel+0x8b1` genuinely is inside that function.
+An image-wide cross-reference finds seven references and the site in
+question is the *only* spin-read: `KeStartAllProcessors` raises the
+barrier and later clears it and calls `KeWakeAddressAll`. **So the
+application processor is waiting to be released by the boot
+processor**, and this is unambiguously the waiting side.
+
+And the reason it burns CPU without exiting is in the loop's own
+structure. All three of its non-`pause` arms are gated on
+`HvlEnlightenments & 0x40`, Windows' Hyper-V enlightenment mask.
+This VMM advertises `ZppZppZppZpp` and no Hyper-V interface, so that
+word is zero, and therefore:
+
+- `HvlNotifyLongSpinWait` - a `vmcall`, which would exit - is never
+  reached.
+- `KeHaltOnAddress` - which ends in `HalProcessorIdle`, a real `hlt`,
+  which would also exit - is never reached either.
+
+**The loop degenerates to a bare `pause` spin containing nothing that
+exits.** Full CPU burn, no exits, no `cpuid`, no `hlt`. That is the
+measured signature exactly, and it is the guest behaving correctly
+given what we tell it.
+
+### The deadline that makes this fatal
+
+`HalpInterruptWaitForProcessorStartUp` polls in 1 ms steps and returns
+3 if the processor started but took **400 ms or more**;
+`KeStartAllProcessors` turns a 3 into `KeBugCheckEx(0x1DF, ...)`. A
+10-second no-show returns a different code and merely leaves the start
+loop. **Slow is fatal and absent is survivable**, which inverts the
+intuition this investigation has been running on.
+
+`HalpInterruptLastProcessorStartupInMs` at RVA `0xfc320c` holds the
+measured figure for the last start and is readable from the monitor.
+That is the number to get next.
+
