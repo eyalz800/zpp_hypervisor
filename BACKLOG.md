@@ -53245,3 +53245,61 @@ shadowing works. `note_shadowing_ineffective` returns immediately when
 shadowing is not enabled, so the counter is zero in precisely the case
 it exists to report.
 
+## ZPP_NESTED_VID: a clean negative, for one boot
+
+Predicted before the boot so it could fail: the TPR threshold census
+shifts off zero, `int-window` collapses, `0x2f` injections rise. None
+happened, and the dump says why in one line:
+
+    virtual_interrupt_delivery     no
+
+**Hyper-V declined the offer.** The threshold census is unmoved -
+`threshold 0` on 99.7% of 700,518 entries - and the exit profile is
+identical to the run before it. So the hypothesis that Hyper-V adapted
+to the polling path *because* virtual-interrupt delivery was absent is
+not refuted, but offering it changes nothing: it does not ask for it
+even when it is there. One boot, cleanly spent, candidate eliminated.
+
+## ZPP_WINDOW_ON_TPR moved the machine more than anything since the INVVPID fix
+
+The dump named this switch itself, which is worth recording as a
+property of the instrument rather than of the bug:
+
+    *** LIVELOCK SHAPE: the level above is being woken by a window it
+    cannot deliver into, and re-arms it on the next entry. One
+    instruction retired per round trip. ZPP_WINDOW_ON_TPR is the switch
+    aimed at this ***
+
+**Two variables, not one, and the build forces it.**
+`static_assert(!(window_on_tpr && deliver_on_drop))` - they drive the
+same per-processor state - so `drop` went 1 -> 0 in the same build.
+Stated rather than hidden, because it weakens what a single comparison
+can conclude.
+
+| | before | after |
+|---|---|---|
+| `int-window` exits | 151,649 (1.6%) | **1,604 (0.0%)** |
+| distinct second-level entry RIPs | 8 | **1** |
+| `vmcall` share | 0.9% | 6.3% |
+| `vmptrld` share | 0.5% | 10.6% |
+| second-level entries per second | ~3,300 | ~1,100 |
+| thread | `ExpWorkerThread` | the **IDLE** thread |
+
+The interrupt-window storm is gone - a hundredfold - which is the
+prediction met. The entry set collapsing from eight instruction
+pointers to **one**, at the hypercall page, is a change of kind: the
+clock loop this file has described for several sessions is not what the
+guest is doing any more.
+
+**What that means is not yet settled, and the two readings are
+opposite.** A guest on its IDLE thread making fewer entries is either a
+machine that finished booting and is idling correctly, or a tighter
+livelock through a single hypercall. The instrument that would tell
+them apart stopped: the thread sampler is frozen at **5 samples** while
+exits climbed 3.1 M -> 5.5 M, so whatever arms it is not firing on this
+path - which is the warning about `sample_guest_thread` being armed on
+a particular exit reason, now demonstrated rather than suspected.
+
+The reading that settles it is the screen, and the screen is a
+passed-through GPU.
+
