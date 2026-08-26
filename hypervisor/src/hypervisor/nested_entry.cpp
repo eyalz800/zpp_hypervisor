@@ -26,13 +26,22 @@ using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
 using field = arch::x86_64::vmx::vmcs::field;
 
 /**
- * The recovery-context field the entry stubs read is CR3-target value 0.
- * asm.h spells the encoding literally, because inline assembly cannot see
- * a constant expression; this is what keeps the two spellings honest.
+ * The slot field the entry stubs read is the VPID, and the table they
+ * index has room for every processor. asm.h spells both literally,
+ * because inline assembly cannot see a constant expression; this is what
+ * keeps the spellings honest.
+ * @{
  */
-static_assert(arch::x86_64::vmx::nested_entry_recovery_field ==
-                  field::cr3_target_value_0,
+static_assert(arch::x86_64::vmx::nested_entry_slot_field == field::vpid,
               "The nested entry stubs and the VMCS field disagree.");
+
+static_assert(hypervisor::max_cpus <=
+                  arch::x86_64::vmx::nested_entry_recovery_slots,
+              "The nested entry recovery table is too small for the "
+              "processors this VMM adopts.");
+/**
+ * @}
+ */
 
 /**
  * The two fields the TPR shadow is carried in, checked against what a
@@ -527,8 +536,10 @@ constexpr field guest_state_fields[] = {
  * control, so what was last written is still there - unlike the guest
  * state fields next door, which it overwrites on every exit.
  *
- * And nothing writes them but `build_vmcs02`, which runs with vmcs02
- * current by construction. That is why the pin-based and primary
+ * And nothing writes them but `build_vmcs02` and `on_l2_exit`'s
+ * threshold disarm, both of which run with vmcs02 current by
+ * construction and both of which go through `write_vmcs02_control`, so
+ * the cache follows what they wrote. That is why the pin-based and primary
  * controls are **not** here even though they are controls: `resume.cpp`
  * and `local_apic.cpp` write them too, and the CR-access handler in
  * `exit_dispatch.cpp` writes the CR0 and CR4 read shadows, so for those
@@ -597,7 +608,14 @@ constexpr field control_fields[] = {
     field::io_bitmap_b,
     field::virtual_apic_address,
     field::tpr_threshold,
-    field::cr3_target_value_0,
+
+    // **`cr3_target_value_0` is deliberately absent, and so is the write
+    // that used to put the entry-failure recovery pointer there.** The
+    // field does not exist under the layer this VMM runs on - see
+    // `nested_entry_slot_field` in `asm.h` - so the write failed with
+    // VMfailValid every time and this list recorded it as done, which is
+    // what made it permanent. Nothing needs it now.
+
     field::cr3_target_count,
     field::tsc_offset,
     field::tsc_multiplier,
@@ -1174,7 +1192,20 @@ void hypervisor::write_vmcs02_control(std::size_t cpu,
             return;
         }
 
+        // **Only cache what was actually written.** A VMWRITE the layer
+        // below refuses is now reported rather than swallowed - see
+        // `vmcs_write_failures` - and caching a refused write is what
+        // made the entry-failure recovery pointer permanently absent
+        // instead of merely absent: the first attempt failed, the cache
+        // recorded it as done, and no later build ever tried again.
+        auto failures = arch::x86_64::vmx::vmcs_write_failures;
+
         this->vmcs.write(control, value);
+
+        if (failures != arch::x86_64::vmx::vmcs_write_failures) {
+            return;
+        }
+
         this->control_cache[cpu][i] = value;
         this->control_cache_valid[cpu][i] = true;
         this->control_writes_done[cpu] += 1;
@@ -1962,15 +1993,64 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // validation above is what stands in for KVM's kvm_vcpu_map.
         write_vmcs02_control(
             cpu, field::virtual_apic_address, virtual_apic12);
+
+        // **The virtual task priority this entry will actually see, read
+        // before anything decides a threshold against it.** It used to be
+        // sampled thirty lines below, after the threshold was written,
+        // and that ordering is what killed the processor under
+        // `window_on_tpr`: see the arming just below.
+        constexpr std::uint64_t virtual_task_priority = 0x80;
+        std::uint8_t entry_vtpr{};
+        auto entry_vtpr_read =
+            (cpu < max_cpus) && (0 != virtual_apic12) &&
+            read_guest_physical(
+                virtual_apic12 + virtual_task_priority,
+                std::span(reinterpret_cast<std::byte *>(&entry_vtpr),
+                          sizeof(entry_vtpr)));
+
         // The threshold this VMM armed for itself takes precedence
         // while it is armed; see `window_threshold_armed`. `2` is the
         // dispatch class, so the processor reports the moment the guest
         // drops below it.
+        //
+        // **And only while the priority this entry will see still admits
+        // it, which is a VM-entry check and not a nicety.** SDM 29.2.1.1,
+        // `.references/sdm.txt:202124`: "The following check is performed
+        // if the 'use TPR shadow' VM-execution control is 1 and the
+        // 'virtualize APIC accesses' and 'virtual-interrupt delivery'
+        // VM-execution controls are both 0: the value of bits 3:0 of the
+        // TPR threshold VM-execution control field should not be greater
+        // than the value of bits 7:4 of VTPR." Neither of those two
+        // controls is offered here - the note on `l2_entry_ppr` below
+        // establishes that for virtual-interrupt delivery - so the check
+        // applies, and SDM 29.7.7 (`.references/sdm.txt:203257`) does not
+        // rescue it: the immediate TPR-below-threshold exit it describes
+        // needs "virtualize APIC accesses" set.
+        //
+        // The armed threshold of 2 stays in vmcs02 across every entry
+        // that does not rebuild it, so the dangerous moment is the entry
+        // *after* the drop is reported - the guest is then below 0x20 by
+        // construction, which is why the exit fired. `on_l2_exit` takes
+        // the threshold back down there; this guard covers the other
+        // route, a rebuild while the flag is still set and the priority
+        // has already fallen.
+        //
+        // Under KVM this is not even a hardware fault to read afterwards:
+        // `nested.c:5074` turns a consistency check hardware caught on
+        // its merged VMCS into `nested_vmx_fail(vcpu,
+        // VMXERR_ENTRY_INVALID_CONTROL_FIELD)` for L1, which is a plain
+        // VMfail at the instruction after our VMLAUNCH.
         auto threshold02 = tpr_threshold12;
 
         if constexpr (nested_vmx::window_on_tpr) {
+            constexpr std::uint8_t dispatch_class = 0x20;
+
             if ((cpu < max_cpus) && this->window_threshold_armed[cpu]) {
-                threshold02 = 2;
+                if (entry_vtpr_read && (dispatch_class <= entry_vtpr)) {
+                    threshold02 = 2;
+                } else {
+                    this->window_threshold_withheld[cpu] += 1;
+                }
             }
         }
 
@@ -2001,22 +2081,17 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // `interrupt_request_vtpr`.
         this->nested_virtual_apic_address[cpu] = virtual_apic12;
 
-        // And sampled here, on the page about to be entered, which is
+        // And recorded here, from the sample the threshold decision
+        // above already took on the page about to be entered - which is
         // the only place that is the right page. See `l2_entry_vtpr`.
         if ((cpu < max_cpus) && (0 != virtual_apic12)) {
-            constexpr std::uint64_t virtual_task_priority = 0x80;
-            std::uint8_t vtpr{};
-
-            if (read_guest_physical(
-                    virtual_apic12 + virtual_task_priority,
-                    std::span(reinterpret_cast<std::byte *>(&vtpr),
-                              sizeof(vtpr)))) {
-                this->l2_entry_vtpr[cpu][vtpr] += 1;
+            if (entry_vtpr_read) {
+                this->l2_entry_vtpr[cpu][entry_vtpr] += 1;
             }
 
             // Carried to where the event this entry will actually
             // carry is in hand. See `l2_low_priority_no_event`.
-            this->l2_entry_priority[cpu] = vtpr;
+            this->l2_entry_priority[cpu] = entry_vtpr;
 
             // And the *processor* priority beside it, which is
             // **dead in this configuration** and is sampled to prove
@@ -2453,14 +2528,58 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // guest hypervisor's own link pointer is not consulted.
     write_vmcs02_control(cpu, field::vmcs_link_pointer, ~std::uint64_t{});
 
-    // Where a refused entry unwinds to. See asm.h: the stubs read this
-    // field because on a refusal nothing has been reloaded and there is no
-    // other per-processor thing left addressable.
-    write_vmcs02_control(cpu,
-                         field::cr3_target_value_0,
-                         reinterpret_cast<std::uint64_t>(
-                             &this->nested_entry_recovery[cpu]));
+    // Where a refused entry unwinds to used to be written here, into
+    // CR3-target value 0. It is not any more: the stubs find it through
+    // the VPID below and a table in `asm.h`, because that field does not
+    // exist under the layer this VMM runs on and the write silently did
+    // nothing. See `nested_entry_slot_field`.
     write_vmcs02_control(cpu, field::cr3_target_count, 0);
+
+    // **The probe that says whether the old mechanism could ever have
+    // worked, once per processor.** It costs one VMWRITE and one VMREAD
+    // of a field nothing consults, on the first build only, and it is
+    // here rather than in a comment because the argument for that field
+    // read correctly for a year and was false on this machine.
+    //
+    // `recovery_field_usable` reading 0 with `recovery_field_probed` set
+    // is the finding; reading 1 falsifies it and the entry-failure fault
+    // this replaced has another cause.
+    if ((cpu < max_cpus) && !this->recovery_field_probed[cpu]) {
+        constexpr std::uint64_t probe = 0x5a5a'1234'5a5a'1234;
+        constexpr auto encoding =
+            static_cast<std::uint64_t>(field::cr3_target_value_0);
+
+        this->recovery_field_probed[cpu] = true;
+
+        // **The bare instructions, not `vmcs.write`/`vmcs.read`.** The
+        // VMCS field cache is write-through, so a cached read would
+        // answer with the value this probe just handed it and report
+        // success on a machine that discards the field - which is the
+        // exact shape of instrument this whole investigation was misled
+        // by. Going around the cache also leaves no entry behind for a
+        // field nothing else reads.
+        std::uint64_t back{};
+
+        auto wrote = arch::x86_64::vmx::vmwrite(encoding, probe);
+        auto read = arch::x86_64::vmx::vmread(encoding, &back);
+
+        this->recovery_field_readback[cpu] = back;
+        this->recovery_field_usable[cpu] =
+            (0 == wrote) && (0 == read) && (probe == back);
+
+        log("cpu {} cr3-target value 0 probe: vmwrite {} vmread {} read "
+            "back {} - the layer below {} the field",
+            cpu,
+            wrote,
+            read,
+            back,
+            this->recovery_field_usable[cpu] ? "keeps"
+                                             : "DISCARDS");
+
+        // Left as it was found, so nothing downstream inherits the
+        // probe's value on a machine that does keep it.
+        arch::x86_64::vmx::vmwrite(encoding, 0);
+    }
 
     // The exception bitmap is the bitwise or of what the guest hypervisor
     // wants to trap and what this VMM does, which is the merge KVM
@@ -9524,6 +9643,31 @@ hypervisor::on_l2_exit(std::size_t cpu,
             this->window_threshold_armed[cpu] = false;
             this->window_armed_on_drop[cpu] = true;
             this->window_granted_on_drop[cpu] += 1;
+
+            // **And take the threshold back down in vmcs02, here, now.**
+            // This exit fired because VTPR[7:4] fell below the 2 this VMM
+            // armed, and the entry that follows does not go through
+            // `build_vmcs02` - an exit this VMM handles is resumed
+            // straight into the second-level guest. So the threshold
+            // stays at 2 over a virtual task priority that is now below
+            // it, and that is a VM-entry consistency check: SDM 29.2.1.1,
+            // `.references/sdm.txt:202124`, quoted in full where the
+            // threshold is armed. The entry fails, and under KVM it comes
+            // back as a plain VMfail (`nested.c:5074`) into the entry
+            // stub's fall-through.
+            //
+            // Measured before this existed: `window_on_tpr` took the
+            // interrupt-window reflections from 1,500,914 to 3 and then
+            // the processor died in `nested_vmlaunch` with `#PF` at a
+            // tiny address - the first success of the mechanism was what
+            // killed it.
+            //
+            // vmcs02 is current here, which is the same fact the RIP
+            // note above turns on.
+            write_vmcs02_control(cpu,
+                                 field::tpr_threshold,
+                                 this->nested_tpr_threshold[cpu]);
+            this->window_threshold_disarmed[cpu] += 1;
             this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
 
             advance_rip = false;

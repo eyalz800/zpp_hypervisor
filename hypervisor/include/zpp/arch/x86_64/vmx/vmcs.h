@@ -35,6 +35,31 @@ inline constinit std::uint64_t vmcs_reads_taken{};
 inline constinit std::uint64_t vmcs_writes_taken{};
 
 /**
+ * The accesses the processor - or the layer below it - refused, and the
+ * first field each refusal named.
+ *
+ * **These used to be `__builtin_trap()` and that was the wrong answer to
+ * the wrong question.** The trap was written for VMfailInvalid, "no
+ * current VMCS", which really is a bug here; `jc` in `asm.h` meant it
+ * never saw the other failure mode. Now that VMfailValid is reported,
+ * the honest response to it is *not* a trap: a VMWRITE the layer below
+ * models no field for is a fact about that layer, and a processor that
+ * traps on it is a dead processor with no log line - which is precisely
+ * the failure the nested entry stubs were fixed for.
+ *
+ * A non-zero count here is never normal. `vmcs_*_failed_field` holds the
+ * first encoding refused, which is enough to name it.
+ * @{
+ */
+inline constinit std::uint64_t vmcs_read_failures{};
+inline constinit std::uint64_t vmcs_write_failures{};
+inline constinit std::uint64_t vmcs_read_failed_field{};
+inline constinit std::uint64_t vmcs_write_failed_field{};
+/**
+ * @}
+ */
+
+/**
  * Which fields those accesses name, as a table rather than a ring.
  *
  * The count above says 54 reads an exit and the guest-state deferral
@@ -861,7 +886,14 @@ public:
         }
 
         if (0 != vmwrite(field, value)) {
-            __builtin_trap();
+            // Recorded rather than trapped. See `vmcs_write_failures`.
+            if (0 == vmcs_write_failures) {
+                vmcs_write_failed_field =
+                    static_cast<std::uint64_t>(field);
+            }
+
+            vmcs_write_failures = vmcs_write_failures + 1;
+            return;
         }
 
         // **Written through, honouring the field's width.** This used
@@ -985,7 +1017,17 @@ public:
 
                 std::uint64_t fresh{};
                 if (0 != vmread(field, &fresh)) {
-                    __builtin_trap();
+                    // Recorded rather than trapped, and **not cached**: a
+                    // field the layer below refuses must not be answered
+                    // from a tag that says it was read. See
+                    // `vmcs_read_failures`.
+                    if (0 == vmcs_read_failures) {
+                        vmcs_read_failed_field =
+                            static_cast<std::uint64_t>(field);
+                    }
+
+                    vmcs_read_failures = vmcs_read_failures + 1;
+                    return 0;
                 }
 
                 current.tag[slot] = tag;
@@ -996,7 +1038,14 @@ public:
 
         std::uint64_t value{};
         if (0 != vmread(field, &value)) {
-            __builtin_trap();
+            // Recorded rather than trapped. See `vmcs_read_failures`.
+            if (0 == vmcs_read_failures) {
+                vmcs_read_failed_field =
+                    static_cast<std::uint64_t>(field);
+            }
+
+            vmcs_read_failures = vmcs_read_failures + 1;
+            return 0;
         }
         return value;
     }

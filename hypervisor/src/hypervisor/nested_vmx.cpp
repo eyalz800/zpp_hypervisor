@@ -2255,6 +2255,22 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
 
     arch::x86_64::capture_context(&this->nested_entry_recovery[cpu]);
 
+    // Published *after* the capture, so the slot the entry stubs index is
+    // null until the context behind it is real - and they test it. This
+    // is where the recovery point's address lives now; it used to be
+    // written into CR3-target value 0 of vmcs02, a field the layer below
+    // does not model, so every stub that read it back got the
+    // second-level guest's register instead. See `nested_entry_slot_field`
+    // in `zpp/arch/x86_64/vmx/asm.h`.
+    //
+    // Idempotent and unconditional rather than once: it is one store, and
+    // a "once" flag is one more thing that can be wrong on the path that
+    // has no other way of reporting anything.
+    if (cpu < arch::x86_64::vmx::nested_entry_recovery_slots) {
+        arch::x86_64::vmx::zpp_vmx_nested_entry_recovery[cpu] =
+            &this->nested_entry_recovery[cpu];
+    }
+
     if (this->nested_entry_failed[cpu].load(std::memory_order_relaxed)) {
         // Arrived from zpp_vmx_nested_entry_failure, which has already put
         // this VMM's own VMCS back and recorded what the processor said.
@@ -2743,6 +2759,8 @@ void hypervisor::on_nested_entry_failure(arch::x86_64::context * recovery)
     if ((0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
         this->running_l2[cpu] = false;
+        this->nested_entry_refusals[cpu] =
+            this->nested_entry_refusals[cpu] + 1;
         this->nested_entry_error[cpu] = refusal;
         this->nested_entry_failed[cpu].store(true,
                                              std::memory_order_relaxed);

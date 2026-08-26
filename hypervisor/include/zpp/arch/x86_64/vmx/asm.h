@@ -151,12 +151,40 @@ inline int __attribute__((naked)) vmclear_raw(void *)
     )!!");
 }
 
+/**
+ * **`jbe`, not `jc`, and the difference is a whole class of silent
+ * failure.**
+ *
+ * SDM 31.2 defines two failure modes and they set *different* flags:
+ * VMfailInvalid - no current VMCS - sets CF, while VMfailValid - a
+ * current VMCS and an error number in `vm_instruction_error` - sets **ZF
+ * and leaves CF clear**. `jc` tests CF alone, so every VMfailValid was
+ * reported to the caller as success.
+ *
+ * What that cost, measured: this VMM runs as KVM's guest, and KVM's
+ * model of a VMCS has no CR3-target values at all - `vmcs12.h:85` names
+ * them `natural_width dead_space[4]`, "Last remnants of
+ * cr3_target_value[0-3]", and `vmcs12.c:74`'s field table has an entry
+ * for `CR3_TARGET_COUNT` and none for `CR3_TARGET_VALUE0`, so
+ * `get_vmcs12_field_offset` answers -ENOENT and `handle_vmwrite` returns
+ * `nested_vmx_fail(vcpu, VMXERR_UNSUPPORTED_VMCS_COMPONENT)`. That is a
+ * VMfailValid. With `jc` the write reported success, the field was never
+ * set, and the matching VMREAD in the nested entry stubs below failed the
+ * same way - leaving its destination register holding **the
+ * second-level guest's** value, because a failed VMREAD does not write
+ * its destination and the stub is entered with the guest's registers
+ * loaded. The stub then dereferenced it: `#PF`, error 0, at a tiny and
+ * varying address.
+ *
+ * `jbe` is CF or ZF, which is exactly "VMfailInvalid or VMfailValid".
+ * @{
+ */
 inline int __attribute__((naked)) vmread(std::uint64_t, void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         vmread [rsi], rdi
-        jc vmread_fail
+        jbe vmread_fail
         mov eax, 0
         ret
     vmread_fail:
@@ -170,7 +198,7 @@ inline int __attribute__((naked)) vmwrite(std::uint64_t, std::uint64_t)
     asm(R"!!(
         .intel_syntax noprefix
         vmwrite rdi, rsi
-        jc vmwrite_fail
+        jbe vmwrite_fail
         mov eax, 0
         ret
     vmwrite_fail:
@@ -178,6 +206,9 @@ inline int __attribute__((naked)) vmwrite(std::uint64_t, std::uint64_t)
         ret
     )!!");
 }
+/**
+ * @}
+ */
 
 /**
  * The invalidation type each of these takes is a *register* operand rather
@@ -259,30 +290,58 @@ inline void __attribute__((naked)) vmresume()
 }
 
 /**
- * Where the two entries below park the address of the context to unwind
- * to when a VM entry into a second-level guest fails.
+ * Where the two entries below find the context to unwind to when a VM
+ * entry into a second-level guest fails.
  *
- * A VMCS field rather than a register or a global, and the choice is
- * forced. On a failed VM entry no VM exit happens, so nothing has been
- * reloaded: every general purpose register still holds what the entry was
- * about to give the guest, RSP names a guest stack the host page table
- * does not map, and the only per-processor thing still addressable is the
- * VMCS that was current. So the recovery point has to come out of the
- * VMCS.
+ * On a failed VM entry no VM exit happens, so nothing has been reloaded:
+ * every general purpose register still holds what the entry was about to
+ * give the guest, RSP names a guest stack the host page table does not
+ * map, and the only per-processor thing still addressable is the VMCS
+ * that was current. So *which processor this is* has to come out of the
+ * VMCS; the address of its recovery context does not have to, and used
+ * to, which is the bug this shape replaces.
  *
- * The CR3-target values are the fields with nothing in them. SDM 25.6.7
- * makes the list consulted only "if the CR3-target count is n, ... the
- * first n CR3-target values", and this VMM reports a CR3-target count of
- * zero through IA32_VMX_MISC and writes zero into the field - so no
- * processor ever reads them, and no guest hypervisor is offered the list.
- * They are natural width, which a pointer needs, where the other spare
- * field of the right shape is 32 bits.
+ * **It was CR3-target value 0, and that field does not exist under the
+ * layer this VMM runs on.** The argument for it was sound on bare metal
+ * - SDM 25.6.7 makes the list consulted only "if the CR3-target count is
+ * n, ... the first n CR3-target values" and this VMM writes a count of
+ * zero, so no processor reads it - and it is wrong here twice over. The
+ * number of CR3-target values a processor supports is IA32_VMX_MISC
+ * [24:16], and KVM reports zero, so the field is not *supported*; and
+ * KVM's own model of a VMCS has deleted it outright - `vmcs12.h:85`
+ * `natural_width dead_space[4]`, "Last remnants of
+ * cr3_target_value[0-3]", with no entry in `vmcs12.c`'s field table. So
+ * every VMWRITE of it failed with VMfailValid(12) and every VMREAD of it
+ * failed the same way, silently, because of the `jc` above.
+ *
+ * The VPID is the replacement because this VMM already depends on it
+ * unconditionally in both directions: `build_vmcs02` writes `cpu + 1`
+ * into vmcs02 and `on_nested_entry_failure` reads it back to learn which
+ * processor it is on. It adds no capability this tree did not already
+ * require, which no other spare field could say.
+ *
+ * The table below turns that slot into a pointer, reached RIP-relatively
+ * so no register is needed to find it.
  *
  * Named here and spelled literally in the two stubs below, because inline
  * assembly cannot see a constant expression. Whoever changes one changes
- * both; nested_vmx.cpp asserts this is the encoding of CR3-target value 0.
+ * both; nested_entry.cpp asserts the encoding and the slot count.
+ * @{
  */
-constexpr std::uint64_t nested_entry_recovery_field = 0x6008;
+constexpr std::uint64_t nested_entry_slot_field = 0x0000;
+
+constexpr std::size_t nested_entry_recovery_slots = 32;
+
+// `used` and `retain` for the reason the two above them carry them: the
+// only reference is from inside the assembly below, which is not an
+// odr-use.
+extern "C" {
+[[gnu::used, gnu::retain]] inline constinit arch::x86_64::context *
+    zpp_vmx_nested_entry_recovery[nested_entry_recovery_slots]{};
+}
+/**
+ * @}
+ */
 
 /**
  * Where the recovery context's stack pointer sits inside it, which the
@@ -318,10 +377,21 @@ zpp_vmx_nested_entry_failure(arch::x86_64::context * recovery);
  * built out of a guest hypervisor's is something a guest asked for, and
  * has to come back with an answer.
  *
- * The recovery reads the context pointer out of the VMCS, moves onto the
- * host stack that context recorded, and calls. Nothing before that may
- * touch memory through RSP: it still names the guest's stack, which the
- * host page table does not map. VMREAD into a register touches none.
+ * The recovery reads this processor's slot out of the VMCS, indexes the
+ * table above for the context, moves onto the host stack that context
+ * recorded, and calls. Nothing before that may touch memory through RSP:
+ * it still names the guest's stack, which the host page table does not
+ * map. VMREAD into a register touches none, and the table is reached
+ * RIP-relatively.
+ *
+ * **Every step is checked, and reaching the park is a deliberate stop
+ * rather than a fault.** The previous shape trusted a VMREAD it did not
+ * test and dereferenced the register it was supposed to have written; a
+ * failed VMREAD leaves that register holding the second-level guest's
+ * value, so the recovery path - the one thing that turns a refused entry
+ * into an answer for the guest hypervisor - ended in `#PF` at whatever
+ * address the guest happened to have in RDI. A processor parked here says
+ * so; a processor that faulted here said nothing.
  * @{
  */
 inline void __attribute__((naked)) nested_vmlaunch()
@@ -329,8 +399,16 @@ inline void __attribute__((naked)) nested_vmlaunch()
     asm(R"!!(
         .intel_syntax noprefix
         vmlaunch
-        mov eax, 0x6008
+        xor eax, eax                 // The VPID, field 0x0000.
         vmread rdi, rax
+        jbe 1f                       // No answer: park, do not guess.
+        sub rdi, 1                   // The VPID is the slot plus one.
+        cmp rdi, 32
+        jae 1f
+        lea rsi, [rip + zpp_vmx_nested_entry_recovery]
+        mov rdi, [rsi + rdi * 8]
+        test rdi, rdi
+        jz 1f
         mov rsp, [rdi + 0x20]
         call zpp_vmx_nested_entry_failure
     1:  cli
@@ -344,8 +422,16 @@ inline void __attribute__((naked)) nested_vmresume()
     asm(R"!!(
         .intel_syntax noprefix
         vmresume
-        mov eax, 0x6008
+        xor eax, eax                 // The VPID, field 0x0000.
         vmread rdi, rax
+        jbe 1f                       // No answer: park, do not guess.
+        sub rdi, 1                   // The VPID is the slot plus one.
+        cmp rdi, 32
+        jae 1f
+        lea rsi, [rip + zpp_vmx_nested_entry_recovery]
+        mov rdi, [rsi + rdi * 8]
+        test rdi, rdi
+        jz 1f
         mov rsp, [rdi + 0x20]
         call zpp_vmx_nested_entry_failure
     1:  cli

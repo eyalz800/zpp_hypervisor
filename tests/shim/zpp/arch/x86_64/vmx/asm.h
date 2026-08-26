@@ -125,8 +125,14 @@ inline void nested_vmresume()
 {
 }
 
-constexpr std::uint64_t nested_entry_recovery_field = 0x6008;
+constexpr std::uint64_t nested_entry_slot_field = 0x0000;
+constexpr std::size_t nested_entry_recovery_slots = 32;
 constexpr std::size_t nested_entry_recovery_rsp_offset = 0x20;
+
+extern "C" {
+inline arch::x86_64::context *
+    zpp_vmx_nested_entry_recovery[nested_entry_recovery_slots]{};
+}
 
 extern "C" void zpp_vmx_entry_failed(std::uint64_t flags);
 extern "C" void

@@ -3270,6 +3270,19 @@ def main():
                "interrupted_samples", "interrupted_overflow",
                "stall_withheld_total", "stall_forced_total",
                "window_deferred_count", "window_granted_on_drop",
+               # The two ways the armed TPR threshold is taken back down.
+               # Left standing over a priority that has already fallen it
+               # is a VM-entry consistency check (SDM 29.2.1.1) and the
+               # entry is refused.
+               "window_threshold_disarmed", "window_threshold_withheld",
+               # Refused second-level entries that reached the recovery
+               # path at all, and the one-boot probe of the field that
+               # recovery pointer used to live in.
+               # `recovery_field_readback` is the whole answer: it holds
+               # 0x5a5a12345a5a1234 where the layer below keeps
+               # CR3-target value 0 and 0 where it discards it, which is
+               # what made every refusal a dead processor.
+               "nested_entry_refusals", "recovery_field_readback",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
                "quiet_samples", "quiet_overflow",

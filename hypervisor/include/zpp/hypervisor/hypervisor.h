@@ -7509,6 +7509,30 @@ private:
      * roughly tracking deferrals is the loop closing.
      */
     std::uint64_t window_granted_on_drop[max_cpus]{};
+
+    /**
+     * The two ways the armed threshold is *not* left standing, which is
+     * what stops it refusing the next VM entry.
+     *
+     * `disarmed` counts the drops the processor reported, where the
+     * threshold is written back down to the level above's own before the
+     * resume - see `on_l2_exit`. `withheld` counts rebuilds where the
+     * flag was still set and the priority had already fallen, so 2 would
+     * have been greater than VTPR[7:4] and the entry would have been
+     * refused outright.
+     *
+     * They read as a pair against `window_granted_on_drop`: `disarmed`
+     * should track it exactly, and a non-zero `withheld` says the other
+     * route is live too. Both reading zero while the guest boots means
+     * neither route was ever taken, which is a different finding from
+     * either working.
+     * @{
+     */
+    std::uint64_t window_threshold_disarmed[max_cpus]{};
+    std::uint64_t window_threshold_withheld[max_cpus]{};
+    /**
+     * @}
+     */
     /** @} */
 
     std::uint64_t l2_no_event_window_asked[max_cpus]{};
@@ -8721,9 +8745,17 @@ private:
      * decided on and restored by `zpp_vmx_nested_entry_failure`, which is
      * the only way back: a failed VM entry produces no VM exit, so the
      * ordinary exit path never runs and the processor is left in host mode
-     * with a guest stack. The address of the context is handed to the
-     * failure stub through a VMCS field - see
-     * `nested_entry_recovery_field`.
+     * with a guest stack. The address of the context reaches the failure
+     * stub through `zpp_vmx_nested_entry_recovery`, indexed by the VPID
+     * the stub reads out of vmcs02 - see `nested_entry_slot_field`.
+     *
+     * **It used to reach the stub through CR3-target value 0 of vmcs02,
+     * and that never worked on this machine.** The field does not exist
+     * under KVM, so both the write and the stub's read failed with
+     * VMfailValid - which `asm.h`'s `jc` reported as success - and the
+     * stub dereferenced the second-level guest's RDI instead. Every
+     * refused entry ended in a host page fault at a tiny address with no
+     * log line.
      *
      * `nested_entry_failed` is what tells the two arrivals apart, in
      * memory rather than in a register because the second arrival restores
@@ -8735,6 +8767,33 @@ private:
         nested_entry_recovery[nested_vmx::enabled ? max_cpus : 1]{};
     std::atomic<bool> nested_entry_failed[max_cpus]{};
     std::uint64_t nested_entry_error[max_cpus]{};
+
+    /**
+     * How many refused second-level entries actually came back through
+     * the recovery path, which nothing counted before.
+     *
+     * A refusal used to be invisible twice over: the stub faulted before
+     * it could report, and nothing counted the reports that did arrive.
+     */
+    std::uint64_t nested_entry_refusals[max_cpus]{};
+
+    /**
+     * The one-boot probe of CR3-target value 0, the field the recovery
+     * pointer used to live in.
+     *
+     * `usable` reading 0 on a processor whose `probed` is set says the
+     * layer below discards the field, which is what made every refused
+     * second-level entry a dead processor. Reading 1 falsifies that and
+     * the fault has another cause - which is the point of writing it as a
+     * probe rather than as an argument.
+     * @{
+     */
+    bool recovery_field_probed[max_cpus]{};
+    bool recovery_field_usable[max_cpus]{};
+    std::uint64_t recovery_field_readback[max_cpus]{};
+    /**
+     * @}
+     */
 
     /**
      * Whether a VMLAUNCH or VMRESUME has already decided where the guest
