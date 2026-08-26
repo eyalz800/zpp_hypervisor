@@ -53177,3 +53177,71 @@ comment warns about. The working parser reads the section headers for
 the segment bases and takes `addr = SSSS:ooooo` off the line *after*
 each `S_PUB32`, with the offset in decimal.
 
+## A stale cache entry had been lying to the guest about its clock all session
+
+`ZPP_TICK_FLOOR` defaults to **0** in `CMakeLists.txt:200`. The cache
+held **80000**, and the binary agreed - `floor=0080000` in the
+manifest. Nobody set it this session; it was inherited, silently, and
+every measurement taken today was of a guest being told its 1.74 ms
+tick request was 8 ms.
+
+This is the third time this exact class has cost this project
+something, and the first two are already written up here:
+`ZPP_VERIFY_HYPERVISOR` inherited through a cache for a day, and
+`ZPP_PUBLISH_REFERENCE_TSC` reading ON in two caches with a stale
+object file. **The manifest is the only thing that told the truth**,
+which is what it exists for - and it was being read past.
+
+### Turning it off moved the guest
+
+One variable, `-DZPP_TICK_FLOOR=0`, verified `floor=0000000` in the
+bytes before deploying:
+
+| | stuck thread | distinct threads |
+|---|---|---|
+| `floor=80000` | `Phase1Initialization` | 1 across 326 samples |
+| `floor=0` | `ExpWorkerThread` | 3 |
+
+**It got past phase-1 kernel initialization.** Phase 1 is what starts
+`smss.exe`, so every previous record of "stalls at `smss.exe`" was a
+guest that had not finished phase 1 at all. It now reaches the
+executive worker queue, at comparable exit volume - 17.36 M exits and
+1.43 M second-level entries against 17.56 M and 1.40 M - so this is a
+change of *position*, not of speed.
+
+It is still stuck. The re-entry set is the same clock loop by name -
+`HvlEndSystemInterrupt` 24.8%, `HalpHvTimerArm` 24.8%,
+`HvlWriteApicCommandRegister` 24.6% - so the shape did not change, only
+which thread is caught in it.
+
+`floor=0` is now the source default and stays. Do not set it.
+
+## VMCS shadowing has never been in force on this rig, and it is 79.5% of every exit
+
+Read out of the dump, no boot:
+
+    shadowing off, at l2 entry 18
+    ...
+    shadowing off, at l2 entry 702,683
+
+It stands down at entry **18** and never comes back. The manifest reads
+`shadowvmcs=1`, which is the build switch and not the state - the
+capability is what is missing. This processor reports no `shadow_vmcs`,
+and KVM strips `SECONDARY_EXEC_SHADOW_VMCS` from any guest advertising
+enlightened VMCS regardless.
+
+The cost is the exit profile: **vmread 51.5% + vmwrite 28.0% = 79.5%**
+of 18.6 M exits. This tree already measured both columns - shadowing in
+force gives 4.6 M exits, absent gives 19.4 M with 81% VMCS accesses.
+This run is the second column, to within a percent.
+
+**It is not the DPC bug** - those are Hyper-V's own instructions and
+have nothing to do with vector `0x2f`. But `nested_vmx.h:496-501`
+already says the thing worth remembering: *"Speed cannot get the guest
+out; it is exactly what decides whether it goes in."*
+
+**Trap worth carrying:** `shadowing_ineffective == 0` does **not** mean
+shadowing works. `note_shadowing_ineffective` returns immediately when
+shadowing is not enabled, so the counter is zero in precisely the case
+it exists to report.
+
