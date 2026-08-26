@@ -53719,3 +53719,74 @@ phase 1 blocked on**, and the honest answer is that nothing in this
 dump measures it: every instrument here watches the interrupt and timer
 path, which is exactly the part that works.
 
+## Both processors are now virtualized. The reset is still there
+
+`550e350` on hardware, two processors, nesting on. The stated
+prediction - cpu 1's start-up-IPI exit count rises above 1 - **failed.
+It is still 1.** Recorded as a refutation, because the rest of the run
+changed a great deal and it would be easy to claim the fix worked.
+
+What did change, and it is not nothing:
+
+    cpu  virtualized  by-guest-sipi  launched
+      0            1              0         1
+      1            1              1         1
+
+    watched_page.cpp(306): every processor on the platform roster of 0x2
+      is adopted, so the local apic page watch can no longer catch a
+      start-up ipi for a processor this vmm does not own
+
+    local apic page watched at 0x0   <- NOT WATCHED
+    commands decoded off the page 2  (was 6)
+    INIT seen 1   start-up seen 1    (was 3 and 3)
+    cpu 0 exits 574,917              (was 622,791)
+    cpu 1 ept-violations             gone entirely
+
+**The second processor is adopted, virtualized and launched, by the
+guest's own start-up IPI.** It never was before. The roster proof
+retires the watch as soon as every processor on the firmware's roster
+is owned, so the page stops faulting and the interception stops eating
+commands - `INIT seen` fell from three to one because the later pairs
+now go straight to hardware, which is what should happen once there is
+nothing left to catch.
+
+**And the guest still resets**, at 93,914 second-level entries against
+96,506 before. cpu 1 still runs 192 exits - 143 CPUIDs of leaves 0x1
+and 0x0, 45 `rdmsr` of the APIC base, two CR accesses - and stops.
+
+So three things are now true together, and the third is the one that
+matters:
+
+1. the interception no longer eats bring-up attempts,
+2. both processors are owned by this VMM,
+3. **the application processor still does not complete Hyper-V's
+   bring-up**, and that was never about the interception.
+
+The swallow was real and worth removing. It was not the blocker.
+
+### What the profiler said, which is the other half
+
+First direct profile of the guest, symbolised against the real PDB
+rather than inferred from entry points:
+
+    where the guest runs        where an interrupt lands on it
+      HalpHvTimerArm      22.9%   KiDpcInterruptBypass+0x12   90.8%
+      HvlEndSystemInterrupt 22.9%   BgpGxFillRectangle          1.1%
+      HvlWriteApicCommandRegister 22.9%   RaspTestIntersection  1.0%
+      HalpHvTimerAcknowledgeInterrupt 16.5%   RaspScaleCoordinates 0.9%
+
+Eighty-five percent of it in four clock-path functions, and **90.8% of
+interrupts landing at one instruction** - `KiDpcInterruptBypass+0x12`,
+immediately after that function's `sti`. The guest re-enables
+interrupts with a tick already pending, 127,842 times.
+
+`BgpGxFillRectangle` and the rasteriser calls say the guest is drawing
+its boot screen, so it is doing real work between ticks - just very
+little of it.
+
+**Caveat on the profile, stated because it would be easy to over-read:**
+these are censuses of *entry points*, not an unbiased time profile. A
+function that causes exits is over-represented by construction, and the
+clock path causes exits. What the numbers support is *where the guest
+is when we see it*, not how it divides its time.
+
