@@ -1545,6 +1545,128 @@ def dump_priority(args, elf, instance):
                       f"{exits / n:.1f} exits")
 
 
+def dump_interrupt_window(args, elf, instance):
+    """Every interrupt-window exit, and the priority it fired at.
+
+    **The counters were already in the binary and nothing printed them.**
+    `l1_wants_l2_exit` has incremented `int_window_asked`,
+    `int_window_stale` and `int_window_vtpr` unconditionally since the
+    window reflection was written, so this section reads a guest that is
+    already running - no rebuild, no reboot, no perturbation.
+
+    What it separates, which the exit-reason histogram alone cannot:
+
+    - `stale` climbing means vmcs02 kept an interrupt-window control
+      that vmcs12 had cleared.  Then the exit storm is **ours** - we are
+      asking the processor a question nobody is waiting for an answer
+      to - and the fix is in `build_vmcs02`.
+    - `reflected` climbing with the priority at or above class 2 means
+      the opposite: the requests are real, and the level above is being
+      woken at a moment it can deliver nothing.  A software interrupt is
+      delivered only when its class exceeds the processor priority's
+      (SDM 12.8.3.1), so a window taken at `0x20` cannot carry the
+      `0x2f` deferred-procedure-call vector, and the level above will
+      re-arm the window on the very next entry.  That is a livelock with
+      one instruction retired per round trip, and it is what
+      `ZPP_WINDOW_ON_TPR` exists to break.
+
+    The `KiDpcInterruptBypass` disassembly is why the second reading has
+    a name.  In the guest's own `ntoskrnl.exe` the function is straight
+    line, no branch:
+
+        mov  ecx, 2
+        mov  cr8, rcx      ; task priority := 0x20, DISPATCH_LEVEL
+        sti                ; +0x0d
+        mov  rcx, [rbp-0x57]
+        lea  rdx, [rbp-0x80]   ; +0x12
+        call <retire the deferred calls>
+
+    Blocking-by-STI expires after the one instruction following `sti`,
+    so `+0x12` is the **first architecturally interruptible address** in
+    that function - which makes it exactly where an interrupt-window
+    exit must fire, and it cannot be a guest loop because there is no
+    branch to loop on.
+    """
+    members = ["int_window_asked", "int_window_stale", "int_window_vtpr"]
+    off = gdb_offsets(elf, members)
+    classes = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->int_window_vtpr[0] / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("int_window_asked", "int_window_stale"):
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["int_window_vtpr"], args.cpus * classes)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    # The class a deferred-procedure-call vector belongs to.  0x2f >> 4
+    # is 2, and delivery needs the priority's class to be strictly
+    # below it - so any window taken at class 2 or above carries
+    # nothing.
+    dispatch_class = 0x2f >> 4
+
+    print("\ninterrupt-window exits, and the priority they fired at")
+
+    if not any(word("int_window_asked", cpu) or
+               word("int_window_stale", cpu)
+               for cpu in range(args.cpus)):
+        print("  *** THIS NEVER HAPPENED: not one interrupt-window exit "
+              "was taken on any processor. The level above never asked "
+              "for a window, so nothing here is being lost in one - "
+              "look somewhere else entirely. ***")
+        return
+
+    for cpu in range(args.cpus):
+        asked = word("int_window_asked", cpu)
+        stale = word("int_window_stale", cpu)
+        if not (asked or stale):
+            continue
+
+        print(f"\ncpu {cpu}  reflected {asked:,}  stale {stale:,}")
+        if stale:
+            print(f"  *** {stale:,} STALE: vmcs02 carried an "
+                  f"interrupt-window control vmcs12 had cleared. That "
+                  f"exit storm is this VMM's own - see build_vmcs02. ***")
+
+        rows = [(word("int_window_vtpr", cpu * classes + i), i)
+                for i in range(classes)]
+        rows = [r for r in rows if r[0]]
+        if not rows:
+            print("  *** THIS NEVER HAPPENED: the priority was never "
+                  "sampled, because nested_virtual_apic_address is zero "
+                  "- the level above set no TPR shadow, so this VMM has "
+                  "no page to read the priority from. ***")
+            continue
+
+        total = sum(c for c, _ in rows) or 1
+        print(f"  task priority when the window fired ({total:,})")
+        for count, klass in sorted(rows, reverse=True):
+            mark = ("  <- blocks the 0x2f dispatch vector"
+                    if klass >= dispatch_class else "")
+            print(f"    class {klass} (0x{klass << 4:02x}-"
+                  f"0x{(klass << 4) | 0xf:02x})  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%{mark}")
+
+        blocked = sum(c for c, k in rows if k >= dispatch_class)
+        share = 100.0 * blocked / total
+        print(f"  {blocked:,} of {total:,} ({share:.1f}%) fired at a "
+              f"priority that blocks 0x2f")
+        if share >= 50.0:
+            print("  *** LIVELOCK SHAPE: the level above is being woken "
+                  "by a window it cannot deliver into, and re-arms it on "
+                  "the next entry. One instruction retired per round "
+                  "trip. ZPP_WINDOW_ON_TPR is the switch aimed at this; "
+                  "check `windowtpr=` in the build manifest before "
+                  "reading this as evidence it is off. ***")
+        else:
+            print("  Not the livelock shape: most windows fired at a "
+                  "priority that permits 0x2f, so a vector lost here was "
+                  "lost after the window, not because of it.")
+
+
 def dump_synthetic_msrs(args, elf, instance):
     """Which synthetic MSRs the second-level guest writes, and how often.
 
@@ -4761,6 +4883,7 @@ def main():
     # the rig killed every section after it, silently, and the dump just
     # looked short. One section failing must not cost the others.
     for section in (dump_entry_rips, dump_priority,
+                    dump_interrupt_window,
                     dump_synthetic_msrs, dump_reference_tsc,
                     dump_tick_account, dump_l1_host_audit,
                     dump_guest_state_shadow, dump_regions,

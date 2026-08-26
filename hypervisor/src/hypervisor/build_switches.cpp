@@ -246,6 +246,24 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // differ in it are not comparable at all.
         ' ', 'v', 'i', 'd', '=',
         digit(nested_vmx::virtual_interrupt_delivery_offered),
+        // **This switch had three of its four edits and not this one.**
+        // The option, the forward and the `constexpr bool` were all
+        // there - `CMakeLists.txt` 261, 399 and 512,
+        // `cmake/hypervisor/CMakeLists.txt` 115 and 298, and
+        // `nested_vmx.h` 2220 - so a cache reading ON looked like
+        // proof, and the manifest could not contradict it. That is
+        // precisely the failure this array exists to stop, and it went
+        // unnoticed on the switch aimed at the largest interrupt-window
+        // storm on the machine.
+        //
+        // A correctness field rather than a tuning one: on, an
+        // interrupt window the level above asked for is **withheld**
+        // while the task priority blocks the dispatch class, and a TPR
+        // threshold is armed in its place. The level above is therefore
+        // woken at a different moment, so two runs that differ in this
+        // are not comparable.
+        ' ', 'w', 'i', 'n', 'd', 'o', 'w', 't', 'p', 'r', '=',
+        digit(nested_vmx::window_on_tpr),
         // Clears the notification flag on a VTL1 entry, so the secure
         // kernel works instead of yielding. A deliberate lie to the
         // guest, so a run with it on describes a different machine.
