@@ -3713,13 +3713,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 std::span(reinterpret_cast<std::byte *>(&entry),
                           sizeof(entry))) &&
             (entry != this->gdt_pt_entry[cpuid])) {
+            // With the VMCS this processor believes is current, and
+            // the page the entry lives on. A VMREAD/VMWRITE handler
+            // that writes a guest page table is one writing vmcs12
+            // fields at an address that is not the guest's VMCS, and
+            // these two values say so directly if they match.
             log("cpu {} handler changed gdt leaf entry {} -> {} at exit "
-                "{}, reason {}",
+                "{}, reason {}, entry page {} current vmcs {}",
                 cpuid,
                 this->gdt_pt_entry[cpuid],
                 entry,
                 this->exit_total[cpuid],
-                vmcs.exit_reason());
+                vmcs.exit_reason(),
+                this->gdt_pt_page[cpuid] & ~0xfffull,
+                this->guest_current_vmcs[cpuid]);
             this->gdt_pt_entry[cpuid] = entry;
         }
     }
