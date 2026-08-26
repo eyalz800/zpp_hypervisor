@@ -50833,3 +50833,53 @@ One-CPU control on the same binary: 23,494,435 exits and 1,901,770
 second-level entries, healthy. So the base is sound and everything
 here is specific to the second processor.
 
+### ZPP_DROP_WATCH_ON_START_UP is a net regression, and the advance it
+### produced was measured on the wrong quantity
+
+Celebrated earlier in this session for taking the application
+processor from a triple fault and zero second-level entries to 37-169
+of them. That is true, and it is the wrong quantity to have judged it
+by. Measured with two processors, same binary otherwise:
+
+| | boot processor exits | its l2-entries | application processor |
+|---|---|---|---|
+| `dropw=0` | **23,240,826** | **1,861,234** | 117 exits, dies quietly |
+| `dropw=1` | ~1,260,000 | ~89,000 | reaches L2, then fast-fails |
+
+One-CPU control, same binary: 23,494,435 and 1,901,770. So with the
+switch **off** the two-processor guest runs exactly as well as the
+one-processor guest - Windows boots, the application processor dies
+quietly and is never missed - and with it **on** the processor gets
+further, fast-fails inside the guest hypervisor, and takes the whole
+guest down with it, because the survivor then spins for ever on a lock
+the dead one holds.
+
+Reaching PASSIVE_LEVEL is the check that says the survivor is healthy
+rather than merely counting exits: 30,301 entries at task priority
+`0x00` and 2,898 at `0x10`.
+
+**A processor that fails loudly is worse than one that fails
+quietly**, when the alternative is a guest that boots without it. The
+switch stays off by default. It remains the right instrument for
+working on the application processor, and it is not a step toward the
+goal on its own.
+
+The general error is worth keeping: "the application processor got
+further" was measured on the application processor, and the objective
+is the guest. Every intervention here needs its headline number taken
+from the thing the goal names.
+
+### Enlightened VMCS toward KVM is not the cause
+
+`ZPP_EVMCS_TO_KVM=OFF`, two processors: 2,342 exits and 91
+second-level entries on the application processor - inside the same
+98-to-3,080 band the switch-on runs occupy. Restored to ON, which is
+the faster setting.
+
+Also audited, and clean: every non-per-processor member read in the
+nested paths. `vmcs_shadowing_enabled` is set once from a capability
+MSR and is partition-wide; `vp_assist_l2_physical` is written and
+never read; the rest are diagnostics. `evmcs_active`,
+`vp_assist_physical` and `evmcs_physical` are all per-processor
+already, as are the shadow EPT roots and `guest_current_vmcs`.
+
