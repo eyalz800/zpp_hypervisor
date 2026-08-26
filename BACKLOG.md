@@ -52466,3 +52466,44 @@ Worth keeping as a shape: **a VM-entry control set to fix one entry
 stays set for every entry after it.** The same trap as a CMake cache,
 one level down.
 
+## Clearing EFER removes the triple fault
+
+Pairing SDM Table 25-13 bit 20, "save IA32_EFER", with the entry
+control fixes the wedge the first attempt caused - the field now
+carries the guest's own value out on every exit and back in on every
+entry, so setting the control once no longer freezes EFER at zero.
+
+With `efer0=1`, the application processor's last three exits:
+
+    [107] init        wait-sipi
+    [108] sipi        qual=0x1  active  cs=0x0100 rip=0x0
+    [109] cr-access             active  cs=0x0030 rip=0x16fe
+
+**Exit 109 is a clean control-register access at exactly the address
+that used to triple fault.** The instruction at `0x16fe` is the guest
+stub's write to CR0 enabling paging; with the host's LME no longer
+surviving INIT it now behaves instead of dropping the processor into
+long mode by accident.
+
+| | boot processor | application processor | triple faults |
+|---|---|---|---|
+| `efer0=0` | 235,552 exits, login screen | 111 exits | **1** |
+| `efer0=1` | 217,851 exits, **user-mode code** | 110 exits | **0** |
+
+The boot processor is at `RIP 0x7ffefd0d9343` - a user-mode address -
+so Windows is well past the login screen on that run.
+
+### Still not multicore, and the reason is no longer a fault
+
+The application processor stops at 110 exits and sits in
+`zpp::arch::x86_64::halt()` with **no `unhandled_exit`, no
+`vm_entry_failure`, and a zeroed host-exception record**. So it is not
+faulting any more; something on our side stops it deliberately and
+does not say so. That is the same silent-halt shape recorded earlier
+against `window_on_tpr`, and it is now the last thing in the way.
+
+Two SDM deviations remain on this path, both found and neither yet
+fixed: `guest_ia32_debugctl` is never reset by `apply_start_up` while
+`load_debug_controls` is on, so a restarted processor is given a stale
+DEBUGCTL.
+
