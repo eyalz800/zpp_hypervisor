@@ -420,9 +420,22 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // "IA32_EFER 0H after INIT" requires of us here. Without it a
     // restarted processor keeps the host's LME and its own stub lands
     // in long mode when it enables paging.
+    // **Both controls, not just the entry one.** Requesting the load
+    // alone froze EFER at zero for every entry afterwards and wedged
+    // the guest at 753 exits - the control persists, so a value
+    // written once to fix one entry is then imposed for ever. With
+    // the exit control paired to it the field carries the guest's own
+    // EFER out on every exit and back in on every entry, so it is
+    // authoritative rather than frozen, and writing zero here means
+    // what INIT means.
     if constexpr (nested_vmx::init_clears_efer) {
         entry_controls |=
             arch::x86_64::vmx::vm_entry_controls::load_ia32_efer;
+
+        vmcs.vm_exit_controls(
+            vmcs.vm_exit_controls() |
+            arch::x86_64::vmx::vm_exit_controls::save_ia32_efer);
+
         vmcs.guest_ia32_efer(0);
     }
 

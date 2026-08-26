@@ -223,6 +223,13 @@ enum type : std::uint64_t
     // guest had in it is simply gone.
     save_debug_controls = (1ull << 2),
     host_address_space_size = (1ull << 9),
+    // SDM Table 25-13 bit 20. Saves IA32_EFER into the guest field on
+    // exit. Paired with the entry control of the same name it makes
+    // that field authoritative: the guest's own value is written there
+    // on every exit and loaded back on every entry, so setting the
+    // control once does not freeze EFER at whatever it held when it
+    // was set.
+    save_ia32_efer = (1ull << 20),
     /**
      * SDM 30.2: without this an external-interrupt VM exit leaves the
      * interrupt pending at the controller and reports no vector; with it
