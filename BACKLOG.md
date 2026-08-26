@@ -53558,3 +53558,65 @@ So the honest position is that the one-processor configuration is
 difference is to leave it running far longer than any run so far - every
 sample in this session was taken between three and eight minutes.
 
+## The AP fixes work, do not help, and refute the account they were built on
+
+`5729ef9` landed two architectural corrections with citations and
+negative controls. On hardware, both do exactly what they claim and
+**cpu 1 still stops at 109 exits**. The prediction stated before the
+boot - "cpu 1's exit count must leave 110" - failed.
+
+The fix itself is confirmed by its own log line:
+
+    interrupt_command.cpp(146): guest init ipi for cpu 0x1 discards the
+                                start-up vector 0x87 queued before it
+    start_up.cpp(928):          guest start-up ipi for cpu 0x1, vector 0x2,
+                                handed over
+
+The queued vector is discarded by the following INIT, as KVM does, and
+the surviving start-up IPI is handed over rather than swallowed.
+
+### RETRACTED: "started at the wrong address, so it asks us nothing"
+
+The entry above concluded that the processor was started at `0x2000`
+where Hyper-V has nothing, and that this is *"why it executed and then
+asked this VMM for nothing"*. **Both halves are wrong.**
+
+It asks for plenty - 109 exits of `rdmsr 0x1b`, `cpuid`, one
+`cr-access` and one EPT violation on the APIC page, all at `cs=0x0038`
+`rip=0x7ef5xxxx`, which is Hyper-V's own 32-bit bring-up code. "Asked
+for nothing" was read off a *count* of 110 without reading the *ring*.
+
+And the address is not the differentiator. Three configurations now,
+and the processor reaches the same code in all of them:
+
+| build | vector applied | ring ends | cpu 1 exits |
+|---|---|---|---|
+| `qstart=0` | `0x2` to hardware | `init active cs=0x0200` | 110 |
+| `qstart=1` | `0x87`, cs base `0x87000` | `init active cs=0x8700` | 109 |
+| `qstart=1` + INIT discard | `0x2` handed over | `init active cs=0x0200` | 109 |
+
+**Starting it at Hyper-V's own trampoline changed nothing**, so the
+trampoline was never what was wrong. Whatever the entry vector, the
+processor arrives in the same place, polls, fails to check in, and
+Hyper-V INITs it again - the last record in every ring is an INIT.
+
+### What the ring actually shows, read this time
+
+The processor is **polling**: 45 `rdmsr` of `0x1b` returning
+`0xfee00800` - the APIC base, xAPIC, enabled - and 143 `cpuid`,
+interleaved, at two or three instruction pointers. That is a wait loop
+in Hyper-V's application-processor bring-up, not a crash and not a
+fault. It is waiting for something this VMM is not giving it, and then
+its parent gives up and re-INITs it.
+
+**So the question is what it is polling for**, and the ring names the
+registers it reads. That is a much narrower question than the one this
+was.
+
+The two fixes stay. They are correct independently of this: the
+`x2apic && nested` conjunct outlived the premise recorded beside it by
+three weeks, and a queued start-up vector with no sequence identity
+could be applied to a sequence the guest had already satisfied. Neither
+was the blocker, and both have negative controls in the test suite so
+they cannot silently rot.
+
