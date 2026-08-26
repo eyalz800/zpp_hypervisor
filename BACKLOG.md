@@ -53047,3 +53047,33 @@ what.** The ring's own indices go to 109, which agrees with 110 and not
 with 201, so the histogram is the more likely candidate for counting
 something else - but that is a guess and is written down as one.
 
+## Never run nested=0. The result is not evidence about the goal
+
+Standing instruction, given after two `nested=0` boots this session:
+**always build and boot with `ZPP_NESTED_VMX=ON`.** Never pass
+`ZPP_ALLOW_NO_NESTED=1`.
+
+With nesting off, VMX is hidden, so Hyper-V finds none and stands down.
+Windows then boots as an ordinary guest and **the screen looks right
+while virtualization based security is not running at all.**
+`deploy-to-rig.sh` already refuses this by default and says exactly why
+- "Windows boots and the screen looks right - which is why this is
+refused rather than warned about" - and that refusal was overridden
+twice today.
+
+The desktop those boots produced is therefore **withdrawn as a
+milestone**. What it was legitimately worth is the bisect: it isolated
+the stale VPID-tagged translation across the emulated CR0.PG
+transition, and that fix is real and carries over - `nested=1` on one
+processor has since gone from four processes stalled at `smss.exe` to
+641,190 second-level entries. The finding survives. The configuration
+does not, and the milestone was never the thing being asked for.
+
+**The rule that generalises.** When a failure needs isolating, find a
+discriminator that keeps nesting on: one processor against two, a build
+switch, an instrument such as the exception-bitmap trap that found the
+last bug in a single boot. Turning off the thing under test is not a
+control, it is a different experiment. If the only experiment available
+needs `nested=0`, the missing piece is an instrument, not a
+configuration.
+
