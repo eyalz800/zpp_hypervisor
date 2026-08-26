@@ -2990,9 +2990,94 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         if (0 == number) {
             auto paging_was_on =
                 0 != (vmcs.guest_cr0() & arch::x86_64::cr0_bits::paging);
+            auto paging_now =
+                0 != (value & arch::x86_64::cr0_bits::paging);
 
             vmcs.cr0_read_shadow(value);
             vmcs.guest_cr0(value | arch::x86_64::cr0_bits::numeric_error);
+
+            // The invalidation the MOV to CR0 would have done, and the
+            // reason the second processor died on its first instruction
+            // with paging on.
+            //
+            // Nothing here executes a MOV to CR0 - the value goes into
+            // the VMCS guest field two lines above and the instruction
+            // is never performed - so none of the invalidation the
+            // architecture attaches to it happens by itself. SDM
+            // 5.10.4.1 (.references/sdm.txt:158389): "MOV to CR0. The
+            // instruction invalidates all TLB entries (including global
+            // entries) and all entries in all paging-structure caches
+            // (for all PCIDs) if it changes the value of CR0.PG from 1
+            // to 0." KVM puts it in the same place: `kvm_post_set_cr0`
+            // (.references/kvm/x86.c:1119) tests the CR0.PG change and,
+            // on the clearing direction, requests
+            // KVM_REQ_TLB_FLUSH_GUEST under the comment "Clearing
+            // CR0.PG is defined to flush the TLB from the guest's
+            // perspective" (x86.c:1144-1148).
+            //
+            // And nothing else covers it. `enable_vpid` is on and
+            // `setup_vmcs` writes `vpid(cpu + 1)`, so every translation
+            // this guest creates is tagged - SDM 31.4.3.2
+            // (.references/sdm.txt:206371): with the "enable VPID"
+            // control set "VMX transitions are not required to
+            // invalidate any linear mappings or combined mappings". A
+            // tagged translation therefore survives every exit and
+            // entry between the two halves of a paging transition.
+            //
+            // What it cost, measured on the rig: an application
+            // processor's start-up stub went real -> protected -> long
+            // and took vector 14 with error code 0x11 at linear address
+            // 0x16fe, RIP 0x16fe, CR3 0x7feeb000. Error 0x11 is P plus
+            // I/D - the page is *present* and the fault is the
+            // instruction fetch of the instruction already running -
+            // and every guest paging structure and descriptor on that
+            // path was verified correct. The translation in use was not
+            // the one in those tables; it was left over from the
+            // Windows address space this same logical processor ran
+            // before its INIT, under the same VPID tag.
+            //
+            // Type 1, single-context, because the architecture's rule
+            // above invalidates global entries too and type 3 is
+            // defined to retain them (SDM 31.4.3.1, type 1 at
+            // .references/sdm.txt:206324, type 3 at 206331). The VPID
+            // is this processor's, so no other processor loses
+            // anything.
+            //
+            // **Both directions, and only one of them is required.**
+            // Clearing PG is the rule quoted above. Setting it is not
+            // required - on hardware the clearing half already flushed
+            // - but it is the direction the fault above is on, the same
+            // section allows it ("MOV to CR0 may invalidate TLB entries
+            // even if CR0.PG is not changing"), and a transition that
+            // happens a handful of times per boot is not worth two
+            // arguments. Narrow it to the clearing half only if a
+            // profile ever shows this mattering, which would mean
+            // trusting that every other path out of a paging-on state
+            // flushes.
+            //
+            // Removable when nothing here emulates a CR0.PG change: if
+            // `paging` leaves `cr0_guest_host_mask` in `setup_vmcs` the
+            // write stops exiting, the processor performs the MOV to
+            // CR0 itself, and it does its own invalidation.
+            if (paging_was_on != paging_now) {
+                struct alignas(0x10) invvpid_descriptor
+                {
+                    std::uint64_t vpid{};
+                    std::uint64_t linear_address{};
+                };
+
+                constexpr std::uint64_t invvpid_single_context = 1;
+
+                invvpid_descriptor descriptor{(cpuid + 1), 0};
+
+                if (arch::x86_64::vmx::invvpid(invvpid_single_context,
+                                               &descriptor)) {
+                    log("cpu {} cr0 paging change: invvpid refused "
+                        "vpid {}",
+                        (cpuid + 1) - 1,
+                        (cpuid + 1));
+                }
+            }
 
             // The mode switch that rides on this write, and the reason
             // the second processor never ran.
@@ -3027,9 +3112,9 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // `vmx_set_efer` (vmx.c:3147), which is the single place
             // that sets or clears VM_ENTRY_IA32E_MODE.
             if constexpr (nested_vmx::track_long_mode_switch) {
-                auto paging_now =
-                    0 != (value & arch::x86_64::cr0_bits::paging);
-
+                // `paging_now` is computed above, beside
+                // `paging_was_on`, because the invalidation there needs
+                // it too and needs it whether this switch is on or off.
                 if (paging_was_on != paging_now) {
                     namespace entry_control =
                         arch::x86_64::vmx::vm_entry_controls;
@@ -3194,8 +3279,93 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // concealment.
         shadow &= ~cr4_smxe;
 
+        // The paging bits the guest changed in the same write, which
+        // this handler applies and the processor therefore never sees.
+        //
+        // A MOV to CR4 only exits when it changes a bit in
+        // `cr4_guest_host_mask`, and `setup_vmcs` puts just VMXE and
+        // SMXE there - so PAE, PGE, PCIDE and SMEP are guest owned and
+        // a write touching only those is performed by the processor,
+        // which does its own invalidation. But the write that *does*
+        // exit carries the guest's whole CR4 value, and the line below
+        // applies all of it. A guest changing VMXE and PGE in one
+        // instruction gets the PGE half emulated here, silently, with
+        // no flush.
+        //
+        // Exactly the bits the architecture names, and no others. SDM
+        // 5.10.4.1 (.references/sdm.txt:158407): "MOV to CR4. The
+        // behavior of the instruction depends on the bits being
+        // modified: - The instruction invalidates all TLB entries
+        // (including global entries) and all entries in all
+        // paging-structure caches (for all PCIDs) if (1) it changes the
+        // value of CR4.PGE; or (2) it changes the value of the
+        // CR4.PCIDE from 1 to 0. - The instruction invalidates all TLB
+        // entries and all entries in all paging-structure caches for
+        // the current PCID if (1) it changes the value of CR4.PAE; or
+        // (2) it changes the value of CR4.SMEP from 0 to 1." KVM
+        // encodes the same four conditions in the same order -
+        // `kvm_post_set_cr4` (.references/kvm/x86.c:1335), PGE or
+        // PCIDE 1 -> 0 at x86.c:1360-1362 and PAE or SMEP 0 -> 1 at
+        // x86.c:1370-1372.
+        //
+        // **SMAP and LA57 are deliberately absent.** Neither reference
+        // lists them: they are not in the SDM paragraph quoted above
+        // and not in `kvm_post_set_cr4`. Adding them would be a guess,
+        // and a guess here is invisible - an unnecessary invalidation
+        // costs page walks and nothing observable, so nothing would
+        // ever contradict it.
+        //
+        // Type 1 for both classes rather than type 3 for the second.
+        // The first class must reach global entries, which type 3 is
+        // defined to retain (SDM 31.4.3.1, type 1 at
+        // .references/sdm.txt:206324, type 3 at 206331), and using one
+        // type for both invalidates more than the second class needs -
+        // which is always allowed, and costs a guest page walks only.
+        //
+        // Removable when this handler stops applying bits it does not
+        // own: split the write so only VMXE and SMXE are taken from
+        // `value` and the rest is left as the processor had it, and
+        // there is no emulated CR4 change left to invalidate for.
+        // Positions from SDM 2.5, each looked up rather than recalled:
+        // PAE bit 5 (.references/sdm.txt:154798), PGE bit 7
+        // (sdm.txt:154035), PCIDE bit 17 (sdm.txt:153977), SMEP bit 20
+        // (sdm.txt:153960). Local like `cr4_vmxe` and `cr4_smxe` above
+        // rather than added to `arch::x86_64::cr4_bits`, which this
+        // handler already does not use.
+        constexpr std::uint64_t cr4_pae = 1ull << 5;
+        constexpr std::uint64_t cr4_pge = 1ull << 7;
+        constexpr std::uint64_t cr4_pcide = 1ull << 17;
+        constexpr std::uint64_t cr4_smep = 1ull << 20;
+
+        auto cr4_was = vmcs.guest_cr4();
+        auto cr4_changed = cr4_was ^ value;
+
+        auto flush_needed =
+            (0 != (cr4_changed & (cr4_pge | cr4_pae))) ||
+            ((0 != (cr4_was & cr4_pcide)) && (0 == (value & cr4_pcide))) ||
+            ((0 == (cr4_was & cr4_smep)) && (0 != (value & cr4_smep)));
+
         vmcs.cr4_read_shadow(shadow);
         vmcs.guest_cr4((value | cr4_vmxe) & ~cr4_smxe);
+
+        if (flush_needed) {
+            struct alignas(0x10) invvpid_descriptor
+            {
+                std::uint64_t vpid{};
+                std::uint64_t linear_address{};
+            };
+
+            constexpr std::uint64_t invvpid_single_context = 1;
+
+            invvpid_descriptor descriptor{(cpuid + 1), 0};
+
+            if (arch::x86_64::vmx::invvpid(invvpid_single_context,
+                                           &descriptor)) {
+                log("cpu {} cr4 paging change: invvpid refused vpid {}",
+                    (cpuid + 1) - 1,
+                    (cpuid + 1));
+            }
+        }
         break;
     }
     case basic_reason::ept_violation: {
