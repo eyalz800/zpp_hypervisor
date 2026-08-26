@@ -98,6 +98,16 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // deploy path able to say so.
         ' ', 'e', 'f', 'e', 'r', '0', '=',
         digit(nested_vmx::init_clears_efer),
+        // Correctness, not tuning, and it reads beside `efer0=` because
+        // the two are one mechanism: `efer0=1` makes the guest EFER
+        // field authoritative, and this is the only thing that then
+        // keeps "IA-32e mode guest" and EFER.LMA agreeing with CR0.PG
+        // when the guest turns paging on. Off, an application processor
+        // that reaches long mode on its own is refused entry with
+        // reason 0x80000021 and halts, which looks from outside exactly
+        // like a processor that never started.
+        ' ', 'l', 'm', 's', 'w', 'i', 't', 'c', 'h', '=',
+        digit(nested_vmx::track_long_mode_switch),
         ' ', 'e', 'x', 'l', 'e', 'n', '=',
         digit(nested_vmx::honest_exit_length),
         ' ', 'l', '2', 's', 'p', 'i', 'n', '=',

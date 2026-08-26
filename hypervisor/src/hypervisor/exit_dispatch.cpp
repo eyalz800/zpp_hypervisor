@@ -2913,8 +2913,122 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // back agrees with the write even for the bit the register
         // keeps.
         if (0 == number) {
+            auto paging_was_on =
+                0 != (vmcs.guest_cr0() & arch::x86_64::cr0_bits::paging);
+
             vmcs.cr0_read_shadow(value);
             vmcs.guest_cr0(value | arch::x86_64::cr0_bits::numeric_error);
+
+            // The mode switch that rides on this write, and the reason
+            // the second processor never ran.
+            //
+            // "IA-32e mode guest" is guest state wearing a control's
+            // clothing, and until this existed nothing in this tree
+            // maintained it: `setup_vmcs` sets it once from a boot
+            // processor already in long mode, `apply_start_up` clears
+            // it for a processor INIT put back into real mode, and
+            // there was no third writer. An application processor's
+            // start-up stub goes real -> protected -> long on its own,
+            // so it arrives here with CR0.PG going to 1 and the control
+            // still clear.
+            //
+            // SDM 29.3.1.1 (.references/sdm.txt:202424) then refuses
+            // the entry: "If the 'load IA32_EFER' VM-entry control is 1
+            // ... Bit 10 (corresponding to IA32_EFER.LMA) must equal
+            // the value of the 'IA-32e mode guest' VM-entry control. It
+            // must also be identical to bit 8 (LME) if bit 31 in the
+            // CR0 field (corresponding to CR0.PG) is 1." A stub that
+            // has already done its WRMSR of EFER.LME - which does not
+            // exit, so this is the first chance to see any of it -
+            // presents LME=1, LMA=0 and the control clear, and the
+            // processor stops in `on_vm_entry_failure` with reason
+            // 0x80000021.
+            //
+            // KVM does exactly this and in exactly this place:
+            // `vmx_set_cr0` (.references/kvm/vmx.c:3307) calls
+            // `enter_lmode` (vmx.c:3172) on a 0 -> 1 transition of
+            // CR0.PG while EFER.LME is set and `exit_lmode`
+            // (vmx.c:3189) on the reverse, and both reach
+            // `vmx_set_efer` (vmx.c:3147), which is the single place
+            // that sets or clears VM_ENTRY_IA32E_MODE.
+            if constexpr (nested_vmx::track_long_mode_switch) {
+                auto paging_now =
+                    0 != (value & arch::x86_64::cr0_bits::paging);
+
+                if (paging_was_on != paging_now) {
+                    namespace entry_control =
+                        arch::x86_64::vmx::vm_entry_controls;
+
+                    constexpr std::uint64_t efer_lme = 1ull << 8;
+                    constexpr std::uint64_t efer_lma = 1ull << 10;
+
+                    auto controls = vmcs.vm_entry_controls();
+
+                    // Only where the guest field is authoritative,
+                    // which is where `apply_start_up` paired "load
+                    // IA32_EFER" with "save IA32_EFER". Reading the
+                    // physical MSR instead is not an alternative and
+                    // the reason is easy to miss: with no "load
+                    // IA32_EFER" VM-*exit* control anywhere in this
+                    // tree, SDM 30.5 (.references/sdm.txt:204822) says
+                    // "The LMA and LME bits in the IA32_EFER MSR are
+                    // each loaded with the setting of the 'host
+                    // address-space size' VM-exit control" - which is 1
+                    // here - so a RDMSR in root operation reports LME
+                    // set on every processor whatever the guest holds.
+                    //
+                    // Without the pair there is nothing this can do,
+                    // and saying so is better than pretending. VM entry
+                    // loads LME from this same control whenever CR0.PG
+                    // is loaded as 1 (SDM 29.3.2.1,
+                    // .references/sdm.txt:202746), so no entry check
+                    // can fail - but a guest that wanted long mode and
+                    // set LME itself is entered in 32-bit PAE paging
+                    // instead, which is the mirror image of the failure
+                    // `init_clears_efer` was added for. The fix is to
+                    // build with `efer0=1`; the line below is so that a
+                    // build without it says which of the two it is.
+                    if (0 != (controls & entry_control::load_ia32_efer)) {
+                        auto efer = vmcs.guest_ia32_efer();
+                        auto long_mode =
+                            paging_now && (0 != (efer & efer_lme));
+
+                        // LMA is the architecture's own function of the
+                        // other two - SDM Table 27-15 note 1
+                        // (.references/sdm.txt:200084): "the Intel 64
+                        // architecture specifies that IA32_EFER.LMA is
+                        // always set to the logical-AND of CR0.PG and
+                        // IA32_EFER.LME" - so it is computed, never
+                        // carried over.
+                        vmcs.guest_ia32_efer(long_mode
+                                                 ? (efer | efer_lma)
+                                                 : (efer & ~efer_lma));
+
+                        vmcs.vm_entry_controls(
+                            long_mode
+                                ? (controls |
+                                   entry_control::ia_32e_mode_guest)
+                                : (controls &
+                                   ~entry_control::ia_32e_mode_guest));
+
+                        log("cpu {} guest paging {} efer {} ia32e {} "
+                            "cr0 {} rip {}",
+                            (cpuid + 1) - 1,
+                            static_cast<std::uint64_t>(paging_now),
+                            efer,
+                            static_cast<std::uint64_t>(long_mode),
+                            value,
+                            vmcs.guest_rip());
+                    } else {
+                        log("cpu {} guest paging {} with efer not "
+                            "swapped, ia32e left as is, cr0 {} rip {}",
+                            (cpuid + 1) - 1,
+                            static_cast<std::uint64_t>(paging_now),
+                            value,
+                            vmcs.guest_rip());
+                    }
+                }
+            }
             break;
         }
 

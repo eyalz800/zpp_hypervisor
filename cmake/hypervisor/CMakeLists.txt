@@ -68,6 +68,10 @@ option(ZPP_INIT_CLEARS_EFER
        "Clear IA32_EFER on the start-up path, per SDM Table 12-1"
        OFF)
 
+option(ZPP_TRACK_LONG_MODE_SWITCH
+       "Maintain 'IA-32e mode guest' and guest IA32_EFER.LMA across a guest paging transition, and own CR0.PG in the mask. See the root CMakeLists and nested_vmx.h."
+       ON)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report an exit instruction length only where the SDM defines it"
        ON)
@@ -333,6 +337,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     # not two, and the third is the only one the compiler sees.
     -DZPP_STEP_VTL=$<BOOL:${ZPP_STEP_VTL}>
     -DZPP_INIT_CLEARS_EFER=$<BOOL:${ZPP_INIT_CLEARS_EFER}>
+    -DZPP_TRACK_LONG_MODE_SWITCH=$<BOOL:${ZPP_TRACK_LONG_MODE_SWITCH}>
     -DZPP_HONEST_EXIT_LENGTH=$<BOOL:${ZPP_HONEST_EXIT_LENGTH}>
     -DZPP_L2_STARTUP_SPIN=$<BOOL:${ZPP_L2_STARTUP_SPIN}>
     -DZPP_STEP_AP_WATCHED_WRITES=$<BOOL:${ZPP_STEP_AP_WATCHED_WRITES}>

@@ -5630,6 +5630,296 @@ void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
         record.guest_cr4,
         record.guest_rflags);
 
+    // Everything SDM 29.3.1 looks at, and then the verdict.
+    //
+    // **This exists because the record above cannot answer the question
+    // it raises.** An entry failure with basic reason 33 says only
+    // "invalid guest state"; the exit qualification names an offender
+    // for a handful of cases and reads zero for the rest, and by the
+    // time anything outside this processor could look, the VMCS is no
+    // longer current and none of it can be read at all. So the fields
+    // are read out here, once, while they still exist - and then the
+    // checks are *run*, because a reader who has to evaluate twenty
+    // conditions by hand against a hex dump will evaluate nineteen.
+    //
+    // The measured cost of not having it: the second processor's halt
+    // was read from a hand-aligned dump of the record, and CR4.PCIDE
+    // was named as the suspect. Bit 17 of `0x352e78` is clear - the
+    // reading was off by nothing, the decode was wrong - and the actual
+    // offender, the guest IA32_EFER field, was not in the record at all.
+    //
+    // Each check below carries the bit it sets in `failed`, so several
+    // can be reported at once. Read `failed 0` as "every check
+    // implemented here passed", which is itself a finding: it means the
+    // offender is one of the checks left out, and the raw fields on the
+    // lines above are what is left to read.
+    {
+        namespace vmx_msr = arch::x86_64::vmx::msr;
+        namespace entry_control = arch::x86_64::vmx::vm_entry_controls;
+
+        constexpr std::uint64_t cr0_pe = 1ull << 0;
+        constexpr std::uint64_t cr0_wp = 1ull << 16;
+        constexpr std::uint64_t cr0_nw = 1ull << 29;
+        constexpr std::uint64_t cr0_cd = 1ull << 30;
+        constexpr std::uint64_t cr0_pg = 1ull << 31;
+        constexpr std::uint64_t cr4_pae = 1ull << 5;
+        constexpr std::uint64_t cr4_pcide = 1ull << 17;
+        constexpr std::uint64_t cr4_cet = 1ull << 23;
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+        constexpr std::uint64_t efer_lma = 1ull << 10;
+        constexpr std::uint64_t secondary_unrestricted_guest = 1ull << 7;
+        constexpr std::uint64_t access_rights_unusable = 1ull << 16;
+
+        auto cr0 = record.guest_cr0;
+        auto cr4 = record.guest_cr4;
+        auto cr3 = vmcs.guest_cr3();
+        auto efer = vmcs.guest_ia32_efer();
+        auto dr7 = vmcs.guest_dr7();
+        auto rflags = record.guest_rflags;
+        auto controls = record.entry_controls;
+
+        auto ia32e = 0 != (controls & entry_control::ia_32e_mode_guest);
+        auto loads_efer = 0 != (controls & entry_control::load_ia32_efer);
+        auto loads_debug =
+            0 != (controls & entry_control::load_debug_controls);
+
+        // Read into a local rather than called twice below, and that is
+        // not only tidiness: `check-exit-handler.sh` reads every
+        // mention of this accessor as a *write* unless it is bound to a
+        // name, because a control written without `adjust_msr` fails the
+        // next VM entry silently.
+        auto secondary =
+            vmcs.secondary_processor_based_vm_execution_controls();
+
+        auto unrestricted =
+            0 != (secondary & secondary_unrestricted_guest);
+
+        auto tr_rights = vmcs.guest_tr_access_rights();
+        auto ldtr_rights = vmcs.guest_ldtr_access_rights();
+        auto ss_rights = vmcs.guest_ss_access_rights();
+        auto cs_rights = record.guest_cs_access_rights;
+
+        log("entry-failure state: entry-controls {} exit-controls {} "
+            "secondary {} cr0 {} cr0-shadow {} cr3 {} cr4 {} "
+            "cr4-shadow {} efer {} dr7 {} debugctl {}",
+            controls,
+            vmcs.vm_exit_controls(),
+            secondary,
+            cr0,
+            vmcs.cr0_read_shadow(),
+            cr3,
+            cr4,
+            vmcs.cr4_read_shadow(),
+            efer,
+            dr7,
+            vmcs.guest_ia32_debugctl());
+
+        log("entry-failure state: rflags {} rip {} rsp {} activity {} "
+            "interruptibility {} pending-debug {} gdtr {}/{} idtr {}/{}",
+            rflags,
+            record.guest_rip,
+            vmcs.guest_rsp(),
+            record.activity_state,
+            record.interruptibility_state,
+            vmcs.guest_pending_debug_exceptions(),
+            vmcs.guest_gdtr_base(),
+            vmcs.guest_gdtr_limit(),
+            vmcs.guest_idtr_base(),
+            vmcs.guest_idtr_limit());
+
+        log("entry-failure segments: cs {}/{}/{}/{} ss {}/{}/{}/{} "
+            "tr {}/{}/{} ldtr {}/{}/{}",
+            record.guest_cs_selector,
+            record.guest_cs_base,
+            vmcs.guest_cs_limit(),
+            cs_rights,
+            vmcs.guest_ss_selector(),
+            vmcs.guest_ss_base(),
+            vmcs.guest_ss_limit(),
+            ss_rights,
+            vmcs.guest_tr_selector(),
+            vmcs.guest_tr_base(),
+            tr_rights,
+            vmcs.guest_ldtr_selector(),
+            vmcs.guest_ldtr_base(),
+            ldtr_rights);
+
+        std::uint64_t failed{};
+
+        // SDM 29.3.1.1: the CR0 and CR4 fields must not set a bit to a
+        // value unsupported in VMX operation, with PE and PG exempt
+        // under "unrestricted guest" and NW and CD never checked.
+        auto cr0_fixed_0 = this->cached_vmx_msr(vmx_msr::cr0_fixed_0);
+        auto cr0_fixed_1 = this->cached_vmx_msr(vmx_msr::cr0_fixed_1);
+        auto cr0_exempt =
+            (cr0_nw | cr0_cd) | (unrestricted ? (cr0_pe | cr0_pg) : 0);
+
+        if (0 != ((~cr0 & cr0_fixed_0 & ~cr0_exempt) |
+                  (cr0 & ~cr0_fixed_1 & ~cr0_exempt))) {
+            failed |= 1ull << 0;
+        }
+
+        // SDM 29.3.1.1: "If bit 31 in the CR0 field (corresponding to
+        // PG) is 1, bit 0 in that field (PE) must also be 1."
+        if ((0 != (cr0 & cr0_pg)) && (0 == (cr0 & cr0_pe))) {
+            failed |= 1ull << 1;
+        }
+
+        auto cr4_fixed_0 = this->cached_vmx_msr(vmx_msr::cr4_fixed_0);
+        auto cr4_fixed_1 = this->cached_vmx_msr(vmx_msr::cr4_fixed_1);
+
+        if (0 != ((~cr4 & cr4_fixed_0) | (cr4 & ~cr4_fixed_1))) {
+            failed |= 1ull << 2;
+        }
+
+        // SDM 29.3.1.1: "If bit 23 in the CR4 field (corresponding to
+        // CET) is 1, bit 16 in the CR0 field (WP) must also be 1."
+        if ((0 != (cr4 & cr4_cet)) && (0 == (cr0 & cr0_wp))) {
+            failed |= 1ull << 3;
+        }
+
+        // SDM 29.3.1.1: "If the 'IA-32e mode guest' VM-entry control is
+        // 1, bit 31 in the CR0 field (corresponding to CR0.PG) and bit 5
+        // in the CR4 field (corresponding to CR4.PAE) must each be 1."
+        if (ia32e && ((0 == (cr0 & cr0_pg)) || (0 == (cr4 & cr4_pae)))) {
+            failed |= 1ull << 4;
+        }
+
+        // SDM 29.3.1.1: "If the 'IA-32e mode guest' VM-entry control is
+        // 0, bit 17 in the CR4 field (corresponding to CR4.PCIDE) must
+        // be 0." Named as the suspect once and innocent both times it
+        // has been looked at, which is precisely why it is checked here
+        // rather than argued about.
+        if (!ia32e && (0 != (cr4 & cr4_pcide))) {
+            failed |= 1ull << 5;
+        }
+
+        // SDM 29.3.1.1: "The CR3 field must be such that bits reserved
+        // in CR3 are 0." MAXPHYADDR is not read here - anything above
+        // bit 51 is reserved on every processor, so this catches the
+        // gross case without a CPUID leaf, and a CR3 that is merely
+        // above *this* processor's MAXPHYADDR is left to the raw value
+        // logged above.
+        if (0 != (cr3 & ~((1ull << 52) - 1))) {
+            failed |= 1ull << 6;
+        }
+
+        // SDM 29.3.1.1: "If the 'load debug controls' VM-entry control
+        // is 1, bits 63:32 in the DR7 field must be 0."
+        if (loads_debug && (0 != (dr7 >> 32))) {
+            failed |= 1ull << 7;
+        }
+
+        // SDM 29.3.1.1 (.references/sdm.txt:202424), and the pair of
+        // checks this instrument was written for: "If the 'load
+        // IA32_EFER' VM-entry control is 1 ... Bit 10 (corresponding to
+        // IA32_EFER.LMA) must equal the value of the 'IA-32e mode guest'
+        // VM-entry control. It must also be identical to bit 8 (LME) if
+        // bit 31 in the CR0 field (corresponding to CR0.PG) is 1."
+        if (loads_efer) {
+            if ((0 != (efer & efer_lma)) != ia32e) {
+                failed |= 1ull << 8;
+            }
+
+            if ((0 != (cr0 & cr0_pg)) &&
+                ((0 != (efer & efer_lma)) != (0 != (efer & efer_lme)))) {
+                failed |= 1ull << 9;
+            }
+        }
+
+        // SDM 29.3.1.4, "Checks on Guest RIP, RFLAGS, and SSP": bit 1
+        // must be 1, bits 63:22, 15, 5 and 3 must be 0, and the VM flag
+        // must be 0 if the guest is in IA-32e mode or CR0.PE is 0.
+        constexpr std::uint64_t rflags_always_one = 1ull << 1;
+        constexpr std::uint64_t rflags_vm = 1ull << 17;
+        constexpr std::uint64_t rflags_reserved =
+            ~((1ull << 22) - 1) | (1ull << 15) | (1ull << 5) | (1ull << 3);
+
+        if ((0 == (rflags & rflags_always_one)) ||
+            (0 != (rflags & rflags_reserved))) {
+            failed |= 1ull << 10;
+        }
+
+        if ((0 != (rflags & rflags_vm)) &&
+            (ia32e || (0 == (cr0 & cr0_pe)))) {
+            failed |= 1ull << 11;
+        }
+
+        // SDM 29.3.1.4: if the guest will not be in IA-32e mode, or CS.L
+        // is 0, bits 63:32 of RIP must be 0.
+        if (!ia32e && (0 != (record.guest_rip >> 32))) {
+            failed |= 1ull << 12;
+        }
+
+        // SDM 29.3.1.2, "Checks on Guest Segment Registers". TR is
+        // always checked - it may not be marked unusable - and its type
+        // must be a busy TSS, 11 in IA-32e mode and 3 or 11 outside it.
+        constexpr std::uint64_t type_mask = 0xf;
+        constexpr std::uint64_t descriptor_type = 1ull << 4;
+        constexpr std::uint64_t present = 1ull << 7;
+
+        if (0 != (tr_rights & access_rights_unusable)) {
+            failed |= 1ull << 13;
+        } else {
+            auto type = tr_rights & type_mask;
+
+            if ((ia32e && (11 != type)) ||
+                (!ia32e && (3 != type) && (11 != type)) ||
+                (0 != (tr_rights & descriptor_type)) ||
+                (0 == (tr_rights & present))) {
+                failed |= 1ull << 14;
+            }
+        }
+
+        // SDM 29.3.1.2: LDTR is checked only if usable, and then its
+        // type must be 2, S must be 0 and it must be present.
+        if (0 == (ldtr_rights & access_rights_unusable)) {
+            if ((2 != (ldtr_rights & type_mask)) ||
+                (0 != (ldtr_rights & descriptor_type)) ||
+                (0 == (ldtr_rights & present))) {
+                failed |= 1ull << 15;
+            }
+        }
+
+        // SDM 29.3.1.2: CS may not be unusable, must be a code type,
+        // must have S set and must be present.
+        if (0 != (cs_rights & access_rights_unusable)) {
+            failed |= 1ull << 16;
+        } else if ((0 == (cs_rights & 8)) ||
+                   (0 == (cs_rights & descriptor_type)) ||
+                   (0 == (cs_rights & present))) {
+            failed |= 1ull << 17;
+        }
+
+        // SDM 29.3.1.3, "Checks on Guest Descriptor-Table Registers":
+        // bits 31:16 of each limit must be 0.
+        if ((0 != (vmcs.guest_gdtr_limit() >> 16)) ||
+            (0 != (vmcs.guest_idtr_limit() >> 16))) {
+            failed |= 1ull << 18;
+        }
+
+        // SDM 29.3.1.5, "Checks on Guest Non-Register State": the
+        // activity state must be 0, 1, 2 or 3, and bits 31:5 of the
+        // interruptibility state are reserved.
+        if (record.activity_state > 3) {
+            failed |= 1ull << 19;
+        }
+
+        if (0 != (record.interruptibility_state & ~std::uint64_t{0x1f})) {
+            failed |= 1ull << 20;
+        }
+
+        log("entry-failure verdict: failed {} (bit 0 cr0-fixed, 1 pg-"
+            "without-pe, 2 cr4-fixed, 3 cet-without-wp, 4 ia32e-without-"
+            "pg-pae, 5 pcide-without-ia32e, 6 cr3-reserved, 7 dr7-high, "
+            "8 lma-vs-ia32e, 9 lma-vs-lme, 10 rflags-reserved, 11 vm-"
+            "flag, 12 rip-high, 13 tr-unusable, 14 tr-type, 15 ldtr-"
+            "type, 16 cs-unusable, 17 cs-type, 18 dt-limit, 19 activity, "
+            "20 interruptibility); 0 means every implemented check "
+            "passed",
+            failed);
+    }
+
     // Stop. This CPU is not going to run a guest again, and pretending
     // otherwise is what made this failure invisible before.
     for (;;) {
@@ -6385,7 +6675,28 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // Measured, on a Windows application processor coming up under
     // Hyper-V: `unhandled exit reason 0x1c qualification 0xe00`, which is
     // MOV to CR0 from R14.
-    vmcs.cr0_guest_host_mask(arch::x86_64::cr0_bits::numeric_error);
+    //
+    // CR0.PG joins it under `track_long_mode_switch`, and that is a
+    // correctness bit rather than a policy one. The exit handler has to
+    // see a paging transition to keep "IA-32e mode guest" and
+    // IA32_EFER.LMA agreeing with it, and with NE alone whether it sees
+    // one is an accident of the value the guest writes: the write that
+    // took the second processor to long mode exited only because it set
+    // NE where the post-INIT read shadow had it clear. A stub that had
+    // set NE in an earlier write would have enabled paging silently.
+    // KVM owns the same bit for the same reason - `vmx_set_cr0`
+    // (.references/kvm/vmx.c:3307) tests `old_cr0_pg` against the new
+    // value on every write, which only works because
+    // `KVM_POSSIBLE_CR0_GUEST_BITS` is `X86_CR0_TS | X86_CR0_WP` and
+    // `vmcs_writel(CR0_GUEST_HOST_MASK, ~...cr0_guest_owned_bits)`
+    // gives the host everything else.
+    constexpr auto cr0_mask =
+        nested_vmx::track_long_mode_switch
+            ? (arch::x86_64::cr0_bits::numeric_error |
+               arch::x86_64::cr0_bits::paging)
+            : std::uint64_t{arch::x86_64::cr0_bits::numeric_error};
+
+    vmcs.cr0_guest_host_mask(cr0_mask);
     vmcs.cr0_read_shadow(this->guest_cr0);
     vmcs.guest_cr0(this->host_cr0);
 
@@ -7502,6 +7813,17 @@ hypervisor::main(arch::x86_64::context & caller_context)
     // point before the first VM entry: every field the entry will consume
     // has been written by now, including the start-up state applied
     // above.
+    // The same argument for the entry-failure instrument, and it is not
+    // behind a switch: a reader who finds no `entry-failure` lines has to
+    // be able to tell "no VM entry was ever refused" from "this binary
+    // predates the instrument". Only the first line distinguishes them,
+    // and it is the whole reason this one is written unconditionally
+    // while the one below is not.
+    if (0 == cpuid) {
+        log("entry-failure instrument armed; no vm entry has been "
+            "refused yet");
+    }
+
     if constexpr (nested_vmx::trace_ap_entry) {
         if (0 == cpuid) {
             log("ap-entry instrument armed; no application processor has "

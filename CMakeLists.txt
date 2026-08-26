@@ -226,6 +226,10 @@ option(ZPP_INIT_CLEARS_EFER
        "Clear IA32_EFER when applying start-up state, as SDM Table 12-1 requires after INIT"
        OFF)
 
+option(ZPP_TRACK_LONG_MODE_SWITCH
+       "Maintain the 'IA-32e mode guest' VM-entry control and the guest IA32_EFER.LMA field across a guest's own paging transitions, and own CR0.PG in the guest/host mask so those transitions cannot be silent. Nothing in this tree maintained either: setup_vmcs sets the control once for a boot processor already in long mode and apply_start_up clears it, so an application processor's stub that goes real -> protected -> long reaches VM entry with CR0.PG set, EFER.LME set and the control clear, which SDM 29.3.1.1 rejects as invalid guest state (reason 0x80000021). Mirrors KVM's vmx_set_cr0 / enter_lmode / vmx_set_efer."
+       ON)
+
 option(ZPP_HONEST_EXIT_LENGTH
        "Report a VM-exit instruction length to the guest hypervisor only for exit reasons where the SDM defines it"
        ON)
@@ -426,6 +430,7 @@ ExternalProject_Add(hypervisor
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
+        -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
@@ -543,6 +548,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_ANNOUNCE_HYPERVISOR_BIT=${ZPP_ANNOUNCE_HYPERVISOR_BIT}
         -DZPP_STEP_VTL=${ZPP_STEP_VTL}
         -DZPP_INIT_CLEARS_EFER=${ZPP_INIT_CLEARS_EFER}
+        -DZPP_TRACK_LONG_MODE_SWITCH=${ZPP_TRACK_LONG_MODE_SWITCH}
         -DZPP_HONEST_EXIT_LENGTH=${ZPP_HONEST_EXIT_LENGTH}
         -DZPP_L2_STARTUP_SPIN=${ZPP_L2_STARTUP_SPIN}
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}

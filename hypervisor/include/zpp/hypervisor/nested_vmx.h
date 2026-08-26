@@ -896,6 +896,59 @@ inline constexpr bool step_vtl = (0 != ZPP_STEP_VTL);
 // no longer ignored.
 inline constexpr bool init_clears_efer = (0 != ZPP_INIT_CLEARS_EFER);
 
+#ifndef ZPP_TRACK_LONG_MODE_SWITCH
+#define ZPP_TRACK_LONG_MODE_SWITCH 1
+#endif
+
+// Whether this VMM maintains the "IA-32e mode guest" VM-entry control
+// and the guest IA32_EFER.LMA field when a guest turns paging on or off.
+//
+// **It did not, and nothing else in this tree ever did.** `setup_vmcs`
+// sets the control once from the state the launch found - the boot
+// processor is already in long mode, so it is set and never has to
+// change - and `apply_start_up` clears it for a processor put back into
+// real mode by INIT. Between those two there is no writer at all, so a
+// guest that walks real -> protected -> long on its own, which is
+// exactly what an application processor's start-up stub does, reaches
+// the next VM entry with CR0.PG set and the control still clear.
+// `sync_vmcs02_to_vmcs12` in nested_entry.cpp already carries the note
+// that "the failing boot ends with it clear in both VMCSes".
+//
+// The check that rejects it, once `init_clears_efer` has paired "load
+// IA32_EFER" with "save IA32_EFER" so the guest field is authoritative -
+// SDM 29.3.1.1 (.references/sdm.txt:202424): "If the 'load IA32_EFER'
+// VM-entry control is 1 ... Bit 10 (corresponding to IA32_EFER.LMA) must
+// equal the value of the 'IA-32e mode guest' VM-entry control. It must
+// also be identical to bit 8 (LME) if bit 31 in the CR0 field
+// (corresponding to CR0.PG) is 1." A stub that has done its WRMSR of
+// EFER.LME and is now writing CR0.PG therefore presents LME=1, LMA=0 and
+// the control clear, and VM entry fails with reason 0x80000021.
+//
+// On, the CR0 write is treated the way KVM's `vmx_set_cr0` treats it
+// (.references/kvm/vmx.c:3307): a 0 -> 1 transition of CR0.PG with
+// EFER.LME set calls `enter_lmode` (vmx.c:3172), the reverse calls
+// `exit_lmode` (vmx.c:3189), and both go through `vmx_set_efer`
+// (vmx.c:3147) which is the single place that sets or clears
+// VM_ENTRY_IA32E_MODE.
+//
+// **Two halves, and the second is why this is a switch and not a
+// one-liner.** The transition is only visible if the write exits, and
+// the CR0 guest/host mask held CR0.NE alone - so the write that
+// mattered exited by accident, because the value the stub wrote
+// happened to set NE where the post-INIT read shadow had it clear. Had
+// the stub set NE in an earlier write the paging transition would have
+// been silent. On, CR0.PG joins the mask so every paging transition
+// exits by construction. KVM owns the same bit for the same reason:
+// `KVM_POSSIBLE_CR0_GUEST_BITS` is `X86_CR0_TS | X86_CR0_WP` and
+// `vmcs_writel(CR0_GUEST_HOST_MASK, ~vcpu->arch.cr0_guest_owned_bits)`
+// gives the host everything else, CR0.PG included.
+//
+// Off restores both halves exactly as they were, for a comparison run.
+// The cost of on is one extra VM exit per paging transition, which is
+// two or three per processor for the life of a boot.
+inline constexpr bool track_long_mode_switch =
+    (0 != ZPP_TRACK_LONG_MODE_SWITCH);
+
 #ifndef ZPP_HONEST_EXIT_LENGTH
 #define ZPP_HONEST_EXIT_LENGTH 1
 #endif
