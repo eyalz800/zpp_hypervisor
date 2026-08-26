@@ -52985,3 +52985,65 @@ is no capability readback, no `constexpr bool`, and no field in
 `build_switches.cpp`, so nothing would say so. Same class as everything
 in "A CMake cache reading ON is not evidence".
 
+## nested=1 on two processors: reproducible, and not a benign reboot
+
+With the INVVPID fix in and `nested=1`, two processors, the guest runs
+a long way and then **resets** - QEMU stops at `paused (shutdown)`,
+which is what `-no-reboot -no-shutdown` is for.
+
+CLAUDE.md's own caveat had to be answered first: *"A stop is not
+evidence of a crash. Going from one processor to two is a hardware
+change Windows reboots for, and that reboot is now a dead stop."* Two
+boots of the same build answer it:
+
+| | cpu 0 exits | l2-entries | cpu 1 exits |
+|---|---|---|---|
+| first | 1,252,532 | 87,572 | **110** |
+| second | 1,287,389 | 89,008 | **110** |
+
+**A benign reboot does not repeat.** Same phase within 2.8% on the boot
+processor and *exactly* 110 exits on the application processor twice.
+This is a deterministic failure.
+
+It is also much further than `nested=1` has ever got before. The
+recorded result was four processes, stalled at `smss.exe`; this run
+made **89,008 second-level entries and 22,027 `HvCallVtlCall` /
+`HvCallVtlReturn` switches**, so VBS was genuinely switching virtual
+trust levels. Whatever the INVVPID fix did for the `nested=0` case, it
+did not leave this one where it found it.
+
+### Where the second processor stops
+
+Its ring ends:
+
+    [107] cpuid   active    cs=0x0038 rip=0x7ef5fbd7
+    [108] init    wait-sipi cs=0x0038 rip=0x7fb6b030
+    [109] sipi    active    cs=0x0200 rip=0x0
+
+It takes the INIT, takes the start-up IPI to vector 2, is placed at
+`0x2000` in real mode - **and then takes no further exit at all.** It
+never enters a second-level guest (`l2-entries 0`), so Hyper-V never
+launched a virtual trust level on it. It is executing, or spinning,
+inside a trampoline that asks this VMM for nothing.
+
+That is a different shape from the `nested=0` failure, which announced
+itself with a triple fault. Silence is harder: there is no record to
+read, and the instrument that would produce one is a monitor trap flag
+armed at the start-up IPI, which turns "it is somewhere in there" into
+one exit per retired instruction.
+
+### An instrument disagreeing with itself, recorded before it misleads
+
+The summary table says cpu 1 took **110** exits. The per-reason
+histogram for the same processor totals **201** (143 cpuid, 45 rdmsr,
+9 ept-violation, 2 cr-access, 1 init, 1 sipi). Both runs, identically.
+
+Two counters for one quantity, disagreeing by the same amount twice, is
+the exact shape of the defect this tree has already recorded twice -
+"Instrument counted only one of two increment sites", and the census
+aimed at the wrong register. **Neither number should be quoted as the
+application processor's exit count until it is known which one counts
+what.** The ring's own indices go to 109, which agrees with 110 and not
+with 201, so the histogram is the more likely candidate for counting
+something else - but that is a guess and is written down as one.
+
