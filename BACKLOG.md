@@ -52669,3 +52669,51 @@ Two notes on method, since both cost time here:
   Three iterations described this failure by register state alone. One
   `xp` at the faulting address named the instruction.
 
+## Every architectural check passes and the far jump still triple faults
+
+The complete state at the fault, from the record rather than the log,
+which wraps long before it can be read:
+
+    rip 0x16fe   cs 0x30   cs_ar 0xc09b     compatibility mode, legal
+    cr0 0x80050033                          PE and PG
+    cr3 0x7feeb000                          a real page table, not zero
+    cr4 0x352e78                            PAE set
+    efer 0xd01                              LME and LMA both set
+    entry_ctl 0x93ff                        bit 9, ia-32e mode guest, SET
+    gdtr 0x1018 limit 0x3f
+    idtr 0x0 limit 0xffff                   the post-INIT one
+
+and the descriptor table it is jumping through, read out of guest
+memory:
+
+    sel 0x10: 0x00209b0000000000   AR 0x9b  L=1   64-bit code
+    sel 0x20: 0x00cf93000000ffff            32-bit data
+    sel 0x30: 0x00cf9b000000ffff            32-bit code, the current CS
+
+So the instruction is `jmp far [rdi+0x66]` going from compatibility
+mode to the 64-bit segment at selector `0x10` - the ordinary end of a
+mode switch - the descriptor is valid, the tables are real, and
+LMA/LME/the entry control all agree with CR0.PG. **There is no
+inconsistency left to find in the state we present.**
+
+Two things that follow:
+
+- The remaining candidate is the **memory operand**. The far jump
+  reads six bytes at `[rdi+0x66]`, and a fault there triple faults
+  rather than reporting, because the IDTR is still the post-INIT one -
+  base 0, limit 0xffff - so the guest has no handler for anything yet.
+  That is normal for a stub, and it means *any* fault at this
+  instruction looks identical.
+- `guest_linear 0x10008b58` is in the record but is undefined for a
+  triple fault, so it must not be read as the faulting address. It is
+  the residue of an earlier exit.
+
+### The state carried in the record, and why it is there
+
+The log ring wraps: the application processor fails inside its first
+hundred exits and the boot processor then takes two hundred thousand,
+so the triple-fault diagnostics are gone even from a dump taken four
+minutes in. Every value above came from members read at the singleton
+plus a DWARF member offset. **When a failure is early and the machine
+keeps running, put the evidence in a member, not the log.**
+
