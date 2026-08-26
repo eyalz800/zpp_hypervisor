@@ -51664,3 +51664,47 @@ Cpu 1 took **35 reflections, none for a reason with an undefined
 length**, so its zero has a different cause and this fix does not
 touch it. It remains stuck at 968 exits and 36 second-level entries.
 
+## We do not reach the login screen in ANY configuration, and now we know why
+
+Enumerated on the live guest in the best configuration - the one that
+runs 21,200,930 exits and 1,699,801 second-level entries and looks
+perfectly healthy:
+
+    4 processes: System, Secure System, Registry, smss.exe
+
+No `csrss.exe`, no `winlogon.exe`, no `LogonUI.exe`. **The guest stalls
+at the session manager**, and twenty-one million exits with four
+processes is a boot processor spinning rather than working.
+
+That joins up with the barrier: `KeStartAllProcessors` runs in Phase 1,
+long before the session manager gets anywhere, and it waits for the
+application processor to report started. In the configuration where
+that processor dies quietly at 117 exits, Windows waits for it for
+ever; in the configuration where it runs and fails later, Windows waits
+for it for ever. **Both configurations are blocked on the same thing.**
+
+So the application processor is not one defect among several. It is
+the single thing between this tree and the goal, and every measurement
+of "the guest is healthy on one processor" recorded above was
+measuring a guest that had stopped in Phase 1 and was spinning.
+
+### How to ask the question, since exits cannot answer it
+
+`scripts/guest-processes.py <kernel-base> <windows-cr3>`, both from our
+own log line "second-level guest kernel image at ..., cr3 ...".
+
+- It walks Windows' page tables with `xp` rather than using the
+  monitor's `x`, because `x` translates through whichever processor is
+  selected and that processor is usually inside the guest hypervisor's
+  address space - `x` then answers "Cannot access memory", which is a
+  mapping fact and says nothing about the guest. The physical walk
+  works whatever the processor is doing, including on a frozen guest.
+- The two offsets - `ActiveProcessLinks` 472, `ImageFileName` 824 -
+  come from `llvm-pdbutil dump --types` on ntkrnlmp.pdb, not from
+  memory of Windows internals. They are per build.
+
+**There is no other way to ask on this rig.** The display is a
+passed-through GPU so QEMU refuses a screendump, and no counter in this
+tree distinguishes a booted system from a spinning one - which is
+exactly the mistake made above, repeatedly, in both directions.
+
