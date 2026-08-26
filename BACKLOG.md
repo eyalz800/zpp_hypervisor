@@ -52275,3 +52275,51 @@ virtual read is both faster - one round trip instead of five - and
 more reliable. Use `x` when a processor is in kernel context, `xp`
 plus a walk when none is.
 
+### And multicore is a second, independent defect
+
+`nested=0`, two processors, hypervisor resident and the loader
+confirmed on serial. Two consecutive boots, so it is not the one-time
+reset Windows performs when the processor count changes:
+
+    cpu 0   991 exits    cpu 1  108 exits    VM status: paused (shutdown)
+    log: cpu 0x1 came up on the trampoline after 0x11bf attempts
+
+The application processor **is adopted** and then the guest resets
+almost immediately, where the same build with one processor runs
+263,353 exits and reaches `winlogon.exe`.
+
+So the two failures are independent and neither implies the other:
+
+| | one processor | two processors |
+|---|---|---|
+| `nested=0` | **login screen, 77 processes** | resets at ~1,000 exits |
+| `nested=1` | stalls at `smss.exe`, 4 processes | boot processor runs, AP dies |
+
+That is a much better decomposition than anything this investigation
+had. The nested path and the multicore path are separate bugs, and the
+base hypervisor carries a single-processor Windows all the way.
+
+### Two process failures of my own, both self-inflicted
+
+- **A whole two-processor measurement was of bare Windows.**
+  `rig-boot.sh` printed *"FAIL: no 'zpp:' line on serial within 240s.
+  The firmware booted something other than the loader, so this run has
+  no hypervisor in it"* - and I read the counters instead of the
+  script's own verdict. The guest's NVRAM had reverted to
+  `Boot0004 "Windows Boot Manager"`; `scripts/rig-one-boot-option.sh`
+  restores it. **Read the launcher's verdict before reading any
+  number it produced.**
+- **`llvm-symbolizer` was pointed at the wrong ELF** earlier for the
+  same reason in miniature: `deploy-to-rig.sh` keeps exactly one
+  `.rig-deployed-hypervisor.elf`, and an A/B overwrites it. Copy it
+  aside per configuration.
+
+### A better way to find the guest's kernel base
+
+Scanning downward for `MZ` failed twice here - the nearest PE to a
+kernel instruction pointer is often a driver, not `ntoskrnl`. What
+works is to **verify a candidate**: read `base + 0xf05c60` and require
+it to hold a canonical kernel pointer, since that is
+`PsActiveProcessHead` and nothing else will. It found the base in one
+pass after two failed scans.
+
