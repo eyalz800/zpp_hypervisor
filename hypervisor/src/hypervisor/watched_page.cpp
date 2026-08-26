@@ -676,6 +676,10 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                 }
 
                 this->emulated_writes = this->emulated_writes + 1;
+                if (cpu < max_cpus) {
+                    this->emulated_writes_by_cpu[cpu] =
+                        this->emulated_writes_by_cpu[cpu] + 1;
+                }
 
                 // The instruction has been carried out, so the guest
                 // resumes after it rather than on it - by the length the
