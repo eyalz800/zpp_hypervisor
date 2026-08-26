@@ -3509,6 +3509,223 @@ def dump_framebuffer(args, elf, instance):
           f"--format {fmt}")
 
 
+# The CPUID leaves an application-processor bring-up loop plausibly
+# polls, so a census can be read without a second window open.  Only
+# leaves this VMM has an opinion about, or that carry identity, are
+# named - the rest print as their number.
+CPUID_LEAF = {
+    0x00000000: "max leaf + vendor",
+    0x00000001: "features; EBX[31:24] initial APIC ID",
+    0x00000004: "cache topology (subleaf)",
+    0x00000006: "thermal/power",
+    0x00000007: "structured features",
+    0x0000000b: "x2APIC topology; EDX = x2APIC ID",
+    0x0000000d: "xsave",
+    0x0000000f: "RDT monitoring",
+    0x00000015: "TSC/core crystal ratio",
+    0x00000016: "processor frequency",
+    0x0000001f: "V2 topology; EDX = x2APIC ID",
+    0x40000000: "hv vendor + max hv leaf",
+    0x40000001: "hv interface signature",
+    0x40000002: "hv version",
+    0x40000003: "hv features/privileges",
+    0x40000004: "hv recommendations",
+    0x40000005: "hv limits",
+    0x4000000a: "hv nested features",
+    0x40000100: "zpp diagnostic leaf",
+    0x80000000: "max extended leaf",
+    0x80000001: "extended features",
+    0x80000008: "physical address bits",
+    0x8fffffff: "zpp deep-presence leaf",
+}
+
+
+def dump_ap_census(args, elf, instance):
+    """What each processor asked this VMM for, and who it thinks it is.
+
+    **Every member read here was added to answer the application-
+    processor question and none of them had a reader.**  `cpuid_total`,
+    `cpuid_leaf_codes`, `cpuid_leaf_counts`, `cpuid_leaf_other`,
+    `cpuid_last_rip`, `cpuid_leaf0_raw`, `cpuid_leaf0_rip`, `l1_gs_base`,
+    `l1_gs_index`, `l1_gs_index_taken`, `start_up_applied`,
+    `init_emulated` and `exit_total` appear in no script in this tree.
+    The header comments beside them describe measurements
+    ("8,378 CPUIDs against cr-access 3, rdmsr 61") that were taken by
+    hand, once, and never taken again - so the numbers they argue from
+    are older than the code they sit in.
+
+    The question this answers directly: an application processor's exits
+    are 71% CPUID at two or three instruction pointers, and the *reason*
+    is unobtainable from the exit ring, which records that a CPUID
+    happened and not which leaf.  `cpuid_leaf_counts[cpu]` records it,
+    per processor, for the whole run.
+
+    Three cross-checks, printed as verdicts rather than left implied,
+    because five instruments in this investigation have reported
+    plausible nonsense:
+
+    - `cpuid_total[cpu]` must equal `exit_reason_counts[cpu][10]`.
+    - the slot counts plus `cpuid_leaf_other[cpu]` must equal
+      `cpuid_total[cpu]`.
+    - `exit_reason_counts[cpu]` must sum to `exit_total[cpu]`.
+
+    A reading that fails any of them is not to be used.
+    """
+    members = ["exit_total", "exit_trace_count", "exit_reason_counts",
+               "cpuid_total", "cpuid_leaf_codes", "cpuid_leaf_counts",
+               "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_raw",
+               "cpuid_leaf0_rip", "l1_gs_base", "l1_gs_index",
+               "l1_gs_index_taken", "start_up_applied", "init_emulated",
+               "started_by_start_up_ipi", "launch_error"]
+    off = gdb_offsets(elf, members, optional=True)
+    if "cpuid_leaf_counts" not in off:
+        print("\n[ap census skipped: the deployed ELF has no "
+              "cpuid_leaf_counts]")
+        return
+
+    lengths = gdb_lengths(elf, ["cpuid_leaf_codes", "exit_reason_counts"])
+    slots = lengths["cpuid_leaf_codes"]
+    reasons = lengths["exit_reason_counts"]
+
+    reader = Monitor(args.rig, args.port)
+    for name in ("exit_total", "exit_trace_count", "cpuid_total",
+                 "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_rip",
+                 "l1_gs_base", "l1_gs_index_taken", "start_up_applied",
+                 "init_emulated", "launch_error"):
+        if name in off:
+            reader.queue(instance + off[name], args.cpus)
+    # Thirty-two bit each, so two processors share a quadword.  Read as
+    # one per word and the second processor's value is silently the high
+    # half of the first's - which reads as a plausible zero.
+    for name in ("cpuid_leaf0_raw", "l1_gs_index"):
+        if name in off:
+            reader.queue(instance + off[name], (args.cpus + 1) // 2)
+    # A byte each; max_cpus of them fit in four words.
+    if "started_by_start_up_ipi" in off:
+        reader.queue(instance + off["started_by_start_up_ipi"],
+                     (args.cpus + 7) // 8)
+    for cpu in range(args.cpus):
+        for name in ("cpuid_leaf_codes", "cpuid_leaf_counts"):
+            reader.queue(instance + off[name] + cpu * slots * 8, slots)
+        reader.queue(
+            instance + off["exit_reason_counts"] + cpu * reasons * 8,
+            reasons)
+    words = reader.run()
+
+    def word(name, index=0):
+        if name not in off:
+            return None
+        return words.get(instance + off[name] + 8 * index)
+
+    def half(name, index):
+        got = word(name, index // 2)
+        if got is None:
+            return None
+        return (got >> (32 * (index % 2))) & 0xffffffff
+
+    def byte(name, index):
+        got = word(name, index // 8)
+        if got is None:
+            return None
+        return (got >> (8 * (index % 8))) & 0xff
+
+    def row(name, cpu, length):
+        base = instance + off[name] + cpu * length * 8
+        return [words.get(base + 8 * i, 0) for i in range(length)]
+
+    print("\n--- per-processor census: what each processor asked for ---")
+
+    for cpu in range(args.cpus):
+        total = word("cpuid_total", cpu) or 0
+        counts = row("exit_reason_counts", cpu, reasons)
+        exits = word("exit_total", cpu) or 0
+        slots_written = word("exit_trace_count", cpu) or 0
+
+        if not exits and not total:
+            print(f"\ncpu {cpu}: no exits recorded - this processor was "
+                  f"never launched, or the reader is pointed at the "
+                  f"wrong binary")
+            continue
+
+        print(f"\ncpu {cpu}  exits {exits:,}  ring slots {slots_written:,}"
+              f"  ({exits - slots_written:,} merged as repeats)")
+
+        # Verdict one.  A row that does not sum to exit_total means a
+        # reason at or above `exit_reason_capacity` was taken, which the
+        # ring still holds.
+        summed = sum(counts)
+        if summed != exits:
+            print(f"  CHECK FAILED: exit reasons sum to {summed:,} "
+                  f"against exit_total {exits:,} - a reason past the "
+                  f"table's bound, or a stale read")
+        cpuid_reason = counts[10] if len(counts) > 10 else 0
+        if total != cpuid_reason:
+            print(f"  CHECK FAILED: cpuid_total {total:,} against the "
+                  f"CPUID row {cpuid_reason:,} - do not use the census "
+                  f"below")
+
+        codes = row("cpuid_leaf_codes", cpu, slots)
+        leaf_counts = row("cpuid_leaf_counts", cpu, slots)
+        other = word("cpuid_leaf_other", cpu) or 0
+        accounted = sum(leaf_counts) + other
+        if accounted != total:
+            print(f"  CHECK FAILED: leaf slots + other = {accounted:,} "
+                  f"against cpuid_total {total:,}")
+
+        if total:
+            print(f"  cpuid leaves ({total:,} total"
+                  + (f", {other:,} past the {slots} slots" if other else "")
+                  + ")")
+            ordered = sorted(
+                ((c, codes[i]) for i, c in enumerate(leaf_counts) if c),
+                reverse=True)
+            for count, leaf in ordered:
+                print(f"    0x{leaf:08x}  {count:>10,}  "
+                      f"{100.0 * count / total:5.1f}%  "
+                      f"{CPUID_LEAF.get(leaf, '')}")
+            last = word("cpuid_last_rip", cpu)
+            leaf0 = half("cpuid_leaf0_raw", cpu)
+            leaf0_rip = word("cpuid_leaf0_rip", cpu)
+            print(f"    last cpuid at rip 0x{(last or 0):x}; leaf 0 "
+                  f"answered EAX=0x{(leaf0 or 0):x} from rip "
+                  f"0x{(leaf0_rip or 0):x}")
+
+        # The exit-reason row, whole.  It is the only whole-run answer to
+        # "what was this processor doing" and the ring's thirty-two slots
+        # are not it.
+        print("  exit reasons")
+        for count, reason in sorted(
+                ((c, i) for i, c in enumerate(counts) if c), reverse=True):
+            print(f"    {EXIT_REASON.get(reason, reason):<16} "
+                  f"{count:>10,}  {100.0 * count / max(exits, 1):5.1f}%")
+
+        # **Who this processor thinks it is.**  `l1_gs_index` is the
+        # guest hypervisor's own processor index, read out of its GS
+        # base at a CPUID exit with vmcs01 current.  The check it has to
+        # pass is stated in the header: on a processor that works, the
+        # value equals that processor's own index.  Zero on an
+        # application processor means every processor believes it is
+        # processor 0 - which would explain a bring-up that polls and
+        # never completes, and is not something the exit ring can say.
+        taken = word("l1_gs_index_taken", cpu) or 0
+        if taken:
+            index = half("l1_gs_index", cpu)
+            gs = word("l1_gs_base", cpu) or 0
+            verdict = "agrees" if index == cpu else "DISAGREES"
+            print(f"  guest hypervisor's own index {index} from gs base "
+                  f"0x{gs:x} - {verdict} with cpu {cpu}")
+        else:
+            print(f"  guest hypervisor's own index never sampled "
+                  f"(no CPUID exit with vmcs01 current)")
+
+        applied = word("start_up_applied", cpu) or 0
+        inits = word("init_emulated", cpu) or 0
+        started = byte("started_by_start_up_ipi", cpu)
+        error = word("launch_error", cpu) or 0
+        print(f"  start-ups applied {applied}  inits emulated {inits}  "
+              f"started_by_start_up_ipi {started}  launch_error {error}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -3550,7 +3767,8 @@ def main():
                "vtl_protect_rcx", "vtl_protect_rdx",
                "vtl_protect_rax", "vtl_protect_count",
                "vtl_call_rcx",
-               "shadow_leaf_permissions", "exit_trace", "exit_trace_count", "l2_exit_trace",
+               "shadow_leaf_permissions", "exit_trace", "exit_trace_count",
+               "exit_total", "l2_exit_trace",
                "l2_exit_trace_count", "l2_working_trace",
                "l2_working_trace_count", "l2_entries", "l2_activity_state",
                "running_l2", "events_requeued", "events_deferred",
@@ -3780,7 +3998,7 @@ def main():
 
     monitor = Monitor(args.rig, args.port)
     # The scalar per-processor arrays, one read each - they are contiguous.
-    scalars = ["exit_trace_count", "l2_exit_trace_count",
+    scalars = ["exit_trace_count", "exit_total", "l2_exit_trace_count",
                "l2_working_trace_count", "l2_entries",
                "l2_activity_state", "events_requeued", "events_deferred",
                "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
@@ -4104,10 +4322,24 @@ def main():
     def read(name, index=0):
         return words.get(instance + off[name] + 8 * index)
 
-    print("\ncpu  exits      l2-entries  l2-exits  requeued  deferred  "
-          "pending  l2-activity")
+    # **This column used to be `exit_trace_count` under the heading
+    # "exits", and it is not exits.**  `hypervisor.h:4392` says so in the
+    # member's own comment: a repeat of the entry already in the newest
+    # slot grows that entry's `repeated` instead of consuming a slot, so
+    # the count is *ring slots written*.  `exit_total` beside it is the
+    # count of exits and had no reader anywhere in this tree.
+    #
+    # What that cost: cpu 1 was reported as taking "110 exits" across
+    # five application-processor boots and the determinism of 110/110/
+    # 110/109/109 was treated as the signature of the failure.  The same
+    # processor's `exit_reason_counts` row summed to 201.  Both numbers
+    # were right and one of them was answering a different question -
+    # 110 distinct-from-predecessor records covering 201 exits.
+    print("\ncpu  exits       slots  l2-entries  l2-exits  requeued  "
+          "deferred  pending  l2-activity")
     for cpu in range(args.cpus):
-        print(f"{cpu:3d}  {read('exit_trace_count', cpu):-10d}  "
+        print(f"{cpu:3d}  {read('exit_total', cpu) or 0:-10d}  "
+              f"{read('exit_trace_count', cpu):-5d}  "
               f"{read('l2_entries', cpu):-10d}  "
               f"{read('l2_exit_trace_count', cpu):-8d}  "
               f"{read('events_requeued', cpu):-8d}  "
@@ -5399,6 +5631,16 @@ def main():
     # needs before it can look at the screen at all, and it costs one
     # monitor connection.
     dump_framebuffer(args, args.elf, instance)
+
+    # Immediately after it, because on an application-processor run this
+    # is the section wanted and everything else is context.  It names
+    # the CPUID leaves each processor asked for - which the exit ring
+    # cannot, since it records that a CPUID happened and not which leaf
+    # - and prints the true exit count beside the ring's slot count.
+    try:
+        dump_ap_census(args, args.elf, instance)
+    except SystemExit as failure:
+        print(f"\n[dump_ap_census skipped: {failure}]")
 
     # Which hypervisor-range CPUID leaves the guest actually asks for.
     # The question the exit trace cannot answer: it records that a cpuid
