@@ -51554,3 +51554,59 @@ manufactured `0` waiting for a guest that reads a neighbouring
 unimplemented field - exactly the shape being chased here, just not
 for `0x681e`.
 
+## The bad RIP is 0 as often as 2, and it is ours
+
+Fresh boot, same binary:
+
+    cpu 0 lowest-rip entry, at entry 87,859 (of 87,896): rip 0x0, long mode
+        vmcs02 cs 0x0010 base 0x0 limit 0x0 ar 0x209b
+        vmcs02 cr0 0x80050033 (PE=1), efer 0xd00 (LMA=1), rflags 0x46
+        vmcs12 cs 0x0010 base 0x0 cr0 0x80050033
+        vmcs02 CARRIES EXACTLY what vmcs12 asked for
+        linear entry address 0x0 (base + rip)
+
+Three things follow.
+
+- **A long-mode guest with a valid code selector entered at linear 0
+  is never legitimate.** This is not a start-up state and not a
+  sentinel.
+- **The value alternates - `0x0` here, `0x2` before.** A varying value
+  is the signature of something being fed in, not of a fixed constant
+  the guest chose.
+- **It happens at the very end**, entry 87,859 of 87,896, after tens
+  of thousands of correct entries. Whatever it is, it is rare and
+  late, not a bring-up problem.
+
+### A framing correction, and it is the important part of this entry
+
+The previous entry ended at "this VMM faithfully stores, serves and
+enters what the guest hypervisor asks for, and the guest hypervisor
+asks to run at 2". **That reads as though the fault had moved off our
+side, and it has not.** The guest is correct software running on a
+virtual machine this code builds; the guest hypervisor can only
+compute what our machine gives it grounds to compute. "We copied it
+faithfully" is a description of the symptom.
+
+Every measurement above stands - we do not serve a zero, compute a low
+RIP, or impose one from the shadow region. What is wrong is the
+conclusion drawn from them. The right reading is: *the corruption
+reaches vmcs12 by a route none of those four instruments watches.*
+
+### The route not yet watched: a vmcs12 that moved processors
+
+A VMCS is legally migrated - VMCLEAR on one processor, VMPTRLD of the
+same physical address on another. `guest_vmcs12[cpu]` is per
+processor, and `on_guest_vmptrld` reads the region out of guest memory
+into that cache; the low-RIP census recorded exactly that, "memory ->
+vmcs12", writing `0x0`.
+
+**The existing shared-vmcs12 detector only notices a region that is
+currently current on another processor.** A migrated one does not trip
+it. If a flush does not write every field back - or if the region we
+read is not in the layout we wrote - the receiving processor reads
+zero for a field the sending one held correctly.
+
+That is multiprocessor-shaped, which fits a failure that does not
+occur with one processor, and it is the first candidate that explains
+a wrong RIP with no arithmetic at all.
+
