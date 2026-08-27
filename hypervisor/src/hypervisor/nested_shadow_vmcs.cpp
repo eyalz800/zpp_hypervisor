@@ -465,6 +465,26 @@ bool hypervisor::point_at_vmcs(std::size_t cpu, bool second_level)
     return 0 != arch::x86_64::vmx::vmptrld(&region, cpu);
 }
 
+/**
+ * Which VMCS this processor has current. See the declaration.
+ *
+ * Deliberately keyed on `running_l2` rather than on a parameter, so that
+ * a caller cannot get it wrong by passing the wrong level: there is
+ * exactly one right answer at any instant and this is where it lives.
+ * `reflect_l2_exit` clears the flag immediately after its own
+ * `point_at_vmcs(cpu, false)` and before the copy at its tail, which is
+ * the one place on the reflection path where the two could disagree.
+ */
+std::uint64_t hypervisor::current_vmcs_region_physical(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return 0;
+    }
+
+    return this->running_l2[cpu] ? this->vmcs02_physical[cpu]
+                                 : own_vmcs_region_physical(cpu);
+}
+
 void hypervisor::initialize_vmcs_shadowing()
 {
     detect_underlying_hypervisor();
@@ -628,10 +648,21 @@ void hypervisor::set_vmcs_shadowing(std::size_t cpu, bool enabled)
  * can be written - the format is not architecturally defined and must not
  * be written as memory. It is cleared again afterwards so its contents
  * reach memory rather than staying in whatever the processor caches, and
- * the VMCS that was current is put back. VMPTRST rather than a remembered
- * pointer because this is called from both the vmcs01 and the reflection
- * paths, and a wrong restore here would be a VM entry against the wrong
- * VMCS.
+ * the VMCS that was current is loaded again.
+ *
+ * **This used to open with a VMPTRST, and the reason given for it was a
+ * statement about the callers rather than about the information.** It
+ * said "VMPTRST rather than a remembered pointer because this is called
+ * from both the vmcs01 and the reflection paths, and a wrong restore here
+ * would be a VM entry against the wrong VMCS". Both halves are true and
+ * neither implies the instruction: `running_l2[cpu]` says which level is
+ * current and `point_at_vmcs` already loads from the same two members
+ * this now reads. All four call sites - the tail of `reflect_l2_exit`,
+ * `set_vmcs_shadowing(cpu, true)` from `on_guest_vmptrld`,
+ * `flush_guest_vmcs12`, and `on_guest_vmlaunch_or_resume` - run in root
+ * operation with vmcs01 current, and each has performed a vmcs01 field
+ * access on the way in, which is what proves there is a current VMCS to
+ * name.
  */
 void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 {
@@ -653,27 +684,40 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
         }
 
         // Adjacent intervals over the five things this does, because
-        // four of them are region instructions and the fifth is the only
-        // one anybody has ever thought about.
+        // three of them are region instructions and the fourth is the
+        // only one anybody has ever thought about.
         //
         // `shadow_writes_skipped` says the field writes are mostly
         // elided already, so a call that still costs tens of thousands
         // of cycles is not costing them on fields - it is costing them
-        // on the VMPTRST, the two VMPTRLDs and the VMCLEAR that bracket
-        // them. Those four are **not** in `vmcs_reads_taken` or
-        // `vmcs_writes_taken`, which count only `vmcs::read` and
-        // `vmcs::write` - so the "110.6 VMCS accesses a round trip" this
-        // project prices its estimates from has never included the most
-        // expensive instructions on the path.
+        // on the two VMPTRLDs and the VMCLEAR that bracket them. Those
+        // are **not** in `vmcs_reads_taken` or `vmcs_writes_taken`,
+        // which count only `vmcs::read` and `vmcs::write` - so the
+        // "110.6 VMCS accesses a round trip" this project prices its
+        // estimates from has never included the most expensive
+        // instructions on the path.
         //
-        // Which of the four is the answer: KVM's `handle_vmptrst` writes
-        // through a guest *linear* address and its `handle_vmclear`
-        // releases the mapped page and writes the launch state back, so
-        // neither is the cheap pointer move its name suggests. If they
-        // are, the VMPTRST is removable outright - this VMM knows which
-        // VMCS is current from `running_l2` and
-        // `own_vmcs_region_physical`, and the comment above only says it
-        // does not.
+        // **The VMPTRST that used to open this is gone**, and slot 40
+        // now brackets the member read that replaced it. It was the one
+        // of the four that named the VMCS rather than moving anything,
+        // and it was the only one KVM does not execute: its own
+        // `copy_shadow_to_vmcs12` and `copy_vmcs12_to_shadow`
+        // (`.references/kvm/nested.c:1593` and `:1620`) are
+        // VMCS_LOAD(shadow), fields, VMCS_CLEAR(shadow),
+        // VMCS_LOAD(loaded_vmcs->vmcs) - three region instructions,
+        // with the pointer remembered rather than asked for. Neither is
+        // the cheap pointer move its name suggests underneath us:
+        // `handle_vmptrst` (`nested.c:5810`) reads VMX_INSTRUCTION_INFO,
+        // decodes the memory operand and writes through a guest
+        // *linear* address with `kvm_write_guest_virt_system`.
+        //
+        // **The VMCLEAR and the VMPTRLD back are not removable and the
+        // SDM says why.** VMCLEAR's operation ends "IF operand addr =
+        // current-VMCS pointer THEN current-VMCS pointer :=
+        // FFFFFFFF_FFFFFFFFH" (SDM 33.3, `.references/sdm.txt:207820`),
+        // so after clearing the shadow this processor has **no** current
+        // VMCS at all. The reload is what gives it one again, not a
+        // restore of a pointer that was still there.
         auto mark = copy_start;
         auto stamp = [&](std::size_t slot) {
             if (cpu < max_cpus) {
@@ -693,8 +737,12 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
         // a round trip. See `vmcs_cache_suspended`.
         arch::x86_64::vmx::vmcs_cache_borrow borrow;
 
-        std::uint64_t previous{};
-        if (arch::x86_64::vmx::vmptrst(&previous)) {
+        // Named, not read back. See `current_vmcs_region_physical`: it
+        // picks between the same two words `point_at_vmcs` loads from,
+        // so this is where that VMPTRLD's argument came from rather than
+        // a second opinion about it.
+        auto previous = current_vmcs_region_physical(cpu);
+        if (0 == previous) {
             return;
         }
 
@@ -751,10 +799,11 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
         // **Restore the enlightened selection, not just a VMCS
         // pointer.** With the enlightened VMCS in use there is no real
         // current VMCS for the second-level one - it was never
-        // `vmptrld`ed - so `vmptrst` above answered with this VMM's own,
-        // and loading that back leaves the cache row bound to vmcs01.
-        // Every second-level field access after this copy would then go
-        // to the wrong VMCS.
+        // `vmptrld`ed - so `previous` above names this VMM's own, which
+        // is also what the VMPTRST that used to compute it answered, and
+        // loading that back leaves the cache row bound to vmcs01. Every
+        // second-level field access after this copy would then go to the
+        // wrong VMCS.
         //
         // That is why mixed mode reset the guest immediately after its
         // first round trip while the enlightened build with shadowing off
@@ -808,8 +857,9 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         }
 
         // The same five adjacent intervals as the copy out; see it for
-        // why the four region instructions are the interesting part and
-        // the nine field reads are not.
+        // why the three region instructions are the interesting part,
+        // why the VMPTRST that used to be the fourth is gone, and why
+        // the VMCLEAR and the VMPTRLD back cannot follow it.
         auto mark = copy_start;
         auto stamp = [&](std::size_t slot) {
             if (cpu < max_cpus) {
@@ -829,8 +879,9 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         // a round trip. See `vmcs_cache_suspended`.
         arch::x86_64::vmx::vmcs_cache_borrow borrow;
 
-        std::uint64_t previous{};
-        if (arch::x86_64::vmx::vmptrst(&previous)) {
+        // Named, not read back; see the copy out for the whole argument.
+        auto previous = current_vmcs_region_physical(cpu);
+        if (0 == previous) {
             return;
         }
 
@@ -906,10 +957,11 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         // **Restore the enlightened selection, not just a VMCS
         // pointer.** With the enlightened VMCS in use there is no real
         // current VMCS for the second-level one - it was never
-        // `vmptrld`ed - so `vmptrst` above answered with this VMM's own,
-        // and loading that back leaves the cache row bound to vmcs01.
-        // Every second-level field access after this copy would then go
-        // to the wrong VMCS.
+        // `vmptrld`ed - so `previous` above names this VMM's own, which
+        // is also what the VMPTRST that used to compute it answered, and
+        // loading that back leaves the cache row bound to vmcs01. Every
+        // second-level field access after this copy would then go to the
+        // wrong VMCS.
         //
         // That is why mixed mode reset the guest immediately after its
         // first round trip while the enlightened build with shadowing off

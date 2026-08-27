@@ -5951,7 +5951,23 @@ private:
      * needed to symbolise a slow run was missing from exactly the runs
      * worth symbolising.
      *
-     * One store on a path that already reads the field.
+     * **"One store on a path that already reads the field" is what this
+     * used to say, and it stopped being true when the guest-state copy
+     * was deferred.** `field::guest_cr3` is in `guest_state_fields` and
+     * `guest_state_deferrable` does not exclude it, so the loop in
+     * `save_l2_state` a few lines below skips exactly this field - and
+     * the read at the top of that function is now the only one on the
+     * path. It is one VMREAD on every second-level exit, about 991
+     * cycles of a ~780,000-cycle round trip at this tree's measured
+     * marginal price.
+     *
+     * **Kept anyway, and deliberately not gated.** It is the root
+     * `scripts/guest-walk.py` walks from and the only way a bugcheck on
+     * the rig has ever been read - the display is a passed-through GPU,
+     * so QEMU has no screendump to give. A switch that is off in every
+     * throughput build is precisely what this member was added to
+     * escape, so gating it would undo its reason for existing. Read the
+     * cost as the price of the channel, not as an oversight.
      */
     std::uint64_t l2_exit_cr3[max_cpus]{};
 
@@ -12264,9 +12280,21 @@ private:
      *
      * **Empty unless `nested_vmx::census_exits` was on.** It is free
      * given the selector, and the selector is not: it is a VMCS read on
-     * every exit, so the two are gated together. `l2_cpl_seen` above is
-     * unaffected - it is taken on the second-level entry path from state
-     * that path already holds.
+     * every exit, so the two are gated together.
+     *
+     * **The sentence that used to end this paragraph was wrong, and it
+     * was the one that justified leaving `l2_cpl_seen` ungated.** It
+     * said `l2_cpl_seen` "is taken on the second-level entry path from
+     * state that path already holds". It is taken in `save_l2_state`,
+     * which is the *exit* path, from a live `vmcs.guest_cs_selector()`
+     * - the same read this one is gated for. `field::guest_cs_selector`
+     * is deferrable and the save loop skips it, so nothing else on that
+     * path holds it, and `reflect_l2_exit`'s own exit ring reads it a
+     * second time a few lines earlier. Two VMREADs an exit, both
+     * ungated, for a census - which is what `census_exits` exists to
+     * decide about. Recorded rather than changed: turning a documented
+     * instrument off is a measurement decision and there is no rig to
+     * take the measurement on.
      */
     std::uint64_t cpl_seen[max_cpus][4]{};
     std::uint64_t l2_vtpr_class_seen[max_cpus][16]{};
@@ -12606,6 +12634,29 @@ private:
      * matching `vmptrld`'s sense, so the switch is a drop-in.
      */
     bool point_at_vmcs(std::size_t cpu, bool second_level);
+
+    /**
+     * Which VMCS this processor has current, named from members rather
+     * than read back with `VMPTRST`.
+     *
+     * **The same two words `point_at_vmcs` loads from.** It picks
+     * `vmcs02_physical[cpu]` or `own_vmcs_region_physical(cpu)` on its
+     * `second_level` argument and hands the result to `vmptrld`; this
+     * picks between the identical pair on `running_l2[cpu]`, which is
+     * what that argument was. So this adds no trust: if either member
+     * named the wrong region, the `vmptrld` that made it current would
+     * already have loaded the wrong VMCS, and reading the pointer back
+     * afterwards would only confirm the mistake.
+     *
+     * Zero means "cannot name it", which the two callers treat exactly
+     * as they treated a `VMPTRST` that reported failure - they give up
+     * rather than borrow a pointer they cannot hand back.
+     *
+     * See `copy_vmcs12_to_shadow` for why it exists and KVM's own
+     * `copy_shadow_to_vmcs12`, which keeps the same pointer in
+     * `loaded_vmcs->vmcs` and executes no `VMPTRST` either.
+     */
+    std::uint64_t current_vmcs_region_physical(std::size_t cpu);
 
     void initialize_vmcs_shadowing();
     void set_vmcs_shadowing(std::size_t cpu, bool enabled);

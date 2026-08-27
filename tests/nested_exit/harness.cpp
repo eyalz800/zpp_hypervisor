@@ -6706,6 +6706,175 @@ static void test_synic_pages_are_kept_per_trust_level()
     fresh();
 }
 
+/**
+ * The two shadow-VMCS copies name the VMCS they borrow the pointer from,
+ * and execute no VMPTRST doing it.
+ *
+ * **A removal needs a check that fails when the instruction comes back,
+ * and looking at the result cannot be that check** - a faithful VMPTRST
+ * and `current_vmcs_region_physical` answer the same thing, which is the
+ * entire argument for the removal. So the shim counts executions and the
+ * first assertion in each pair is on the count. Put either VMPTRST back
+ * in `nested_shadow_vmcs.cpp` and exactly those two fail; every other
+ * check here still passes, which is what makes them a control rather
+ * than noise.
+ *
+ * The assertions around them are the other half, and they are what the
+ * count on its own cannot say: that the *replacement* is right. A copy
+ * borrows the current pointer, VMPTRLDs the shadow, writes it, VMCLEARs
+ * it - which by SDM 33.3 leaves this processor with **no** current VMCS
+ * at all - and VMPTRLDs back. If the value it loads back is wrong, the
+ * region current afterwards is wrong and vmcs01's own fields read as
+ * whatever the other region holds. Both are checked.
+ *
+ * And the agreement is checked against a state where it must *fail*, so
+ * that "they agree" is a measurement rather than two constants: with
+ * `running_l2` set while vmcs01 is the region actually loaded, the two
+ * have to disagree. That is the invariant the removal rests on, stated
+ * as something breakable - and it is why `reflect_l2_exit` clears the
+ * flag before the copy at its tail rather than after.
+ */
+static void test_shadow_copies_name_the_current_vmcs()
+{
+    std::println("\n-- the shadow copies name the current vmcs --");
+
+    auto & h = hv();
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    // A clean region table. The shim keys eight regions by the physical
+    // address it is handed and earlier cases have consumed slots; this
+    // one needs three of its own.
+    for (auto & address : vmx::g_vmcs_address) {
+        address = 0;
+    }
+    vmx::g_vmcs_loaded = vmx::g_vmcs;
+
+    auto own = h.own_vmcs_region_physical(cpu);
+    h.vmcs02_physical[cpu] = 0x2000;
+    h.shadow_vmcs_physical[cpu] = 0x3000;
+
+    check(0 != own,
+          "the fixture's host page table names this processor's own "
+          "vmcs region, without which nothing below tests anything");
+    check((own != h.vmcs02_physical[cpu]) &&
+              (own != h.shadow_vmcs_physical[cpu]),
+          "and the three regions are distinct, so a restore into the "
+          "wrong one is visible rather than being the same object");
+
+    // (1) The agreement, with vmcs01 current.
+    h.running_l2[cpu] = false;
+    static_cast<void>(vmx::vmptrld(&own, cpu));
+
+    {
+        std::uint64_t reported{};
+        auto before = vmx::g_vmptrst_calls;
+
+        check(0 == vmx::vmptrst(&reported),
+              "the shim's vmptrst reports the loaded region rather than "
+              "returning success and writing nothing, which is what it "
+              "used to do");
+        check((before + 1) == vmx::g_vmptrst_calls,
+              "and it is counted, so the count below means something");
+        check(reported == h.current_vmcs_region_physical(cpu),
+              "with vmcs01 current and running_l2 clear, "
+              "current_vmcs_region_physical agrees with VMPTRST");
+    }
+
+    // (2) The agreement, with vmcs02 current.
+    auto second_level = h.vmcs02_physical[cpu];
+    h.running_l2[cpu] = true;
+    static_cast<void>(vmx::vmptrld(&second_level, cpu));
+
+    {
+        std::uint64_t reported{};
+        static_cast<void>(vmx::vmptrst(&reported));
+
+        check(reported == h.current_vmcs_region_physical(cpu),
+              "and with vmcs02 current and running_l2 set it agrees "
+              "there too, so the answer follows the level rather than "
+              "being one constant");
+    }
+
+    // (3) The invariant violated, so that the two above are a check.
+    {
+        h.running_l2[cpu] = false;
+
+        std::uint64_t reported{};
+        static_cast<void>(vmx::vmptrst(&reported));
+
+        check(reported != h.current_vmcs_region_physical(cpu),
+              "a running_l2 that disagrees with the processor makes the "
+              "two disagree - the agreement above is measured, not two "
+              "constants that happen to match");
+    }
+
+    // (4) The copy out, for real, with shadowing on.
+    h.running_l2[cpu] = false;
+    static_cast<void>(vmx::vmptrld(&own, cpu));
+
+    h.vmcs_shadowing_enabled = true;
+    h.shadow_cache_valid[cpu] = false;
+
+    // Not on either shadow list, so the copy has no business writing it
+    // and it can only survive if the borrow was handed back.
+    constexpr auto probe = field::guest_gdtr_base;
+    constexpr std::uint64_t sentinel = 0x5a5a5a5a000;
+
+    h.vmcs.write(probe, sentinel);
+    h.guest_vmcs12[cpu].write(field::guest_rip, 0xdead000);
+
+    {
+        auto before = vmx::g_vmptrst_calls;
+
+        h.copy_vmcs12_to_shadow(cpu);
+
+        check(before == vmx::g_vmptrst_calls,
+              "copy_vmcs12_to_shadow executes no VMPTRST - the pointer "
+              "it borrows is named from members, as KVM's own copy "
+              "names it from loaded_vmcs->vmcs");
+
+        std::uint64_t after{};
+        static_cast<void>(vmx::vmptrst(&after));
+
+        check(own == after,
+              "and it leaves vmcs01 current again, which the VMCLEAR of "
+              "the shadow region makes mandatory rather than tidy: SDM "
+              "33.3 invalidates the current-VMCS pointer when the "
+              "region cleared is the current one");
+        check(sentinel == h.vmcs.read(probe),
+              "and vmcs01's own fields survive the borrow, so the "
+              "copy's field writes went to the shadow region");
+    }
+
+    // (5) The copy back.
+    {
+        auto before = vmx::g_vmptrst_calls;
+
+        h.copy_shadow_to_vmcs12(cpu);
+
+        check(before == vmx::g_vmptrst_calls,
+              "copy_shadow_to_vmcs12 executes no VMPTRST either");
+
+        std::uint64_t after{};
+        static_cast<void>(vmx::vmptrst(&after));
+
+        check(own == after, "and it too leaves vmcs01 current again");
+        check(sentinel == h.vmcs.read(probe),
+              "and leaves vmcs01's own fields alone");
+        check(0xdead000 == h.guest_vmcs12[cpu].read(field::guest_rip),
+              "and collects the shadowed guest RIP back out of the "
+              "region, so the round trip through it is real and the "
+              "checks above are not passing on an early return");
+    }
+
+    // Left as the rest of the suite expects to find it.
+    h.vmcs_shadowing_enabled = false;
+    h.shadow_cache_valid[cpu] = false;
+    h.vmcs02_physical[cpu] = 0;
+    h.shadow_vmcs_physical[cpu] = 0;
+    h.running_l2[cpu] = false;
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -6748,6 +6917,9 @@ int main()
     test_the_top_secondary_controls();
     test_synic_pages_are_kept_per_trust_level();
     test_guest_thread_sample_stride();
+
+    // Last, because it resets the shim's region table. See its comment.
+    test_shadow_copies_name_the_current_vmcs();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
 

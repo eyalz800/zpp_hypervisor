@@ -1,5 +1,147 @@
 # Known defects
 
+## The region-instruction lever was 2 of 10, not 4 of 10 - landed 2026-08-27
+
+The prediction further down this file ("The instructions nothing was
+counting", "2. The shadow-VMCS copies") said **four of the ten VMX region
+instructions a nested round trip issues are removable**: both `VMPTRST`s
+and two `VMPTRLD` restores "that the very next instruction repeats". Two
+of those four are removable and two are not, and the half that is not is
+settled by the SDM rather than by measurement.
+
+### The count, from the source
+
+Ten, and the figure was right even though its breakdown was not. One
+round trip - a second-level exit reflected to the level above, its
+handler, and the `VMRESUME` back:
+
+| where | instructions |
+|---|---|
+| `nested_entry.cpp:5392` `point_at_vmcs(cpu, false)` | 1 VMPTRLD (vmcs01) |
+| `nested_entry.cpp:5481` `copy_vmcs12_to_shadow` | 1 VMPTRST, 2 VMPTRLD, 1 VMCLEAR |
+| `nested_vmx.cpp:2223` `copy_shadow_to_vmcs12` | 1 VMPTRST, 2 VMPTRLD, 1 VMCLEAR |
+| `nested_entry.cpp:1741` `point_at_vmcs(cpu, true)` | 1 VMPTRLD (vmcs02) |
+
+**6 VMPTRLD, 2 VMPTRST, 2 VMCLEAR.** The "roughly seven VMPTRLD" this
+file quotes elsewhere is the same six plus an average of
+`materialise_l2_guest_state`'s pair (`nested_entry.cpp:8300` and `:8324`),
+which is conditional on the deferral and not part of the reflection.
+
+### The two VMPTRSTs are gone
+
+`current_vmcs_region_physical` names the current VMCS from the same two
+members `point_at_vmcs` *loads* it from - `vmcs02_physical[cpu]` or
+`own_vmcs_region_physical(cpu)`, selected on `running_l2[cpu]` instead of
+on that function's `second_level` argument. It therefore adds no trust:
+if either member named the wrong region, the VMPTRLD that made it current
+already loaded the wrong VMCS.
+
+KVM does not execute one either. `copy_shadow_to_vmcs12` and
+`copy_vmcs12_to_shadow` (`.references/kvm/nested.c:1593`, `:1620`) are
+`vmcs_load(shadow)`, fields, `vmcs_clear(shadow)`,
+`vmcs_load(loaded_vmcs->vmcs)` - three region instructions, the pointer
+remembered. And underneath us the instruction is not cheap:
+`handle_vmptrst` (`nested.c:5810`) reads `VMX_INSTRUCTION_INFO`, decodes
+the memory operand and writes through a guest *linear* address with
+`kvm_write_guest_virt_system`.
+
+### The two VMPTRLD restores are **not** removable, and the SDM says so
+
+VMCLEAR's operation ends "IF operand addr = current-VMCS pointer THEN
+current-VMCS pointer := FFFFFFFF_FFFFFFFFH" - SDM 33.3,
+`.references/sdm.txt:207820`. After clearing the shadow region this
+processor has **no current VMCS at all**, so the VMPTRLD that follows is
+not restoring a pointer that was still there; it is the only thing that
+gives the processor a VMCS again. The next VMCS access after either copy
+would VMfailInvalid without it.
+
+The framing "a restore the very next instruction repeats" also does not
+survive reading the paths. After the copy in `reflect_l2_exit`'s tail the
+guest hypervisor is resumed on vmcs01, and after the copy in
+`on_guest_vmlaunch_or_resume` the refusal paths (`vmx_fail`,
+`vmx_fail_invalid`) write the guest's RIP and RFLAGS into vmcs01 before
+`build_vmcs02` is reached. Neither is dead.
+
+### What it is worth, and the two constants under that estimate
+
+**Proved:** two trapping VMX instructions per round trip, gone, verified
+on the assembly (`vmptrst` call sites 2 -> 0 in the release build of
+`nested_shadow_vmcs.cpp`; `vmptrld` 8 -> 5 and `vmclear` 3 -> 2, the
+falls being the optimiser's duplicated failure paths going with them).
+
+**Likely, and no better than the constants it rests on:** at the VMPTRLD
+price of 5,715 cycles measured by phases 6 and 7, 11,430 of 780,707 -
+**1.5% of the round trip**. At the 991-cycle marginal VMCS-access price,
+0.25%. The true figure is between them and closer to the top, because a
+VMPTRST is a full exit to L0 like a VMPTRLD and not a shadowed field
+access. **The 2.8-4.7% claimed for the four-instruction version does not
+survive halving the instruction count.**
+
+Both constants are real measurements, and their provenance is uneven:
+
+- **5,715 is directly bracketed.** Phase 6 is `rdtsc` either side of one
+  `point_at_vmcs` call and nothing else (`nested_entry.cpp:1726-1746`).
+- **991 is a controlled removal**, 22,800 cycles across 23 removed
+  accesses, in the section "A VMCS access costs 991 cycles at the margin".
+- **`IA32_VMX_MISC` bit 29 is neither.** This file's own CAVEAT says so:
+  the `0x485 MISC = 0x0000000020000165 bit 29 : YES` reading was taken
+  from *inside* the guest and is KVM's emulated MSR, KVM advertises the
+  bit "even if the hardware doesn't support it", and the host has no
+  `msr` module. All that is established is `enable_shadow_vmcs` reads
+  **N**, which is one of `cpu_has_vmx_shadow_vmcs()`'s two conditions
+  failing. So "the rig lacks bit 29, therefore KVM emulates every VMX
+  instruction" is an inference resting on an unread MSR. The removal does
+  not depend on it - a VMPTRST exits to L0 whatever L0 then does with it -
+  but any *number* derived from it should say so.
+
+### Rejected, with the reason, so it is not re-proposed
+
+- **The VMCLEAR.** It is what makes the shadow region's contents reach
+  memory, and KVM's own copies do the same thing.
+- **The VMPTRLD back.** SDM 33.3 above.
+- **Merging the two copies into one visit.** The collection has to happen
+  after the level above has run and the publish before it does; its exit
+  handler is between them by definition.
+
+### The negative controls, both run
+
+`tests/shim/.../vmx/asm.h` now counts VMPTRST executions - a claim that an
+instruction is *not* executed cannot be checked by looking at the result,
+because the result is the same either way. It also had to be made
+*faithful* first: it used to return success and write nothing, which would
+have made the reverted build fail for the shim's reasons rather than its
+own.
+
+| state | `tests/nested_exit` |
+|---|---|
+| as landed | 1171 checks, **0 failures** |
+| both VMPTRSTs put back | 1171 checks, **2 failures** - and only the two count assertions |
+| helper made to ignore `running_l2` | 1171 checks, **1 failure** - the vmcs02 agreement |
+
+The third is the one that matters for safety: it is the invariant the
+removal rests on, stated as something breakable. The harness also asserts
+the two *disagree* when `running_l2` contradicts the loaded region, so
+"they agree" is a measurement rather than two constants that match.
+
+### Two stale justifications found while checking, corrected in place
+
+Neither changes behaviour; both had stopped being true and both were the
+reason something was left as it is.
+
+- `l2_exit_cr3` said "one store on a path that already reads the field".
+  The deferral skips `field::guest_cr3` - it is in `guest_state_fields`
+  and `guest_state_deferrable` does not exclude it - so that read is now
+  the only one on the path, one VMREAD an exit. **Kept and not gated**:
+  it is the root `guest-walk.py` walks from and the only way a bugcheck
+  has ever been read on a rig whose display is a passed-through GPU.
+- `cpl_seen` said `l2_cpl_seen` "is taken on the second-level entry path
+  from state that path already holds". It is taken in `save_l2_state`,
+  on the *exit* path, from a live `vmcs.guest_cs_selector()` - and
+  `reflect_l2_exit`'s exit ring reads the same field a few lines earlier.
+  Two ungated VMREADs an exit for a census, which is exactly what
+  `census_exits` gates elsewhere. Recorded, not changed: switching off a
+  documented instrument is a measurement decision and there is no rig.
+
 ## Four instruments and one control bit, all repaired 2026-08-27
 
 No hardware in any of it - the rig is down - so every one is closed with
@@ -12515,6 +12657,12 @@ access count anywhere. At the VMPTRLD price that is on the order of
 60,000 cycles a round trip, 10% of our own time, in a category this file
 has been treating as free.
 
+*(Recounted 2026-08-27: the reflection itself is exactly **six** VMPTRLD,
+two VMPTRST and two VMCLEAR - the seventh and eighth VMPTRLD are
+`materialise_l2_guest_state`'s pair, which is conditional on the
+deferral rather than part of the round trip. The two VMPTRSTs have since
+been removed. Table at the top of this file.)*
+
 ### What it costs to run
 
 One RDTSC per boundary, and KVM clears `CPU_BASED_RDTSC_EXITING` for its
@@ -12555,20 +12703,30 @@ and `shadow_writes_skipped` already says the field loop is mostly
 elided, so the cost is the four region instructions. Slots 40-49 price
 each one.
 
-- **Removable: the VMPTRST.** The comment says it is used "rather than a
-  remembered pointer because this is called from both the vmcs01 and the
-  reflection paths". That is a statement about the *callers*, not about
-  the information: `running_l2[cpu]` says which level is current,
+- **Removable: the VMPTRST.** **LANDED 2026-08-27** - see the section at
+  the top of this file, which supersedes the projection below. The
+  comment said it is used "rather than a remembered pointer because this
+  is called from both the vmcs01 and the reflection paths". That is a
+  statement about the *callers*, not about the information:
+  `running_l2[cpu]` says which level is current,
   `own_vmcs_region_physical(cpu)` and `vmcs02_physical[cpu]` give both
   addresses, and `reflect_l2_exit` has just executed the VMPTRLD that
   made vmcs01 current thirty lines above. Two VMPTRSTs a round trip.
   **Projected 11,000-33,000 cycles/RT, 1.4-4.3 points** - the range is
   wide because the price is either a VMPTRLD's (5,715, measured) or the
   residual the copies' totals imply (~16,700, arithmetic). Slot 40 and
-  slot 45 settle it in one boot, which is why they exist.
+  slot 45 settle it in one boot, which is why they exist. *(Nobody has
+  taken that boot; the rig is down. The removal is justified by KVM
+  executing no VMPTRST either, not by a number.)*
 - **Not removable: the VMCLEAR and the restore.** The VMCLEAR is what
   makes the region's contents reach memory; KVM does the identical
-  sequence in its own `copy_shadow_to_vmcs12`.
+  sequence in its own `copy_shadow_to_vmcs12`. **And the restore is not
+  a restore**: SDM 33.3 (`.references/sdm.txt:207820`) makes VMCLEAR of
+  the current VMCS invalidate the current-VMCS pointer, so after it this
+  processor has no current VMCS and the VMPTRLD is the only thing that
+  gives it one. A later reading of this file proposed removing two of
+  them as "a restore the very next instruction repeats"; they are
+  mandatory.
 - **Rejected: merging the two visits into one.** The collection has to
   happen before anything reads the cached vmcs12 after L1 has run, and
   the publish has to happen before L1 runs. L1's exit handler is between

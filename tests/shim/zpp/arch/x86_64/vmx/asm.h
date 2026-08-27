@@ -94,9 +94,41 @@ inline int vmptrld_raw(void * pointer)
 
     return 1;
 }
-inline int vmptrst(void *)
+/**
+ * How many times `vmptrst` has been executed, ever.
+ *
+ * The claim `current_vmcs_region_physical` rests on is that **nothing on
+ * the shadow-copy path executes one**, and a claim about an instruction
+ * not being executed cannot be checked by looking at the result - the
+ * result is the same either way. So it is counted, and
+ * `tests/nested_exit` asserts the count does not move across a copy in
+ * each direction. Put the VMPTRST back and that assertion fails; nothing
+ * else in the suite does.
+ */
+inline std::uint64_t g_vmptrst_calls{};
+
+/**
+ * SDM 33.3: "Stores the current-VMCS pointer into a specified memory
+ * address."
+ *
+ * **This used to return 0 and write nothing**, which is not what the
+ * instruction does and made the harness unable to tell a correct restore
+ * from a restore of address zero. It has to be faithful here or the
+ * negative control above proves the wrong thing: with a lying VMPTRST the
+ * old code fails for the shim's reasons rather than its own.
+ */
+inline int vmptrst(void * pointer)
 {
-    return 0;
+    g_vmptrst_calls = g_vmptrst_calls + 1;
+
+    for (std::size_t i{}; i < g_vmcs_regions; ++i) {
+        if (g_vmcs_loaded == g_vmcs_region(i)) {
+            *static_cast<std::uint64_t *>(pointer) = g_vmcs_address[i];
+            return 0;
+        }
+    }
+
+    return 1;
 }
 // Named `_raw` to match the real header, where `vmcs.h` wraps these to
 // end the VMCS field cache's window first.
