@@ -56851,3 +56851,52 @@ of it - which is the whole difference between this and
 That also keeps the reference counter truthful, which is the property
 that made this family of intervention safe where the four time lies
 were not.
+
+## The sink wedge is structural: 2,500 us behaves exactly like 10,000 us
+
+If Hyper-V were merely waiting out the gap, a shorter one would wedge it
+for less time or not at all. It does not:
+
+    gap        exit_total        everything else
+    10,000 us  1,079.36 /s       frozen (4 of 537 moved)
+     2,500 us  1,079.33 /s       frozen (4 of 537 moved)
+
+Identical to three significant figures, and 1,079/s is this VMM's own
+1 ms poll - so in both cases every exit is our timer and none is the
+guest. **The wedge does not scale with the gap**, which is what
+distinguishes "waiting for time to pass" from "waiting for an event that
+will never come". It is the acknowledgement, exactly as the switch's
+note said before any of this was run.
+
+`ZPP_LAZY_TICK` is therefore unusable at any value, and that is now
+measured at two values an order of magnitude apart rather than argued.
+It stays off by default, where it already was.
+
+### A correction that matters for what comes next
+
+An earlier note here proposed withholding at the **source** instead -
+"this VMM answers the synthetic timer itself, so delay the answer". That
+is **wrong about this tree**. `l2_injected_vector`, `stimer_given_arms`
+and the tick account are all censuses of what **Hyper-V** stages into
+vmcs12; the only injection this VMM ever creates is a *replay* of an
+event the level above already staged. The synthetic timer belongs to
+Hyper-V and there is no arm here to delay.
+
+So KVM's lazy policy is not portable to this position, and the source is
+not available to us. Recorded because the proposal was written down as
+the next step and would have cost a session to discover.
+
+### What survives, and it is the useful half
+
+The gap is still the only thing that has moved this boot forward - past
+`MakeGdtReadOnly`, into `MiReloadBootLoadedDrivers`. What it bought was
+**uninterrupted time for VTL1**, which measurably needs about 1,052 us
+and is interrupted at about that period.
+
+That reframes the question one more time, and this time without a rate
+in it: the quantity that decides whether `MakeGdtReadOnly` completes is
+**how much VTL1 work fits between two interrupts**. Withholding the
+interrupt is unavailable. So the remaining lever is the other side of
+the same ratio - what VTL1's 1,052 us is spent on, and whether any of it
+is this VMM's cost rather than the secure kernel's work.
+`shadow_ept_replayed` at 1.8 million is where to look first.
