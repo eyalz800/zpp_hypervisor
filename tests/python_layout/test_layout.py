@@ -27,6 +27,7 @@ constant is cheapest to notice.
 
 Run with:  python3 -m unittest discover tests/python_layout
 """
+import hashlib
 import os
 import re
 import sys
@@ -2366,6 +2367,16 @@ class FakeRig:
                "l2_exit_trace": 64, "l2_working_trace": 64,
                "phase_cycles": 16, "l2_ept_dispositions": 10}
 
+    # The members declared `[n]` rather than `[max_cpus][n]`, and the
+    # length each really has. Separate from LENGTHS because gdb answers
+    # a different question for each shape - see `_answer`.
+    FLAT_LENGTHS = {"handler_reason_exits": 64,
+                    "handler_reason_from_l2": 64,
+                    "handler_reason_cycles": 64,
+                    "handler_reason_reads": 64,
+                    "handler_reason_writes": 64}
+    MAX_CPUS = 8
+
     def __init__(self):
         self.offsets = {}
         self.cell = {}
@@ -2375,8 +2386,33 @@ class FakeRig:
         self.open_now = 0
 
     def offset_for(self, name):
+        """A member's offset, from its NAME rather than from the order
+        it was asked for.
+
+        It used to be `0x10000 + 0x2000 * len(self.offsets)`, which made
+        every address depend on how many members had been requested
+        before it - so adding one name to the reader's offset list moved
+        every member after it, changed every pseudo-random word derived
+        from an address, and produced a 400-line diff in a dump that no
+        reader change had touched.  **That is a fixture that cannot tell
+        "the output changed" from "the fixture moved"**, and the whole
+        point of the byte-for-byte check below is to tell those apart.
+
+        Hashed into a space large enough that a collision is unlikely,
+        and then *checked*, because an unlikely collision that aliases
+        two members is exactly the silent wrong answer this file exists
+        to prevent.
+        """
         if name not in self.offsets:
-            self.offsets[name] = 0x10000 + 0x2000 * len(self.offsets)
+            digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+            offset = 0x10000 + 0x2000 * (int(digest, 16) % (1 << 20))
+            clash = [n for n, o in self.offsets.items() if o == offset]
+            if clash:
+                raise AssertionError(
+                    "FakeRig offset collision: {} and {} hash to the "
+                    "same address, so two members alias".format(
+                        name, clash[0]))
+            self.offsets[name] = offset
         return self.offsets[name]
 
     def address(self, name, index=0):
@@ -2397,29 +2433,56 @@ class FakeRig:
         return self._ssh(argv, kwargs.get("input", ""))
 
     def _gdb(self, argv):
+        """gdb, including the questions it REFUSES to answer.
+
+        An expression gdb cannot evaluate prints its error on stderr and
+        produces no `$N = ...` line at all, and the reader's length
+        helpers count `$N` lines - so a refusal is what makes one of
+        them `sys.exit`. This fixture used to answer *every* length
+        question with a plausible small number, which meant the reader
+        passed here and failed on the rig. Measured against real
+        `x86_64-elf-gdb` on a stand-in object: the nested question put
+        to a flat array answers `cannot subscript something of type
+        'unsigned long'` and nothing else.
+        """
         out, n = [], 0
         for i, a in enumerate(argv):
             if a != "-ex":
                 continue
-            expression, n = argv[i + 1], n + 1
-            member = re.search(r"->([A-Za-z0-9_]+)$", expression)
-            if expression.startswith("print/x (long)&") and member:
-                out.append("${} = 0x{:x}".format(
-                    n, self.offset_for(member.group(1))))
+            answer = self._answer(argv[i + 1])
+            if answer is None:
                 continue
-            if expression.startswith("print/x &'"):
-                out.append("${} = 0x{:x}".format(n, self.singleton))
-                continue
-            for pattern, value in self.EXPRESSIONS:
-                if re.search(pattern, expression):
-                    out.append("${} = {}".format(n, value))
-                    break
-            else:
-                row = re.search(r"->([A-Za-z0-9_]+)\[0\] / sizeof",
-                                expression)
-                out.append("${} = {}".format(
-                    n, self.LENGTHS.get(row.group(1), 8) if row else 8))
+            n += 1
+            out.append("${} = {}".format(n, answer))
         return FakeResult("\n".join(out) + "\n")
+
+    def _answer(self, expression):
+        """One expression's answer, or None when gdb would refuse it."""
+        member = re.search(r"->([A-Za-z0-9_]+)$", expression)
+        if expression.startswith("print/x (long)&") and member:
+            return "0x{:x}".format(self.offset_for(member.group(1)))
+        if expression.startswith("print/x &'"):
+            return "0x{:x}".format(self.singleton)
+        for pattern, value in self.EXPRESSIONS:
+            if re.search(pattern, expression):
+                return value
+
+        # `sizeof(m[0]) / sizeof(m[0][0])` - the nested question. A flat
+        # member has no `m[0][0]`, so gdb refuses and answers nothing.
+        row = re.search(r"->([A-Za-z0-9_]+)\[0\] / sizeof", expression)
+        if row:
+            if row.group(1) in self.FLAT_LENGTHS:
+                return None
+            return self.LENGTHS.get(row.group(1), 8)
+
+        # `sizeof(m) / sizeof(m[0])` - the flat question. Put to a
+        # `[max_cpus][n]` member it answers `max_cpus`, which is a
+        # plausible small number and the reason the two questions are
+        # two functions rather than one with a fallback.
+        flat = re.search(r"->([A-Za-z0-9_]+) / sizeof", expression)
+        if flat:
+            return self.FLAT_LENGTHS.get(flat.group(1), self.MAX_CPUS)
+        return 8
 
     def _ssh(self, argv, script):
         if "allocate_rwx" in " ".join(argv):
@@ -2606,6 +2669,570 @@ class DeltaModeEndToEndCatchesTheBackwardsCounter(unittest.TestCase):
              "exit_total": 1_106_380})
         self.assertIn("NOT from the same boot", text)
         self.assertNotIn("5,089.95", text)
+
+
+class AFlatArrayCannotBeAskedTheNestedQuestion(unittest.TestCase):
+    """`gdb_lengths` on `x[64]`, and the section it silently deleted.
+
+    `gdb_lengths` asks `sizeof(m[0]) / sizeof(m[0][0])`, which is right
+    for `x[max_cpus][n]` and is not a question at all for a flat `x[n]`.
+    **Measured with real `x86_64-elf-gdb` on a stand-in object holding
+    `unsigned long handler_reason_exits[64]` and `unsigned long
+    phase_cycles[8][52]`:**
+
+        nested form, flat member   -> cannot subscript something of
+                                      type `unsigned long'   (no $1)
+        nested form, nested member -> $1 = 52
+        flat form,   flat member   -> $1 = 64
+        flat form,   nested member -> $1 = 8      <- max_cpus
+
+    The caller wrapped that refusal in `except SystemExit` and printed
+    `handler_reason_exits is absent from this ELF`. It is not absent -
+    it has been resident since it was written - so `--delta` has never
+    printed its exits-by-level split, and the note in its place named a
+    cause that was not true.
+
+    Two rules fall out and both are pinned below: the two shapes get two
+    functions, because the flat question put to a nested member answers
+    `max_cpus` rather than failing; and the fixture has to model the
+    refusal, because a fixture that answers every question passes a
+    reader that dies on the rig.
+    """
+
+    def test_the_two_helpers_ask_two_different_questions(self):
+        source = read(DUMP_STATE)
+        flat = re.search(r"def gdb_flat_lengths.*?return dict", source,
+                         re.S)
+        nested = re.search(r"def gdb_lengths.*?return dict", source,
+                           re.S)
+        self.assertIsNotNone(flat, "gdb_flat_lengths is gone, so a flat "
+                                   "row is being asked the nested "
+                                   "question again")
+        self.assertIn("->{m} / sizeof", flat.group(0))
+        self.assertNotIn("->{m}[0] / sizeof", flat.group(0))
+        self.assertIn("->{m}[0] / sizeof", nested.group(0))
+
+    def test_the_flat_members_are_resolved_with_the_flat_helper(self):
+        """The wiring, not just the helper.
+
+        A correct helper that nothing calls is worth nothing, and this
+        file already records a verdict helper one deletion away from
+        exactly that.
+        """
+        source = read(DUMP_STATE)
+        call = re.search(
+            r"reason_slots = (gdb_\w+)\(", source)
+        self.assertIsNotNone(call)
+        self.assertEqual("gdb_flat_lengths", call.group(1))
+        phase = re.search(r"phase_slots = (gdb_\w+)\(", source)
+        self.assertIsNotNone(phase)
+        self.assertEqual("gdb_lengths", phase.group(1),
+                         "phase_cycles is [max_cpus][n]; the flat "
+                         "question would answer max_cpus and walk every "
+                         "processor's row at the wrong stride")
+
+    def test_the_fixture_refuses_what_gdb_refuses(self):
+        """The fixture's own negative control.
+
+        Without this the reader passes here and fails on the rig, which
+        is what happened: the fixture answered the impossible question
+        with 8 and the section looked healthy in every test.
+        """
+        rig = FakeRig()
+        nested = ("print (int)(sizeof(('zpp::hypervisor::hypervisor' "
+                  "*)0)->handler_reason_exits[0] / sizeof(('zpp::"
+                  "hypervisor::hypervisor' *)0)->handler_reason_exits"
+                  "[0][0])")
+        self.assertIsNone(rig._answer(nested))
+        flat = ("print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                "->handler_reason_exits / sizeof(('zpp::hypervisor::"
+                "hypervisor' *)0)->handler_reason_exits[0])")
+        self.assertEqual(64, rig._answer(flat))
+
+    def test_the_flat_question_on_a_nested_member_answers_max_cpus(self):
+        """Why the two are two functions and not one with a fallback.
+
+        This is the dangerous half: it does not fail, it answers a
+        plausible small number.
+        """
+        rig = FakeRig()
+        flat = ("print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                "->phase_cycles / sizeof(('zpp::hypervisor::hypervisor'"
+                " *)0)->phase_cycles[0])")
+        self.assertEqual(rig.MAX_CPUS, rig._answer(flat))
+        self.assertNotEqual(rig.LENGTHS["phase_cycles"],
+                            rig._answer(flat))
+
+    def test_the_split_appears_now_and_did_not_before(self):
+        """End to end, and the negative control is the old expression.
+
+        The old call is reconstructed here rather than described, so
+        this fails if the fix is reverted **and** fails if the fixture
+        stops modelling the refusal.
+        """
+        text = run_reader(FakeRig(),
+                          ["--elf", "/dev/null", "--cpus", "1",
+                           "--delta", "20"],
+                          clock=[0.0, 1.5, 20.9, 22.4])
+        self.assertNotIn("handler_reason_exits is absent from this ELF",
+                         text)
+        self.assertIn("exits by level", text)
+
+
+class PerHandlerCyclesAreWindowedNotBootWide(unittest.TestCase):
+    """`handler_reason_cycles`, the last boot-cumulative instrument.
+
+    `dump_handler_by_reason` divides it by `handler_cycles` since the
+    first exit of the boot and prints the quotient under a present-tense
+    heading. Its own docstring quotes `vmresume at 38% of exits and
+    vmptrld at 8%` - a mean taken before VMCS shadowing was in force,
+    which is a configuration that no longer exists, and with shadowing
+    on the guest hypervisor's VMREADs and VMWRITEs stop exiting at all.
+
+    So the file already carries a stale figure of exactly the kind
+    `--delta` exists to retire, and every test below is about the two
+    numbers being different: what the split is over the boot, and what
+    it is over the window.
+    """
+
+    ROWS = ("handler_reason_cycles", "handler_reason_reads",
+            "handler_reason_writes", "handler_reason_exits",
+            "handler_reason_from_l2")
+    SLOTS = 64
+
+    def samples(self, boot, window):
+        """`(before, after)` from a boot total and a window's share.
+
+        `after` is the boot total and `before` is it minus the window,
+        which is the only arrangement that is monotonic - building them
+        the other way round produces a negative delta and tests the
+        impossibility path by accident.
+        """
+        before, after = {}, {}
+        for reason in range(self.SLOTS):
+            for name in self.ROWS:
+                total = boot.get(reason, {}).get(name, 0)
+                moved = window.get(reason, {}).get(name, 0)
+                after[(name, reason)] = total
+                before[(name, reason)] = total - moved
+        return before, after
+
+    def report(self, boot, window, handler=None, exits=None,
+               seconds=20.0):
+        module = load_dump_state()
+        before, after = self.samples(boot, window)
+        if handler is None:
+            handler = int(sum(w.get("handler_reason_cycles", 0)
+                              for w in window.values()) / 0.8)
+        if exits is None:
+            exits = sum(w.get("handler_reason_exits", 0)
+                        for w in window.values())
+        return "\n".join(module.delta_handler_reason_lines(
+            before, after, self.SLOTS, seconds, handler, exits))
+
+    # --- what is differenced, and what is refused -------------------
+
+    def test_the_cost_rows_are_differenced_and_not_refused(self):
+        """The positive control. Out of the refusal list AND in a read
+        list - removing it from one alone leaves a reader that neither
+        reports the member nor says it declined to."""
+        module = load_dump_state()
+        named = [n for n, _ in module.DELTA_HANDLER_REASON_COSTS]
+        self.assertIn("handler_reason_cycles", named)
+        self.assertIn("handler_reason_reads", named)
+        self.assertIn("handler_reason_writes", named)
+        for _what, names, _why in module.DELTA_REFUSALS:
+            for name in named:
+                self.assertNotIn(name, names)
+
+    def test_the_open_end_of_the_same_bracket_is_refused(self):
+        """The negative control, and the trap next to the thing added.
+
+        `phase_mark` and `handler_entry_tsc` sit beside the members this
+        change differences, are the same width, are per processor, and
+        **climb**, because they are RDTSC values. Their delta looks
+        exactly like a cycle count and is a distance between two
+        unrelated instants.
+        """
+        module = load_dump_state()
+        differenced = set(
+            [n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+            + [n for n, _ in module.DELTA_GLOBAL_COUNTERS]
+            + [n for n, _ in module.DELTA_PER_CPU_CYCLES]
+            + [n for n, _ in module.DELTA_HANDLER_REASON_COSTS]
+            + [n for n, _ in module.DELTA_GLOBAL_HISTOGRAMS])
+        refused = "\n".join(names for _w, names, _y
+                            in module.DELTA_REFUSALS)
+        for name in ("phase_mark", "handler_entry_tsc",
+                     "handler_entry_reads", "handler_entry_writes",
+                     "handler_was_l2", "reason_bucket"):
+            self.assertNotIn(name, differenced,
+                             "{} is the open end of a bracket and must "
+                             "not be subtracted".format(name))
+            self.assertIn(name, refused,
+                          "{} is neither differenced nor named as "
+                          "refused, so the report is silent about "
+                          "it".format(name))
+
+    def test_the_shapes_are_what_the_header_declares(self):
+        """A flat row read per processor reports one CPU's share as the
+        whole, and a per-processor row read flat reads its neighbour."""
+        module = load_dump_state()
+        for name, _ in (module.DELTA_HANDLER_REASON_COSTS
+                        + module.DELTA_GLOBAL_HISTOGRAMS):
+            self.assertEqual(
+                ["handler_reason_slots"], header_dimensions(name),
+                "{} is read as one global row".format(name))
+        for name in ("phase_cycles", "phase_calls"):
+            self.assertEqual(["max_cpus", "phase_count"],
+                             header_dimensions(name))
+
+    # --- the arithmetic --------------------------------------------
+
+    def test_a_reason_whose_share_moved_is_called_out_in_words(self):
+        """The verdict this section exists for.
+
+        Shape taken from the figure the cumulative reader printed:
+        `vmresume` at 38% of the handler over the boot. Here the window
+        holds 58% of it, which is a twenty-point drift and is the
+        difference between "the reflection path is the cost" and "it is
+        not".
+        """
+        boot = {24: {"handler_reason_cycles": 3_800_000,
+                     "handler_reason_exits": 38_000},
+                32: {"handler_reason_cycles": 6_200_000,
+                     "handler_reason_exits": 62_000}}
+        window = {24: {"handler_reason_cycles": 580_000,
+                       "handler_reason_exits": 5_800},
+                  32: {"handler_reason_cycles": 420_000,
+                       "handler_reason_exits": 4_200}}
+        text = self.report(boot, window)
+        self.assertIn("DISAGREE", text)
+        self.assertIn("vmresume", text)
+        self.assertIn("38.0% since boot", text)
+        self.assertIn("58.0%", text)
+        # Signed against the boot figure. `vmresume` ROSE and `wrmsr`
+        # FELL by the same twenty points, and printing both as `+20.0`
+        # is the mislabelling this whole file is written against.
+        self.assertIn("(+20.0 points)", text)
+        self.assertIn("(-20.0 points)", text)
+
+    def test_a_split_that_did_not_move_its_shares_says_it_agrees(self):
+        """**The negative control for the check above.**
+
+        A verdict that only ever fires cannot be told apart from one
+        that is not wired up, and the AGREE case has to be as loud as
+        the DISAGREE case - otherwise the reader learns nothing from
+        silence. Same totals as above, window scaled exactly.
+        """
+        boot = {24: {"handler_reason_cycles": 3_800_000,
+                     "handler_reason_exits": 38_000},
+                32: {"handler_reason_cycles": 6_200_000,
+                     "handler_reason_exits": 62_000}}
+        window = {24: {"handler_reason_cycles": 380_000,
+                       "handler_reason_exits": 3_800},
+                  32: {"handler_reason_cycles": 620_000,
+                       "handler_reason_exits": 6_200}}
+        text = self.report(boot, window)
+        self.assertIn("AGREES", text)
+        self.assertNotIn("DISAGREE", text)
+
+    def test_the_drift_threshold_is_the_one_the_module_declares(self):
+        """A threshold in the test and a threshold in the reader are two
+        constants, and this tree records what happens when a copy stops
+        moving with its original."""
+        module = load_dump_state()
+        boot = {24: {"handler_reason_cycles": 500,
+                     "handler_reason_exits": 5},
+                32: {"handler_reason_cycles": 500,
+                     "handler_reason_exits": 5}}
+        # Just under the declared drift: 50% -> 50% + half of it.
+        edge = module.DELTA_SHARE_DRIFT_POINTS
+        self.assertGreater(edge, 0.0)
+        window = {24: {"handler_reason_cycles": 100,
+                       "handler_reason_exits": 1},
+                  32: {"handler_reason_cycles": 100,
+                       "handler_reason_exits": 1}}
+        self.assertIn("AGREES", self.report(boot, window))
+
+    def test_the_printed_cost_is_the_window_not_the_boot(self):
+        """The whole point, stated as an assertion.
+
+        Boot-wide this reason costs 100 cycles an exit; in the window it
+        costs 10,000. The cumulative reader prints 100 under a
+        present-tense heading, and 100 must not appear here.
+        """
+        boot = {24: {"handler_reason_cycles": 1_000_000,
+                     "handler_reason_exits": 10_000}}
+        window = {24: {"handler_reason_cycles": 100_000,
+                       "handler_reason_exits": 10}}
+        text = self.report(boot, window)
+        self.assertIn("10,000", text)
+        self.assertIn("IN THIS WINDOW", text)
+
+    def test_a_backwards_cost_row_is_an_error_not_a_number(self):
+        module = load_dump_state()
+        before, after = self.samples(
+            {24: {"handler_reason_cycles": 1_000,
+                  "handler_reason_exits": 10}},
+            {24: {"handler_reason_cycles": 100,
+                  "handler_reason_exits": 1}})
+        after[("handler_reason_cycles", 24)] = 500
+        text = "\n".join(module.delta_handler_reason_lines(
+            before, after, self.SLOTS, 20.0, 10_000, 10))
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("handler_reason_cycles[reason 24]", text)
+        self.assertNotIn("cyc/exit", text)
+
+    def test_a_split_larger_than_what_it_splits_is_impossible(self):
+        """`handler_reason_cycles` and `handler_cycles` are closed from
+        the same pair of reads in `resume_guest`, so the first cannot
+        exceed the second - and a reader that prints it anyway reports
+        a coverage above 100%, which reads as a finding."""
+        boot = {24: {"handler_reason_cycles": 1_000_000,
+                     "handler_reason_exits": 1_000}}
+        window = {24: {"handler_reason_cycles": 500_000,
+                       "handler_reason_exits": 500}}
+        text = self.report(boot, window, handler=10_000, exits=500)
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("LARGER than what it splits", text)
+
+    def test_one_exit_straddling_a_boundary_is_not_an_impossibility(self):
+        """The negative control for the check above.
+
+        At most one exit can be open at each of the two sample
+        boundaries, so a split a whisker over its denominator is the
+        expected case and refusing it would make this section useless on
+        every real reading.
+        """
+        boot = {24: {"handler_reason_cycles": 1_000_000,
+                     "handler_reason_exits": 1_000}}
+        window = {24: {"handler_reason_cycles": 500_000,
+                       "handler_reason_exits": 500}}
+        text = self.report(boot, window, handler=499_000, exits=500)
+        self.assertNotIn("IMPOSSIBLE", text)
+        self.assertIn("covers 100.2%", text)
+
+    def test_an_unread_row_is_unknown_and_not_zero(self):
+        """An unanswered read and a handler that took no time produce
+        the same missing row, and only one is a fact about the guest."""
+        module = load_dump_state()
+        before, after = self.samples(
+            {24: {"handler_reason_cycles": 1_000,
+                  "handler_reason_exits": 10}},
+            {24: {"handler_reason_cycles": 100,
+                  "handler_reason_exits": 1}})
+        del after[("handler_reason_reads", 7)]
+        text = "\n".join(module.delta_handler_reason_lines(
+            before, after, self.SLOTS, 20.0, 1_000, 10))
+        self.assertIn("NOT READ", text)
+        self.assertIn("handler_reason_reads", text)
+        self.assertIn("unknown rather than empty", text)
+
+    def test_a_window_with_no_exits_is_not_a_table_of_zeroes(self):
+        boot = {24: {"handler_reason_cycles": 1_000_000,
+                     "handler_reason_exits": 10_000}}
+        text = self.report(boot, {}, handler=0, exits=0)
+        self.assertIn("every reason unchanged in this window", text)
+        self.assertNotIn("cyc/exit", text)
+
+    def test_an_unread_denominator_leaves_coverage_unknown(self):
+        """A split with no denominator is not a fraction."""
+        module = load_dump_state()
+        before, after = self.samples(
+            {24: {"handler_reason_cycles": 1_000_000,
+                  "handler_reason_exits": 10_000}},
+            {24: {"handler_reason_cycles": 1_000,
+                  "handler_reason_exits": 10}})
+        text = "\n".join(module.delta_handler_reason_lines(
+            before, after, self.SLOTS, 20.0, None, None))
+        self.assertIn("handler_cycles was NOT READ", text)
+        self.assertIn("handler_exits was NOT READ", text)
+        self.assertNotIn("covers", text)
+
+
+class TheWindowedPhaseTreeReplacesTheBootWideOne(unittest.TestCase):
+    """`phase_cycles`, and the reading that cost this session most.
+
+    The cumulative tree printed `11,358 us and 90.8 exits` for one
+    trust-level round trip under a present-tense heading, describing a
+    phase that had ended - and the same dump implied 77.6 round trips a
+    second against a measured 5.45. Every column of it is a boot-wide
+    mean, and a boot has phases.
+
+    The windowed tree is the same shape on purpose, so the two can be
+    read against each other, with the heading saying which is which.
+    """
+
+    SLOTS = 52
+
+    def samples(self, cpu, boot, window):
+        before, after = {}, {}
+        for slot in range(self.SLOTS):
+            for name in ("phase_cycles", "phase_calls"):
+                total = boot.get(slot, {}).get(name, 0)
+                moved = window.get(slot, {}).get(name, 0)
+                after[(name, (cpu, slot))] = total
+                before[(name, (cpu, slot))] = total - moved
+        return before, after
+
+    def test_the_tree_is_opt_in_and_absence_is_announced(self):
+        """A section silently absent and one that measured nothing look
+        identical afterwards, which is this whole file's subject."""
+        text = run_reader(FakeRig(),
+                          ["--elf", "/dev/null", "--cpus", "1",
+                           "--delta", "20"],
+                          clock=[0.0, 1.5, 20.9, 22.4])
+        self.assertIn("the phase tree: NOT SAMPLED in this window", text)
+        self.assertIn("--delta-phases", text)
+        self.assertNotIn("phase tree IN THIS WINDOW", text)
+
+    def test_the_flag_reaches_the_reads(self):
+        """The positive control for the line above: with the flag the
+        section is produced, so 'NOT SAMPLED' is a choice and not a
+        section that does not exist."""
+        text = run_reader(FakeRig(),
+                          ["--elf", "/dev/null", "--cpus", "1",
+                           "--delta", "20", "--delta-phases"],
+                          clock=[0.0, 1.5, 20.9, 22.4])
+        self.assertNotIn("the phase tree: NOT SAMPLED", text)
+        self.assertIn("cpu 0 phase tree", text)
+
+    def test_a_phase_that_did_not_run_is_not_the_boot_s_cost(self):
+        """The reading the cumulative tree gets exactly backwards.
+
+        A phase with a large boot total and nothing in the window is a
+        phase that has **stopped**; the cumulative tree prints its
+        boot-wide cost either way, and that is the number that was
+        quoted in the present tense.
+        """
+        module = load_dump_state()
+        before, after = self.samples(
+            0, {26: {"phase_cycles": 900_000_000,
+                     "phase_calls": 3_000}}, {})
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, 0, 0,
+            3_000, 900_000_000))
+        self.assertIn("no phase was entered in this window", text)
+        self.assertNotIn("900,000,000", text)
+        self.assertNotIn("300,000", text)
+
+    def test_the_nesting_is_taken_from_the_parent_table(self):
+        """A container and its child must not be added to each other.
+
+        Slot 1 `reflect_l2_exit` is inside slot 26 `exit: dispatch`, so
+        26's `self` column is its own cycles minus 1's - and a flat sum
+        of the table would count 1 twice.
+        """
+        module = load_dump_state()
+        before, after = self.samples(
+            0,
+            {26: {"phase_cycles": 1_000_000, "phase_calls": 100},
+             1: {"phase_cycles": 600_000, "phase_calls": 100}},
+            {26: {"phase_cycles": 1_000_000, "phase_calls": 100},
+             1: {"phase_cycles": 600_000, "phase_calls": 100}})
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, 100, 1_000_000,
+            100, 1_000_000))
+        self.assertIn("exit: dispatch", text)
+        self.assertIn("reflect_l2_exit", text)
+        # 26 is 10,000 cyc/RT and its self is 4,000 once 1 is removed.
+        self.assertRegex(text, r"exit: dispatch\s+.*10,000\s+4,000")
+
+    def test_a_backwards_phase_accumulator_is_an_error(self):
+        module = load_dump_state()
+        before, after = self.samples(
+            0, {26: {"phase_cycles": 1_000, "phase_calls": 10}},
+            {26: {"phase_cycles": 100, "phase_calls": 1}})
+        after[("phase_cycles", (0, 26))] = 500
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, 10, 1_000, 10, 1_000))
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("phase_cycles[cpu 0][26]", text)
+        self.assertNotIn("cyc/RT", text)
+
+    def test_an_unread_denominator_prints_no_tree(self):
+        """`round_trips` divides every column. A denominator that was
+        not read is not a small denominator."""
+        module = load_dump_state()
+        before, after = self.samples(
+            0, {26: {"phase_cycles": 1_000, "phase_calls": 10}},
+            {26: {"phase_cycles": 100, "phase_calls": 1}})
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, None, 1_000, 10, 1_000))
+        self.assertIn("NOT PRINTED", text)
+        self.assertIn("no denominator", text)
+
+    def test_a_round_trip_that_got_dearer_is_called_out(self):
+        """The phase tree's own verdict.
+
+        Boot-wide the handler costs 100,000 cycles a round trip; in this
+        window it costs 300,000. Both are correct and only one is the
+        present tense.
+        """
+        module = load_dump_state()
+        before, after = self.samples(
+            0, {26: {"phase_cycles": 1_000_000, "phase_calls": 100}},
+            {26: {"phase_cycles": 300_000, "phase_calls": 10}})
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, 10, 3_000_000,
+            1_000, 100_000_000))
+        self.assertIn("DISAGREE", text)
+        self.assertIn("3.00x", text)
+
+    def test_a_round_trip_that_did_not_move_says_so(self):
+        """**The negative control for the verdict above.**"""
+        module = load_dump_state()
+        before, after = self.samples(
+            0, {26: {"phase_cycles": 1_000_000, "phase_calls": 100}},
+            {26: {"phase_cycles": 300_000, "phase_calls": 10}})
+        text = "\n".join(module.delta_phase_lines(
+            before, after, 0, self.SLOTS, 20.0, 10, 1_000_000,
+            1_000, 100_000_000))
+        self.assertIn("agrees with the boot-wide mean", text)
+        self.assertNotIn("DISAGREE", text)
+
+
+class TheDeltaReadWindowIsMeasuredWhenItGrows(unittest.TestCase):
+    """Every member added widens the read window, and the read window is
+    this measurement's own error bar.
+
+    So the cost of adding the per-handler accounting is measured rather
+    than asserted to be small, and the widest part of it is behind a
+    flag. The unit here is monitor round trips - `Monitor.CHUNK` is 6
+    commands per ssh connection - because that, not the word count, is
+    what the wall clock follows.
+    """
+
+    ARGV = ["--elf", "/dev/null", "--delta", "20"]
+    CLOCK = [0.0, 1.5, 20.9, 22.4]
+
+    def connections(self, cpus, phases):
+        rig = FakeRig()
+        argv = self.ARGV + ["--cpus", str(cpus)]
+        if phases:
+            argv = argv + ["--delta-phases"]
+        run_reader(rig, argv, clock=self.CLOCK)
+        return rig.connections
+
+    def test_the_phase_tree_is_the_part_that_scales_with_processors(self):
+        """Two rows of phase_count per processor, so its cost grows with
+        the guest and the by-reason rows' cost does not - which is why
+        one is opt-in and the other is not."""
+        one = self.connections(1, True) - self.connections(1, False)
+        eight = self.connections(8, True) - self.connections(8, False)
+        self.assertGreater(eight, one)
+
+    def test_the_delta_sample_is_still_a_fraction_of_the_full_dump(self):
+        """The bound that stops a member added here quietly restoring
+        the cumulative dump's cost."""
+        full = FakeRig()
+        run_reader(full, ["--elf", "/dev/null", "--cpus", "2"])
+        delta = FakeRig()
+        run_reader(delta, ["--elf", "/dev/null", "--cpus", "2",
+                           "--delta", "20", "--delta-phases"],
+                   clock=self.CLOCK)
+        self.assertLess(delta.connections, full.connections // 2)
 
 
 if __name__ == "__main__":

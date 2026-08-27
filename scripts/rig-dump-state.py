@@ -232,6 +232,51 @@ def gdb_lengths(elf, members):
     return dict(zip(members, (int(v) for v in values)))
 
 
+def gdb_flat_lengths(elf, members):
+    """The same question as `gdb_lengths`, for a **flat** array.
+
+    `gdb_lengths` asks `sizeof(m[0]) / sizeof(m[0][0])`.  That is the
+    right question for `x[max_cpus][n]` and is not a question at all for
+    a flat `x[n]` - gdb answers, on stderr,
+
+        cannot subscript something of type `unsigned long'
+
+    prints no `$1 = ...`, and `gdb_lengths` then `sys.exit`s.  Every
+    caller here wraps that in `except SystemExit` and prints a note
+    saying the member is *absent from this ELF*, so a flat array that is
+    present reports itself missing and the section needing it is skipped
+    in silence.
+
+    **Measured, on this machine, against a stand-in object with
+    `unsigned long handler_reason_exits[64]` and `unsigned long
+    phase_cycles[8][52]`:** the nested form answers `cannot subscript`
+    for the first and `52` for the second; the flat form below answers
+    `64` and `8`.  So `--delta` has never printed its exits-by-level
+    split on the rig, and the note in its place named the wrong cause -
+    which is the failure this whole reader is written against, one level
+    up: an instrument reporting its own absence for a reason that is not
+    true.
+
+    Deliberately a *second* function rather than a fallback inside the
+    first.  On `x[max_cpus][n]` this expression answers `max_cpus` - a
+    plausible small number that would be read as the row length, and
+    read wrong in the direction that still prints a table.  The caller
+    has to say which shape it is asking about.
+    """
+    args = []
+    for m in members:
+        args += ["-ex",
+                 f"print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m} / sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0])"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(members):
+        sys.exit(f"could not read all lengths from {elf}: got {values}")
+    return dict(zip(members, (int(v) for v in values)))
+
+
 def gdb_values(elf, expressions):
     """Evaluate integer expressions against the ELF's own types.
 
@@ -4509,6 +4554,11 @@ DELTA_PER_CPU_COUNTERS = [
     # without it the `rdmsr` share of the exit histogram has nothing to
     # be attributed to.
     ("reference_read_count", "reference-counter RDMSRs"),
+    # The denominator the by-reason split must sum to.  `handler_cycles`
+    # is already differenced as an occupancy; this is the count that
+    # goes with it, and without it "the split covers N% of the exits"
+    # has to be taken on trust rather than checked.
+    ("handler_exits", "handler spans closed"),
 ]
 
 # Monotonic counts that are single words, not per-processor rows.  Read
@@ -4603,6 +4653,47 @@ DELTA_GLOBAL_HISTOGRAMS = [
     ("handler_reason_exits", "exits, by reason, BOTH levels"),
     ("handler_reason_from_l2", "of those, taken from the second level"),
 ]
+
+# The cost rows that go with the counts above, and the last per-handler
+# accounting in this tree that could only be read cumulatively.
+#
+# **Every one of these is an accumulator paired with a count**, which is
+# what makes it differenceable: the quotient of two deltas is the mean
+# over the window, and the mean over the window is the quantity the
+# cumulative reader claimed to be printing and was not.
+# `dump_handler_by_reason` prints exactly these rows divided by
+# `handler_cycles` since boot, and its own docstring quotes `vmresume at
+# 38% of exits and vmptrld at 8%` - a mean taken before VMCS shadowing
+# was in force, under a present-tense heading, of a configuration that
+# no longer exists.
+#
+# What is NOT here and why: `handler_entry_tsc`, `handler_entry_reads`
+# and `handler_entry_writes` are the *open* end of the bracket these
+# close - one latched value per processor, replaced at every exit - so
+# their difference is a distance between two unrelated instants.  See
+# DELTA_REFUSALS.
+DELTA_HANDLER_REASON_COSTS = [
+    ("handler_reason_cycles", "cycles inside the handler, by reason"),
+    ("handler_reason_reads", "VMCS reads taken, by reason"),
+    ("handler_reason_writes", "VMCS writes taken, by reason"),
+]
+
+# When a share measured in this window is called a disagreement with the
+# same share measured over the whole boot.
+#
+# Percentage *points*, not a ratio.  A share is already a percentage and
+# the ratio of two small ones is noise - 0.1% against 0.3% is a "3x
+# disagreement" worth nothing, and a rule stated as a ratio would print
+# that as a finding while missing 40% -> 48%.  Five points is the
+# smallest drift that can change which row is largest in a table of this
+# shape, which is the reading somebody acts on.
+DELTA_SHARE_DRIFT_POINTS = 5.0
+
+# The same idea for a per-round-trip cost, which is not a share and so
+# cannot use points.  A quarter is the drift at which the windowed and
+# the boot-wide figures stop rounding to the same number at the
+# precision this table prints.
+DELTA_PER_RT_DRIFT = 0.25
 
 # The span source.  `handler_last_tsc` is a *last value*, not an
 # accumulator, so it is never rated - its difference is the wall clock
@@ -4741,6 +4832,22 @@ DELTA_REFUSALS = [
      "vtl_copy_max_pfn, vtl_code0_run_longest",
      "monotonic in one direction but not counts - a max that grew by "
      "4096 saw one page further out, not 4096 events"),
+    # The trap sitting directly beside the members this mode now
+    # differences, and the one somebody adding the next phase will hit.
+    # `phase_cycles` and `handler_reason_cycles` ARE differenced - they
+    # are closed accumulators. These are the open ends of the same
+    # brackets and they look identical in a dump: eight bytes, per
+    # processor, climbing.
+    ("open ends of a bracket, not accumulators",
+     "phase_mark, handler_entry_tsc, handler_entry_reads, "
+     "handler_entry_writes, handler_was_l2, reason_bucket",
+     "each holds where the CURRENT span started, replaced at every "
+     "exit, so two samples hold two unrelated instants and their "
+     "difference is a distance between them. `phase_mark` climbs like "
+     "a counter because it is an RDTSC, and its delta looks exactly "
+     "like a cycle count. The closed halves - phase_cycles, "
+     "phase_calls, handler_reason_cycles/reads/writes - are "
+     "differenced, and they are the only halves that are sums"),
     ("composite records",
      "unhandled_exit, vm_entry_failure, ap_fault, vtl_call_block",
      "one struct mixing a flag, a reason and several addresses; there "
@@ -4755,10 +4862,14 @@ DELTA_REFUSALS = [
      "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
      "counts, vtl_service_calls, hypercall_code_counts, "
      "l2_injected_vector, l2_entry_vector, l2_synthetic_msr_writes, "
-     "l2_msr_write_counts",
+     "l2_msr_write_counts, bucket_phase_cycles, bucket_phase_reads, "
+     "bucket_phase_writes, bucket_calls, vmcs02_split_cycles",
      "differenceable in principle and deliberately left out: every "
      "member added widens the read window, and the read window is this "
-     "measurement's own error bar"),
+     "measurement's own error bar. The five phase members at the end "
+     "are the sub-splits of phases the tree above already covers, so "
+     "the cheap reading is taken first and these are what to add when "
+     "it points at their parent"),
     ("synthetic_msr_writes - a SIX-INDEX SLICE, not the census",
      "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0x93 SINT3, 0xb0 STIMER0_CONFIG, "
      "0xb1 STIMER0_COUNT, per processor",
@@ -5084,6 +5195,404 @@ def delta_level_split_lines(before, after, slots, seconds, l2_entries):
     return lines
 
 
+def share_drift_lines(pairs, what, unit="of the split's cycles"):
+    """Boot-wide share against windowed share, as a verdict in words.
+
+    `pairs` is `(name, boot_percent, window_percent)`.  Both sides are
+    shares **of the same split**, never one of the split and one of
+    something else - a drift computed against two different
+    denominators is a unit slip wearing a percentage sign.
+
+    Prints the AGREE case as loudly as the DISAGREE case, on purpose.  A
+    check that only speaks when it fires cannot be distinguished from a
+    check that is not wired up, and this file records a verdict helper
+    that was one deletion away from exactly that.
+    """
+    drifts = sorted(((abs(w - b), name, b, w) for name, b, w in pairs),
+                    reverse=True)
+    if not drifts:
+        return []
+    worst = drifts[0][0]
+    if worst < DELTA_SHARE_DRIFT_POINTS:
+        return [
+            f"  the windowed {what} AGREES with the boot-wide one "
+            f"(worst drift {worst:.1f} points,",
+            f"  under the {DELTA_SHARE_DRIFT_POINTS:.1f} that would be "
+            f"called out). The cumulative table happens to",
+            "  describe the present HERE - which is a fact about this "
+            "window, not a licence to",
+            "  quote it about a later one."]
+
+    lines = ["",
+             f"  *** BOOT-WIDE {what.upper()} and THIS WINDOW DISAGREE "
+             f"***"]
+    for drift, name, boot, window in drifts:
+        if drift < DELTA_SHARE_DRIFT_POINTS:
+            continue
+        # Signed against the boot-wide figure, not the absolute drift
+        # the sort is on: a share that FELL and one that rose are
+        # opposite readings, and printing both as `+20.2 points` is the
+        # kind of label this whole file is written against.
+        lines.append(f"      {name:<14} {boot:>6.1f}% since boot  ->  "
+                     f"{window:>6.1f}% {unit} IN THIS WINDOW  "
+                     f"({window - boot:+.1f} points)")
+    lines.append("      -> a cumulative by-reason table is a mean over "
+                 "every phase of the boot,")
+    lines.append("         including phases that have ended. Quote the "
+                 "window column, and do")
+    lines.append("         not quote the cumulative one in the present "
+                 "tense.")
+    return lines
+
+
+def delta_handler_reason_lines(before, after, slots, seconds,
+                               handler_delta, exits_delta):
+    """Where the handler's time went, BY REASON, inside this window.
+
+    **The last per-handler number in this tree that could only be read
+    cumulatively.**  `dump_handler_by_reason` divides
+    `handler_reason_cycles` by `handler_cycles` since the first exit of
+    the boot and prints the quotient under a present-tense heading; the
+    same file's docstring quotes `vmresume at 38% of exits and vmptrld
+    at 8%`, taken before VMCS shadowing was in force, and with shadowing
+    on the guest hypervisor's VMREADs and VMWRITEs stop exiting at all.
+    So the table already carries a figure of exactly the kind this mode
+    exists to retire.
+
+    Four things are printed and each is falsifiable on its own:
+
+    - the windowed cost per exit, per reason, which is a mean over the
+      window rather than over the boot;
+    - **the coverage**, `handler_reason_cycles` summed against the
+      `handler_cycles` delta.  The header states these are closed from
+      the same pair of reads (`resume_guest`), so they must sum to each
+      other; a split that does not is measuring a different span from
+      the one it is being compared against;
+    - reads and writes beside cycles over the same span, which is what
+      separates a reason whose cost is VMCS traffic from one whose cost
+      is software;
+    - **the verdict**, in words, when a reason's windowed share differs
+      from its boot-wide share by more than `DELTA_SHARE_DRIFT_POINTS`.
+
+    `handler_reason_*` are `[handler_reason_slots]`, **not** per
+    processor - one global row summed over every CPU.  `handler_cycles`
+    is `[max_cpus]`, so the caller passes the sum of its deltas, and the
+    coverage line compares like with like.  Getting that wrong divides a
+    sum over eight processors by one processor's share and reports 800%
+    coverage, which reads as a finding.
+
+    Takes dictionaries and numbers only, no rig, so every judgement here
+    is reachable from a test with values chosen to make it fail.
+    """
+    names = ([n for n, _ in DELTA_HANDLER_REASON_COSTS]
+             + [n for n, _ in DELTA_GLOBAL_HISTOGRAMS])
+
+    moved, bad, unread = {}, [], []
+    for name in names:
+        rows, impossible, missing = delta_rows(
+            before, after, [((name, r), "") for r in range(slots)])
+        moved[name] = {key[1]: d for key, _l, _a, _b, d in rows}
+        bad += [(name, key[1], a, b, d)
+                for key, _l, a, b, d in impossible]
+        unread += [(name, key[1]) for key, _l in missing]
+
+    # An unanswered read and a handler that took no time produce the
+    # same missing row, and only one of them is a fact about the guest.
+    if unread:
+        absent = sorted({n for n, _r in unread})
+        return ["",
+                "the handler's time BY REASON: NOT READ ("
+                + ", ".join(absent) + ").",
+                "  Absent from one or both samples, and NOT counted as "
+                "zero. This section is",
+                "  unknown rather than empty."]
+
+    if bad:
+        lines = ["",
+                 "*** IMPOSSIBLE: a monotonic accumulator went "
+                 "BACKWARDS ***"]
+        for name, reason, a, b, delta in bad:
+            lines.append(f"    {name}[reason {reason}]  {a:,} -> {b:,} "
+                         f"({delta:,})")
+        lines.append("    The by-reason split is not printed. See the "
+                     "four causes above.")
+        return lines
+
+    cycles = moved["handler_reason_cycles"]
+    exits = moved["handler_reason_exits"]
+    reads = moved["handler_reason_reads"]
+    writes = moved["handler_reason_writes"]
+    from_l2 = moved["handler_reason_from_l2"]
+
+    split_cycles = sum(cycles.values())
+    split_exits = sum(exits.values())
+
+    if not split_exits:
+        return ["",
+                "the handler's time BY REASON: every reason unchanged "
+                "in this window.",
+                "  Not printed - a table of zeroes is not a "
+                "distribution. The handler took",
+                "  no exit here, which is a reading, not an absence."]
+
+    # At most one exit can straddle each of the two sample boundaries,
+    # so two exits' worth of cycles is the tolerance and anything past
+    # it means the two members are not describing the same span.
+    if handler_delta:
+        slack = 2 * (split_cycles / split_exits)
+        if split_cycles > handler_delta + slack:
+            return ["",
+                    "*** IMPOSSIBLE: the split is LARGER than what it "
+                    "splits ***",
+                    f"    handler_reason_cycles summed  "
+                    f"{split_cycles:,}",
+                    f"    handler_cycles summed over cpus "
+                    f"{handler_delta:,}",
+                    "    Both are closed in `resume_guest` from the "
+                    "same pair of reads, so the",
+                    "    first cannot exceed the second. One of: the "
+                    "two were read from",
+                    "    different binaries, or handler_cycles was "
+                    "summed over the wrong set of",
+                    "    processors. Nothing below is printed."]
+
+    lines = ["",
+             f"where the handler's time went, BY REASON, IN THIS WINDOW "
+             f"({split_exits:,} exits,",
+             f"  {split_exits / seconds:,.1f}/s). Cycles are summed over "
+             f"EVERY processor, as the member is.",
+             "  reason             exits    exits/s   cyc/exit    %cyc"
+             "    rd/ex   wr/ex  cyc/acc  whose"]
+
+    for reason in sorted(exits, key=lambda r: -cycles.get(r, 0)):
+        if not exits[reason]:
+            continue
+        name = EXIT_REASON.get(reason, reason)
+        took = cycles.get(reason, 0)
+        rd, wr = reads.get(reason, 0), writes.get(reason, 0)
+        access = rd + wr
+        l2 = from_l2.get(reason, 0)
+        whose = ("L2" if l2 == exits[reason]
+                 else ("L1" if not l2 else f"{l2}/{exits[reason]}"))
+        lines.append(
+            f"  {name:<14} {exits[reason]:>10,} "
+            f"{exits[reason] / seconds:>10,.1f} "
+            f"{took // exits[reason]:>10,} "
+            f"{100.0 * took / max(split_cycles, 1):>6.1f}% "
+            f"{rd / exits[reason]:>7.1f} {wr / exits[reason]:>7.1f} "
+            f"{(took / access) if access else 0:>8,.0f}  {whose}")
+
+    # Coverage, as the header says it must be, and against the window
+    # rather than against the boot.
+    if handler_delta:
+        lines.append(
+            f"  --- the split covers "
+            f"{100.0 * split_cycles / handler_delta:.1f}% of the "
+            f"handler_cycles delta")
+    else:
+        lines.append("  --- handler_cycles was NOT READ in this window, "
+                     "so the split's coverage is")
+        lines.append("      unknown. A split with no denominator is not "
+                     "a fraction.")
+    if exits_delta:
+        lines.append(
+            f"  --- and {100.0 * split_exits / exits_delta:.1f}% of the "
+            f"handler_exits delta ({exits_delta:,})")
+    else:
+        lines.append("  --- handler_exits was NOT READ in this window, "
+                     "so the exit coverage is unknown.")
+
+    # The verdict, against the same split's boot-wide shares. Both sides
+    # are shares of `handler_reason_cycles`, so the comparison is of two
+    # measurements of one quantity over two spans - which is the only
+    # comparison that says anything.
+    boot = {r: (after.get(("handler_reason_cycles", r)) or 0)
+            for r in range(slots)}
+    boot_total = sum(boot.values())
+    pairs = []
+    if boot_total:
+        for reason in exits:
+            if not exits[reason]:
+                continue
+            pairs.append((str(EXIT_REASON.get(reason, reason)),
+                          100.0 * boot[reason] / boot_total,
+                          100.0 * cycles.get(reason, 0)
+                          / max(split_cycles, 1)))
+    lines.extend(share_drift_lines(pairs, "share of handler cycles"))
+    return lines
+
+
+def delta_phase_lines(before, after, cpu, slots, seconds, round_trips,
+                      handler_delta, boot_round_trips, boot_handler):
+    """`dump_phase_tree`, over the measured window instead of the boot.
+
+    The cumulative tree is the instrument that produced this session's
+    most expensive wrong answer - a boot-wide mean under a present-tense
+    heading, quoted present tense, describing a phase that had ended.
+    The shape here is deliberately the same as `dump_phase_tree`'s so
+    the two can be read against each other, and the heading says IN THIS
+    WINDOW so they cannot be confused.
+
+    `phase_cycles` and `phase_calls` are `[max_cpus][phase_count]` and
+    both only ever `+=`, so a difference is the cycles and the calls
+    inside the window.  `phase_mark` is the open end of the same bracket
+    and is refused - see DELTA_REFUSALS.
+
+    The two columns that are not simply the cumulative ones divided
+    differently:
+
+    - `cyc/RT` divides by the round trips **in this window**, so
+      siblings stay additive and the figure is a present-tense cost;
+    - `outside the split` is the windowed `handler_cycles` minus the
+      windowed top-level intervals, which is the coverage check.  Slots
+      25-30 are adjacent intervals over the whole of an exit and sum to
+      `handler_cycles` by construction, so a residue much above the
+      round-off means an exit left the handler somewhere this does not
+      know about - and a residue that appears only in the window is a
+      path the guest has *started* taking.
+    """
+    # A denominator that was not read is not a small denominator, and
+    # `round_trips` is the divisor of every column below.
+    if round_trips is None or handler_delta is None:
+        return ["",
+                f"cpu {cpu} phase tree: NOT PRINTED. `l2_entries` or "
+                f"`handler_cycles` was not",
+                "  read on this processor, or went backwards, so there "
+                "is no denominator to",
+                "  divide by. Unknown, not zero."]
+
+    rows, bad, unread = {}, [], []
+    for name in ("phase_cycles", "phase_calls"):
+        got, impossible, missing = delta_rows(
+            before, after,
+            [((name, (cpu, i)), "") for i in range(slots)])
+        rows[name] = {key[1][1]: d for key, _l, _a, _b, d in got}
+        bad += [(name, key[1][1], a, b, d)
+                for key, _l, a, b, d in impossible]
+        unread += [(name, key[1][1]) for key, _l in missing]
+
+    if unread:
+        return ["",
+                f"cpu {cpu} phase tree: NOT READ. `phase_cycles` or "
+                f"`phase_calls` is absent",
+                "  from one or both samples, so the split is unknown "
+                "rather than empty."]
+    if bad:
+        lines = ["",
+                 f"*** IMPOSSIBLE: a phase accumulator went BACKWARDS "
+                 f"on cpu {cpu} ***"]
+        for name, index, a, b, delta in bad:
+            lines.append(f"    {name}[cpu {cpu}][{index}]  {a:,} -> "
+                         f"{b:,} ({delta:,})")
+        lines.append("    The phase tree is not printed for this "
+                     "processor.")
+        return lines
+
+    calls = rows["phase_calls"]
+    cycles = rows["phase_cycles"]
+    if not any(calls.values()):
+        return ["",
+                f"cpu {cpu} phase tree: no phase was entered in this "
+                f"window.",
+                "  Not printed. The cumulative tree would still show "
+                "the whole boot's costs",
+                "  here, which is the reading this mode exists to "
+                "replace."]
+
+    children = [[] for _ in range(slots)]
+    for index in range(slots):
+        parent = (PHASE_PARENT[index] if index < len(PHASE_PARENT)
+                  else PHASE_CROSS)
+        if 0 <= parent < slots:
+            children[parent].append(index)
+
+    rt = round_trips or 1
+    total = handler_delta or 1
+
+    lines = ["",
+             f"cpu {cpu} phase tree IN THIS WINDOW "
+             f"({round_trips:,} round trips, "
+             f"{(handler_delta or 0) // max(round_trips, 1):,} handler "
+             f"cycles a round trip)",
+             "     phase                                     calls"
+             "  calls/RT     cyc/call      cyc/RT   self/RT   %vmm"]
+
+    def row(index, depth):
+        if not calls.get(index):
+            return
+        name = (("  " * depth) + (PHASE_NAMES[index]
+                                  if index < len(PHASE_NAMES)
+                                  else f"(slot {index})"))[:36]
+        own = cycles[index] - sum(cycles.get(c, 0)
+                                  for c in children[index])
+        lines.append(f"  {index:3d}  {name:<36} {calls[index]:>12,} "
+                     f"{calls[index] / rt:>8.2f} "
+                     f"{cycles[index] // calls[index]:>12,} "
+                     f"{cycles[index] / rt:>11,.0f} "
+                     f"{own / rt:>9,.0f} "
+                     f"{100.0 * cycles[index] / total:>6.1f}")
+        for child in children[index]:
+            row(child, depth + 1)
+
+    top = [i for i in range(slots)
+           if (i < len(PHASE_PARENT)) and (PHASE_PARENT[i] == PHASE_TOP)]
+    for index in top:
+        row(index, 0)
+
+    covered = sum(cycles.get(i, 0) for i in top)
+    for label, value in (
+            ("--- the adjacent intervals", covered),
+            ("--- handler_cycles delta", handler_delta or 0),
+            ("--- outside the split", (handler_delta or 0) - covered)):
+        lines.append(f"       {label:<36} {'':>12} {'':>8} {'':>12} "
+                     f"{value / rt:>11,.0f} {'':>9} "
+                     f"{100.0 * value / total:>6.1f}")
+
+    cross = [i for i in range(slots)
+             if (i < len(PHASE_PARENT))
+             and (PHASE_PARENT[i] == PHASE_CROSS) and calls.get(i)]
+    if cross:
+        lines.append("       cross-cutting - each is already inside one "
+                     "of the rows above and is")
+        lines.append("       NOT subtracted from that row's self, "
+                     "because it has more than one")
+        lines.append("       caller. Do not add them to the tree.")
+        for index in cross:
+            row(index, 1)
+
+    # The verdict. Cycles per round trip is not a share, so it is stated
+    # as a ratio - and the AGREE case is printed too, for the reason
+    # `share_drift_lines` gives.
+    if boot_round_trips and round_trips and boot_handler:
+        boot_rate = boot_handler / boot_round_trips
+        window_rate = (handler_delta or 0) / round_trips
+        if boot_rate > 0:
+            drift = abs(window_rate - boot_rate) / boot_rate
+            if drift >= DELTA_PER_RT_DRIFT:
+                lines.append(
+                    f"       *** BOOT-WIDE MEAN and THIS WINDOW "
+                    f"DISAGREE by {window_rate / boot_rate:.2f}x: "
+                    f"{boot_rate:,.0f}")
+                lines.append(
+                    f"           handler cycles a round trip since "
+                    f"boot against {window_rate:,.0f} here. The "
+                    f"cumulative")
+                lines.append(
+                    "           tree above this one describes neither "
+                    "the boot nor now - it is a")
+                lines.append(
+                    "           mean over both, and nothing ran at it.")
+            else:
+                lines.append(
+                    f"       the windowed cost agrees with the "
+                    f"boot-wide mean ({window_rate / boot_rate:.2f}x, "
+                    f"under")
+                lines.append(
+                    f"       the {DELTA_PER_RT_DRIFT:.2f} drift that "
+                    f"would be called out).")
+    return lines
+
+
 def delta_report(before, after, entries, cycles, histograms, span,
                  fingerprints, cpus, asked_seconds, read_windows):
     """The whole delta report, as lines, from data alone.
@@ -5362,7 +5871,8 @@ def serial_module_base(rig):
 
 def delta_sample(args, instance, off, cpus, reason_capacity,
                  disposition_capacity, synthetic_capacity=None,
-                 gap_capacity=None, reason_slots=None):
+                 gap_capacity=None, reason_slots=None,
+                 phase_slots=None):
     """One complete delta sample: open, read, close.
 
     **The monitor takes exactly one connection.**  `Monitor` opens and
@@ -5392,13 +5902,29 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
     if "l2_ept_dispositions" in off:
         monitor.queue(instance + off["l2_ept_dispositions"],
                       cpus * disposition_capacity)
-    # The by-level split.  Global rows, one read each, at the row length
-    # the ELF reports - never a literal 64, for the reason `gdb_lengths`
-    # exists.  Two rows is 128 quadwords, under three round trips.
+    # The by-level split and the cost rows that go with it.  Global
+    # rows, one read each, at the row length the ELF reports - never a
+    # literal 64, for the reason `gdb_flat_lengths` exists.  Five rows
+    # is 320 quadwords and one extra monitor round trip.
     if reason_slots:
-        for name, _ in DELTA_GLOBAL_HISTOGRAMS:
+        for name, _ in (DELTA_GLOBAL_HISTOGRAMS
+                        + DELTA_HANDLER_REASON_COSTS):
             if name in off:
                 monitor.queue(instance + off[name], reason_slots)
+    # The phase tree, and the widest thing this mode reads: two rows of
+    # `phase_count` per processor, so eight processors is sixteen more
+    # commands where the whole sample is around two hundred.  Behind
+    # `--delta-phases` for that reason - the read window is this
+    # measurement's own error bar, and a section nobody asked for should
+    # not widen it.  `phase_slots` is None when the flag is absent, and
+    # `delta_main` says so in the report rather than printing nothing.
+    if phase_slots:
+        for name in ("phase_cycles", "phase_calls"):
+            if name not in off:
+                continue
+            for cpu in range(cpus):
+                monitor.queue(instance + off[name]
+                              + cpu * phase_slots * 8, phase_slots)
     # Optional, and read per processor rather than as one run: the row
     # length comes from the ELF, never a literal 64, for the reason
     # `gdb_lengths` exists.
@@ -5442,9 +5968,16 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
     for name, _ in DELTA_GLOBAL_COUNTERS:
         readings[(name, None)] = read(name)
     if reason_slots:
-        for name, _ in DELTA_GLOBAL_HISTOGRAMS:
+        for name, _ in (DELTA_GLOBAL_HISTOGRAMS
+                        + DELTA_HANDLER_REASON_COSTS):
             for reason in range(reason_slots):
                 readings[(name, reason)] = read(name, reason)
+    if phase_slots:
+        for name in ("phase_cycles", "phase_calls"):
+            for cpu in range(cpus):
+                for slot in range(phase_slots):
+                    readings[(name, (cpu, slot))] = read(
+                        name, cpu * phase_slots + slot)
     for cpu in range(cpus):
         for reason in range(reason_capacity):
             readings[("exit_reason_counts", (cpu, reason))] = read(
@@ -5666,13 +6199,13 @@ def delta_synic_lines(after, cpus):
 
 def delta_main(args, base, instance, off, cpus, reason_capacity,
                disposition_capacity, synthetic_capacity=None,
-               gap_capacity=None, reason_slots=None):
+               gap_capacity=None, reason_slots=None, phase_slots=None):
     """Two samples, a measured span between them, and rates from it."""
     print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
           f"B ...")
     before, first_a, clock_a, a0, a1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity, reason_slots)
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots)
 
     # The socket is closed before this sleep and reopened after it: no
     # connection is held across the wait.
@@ -5680,7 +6213,7 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
 
     after, first_b, clock_b, b0, b1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity, reason_slots)
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots)
     base_b = serial_module_base(args.rig)
 
     # Midpoint to midpoint, because each sample takes a measurable time
@@ -5758,6 +6291,69 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
                 entered):
             print(line)
 
+    # `handler_reason_*` is one global row, so its denominators have to
+    # be summed over the processors sampled - `handler_cycles` and
+    # `handler_exits` are `[max_cpus]`. Summed here rather than inside
+    # the printer, so the printer stays reachable from a test with
+    # numbers chosen to make it fail.
+    def summed(name):
+        rows, bad, unread = delta_rows(
+            before, after, [((name, cpu), "") for cpu in range(cpus)])
+        if bad or unread:
+            return None
+        return sum(d for _k, _l, _a, _b, d in rows)
+
+    if reason_slots:
+        for line in delta_handler_reason_lines(
+                before, after, reason_slots, span[1] or args.delta,
+                summed("handler_cycles"), summed("handler_exits")):
+            print(line)
+    else:
+        # Said out loud. A section that is silently absent and one that
+        # measured nothing look identical afterwards, which is the whole
+        # subject of this file.
+        print("")
+        print("the handler's time BY REASON: NOT SAMPLED - the row "
+              "length could not be read")
+        print("  from the ELF, so `handler_reason_cycles` was not "
+              "queued. This is unknown,")
+        print("  not zero.")
+
+    # Through `delta_rows` rather than by subtracting two `.get`s, so a
+    # denominator that went backwards or was never read comes out as
+    # None and the printer says so. Subtracting them by hand is how this
+    # investigation produced -11,989 cycles on a monotonic accumulator.
+    def one_cpu(name, cpu):
+        rows, bad, unread = delta_rows(
+            before, after, [((name, cpu), "")])
+        if bad or unread:
+            return None
+        return rows[0][4]
+
+    if phase_slots:
+        for cpu in range(cpus):
+            for line in delta_phase_lines(
+                    before, after, cpu, phase_slots,
+                    span[1] or args.delta,
+                    one_cpu("l2_entries", cpu),
+                    one_cpu("handler_cycles", cpu),
+                    after.get(("l2_entries", cpu)) or 0,
+                    after.get(("handler_cycles", cpu)) or 0):
+                print(line)
+    else:
+        print("")
+        print("the phase tree: NOT SAMPLED in this window. Pass "
+              "--delta-phases for it.")
+        print("  Two rows of phase_count per processor is the widest "
+              "read this mode can")
+        print("  make, and the read window is this measurement's own "
+              "error bar - so it is")
+        print("  opt-in. **The cumulative tree in the default dump is "
+              "NOT a substitute:**")
+        print("  it is a mean over the whole boot and has already been "
+              "quoted in the")
+        print("  present tense about a phase that had ended.")
+
     for line in delta_synic_lines(after, cpus):
         print(line)
 
@@ -5804,6 +6400,15 @@ def main():
                     help="take two samples N seconds apart and print "
                          "rates and deltas over the MEASURED span "
                          "instead of the cumulative dump")
+    # Opt-in because it is the widest read in the mode: two rows of
+    # `phase_count` per processor, sixteen more monitor commands on an
+    # eight-processor guest. The report says so when it is off, so an
+    # absent section cannot be read as an empty one.
+    ap.add_argument("--delta-phases", action="store_true",
+                    help="with --delta, also difference the per-phase "
+                         "cycle tree (phase_cycles/phase_calls). Widens "
+                         "the read window, which is this measurement's "
+                         "own error bar")
     args = ap.parse_args()
 
     base = args.base
@@ -6111,6 +6716,12 @@ def main():
         # instead of one section.
         "handler_reason_exits", "handler_reason_from_l2",
         "hlt_reflect_count", "reference_read_count",
+        # The cost rows that go with the two counts above, and the
+        # per-processor exit count the split has to sum to. Optional for
+        # the same reason: a deployed binary predating one of them must
+        # cost this section, not the whole dump.
+        "handler_reason_cycles", "handler_reason_reads",
+        "handler_reason_writes", "handler_exits",
     ], optional=True))
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -6175,17 +6786,40 @@ def main():
         # reads the second row at the wrong stride and prints a coherent
         # histogram of exits the guest never took.  `exit_reason_counts`
         # has already cost this file exactly that.
+        #
+        # **`gdb_flat_lengths`, not `gdb_lengths`.**  These rows are
+        # `[handler_reason_slots]` and flat, and the nested question
+        # `gdb_lengths` asks cannot be put to a flat array at all - gdb
+        # answers `cannot subscript something of type 'unsigned long'`,
+        # this `except` caught it, and the note below claimed the member
+        # was *absent*.  It is not absent, it has been resident all
+        # along, and the exits-by-level split has therefore never
+        # printed.  Measured against a stand-in object; see
+        # `gdb_flat_lengths`.
         try:
-            reason_slots = gdb_lengths(
+            reason_slots = gdb_flat_lengths(
                 args.elf,
                 ["handler_reason_exits"])["handler_reason_exits"]
         except SystemExit:
             reason_slots = None
             print("note: handler_reason_exits is absent from this ELF; "
-                  "the exits-by-level split will not be reported")
+                  "the exits-by-level split and the by-reason cost "
+                  "split will not be reported")
+        # The phase tree, only when asked for. Nested, so `gdb_lengths`
+        # is the right question here and the flat one would answer
+        # `max_cpus` - which is a plausible small number and would walk
+        # every processor's row at the wrong stride.
+        phase_slots = None
+        if args.delta_phases:
+            try:
+                phase_slots = gdb_lengths(
+                    args.elf, ["phase_cycles"])["phase_cycles"]
+            except SystemExit:
+                print("note: phase_cycles is absent from this ELF; the "
+                      "windowed phase tree will not be reported")
         delta_main(args, base, instance, off, args.cpus, reason_capacity,
                    disposition_capacity, synthetic_capacity, gap_capacity,
-                   reason_slots)
+                   reason_slots, phase_slots)
         return
 
     monitor = Monitor(args.rig, args.port)
