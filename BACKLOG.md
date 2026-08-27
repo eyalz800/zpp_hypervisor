@@ -54390,3 +54390,139 @@ That is the next question, and it is a much better one than "which
 frame does it stop at": **what is the request the guest keeps making
 after the walk is done, and what do we answer?**
 
+
+## The secure call block, decoded from the guest binary
+
+2026-08-27. The question above — "what is the request the guest keeps
+making, and what do we answer?" — is answered, and the answer retires
+most of the section that asked it. Nothing here comes from the TLFS:
+`.references/` has **no** VTL material at all (checked: zero hits for
+`VTL`, `HvCallVtlCall`, `MODIFY_VTL`, `HV_MAP_GPA_FLAGS` across kvm,
+xen, acrn, bitvisor, xvisor and `sdm.txt`; the one VTL-adjacent thing
+present is an opaque `uint64_t vtl_control[3]` in Xen's VP assist page
+struct, `xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:572-581`).
+It comes from disassembling the guest's own `ntoskrnl.exe`.
+
+### The layout
+
+Every secure call in Windows funnels through **one** function,
+`VslpEnterIumSecureMode` at RVA `0x38dd60` — 164 call sites, all
+`Vsl*`/`Mi*`/`Mm*`/`Hvl*`. Its prologue is the whole decode:
+
+    0038dd8d  movzbl %cl,   %r14d      ; arg1, a byte
+    0038ddac  movzwl %dx,   %r15d      ; arg2, a word
+    0038ddb6  movb   %r14b, (%r9)      ; block+0x00 = arg1
+    0038ddb9  movw   %dx,   0x2(%r9)   ; block+0x02 = arg2
+
+and every caller zeroes the block before it — `VslCopyProtectedPage`
+at `0048851c`, `VslSetPlaceholderPages` at `0038ccef`,
+`VslRemoveProtectedPage` at `0038cac7`, all `memset(block, 0, 0x68)` —
+then writes its arguments from `block+0x08` upward. So the quadword
+this tree calls "the request word" is:
+
+    +0x00  u8   call class     0..3 (`cmpb $0x2,%r14b` bounds the fast path)
+    +0x01  u8   entry reason   written by VTL1 on the way BACK
+    +0x02  u16  SECURE SERVICE NUMBER
+    +0x04  u32  continuation
+    +0x08  u64  first argument (the NTSTATUS on the way back)
+
+Byte 1 is read after the switch at `0038df01` and dispatched on 1, 6,
+3, 2 and 0, with bit 7 trapping — it is an exit reason, not a request.
+
+### What that retires
+
+- **Both readings recorded in `hypervisor.h` were wrong.** "Byte 0 is
+  a subcode and `0x01010002` means a PFN request" and "byte 0 is the
+  operation and bytes 2-3 are a count" are two ways of splitting a
+  field that is not there. The constant genuinely appears nowhere in
+  `ntoskrnl.exe` because it is assembled at run time from two register
+  writes — **absence of an immediate is not evidence about a field.**
+- **The `code 0` filter selects nothing.** `(word >> 8) & 0xff == 0`
+  tests byte 1, which every caller has just memset to zero, so it
+  admits every ordinary secure call and excludes only the re-entries.
+  `vtl_call_request` is a census of a field VTL0 never writes.
+- **`0x01010002` is service `0x101`, `VslSetPlaceholderPages`.** Its
+  only caller is `MiUpdateSlabPagePlaceholderState` (`0038cc44`), and
+  its first argument really is a page frame number — confirmed by the
+  caller indexing the PFN database with it at `0038cbf3`
+  (`(pfn * 3) << 4 + 0xffffde0000000000`). The numbers are real. They
+  are **slab placeholder bookkeeping**, not image validation.
+- **`0x00f40002` — 48.1%, "never decoded" — is service `0x0f4`,
+  `VslCopyProtectedPage`, and its caller is `MiCopyPage` at
+  `002523c1`.** That is the frame in the failing stack. It was never
+  measured. `0x00f30002` at 13.8% is `0x0f3`,
+  `VslRemoveProtectedPage`, from `MiWalkEntireImage`'s neighbourhood.
+
+So **"the walk finished" is a statement about the wrong walk.** Every
+`pfn`, span, density, run-length and backward-step figure in the
+section above describes `MiUpdateSlabPagePlaceholderState`, and the
+image validation the investigation is actually about was invisible to
+every instrument.
+
+Full service map, all 164 call sites, is in `SK_SERVICE` in
+`scripts/rig-dump-state.py`. Notable entries reached by this guest:
+`0x003` `VslFinishStartSecureProcessor`, `0x0d3`
+`VslReserveProtectedPages`, `0x0db` `VslMapKernelScpPages`, `0x0c1`
+`VslValidateSecureImagePages`.
+
+### The epoch instrument overstates by 9x, and its own tsc column says so
+
+`vtl_code0_epoch_*` samples **on the hypercall path** when
+`since >= vtl_code0_epoch_ticks`, and `vtl_code0_epoch_ticks` is
+`1 << 34` = 17.18e9 ticks = 8.59 s at this rig's 2 GHz. A sample can
+therefore only be taken *when a hypercall arrives*.
+
+The last two samples in the run above are 372,630,200,629 and
+529,099,445,053 — a gap of **156.5e9 ticks, 9.1 thresholds**. Since
+the sample fires on the first call past the threshold, that means: no
+second-level hypercall arrived on cpu 0 between `t0 + 17.2e9` and
+`t0 + 156.5e9`. **A 70-second silence.**
+
+"Trust-level calls keep arriving at about fifty an epoch" is therefore
+the wrong reading of that column. The epoch *stretched*, and the
+stretch is the measurement. What the data actually shows is bursts of
+traffic separated by ~70-second silences — the opposite claim, and it
+was produced by dividing a delta by a nominal epoch length the
+instrument does not guarantee.
+
+Separately: the two rows quoted report `+50 calls` against cumulative
+figures 86,156 and 86,548, which differ by **392**. The printer
+computes its delta against the previous printed row, so those two
+numbers cannot both be right. Re-read the raw block before using
+either.
+
+### What we answer: nothing
+
+Traced end to end. `on_l2_exit` (`nested_entry.cpp:9523`) decodes no
+hypercall before deciding: `l0_wants_l2_exit` falls to
+`default: return false` (`nested_entry.cpp:3486`), `l1_wants_l2_exit`
+falls to `default: return true` (`nested_entry.cpp:3916`), and every
+L2 VMCALL leaves through `reflect_l2_exit` with `advance_rip = false`
+(`nested_entry.cpp:11910-11912`). The code is not even read until
+`nested_entry.cpp:10110`, which is after both decisions. No path
+writes RAX, RDX or R8 for a hypercall.
+
+**So no answer of ours can make a caller repeat**, and question 3 is
+closed — with one hazard worth naming. If `running_l2[cpu]` were ever
+false while an L2 VMCALL exited, the exit falls through
+`exit_dispatch.cpp:861-869` into `case vmcall` → `on_vmx_instruction`
+→ `nested_vmx.cpp:654` `vmx_fail`, which **breaks with
+`advance_rip == true` and leaves RAX untouched**. A caller that zeroed
+RAX reads that as `HV_STATUS_SUCCESS` on a VMCALL that did nothing,
+and it would be counted under `l1_vmcall_*`, which no script in the
+tree reads.
+
+### The instrument added
+
+`hypervisor.h`: `vtl_service_calls` (a direct 0x120-entry table, so it
+cannot saturate) with `vtl_service_other`, `vtl_service_class` and
+`vtl_service_reason`; `vtl_copy_*`, the image-validation walk measured
+the way the placeholder walk already was; and
+`l2_hypercall_cpu_*`/`l2_hypercall_epoch_delta`, a **per-processor**
+hypercall census with an overflow counter and a per-epoch difference.
+
+`l2_hypercall_code_counts` is left alone but should not be trusted: it
+has no `[max_cpus]` dimension, so it sums across processors under a
+heading that says "cpu 0"; it holds sixteen codes and drops the
+seventeenth without counting it; and it is cumulative, so it cannot
+say what is being called *now*.

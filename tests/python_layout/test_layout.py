@@ -1070,5 +1070,169 @@ class WalkShapeInstrument(unittest.TestCase):
                 "hold".format(name))
 
 
+class SecureCallBlockIsDecodedNotGuessed(unittest.TestCase):
+    """The secure call header, and the two guesses it retires.
+
+    `hypervisor.h` carried two competing readings of the quadword at
+    `block+0x00` - "byte 0 is a subcode and `0x01010002` means a PFN
+    request", and "byte 0 is the operation and bytes 2-3 are a count".
+    Both are wrong, and `ntoskrnl.exe` says so directly:
+    `VslpEnterIumSecureMode` writes `block+0x00 = (BYTE)arg1` and
+    `block+0x02 = (WORD)arg2`, and every caller memsets the block to
+    zero first.
+
+    So bytes 2-3 are a **secure service number**, and the two readings
+    above are two ways of splitting a field that is not there.
+
+    The consequence that matters: `0x0101` is `VslSetPlaceholderPages`
+    (caller `MiUpdateSlabPagePlaceholderState`) and `0x00f4` is
+    `VslCopyProtectedPage` (caller `MiCopyPage`). Those are different
+    walks. Every "the walk finished" reading in this investigation was
+    taken through the `0x01010002` filter, which selects the first and
+    is blind to the second - and the second is the one the failing
+    stack names.
+    """
+
+    # From the census in the dump this was decoded against.
+    POPULATION = {
+        0x00f40002: 10172,
+        0x01010002: 7207,
+        0x00f30002: 2926,
+        0x00000000: 365,
+        0x00d30002: 87,
+    }
+
+    @staticmethod
+    def decode(word):
+        return (word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xffff)
+
+    def test_the_decode_explains_every_member_of_the_population(self):
+        for word in self.POPULATION:
+            klass, reason, service = self.decode(word)
+            self.assertIn(
+                klass, (0, 2),
+                "call class {} for 0x{:08x} is outside the range "
+                "`VslpEnterIumSecureMode` accepts".format(klass, word))
+            self.assertEqual(
+                0, reason,
+                "byte 1 of 0x{:08x} is not zero, but every caller "
+                "memsets the block before the call".format(word))
+            self.assertLess(service, 0x120)
+
+    def test_the_filter_selects_the_placeholder_walk_not_the_image_walk(self):
+        """NEGATIVE CONTROL - the filter's blind spot, measured.
+
+        A check that cannot fail is not a check. This one asserts that
+        the `0x01010002` filter really does miss the majority of the
+        traffic, using the counts from the run that was read as "the
+        walk finished".
+        """
+        selected = self.POPULATION[0x01010002]
+        missed = sum(n for w, n in self.POPULATION.items()
+                     if w != 0x01010002)
+        self.assertGreater(
+            missed, selected,
+            "the population no longer shows the filter missing more "
+            "than it selects, so this control has lost its power")
+        self.assertEqual(
+            0x00f4, self.decode(0x00f40002)[2],
+            "the largest missed population is no longer service 0x0f4")
+
+    def test_the_header_records_the_decode(self):
+        source = read(HEADER)
+        self.assertIn(
+            "vtl_service_calls", source,
+            "hypervisor.h no longer censuses the secure service number, "
+            "so the request word is back to being guessed")
+        self.assertIn(
+            "VslCopyProtectedPage", source,
+            "hypervisor.h no longer names the service behind the 48% of "
+            "traffic nothing decoded")
+        self.assertIn(
+            "vtl_copy_calls", source,
+            "hypervisor.h no longer tracks the image validation walk "
+            "separately from the placeholder walk")
+
+    def test_the_service_census_cannot_saturate_silently(self):
+        source = read(HEADER)
+        slots = cxx_constant(source, "vtl_service_slots")
+        self.assertGreater(
+            slots, 0x116,
+            "the service table is narrower than the highest service "
+            "observed in ntoskrnl.exe's call sites (0x116), so real "
+            "services would land in the overflow counter")
+        self.assertIn(
+            "vtl_service_other", source,
+            "the service census has no overflow counter, which is the "
+            "defect `l1_vmcall_code_other` was added to fix once")
+
+    def test_the_per_cpu_hypercall_census_has_an_overflow_counter(self):
+        source = read(HEADER)
+        self.assertIn(
+            "l2_hypercall_cpu_other", source,
+            "the per-processor hypercall census has no overflow "
+            "counter, so a saturated table reads exactly like a quiet "
+            "one - which is what `l2_hypercall_code_counts` does today")
+        self.assertIn(
+            "l2_hypercall_epoch_delta", source,
+            "nothing differences the hypercall census over an epoch, so "
+            "'what is still being called' cannot be answered from one "
+            "dump")
+
+
+class EpochLengthIsMeasuredNotAssumed(unittest.TestCase):
+    """An epoch is 2^34 ticks only while hypercalls keep arriving.
+
+    `vtl_code0_epoch_*` samples on the **hypercall** path when
+    `since >= vtl_code0_epoch_ticks`. When hypercalls stop, no sample
+    is taken, so the epoch stretches - and a delta read as "per epoch"
+    then understates a silence by exactly the stretch.
+
+    The run this was written against had adjacent samples at
+    372,630,200,629 and 529,099,445,053: a gap of 9.1 thresholds. Read
+    as one epoch that is "50 calls per epoch"; read honestly it is a
+    70-second stretch in which no second-level hypercall arrived at all
+    on that processor.
+    """
+
+    THRESHOLD = 1 << 34
+    SAMPLES = (372630200629, 529099445053)
+
+    def test_the_observed_gap_is_many_thresholds(self):
+        gap = self.SAMPLES[1] - self.SAMPLES[0]
+        self.assertGreater(
+            gap / float(self.THRESHOLD), 9.0,
+            "the gap this check was written against is no longer many "
+            "thresholds wide, so it no longer demonstrates the stretch")
+        silence = gap - self.THRESHOLD
+        self.assertGreater(
+            silence / 2e9, 60.0,
+            "the implied silence is under a minute, so the reading "
+            "'calls keep arriving' would not be misleading")
+
+    def test_a_nominal_epoch_overstates_the_rate(self):
+        """NEGATIVE CONTROL - the wrong divisor, and by how much."""
+        gap = self.SAMPLES[1] - self.SAMPLES[0]
+        delta = 392
+        honest = delta * 2e9 / gap
+        nominal = delta * 2e9 / float(self.THRESHOLD)
+        self.assertGreater(
+            nominal / honest, 9.0,
+            "dividing by the nominal threshold no longer overstates "
+            "the rate, so this control has lost its power")
+
+    def test_the_reader_divides_by_the_measured_gap(self):
+        source = read(DUMP_STATE)
+        self.assertIn(
+            "threshold", source,
+            "rig-dump-state.py no longer reports the epoch gap in "
+            "units of the sampling threshold, so a stretched epoch "
+            "reads as a normal one")
+        self.assertIn(
+            "l2_hypercall_epoch_span", source,
+            "rig-dump-state.py no longer reads the measured epoch "
+            "span, so any rate it prints uses an assumed divisor")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14264,6 +14264,142 @@ private:
     std::uint64_t vtl_code0_word_other[max_cpus]{};
 
     /**
+     * The secure call block, decoded. **Both readings above are wrong.**
+     *
+     * Settled by disassembly of the guest's own `ntoskrnl.exe`, not by
+     * argument. `VslpEnterIumSecureMode` is the single funnel every
+     * secure call goes through - 164 call sites, all of them
+     * `Vsl*`/`Mi*`/`Hvl*` - and its prologue writes the header:
+     *
+     *     0038dd8d  movzbl %cl,  %r14d        ; arg1, byte
+     *     0038ddac  movzwl %dx,  %r15d        ; arg2, word
+     *     0038ddb6  movb   %r14b, (%r9)       ; block+0x00 = arg1
+     *     0038ddb9  movw   %dx,  0x2(%r9)     ; block+0x02 = arg2
+     *
+     * and every caller zeroes the block first - `VslCopyProtectedPage`
+     * at `0048851c`, `VslSetPlaceholderPages` at `0038ccef`, and the
+     * rest, all `memset(block, 0, 0x68)` - then writes its arguments
+     * from `block+0x08` upward. So the quadword this code calls the
+     * "request word" is
+     *
+     *     +0x00  u8   call class      0..3; 2 is an ordinary service
+     *     +0x01  u8   entry reason    written by VTL1, not by VTL0
+     *     +0x02  u16  SECURE SERVICE NUMBER
+     *     +0x04  u32  continuation
+     *     +0x08  u64  first argument  (the status on the way back)
+     *
+     * Consequences, each of which retires a reading held above:
+     *
+     * - **Byte 1 is not a request code.** It is zero on every fresh
+     *   call because the caller memsets the block, so
+     *   `vtl_call_request` and the `code 0` filter keyed on it select
+     *   *every ordinary secure call* and separate nothing. VTL1 writes
+     *   it on the way back - `0038df01` reads it and dispatches on 1,
+     *   6, 3, 2 and 0, and traps on bit 7 - so it is an exit reason,
+     *   and reading it as the request is reading the wrong direction.
+     * - **`0x01010002` is not "a PFN request".** It is class 2, service
+     *   `0x101`, and service `0x101` is `VslSetPlaceholderPages`, whose
+     *   one caller is `MiUpdateSlabPagePlaceholderState` - slab
+     *   placeholder bookkeeping. Its first argument is a page frame
+     *   number, confirmed by the caller indexing the PFN database with
+     *   it at `0038cbf3` (`(pfn * 3) << 4 + 0xffffde0000000000`), so
+     *   the numbers the walk instrument reported are real. **They are
+     *   not the image validation walk.**
+     * - **The 48.1% nobody decoded is service `0x0f4`,
+     *   `VslCopyProtectedPage`, and its caller is `MiCopyPage`
+     *   (`002523c1`)** - the frame named in the stack this whole
+     *   investigation is about. It was never measured, and neither was
+     *   `0x0f3` `VslRemoveProtectedPage` at 13.8%. So "the walk
+     *   finished" is a statement about the wrong walk.
+     * - The constant genuinely appears nowhere in `ntoskrnl.exe`
+     *   because it is assembled at run time from two register writes.
+     *   Absence of an immediate is not evidence about a field.
+     *
+     * Censused by service number rather than by low half, because the
+     * low half is a *pair* of fields and sixteen slots cannot hold a
+     * service space of eight hundred. A direct table cannot saturate,
+     * which is the failure `l2_hypercall_code_counts` still has.
+     */
+    static constexpr std::size_t vtl_service_slots = 0x120;
+
+    std::uint64_t vtl_service_calls[max_cpus][vtl_service_slots]{};
+    std::uint64_t vtl_service_other[max_cpus]{};
+    std::uint64_t vtl_service_class[max_cpus][4]{};
+    std::uint64_t vtl_service_class_other[max_cpus]{};
+    std::uint64_t vtl_service_reason[max_cpus][8]{};
+    std::uint64_t vtl_service_reason_other[max_cpus]{};
+
+    /**
+     * The **image validation** walk, measured the way the placeholder
+     * walk already is.
+     *
+     * Service `0x0f4` is `VslCopyProtectedPage` and its first argument
+     * is at `block+0x08`, the same offset the placeholder walk's page
+     * frame number lives at. Nothing tracked it, so the one question
+     * this investigation has been asking - has the walk stopped, and
+     * where - has only ever been answered about `0x101`.
+     *
+     * Same partition as `vtl_code0_consecutive` and friends, so the
+     * same identity holds and can be checked by the reader:
+     *
+     *     consecutive + same + back + skip == calls - 1
+     *
+     * A counter that cannot fail an arithmetic check is the kind this
+     * file has been misled by thirteen times.
+     */
+    std::uint64_t vtl_copy_min_pfn[max_cpus]{};
+    std::uint64_t vtl_copy_max_pfn[max_cpus]{};
+    std::uint64_t vtl_copy_last_pfn[max_cpus]{};
+    std::uint64_t vtl_copy_calls[max_cpus]{};
+    std::uint64_t vtl_copy_consecutive[max_cpus]{};
+    std::uint64_t vtl_copy_same[max_cpus]{};
+    std::uint64_t vtl_copy_back[max_cpus]{};
+    std::uint64_t vtl_copy_skip[max_cpus]{};
+
+    /**
+     * The second-level hypercall census, **per processor, with an
+     * overflow counter, and as a rate**.
+     *
+     * `l2_hypercall_code_counts` beside it has three defects that only
+     * matter once it is the instrument being trusted, and it is now:
+     * it has no `[max_cpus]` dimension so it sums silently across
+     * processors while the reader prints "cpu 0"; it holds sixteen
+     * codes and drops the seventeenth without counting it, which is
+     * the exact bug `l1_vmcall_code_other` was added to fix on the
+     * sibling census; and it is cumulative from boot, so it cannot
+     * answer "what is still being called *now*", which is the whole
+     * question about a guest that has gone quiet.
+     *
+     * `epoch_delta` is what makes one dump enough. At each epoch
+     * boundary - the same boundary `vtl_code0_epoch_tsc` samples - the
+     * per-code counts are differenced against the previous boundary
+     * and the difference is kept. So a single read names the codes
+     * that arrived in the most recent window, which is the reading a
+     * frozen walk beside continuing traffic needs and no cumulative
+     * total can give.
+     *
+     * **Read `vtl_code0_epoch_tsc` before believing any of it.** The
+     * epoch boundary is only crossed *on a hypercall*, so an epoch is
+     * `vtl_code0_epoch_ticks` long only while hypercalls are frequent.
+     * When they stop, the epoch stretches, and a delta divided by a
+     * nominal epoch length overstates the rate by however far it
+     * stretched. Divide by the measured tsc gap, never by 2^34.
+     */
+    static constexpr std::size_t l2_hypercall_cpu_slots = 32;
+
+    std::uint64_t
+        l2_hypercall_cpu_codes[max_cpus][l2_hypercall_cpu_slots]{};
+    std::uint64_t
+        l2_hypercall_cpu_counts[max_cpus][l2_hypercall_cpu_slots]{};
+    std::uint64_t l2_hypercall_cpu_other[max_cpus]{};
+    std::uint64_t
+        l2_hypercall_epoch_previous[max_cpus][l2_hypercall_cpu_slots]{};
+    std::uint64_t
+        l2_hypercall_epoch_delta[max_cpus][l2_hypercall_cpu_slots]{};
+    std::uint64_t l2_hypercall_epoch_tsc[max_cpus]{};
+    std::uint64_t l2_hypercall_epoch_span[max_cpus]{};
+
+    /**
      * The trust-level calls the census never saw, by reason.
      *
      * A call whose block pointer is below the kernel floor, or does not

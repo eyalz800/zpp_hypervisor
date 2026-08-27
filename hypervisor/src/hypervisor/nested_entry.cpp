@@ -10160,8 +10160,63 @@ hypervisor::on_l2_exit(std::size_t cpu,
                         this->vtl_code0_epoch_calls[cpu][slot] =
                             this->last_hypercall_count[cpu];
 
+                        // And the per-code hypercall census differenced
+                        // against the previous boundary, so one dump
+                        // names what is *still* being called rather than
+                        // what has ever been called. See
+                        // `l2_hypercall_epoch_delta`.
+                        //
+                        // `span` is recorded beside it because the
+                        // boundary is only crossed on a hypercall: when
+                        // they stop the epoch stretches, and a delta
+                        // divided by the nominal `vtl_code0_epoch_ticks`
+                        // then overstates the rate by exactly that
+                        // stretch. The divisor has to be measured.
+                        this->l2_hypercall_epoch_span[cpu] =
+                            now - this->l2_hypercall_epoch_tsc[cpu];
+                        this->l2_hypercall_epoch_tsc[cpu] = now;
+
+                        for (std::size_t s{}; s < l2_hypercall_cpu_slots;
+                             ++s) {
+                            auto seen =
+                                this->l2_hypercall_cpu_counts[cpu][s];
+
+                            this->l2_hypercall_epoch_delta[cpu][s] =
+                                seen -
+                                this->l2_hypercall_epoch_previous[cpu][s];
+                            this->l2_hypercall_epoch_previous[cpu][s] =
+                                seen;
+                        }
+
                         this->vtl_code0_epoch_count[cpu] += 1;
                         this->vtl_code0_epoch_last[cpu] = now;
+                    }
+                }
+
+                // The same census as `l2_hypercall_code_counts` below,
+                // per processor and with an overflow counter. That one
+                // has neither, so it sums across processors under a
+                // heading that says "cpu 0" and drops a seventeenth
+                // code without saying so. See `l2_hypercall_cpu_codes`.
+                {
+                    auto placed = false;
+
+                    for (std::size_t s{}; s < l2_hypercall_cpu_slots;
+                         ++s) {
+                        if (0 == this->l2_hypercall_cpu_counts[cpu][s]) {
+                            this->l2_hypercall_cpu_codes[cpu][s] = code;
+                        }
+
+                        if (this->l2_hypercall_cpu_codes[cpu][s] ==
+                            code) {
+                            this->l2_hypercall_cpu_counts[cpu][s] += 1;
+                            placed = true;
+                            break;
+                        }
+                    }
+
+                    if (!placed) {
+                        this->l2_hypercall_cpu_other[cpu] += 1;
                     }
                 }
             }
@@ -11013,6 +11068,98 @@ hypervisor::on_l2_exit(std::size_t cpu,
                             if (word != this->vtl_block_previous[cpu]) {
                                 this->vtl_block_changes[cpu] += 1;
                                 this->vtl_block_previous[cpu] = word;
+                            }
+
+                            // The header decoded as `ntoskrnl.exe`
+                            // writes it, rather than as this file has
+                            // been guessing. See `vtl_service_calls`
+                            // for the disassembly that settles it:
+                            // byte 0 is the call class, byte 1 is the
+                            // reason VTL1 writes on the way *back*, and
+                            // bytes 2-3 are the secure service number.
+                            //
+                            // Outside the `code 0` filter on purpose.
+                            // That filter tests byte 1, which every
+                            // caller has just memset to zero, so it
+                            // admits every ordinary call and excludes
+                            // only the re-entries - and those are
+                            // exactly the ones a stalled secure call
+                            // would consist of.
+                            {
+                                auto klass = word & 0xff;
+                                auto reason = (word >> 8) & 0xff;
+                                auto service = (word >> 16) & 0xffff;
+
+                                if (klass < 4) {
+                                    this->vtl_service_class[cpu][klass]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_class_other[cpu]
+                                        += 1;
+                                }
+
+                                if (reason < 8) {
+                                    this->vtl_service_reason[cpu][reason]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_reason_other[cpu]
+                                        += 1;
+                                }
+
+                                if (service < vtl_service_slots) {
+                                    this->vtl_service_calls[cpu][service]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_other[cpu] += 1;
+                                }
+
+                                // And the image validation walk, which
+                                // is service 0x0f4 and not the 0x101
+                                // the walk instrument selects. Service
+                                // 0x0f4 is `VslCopyProtectedPage`,
+                                // called from `MiCopyPage` - the frame
+                                // in the stack this is all about - and
+                                // its first argument sits at the same
+                                // `block+0x08` the placeholder walk's
+                                // page frame number does.
+                                constexpr std::uint64_t copy_service =
+                                    0x00f4;
+
+                                if ((copy_service == service) &&
+                                    (2 == klass)) {
+                                    auto pfn =
+                                        this->vtl_call_block[cpu][1];
+
+                                    if ((0 == this->vtl_copy_calls[cpu]) ||
+                                        (pfn <
+                                         this->vtl_copy_min_pfn[cpu])) {
+                                        this->vtl_copy_min_pfn[cpu] = pfn;
+                                    }
+
+                                    if (pfn >
+                                        this->vtl_copy_max_pfn[cpu]) {
+                                        this->vtl_copy_max_pfn[cpu] = pfn;
+                                    }
+
+                                    if (0 != this->vtl_copy_calls[cpu]) {
+                                        auto last =
+                                            this->vtl_copy_last_pfn[cpu];
+
+                                        if (pfn == (last + 1)) {
+                                            this->vtl_copy_consecutive
+                                                [cpu] += 1;
+                                        } else if (pfn == last) {
+                                            this->vtl_copy_same[cpu] += 1;
+                                        } else if (pfn < last) {
+                                            this->vtl_copy_back[cpu] += 1;
+                                        } else {
+                                            this->vtl_copy_skip[cpu] += 1;
+                                        }
+                                    }
+
+                                    this->vtl_copy_last_pfn[cpu] = pfn;
+                                    this->vtl_copy_calls[cpu] += 1;
+                                }
                             }
 
                             // And, for the memory-manager requests, what

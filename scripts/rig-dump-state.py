@@ -3899,6 +3899,15 @@ def main():
                "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
                "vtl_code0_epoch_count", "vtl_code0_epoch_last",
                "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_service_calls", "vtl_service_other",
+               "vtl_service_class", "vtl_service_class_other",
+               "vtl_service_reason", "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
                "vtl_code0_word_other", "vtl_call_block_below_floor",
                "vtl_call_block_untranslated",
                "vtl_call_block_unreadable",
@@ -4155,6 +4164,15 @@ def main():
                "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
                "vtl_code0_epoch_count", "vtl_code0_epoch_last",
                "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_service_calls", "vtl_service_other",
+               "vtl_service_class", "vtl_service_class_other",
+               "vtl_service_reason", "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
                "vtl_code0_word_other", "vtl_call_block_below_floor",
                "vtl_call_block_untranslated",
                "vtl_call_block_unreadable",
@@ -4372,10 +4390,28 @@ def main():
     for _n in ("vtl_code0_run_current", "vtl_code0_run_longest",
                "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
                "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_service_other", "vtl_service_class_other",
+               "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "l2_hypercall_cpu_other",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
                "vtl_code0_word_other", "vtl_call_block_below_floor",
                "vtl_call_block_untranslated",
                "vtl_call_block_unreadable"):
         monitor.queue(instance + off[_n], scalar_cpus)
+    # The widths here are the members' own, not `scalar_cpus`: a table
+    # queued at the wrong width reads the next member and reports it
+    # under this one's name, which is the shape of half the mislabelled
+    # readings in this investigation.
+    monitor.queue(instance + off["vtl_service_calls"],
+                  scalar_cpus * 0x120)
+    monitor.queue(instance + off["vtl_service_class"], scalar_cpus * 4)
+    monitor.queue(instance + off["vtl_service_reason"], scalar_cpus * 8)
+    for _n in ("l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_epoch_delta"):
+        monitor.queue(instance + off[_n], scalar_cpus * 32)
     for _n in ("vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
                "vtl_code0_epoch_code0", "vtl_code0_epoch_calls"):
         monitor.queue(instance + off[_n], scalar_cpus * 64)
@@ -4907,6 +4943,156 @@ def main():
         0xc0000080: "IA32_EFER",
         0xc0000101: "GS_BASE",
         0xc0000102: "KERNEL_GS_BASE",
+    }
+    # The secure service number in bytes 2-3 of the secure call block,
+    # named by the function that issues it.
+    #
+    # Built by disassembling the guest's own `ntoskrnl.exe`: every
+    # secure call funnels through `VslpEnterIumSecureMode`, which takes
+    # the number in DX, so each of its 164 call sites names one. This
+    # is the map, and it is what turns "0x00f40002, 48.1%, never
+    # decoded" into "MiCopyPage is validating an image".
+    #
+    # Two honesty notes. The name is the *caller*, resolved by nearest
+    # preceding public symbol - for the thin `Vsl*` wrappers that is
+    # the service itself, and for entries like `NtProtectVirtualMemory`
+    # it is the function that happens to contain the call site, which
+    # may be an inlined helper. And the map is per Windows build; a
+    # different `ntoskrnl.exe` may renumber it. Treat a name as a lead,
+    # never as a citation.
+    SK_SERVICE = {
+        0x0000: "VslFlushEntireTb",
+        0x0001: "VslpIumPhase4Initialize",
+        0x0002: "VslStartSecureProcessor",
+        0x0003: "VslFinishStartSecureProcessor",
+        0x0005: "VslRegisterSecureSystemProcess",
+        0x0006: "VslCreateSecureProcess",
+        0x0007: "VslInitializeSecureProcess",
+        0x0008: "VslCreateSecureThread",
+        0x0009: "VslRequestSecureThreadExit",
+        0x000a: "VslTerminateSecureThread",
+        0x000b: "VslRundownSecureProcess",
+        0x000c: "NtRemoveProcessDebug",
+        0x000d: "VslGetSecureTebAddress",
+        0x0010: "VslSendDebugAttachNotifications",
+        0x0011: "VslGetEtwDebugId",
+        0x0012: "VslGetOnDemandDebugChallenge",
+        0x0013: "VslEnableOnDemandDebugWithResponse",
+        0x0014: "VslRetrieveMailbox",
+        0x0015: "VslIsTrustletRunning",
+        0x0016: "VslCreateSecureAllocation",
+        0x0017: "VslFillSecureAllocation",
+        0x0018: "VslMakeCodeCatalog",
+        0x0019: "VslCreateSecureImageSection",
+        0x001a: "VslFinalizeSecureImageHash",
+        0x001c: "VslCaptureImageHotPatchMetadata",
+        0x001d: "VslPrepareSecureImageRelocations",
+        0x001e: "VslRelocateImage",
+        0x001f: "VslCloseSecureHandle",
+        0x0020: "VslValidateDynamicCodePages",
+        0x0021: "VslTransferSecureImageVersionResource",
+        0x0022: "VslSetCodeIntegrityPolicy",
+        0x0023: "VslExchangeEntropy",
+        0x0025: "VslAllocateSecureHibernateResources",
+        0x0026: "VslFreeSecureHibernateResources",
+        0x0027: "VslConfigureDynamicMemory",
+        0x0028: "NtProtectVirtualMemory",
+        0x0029: "VslDebugReadWriteSecureProcess",
+        0x002a: "VslQueryVirtualMemory",
+        0x002b: "VslCaptureSecureImageIat",
+        0x002c: "VslFreeSecureImageIat",
+        0x002d: "VslApplySecureImageFixups",
+        0x002e: "MmProtectDriverSection",
+        0x002f: "VslCreateEnclave",
+        0x0030: "VslLoadEnclaveData",
+        0x0031: "VslLoadEnclaveModule",
+        0x0032: "VslInitializeEnclave",
+        0x0033: "PsTerminateVsmEnclave",
+        0x0034: "PsRundownVsmEnclave",
+        0x0038: "VslRelaxQuotas",
+        0x003a: "VslLiveDumpQuerySecondaryDataSize",
+        0x003b: "VslpLiveDumpStart",
+        0x003c: "VslpAddLiveDumpBufferChunk",
+        0x003d: "VslpSetupLiveDumpBuffer",
+        0x003e: "VslFinalizeLiveDumpInSk",
+        0x003f: "VslAbortLiveDump",
+        0x0040: "VslLiveDumpCaptureProcess",
+        0x0041: "VslpConnectedStandbyWnfCallback",
+        0x0042: "VslQuerySecureKernelProfileInformation",
+        0x0043: "VslUpdateFreezeTimeBias",
+        0x0044: "VslCreateSecureSection",
+        0x0045: "VslDeleteSecureSection",
+        0x0046: "VslQuerySecureDevice",
+        0x0047: "PipUnprotectDevice",
+        0x0048: "VslRegisterSecurePatch",
+        0x0049: "VslQueryActiveSecurePatches",
+        0x004a: "VslDetermineHotPatchType",
+        0x004c: "VslObtainHotPatchUndoTable",
+        0x004d: "VslApplyHotPatch",
+        0x004e: "VslPrepareDriverForPatch",
+        0x004f: "VslProvisionDumpEncryption",
+        0x0050: "VslCapturePgoData",
+        0x0058: "MmWriteSystemImageTracepoint",
+        0x005a: "PsRegisterSyscallProvider",
+        0x005b: "VslRevokeSyscallProviderServiceTables",
+        0x00c0: "VslGetSecurePebAddress",
+        0x00c1: "VslValidateSecureImagePages",
+        0x00d1: "VslpSecureKernelPeriodicTick",
+        0x00d2: "VslExecuteWorkItems",
+        0x00d3: "VslReserveProtectedPages",
+        0x00d5: "VslIumEtwEnableCallback",
+        0x00d6: "VslInitializeSecurePool",
+        0x00d7: "VslInitializeSecureKernelCfg",
+        0x00d9: "VslCompleteSecureDriverLoad",
+        0x00da: "VslUnloadSecureDriver",
+        0x00db: "VslMapKernelScpPages",
+        0x00dc: "VslEnableKernelCfgTarget",
+        0x00e2: "VslReapplyImportOptimizationForDriverVerifier",
+        0x00e3: "VslInitFunctionOverrideCapabilities",
+        0x00e5: "VslSynchronizeXSave",
+        0x00e6: "VslAllocateKernelShadowStack",
+        0x00e7: "VslFreeKernelShadowStack",
+        0x00e8: "VslResetKernelShadowStack",
+        0x00e9: "VslRegisterSyscallProviderServiceTableMetadata",
+        0x00f0: "VslFlushSecureAddressSpace",
+        0x00f1: "VslFastFlushSecureRangeList",
+        0x00f2: "VslSlowFlushSecureRangeList",
+        0x00f3: "VslRemoveProtectedPage",
+        0x00f4: "VslCopyProtectedPage",
+        0x00f5: "VslWriteProtectedPage",
+        0x00f6: "VslRegisterProtectedPage",
+        0x00f7: "VslSetPrivilegedPte",
+        0x00f8: "VslQueryPrivilegedAccessedState",
+        0x00fa: "VslMakeProtectedPageExecutable",
+        0x00fc: "VslIumEfiRuntimeService",
+        0x00fd: "HvlCollectLivedump",
+        0x00fe: "VslRegisterLogPages",
+        0x00ff: "VslReclaimPartitionPages",
+        0x0101: "VslSetPlaceholderPages",
+        0x0102: "VslGetSecureSpeculationControlInformation",
+        0x0103: "MiProtectDriverSectionPte",
+        0x0104: "VslExemptSecurePteRange",
+        0x0105: "VslVerifyPage",
+        0x0106: "HvlPrepareForSecureHibernate",
+        0x0107: "VslPrepareForCrashdump",
+        0x0109: "VslSwapHiberShadowStacks",
+        0x010a: "VslNotifyShutdown",
+        0x010b: "VslGetSecurePciDeviceAlternateFunctionNumberForVtl0Dma",
+        0x010c: "VslAccessPciDevice",
+        0x010d: "VslGetSecurePciDeviceBootConfiguration",
+        0x010e: "VslReinitializeIumDebuggerTransport",
+        0x010f: "VslpKsrEnterIumSecureMode",
+        0x0110: "VslSvcEnterIumSecureMode",
+        0x0112: "VslKernelShadowStackAssist",
+        0x0113: "VslRequestSecureKernelDebuggerBreakIn",
+        0x0114: "VslConfigureSecureAtsDevice",
+        0x0115: "VslTerminateSecureServices",
+        0x0116: "VslQueryRuntimeAttestationReport",
+        0x0700: "VslTestRoutine",
+        0x0800: "VslStartSecurePageIteration",
+        0x0801: "HvlpEndSecurePageListIteration",
+        0x0802: "VslGetSecurePageList",
+        0x0803: "VslResumeFromCrashdump",
     }
     HV_CALLS = {
         # Corrected against Linux's include/asm-generic/hyperv-tlfs.h.
@@ -5771,6 +5957,62 @@ def main():
                     oth = read('vtl_code0_word_other', 0) or 0
                     if oth:
                         print(f"    (beyond sixteen distinct) {oth:,}")
+                # The same population, DECODED. See hypervisor.h
+                # `vtl_service_calls` for the disassembly: bytes 2-3 of
+                # the block are the secure service number, byte 0 is the
+                # call class and byte 1 is the reason VTL1 writes on the
+                # way back. Neither reading the low half as one field
+                # nor byte 1 as a request survives that.
+                sc = [read('vtl_service_calls', i) or 0
+                      for i in range(0x120)]
+                if any(sc):
+                    total = sum(sc)
+                    print(f"\n  secure calls by SERVICE ({total:,} with a "
+                          f"readable block):")
+                    for v, n in sorted(enumerate(sc),
+                                       key=lambda p: -p[1]):
+                        if not n:
+                            continue
+                        print(f"    0x{v:04x}  {n:>10,}  "
+                              f"{100.0 * n / total:5.1f}%  "
+                              f"{SK_SERVICE.get(v, '')}")
+                    o = read('vtl_service_other', 0) or 0
+                    if o:
+                        print(f"    (service >= 0x120) {o:,}")
+                    kl = [read('vtl_service_class', i) or 0
+                          for i in range(4)]
+                    ko = read('vtl_service_class_other', 0) or 0
+                    print("    call class  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(kl) if v)
+                        + (f"  other={ko:,}" if ko else ""))
+                    rs = [read('vtl_service_reason', i) or 0
+                          for i in range(8)]
+                    ro = read('vtl_service_reason_other', 0) or 0
+                    print("    entry reason  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(rs) if v)
+                        + (f"  other={ro:,}" if ro else ""))
+                # The IMAGE VALIDATION walk - service 0x0f4,
+                # `VslCopyProtectedPage`, called from `MiCopyPage`.
+                # `vtl_code0_*` above measures service 0x101,
+                # `VslSetPlaceholderPages`, whose only caller is
+                # `MiUpdateSlabPagePlaceholderState`. They are different
+                # walks and only the second was ever instrumented.
+                cc = read('vtl_copy_calls', 0) or 0
+                if cc:
+                    lo = read('vtl_copy_min_pfn', 0) or 0
+                    hi = read('vtl_copy_max_pfn', 0) or 0
+                    con = read('vtl_copy_consecutive', 0) or 0
+                    sm = read('vtl_copy_same', 0) or 0
+                    bk = read('vtl_copy_back', 0) or 0
+                    sk = read('vtl_copy_skip', 0) or 0
+                    ok = "OK" if (con + sm + bk + sk) == (cc - 1) else (
+                        "BROKEN - do not use these numbers")
+                    print(f"\n  the IMAGE VALIDATION walk "
+                          f"(0x0f4 VslCopyProtectedPage <- MiCopyPage):")
+                    print(f"    {cc:,} calls, frames 0x{lo:x}..0x{hi:x}, "
+                          f"last 0x{read('vtl_copy_last_pfn', 0) or 0:x}")
+                    print(f"    +1 {con:,}  same {sm:,}  back {bk:,}  "
+                          f"skip {sk:,}   partition {ok}")
                 # Progress against wall-clock time. One dump, not two.
                 ec = read('vtl_code0_epoch_count', 0)
                 if ec:
@@ -5785,13 +6027,55 @@ def main():
                         pf = read('vtl_code0_epoch_pfn', sl) or 0
                         c0e = read('vtl_code0_epoch_code0', sl) or 0
                         ca = read('vtl_code0_epoch_calls', sl) or 0
+                        # The gap, in units of the sampling threshold,
+                        # and the delta as a RATE. An epoch boundary is
+                        # only crossed on a hypercall, so an epoch is
+                        # 2^34 ticks long only while hypercalls keep
+                        # arriving; when they stop it stretches, and a
+                        # delta read as "per epoch" then understates the
+                        # silence by exactly the stretch. `x9.1` in this
+                        # column means eight consecutive thresholds
+                        # elapsed with NO hypercall at all - which is a
+                        # much stronger statement than the delta beside
+                        # it, and the opposite of "calls keep arriving".
+                        gap = 0 if prev is None else (t - prev[3])
                         d = "" if prev is None else (
                             f"  (+{pf - prev[0]:,} pfn, "
                             f"+{c0e - prev[1]:,} code0, "
-                            f"+{ca - prev[2]:,} calls)")
+                            f"+{ca - prev[2]:,} calls"
+                            + (f", x{gap / float(1 << 34):.1f} threshold"
+                               f", {(ca - prev[2]) * 2e9 / gap:,.1f}/s"
+                               if gap else "") + ")")
                         print(f"    tsc {t:>18,}  pfn {pf:>8,}  "
                               f"code0 {c0e:>8,}  calls {ca:>8,}{d}")
-                        prev = (pf, c0e, ca)
+                        prev = (pf, c0e, ca, t)
+                # Which codes are still arriving, as a delta over the
+                # most recent epoch. Cumulative totals cannot answer
+                # "what is being called NOW", and that is the question a
+                # frozen walk beside continuing traffic poses.
+                ed = [(read('l2_hypercall_cpu_codes', i) or 0,
+                       read('l2_hypercall_epoch_delta', i) or 0,
+                       read('l2_hypercall_cpu_counts', i) or 0)
+                      for i in range(32)]
+                span = read('l2_hypercall_epoch_span', 0) or 0
+                if any(c for _, _, c in ed):
+                    secs = span / 2e9 if span else 0.0
+                    print(f"\n  cpu 0 second-level hypercalls, MOST "
+                          f"RECENT epoch (span {span:,} ticks"
+                          + (f" = {secs:.1f}s at 2 GHz" if span else "")
+                          + "):")
+                    for c, dl, tot in sorted(ed, key=lambda p: -p[1]):
+                        if not tot:
+                            continue
+                        rate = (f"{dl / secs:8.2f}/s" if secs
+                                else "       -  ")
+                        print(f"    0x{c:04x}  +{dl:>8,}  {rate}  "
+                              f"total {tot:>10,}  {HV_CALLS.get(c, '')}")
+                    o = read('l2_hypercall_cpu_other', 0) or 0
+                    print(f"    (beyond 32 distinct codes) {o:,}"
+                          + ("   <- census complete" if not o
+                             else "   <- SATURATED, totals are lower "
+                                  "bounds"))
                 # How many calls the census never saw. Every total above
                 # is a lower bound until these read zero.
                 bf = read('vtl_call_block_below_floor', 0)
