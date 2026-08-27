@@ -29,6 +29,7 @@ Run with:  python3 -m unittest discover tests/python_layout
 """
 import os
 import re
+import sys
 import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1517,6 +1518,693 @@ class TrustLevelRoundTripIsAMeanNotARate(unittest.TestCase):
                 name, dump,
                 "the second field the halves are checked against is no "
                 "longer read, so the check is vacuous")
+
+
+def header_dimensions(name):
+    """A member's declared array dimensions, as a list of bound strings.
+
+    `[]` for a plain scalar, `["max_cpus"]` for a per-processor row.
+    Raises when the member is not declared at all, which is the negative
+    control this family needs: every silent failure in this tree began
+    with a lookup that returned nothing and a caller that carried on.
+    """
+    source = read(HEADER)
+    match = re.search(
+        r"^[ \t]*(?:static\s+)?(?:constinit\s+)?(?:volatile\s+)?"
+        r"(?:std::uint(?:8|16|32|64)_t|std::size_t|bool)\s+"
+        + re.escape(name) + r"((?:\s*\[[^\]]*\])*)\s*(?:\{|=|;)",
+        source, re.M)
+    if not match:
+        raise AssertionError(
+            "no declaration of `{}` in hypervisor.h - the reader "
+            "differences a member the header does not have".format(name))
+    return [b.strip() for b in re.findall(r"\[([^\]]*)\]", match.group(1))]
+
+
+class DeltaModeDifferencesOnlyWhatIsMonotonic(unittest.TestCase):
+    """What `--delta` will subtract, and what it refuses to.
+
+    A ring slot, a last-value field and a current-state field all look
+    exactly like a counter once they are eight bytes in a dump, and
+    subtracting any of them produces a number with a plausible magnitude
+    and no meaning. The reader's classification is the only thing
+    standing between those and a rate, so it is checked here rather than
+    trusted.
+    """
+
+    def test_every_per_cpu_counter_is_declared_per_cpu(self):
+        """The `hypercalls_seen` shape, caught by construction.
+
+        `hypercalls_seen` is a bare `std::uint64_t` and the cumulative
+        reader queues it at the processor count - harmless only because
+        it happens to read index 0. A member differenced at the wrong
+        width reads its *neighbour* and reports it under this one's
+        name, and this file already records that costing a run.
+        """
+        module = load_dump_state()
+        per_cpu = ([n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+                   + [n for n, _ in module.DELTA_PER_CPU_CYCLES]
+                   + [module.DELTA_CLOCK, module.DELTA_FINGERPRINT])
+        for name in per_cpu:
+            self.assertEqual(
+                ["max_cpus"], header_dimensions(name),
+                "{} is differenced once per processor but is not "
+                "declared [max_cpus]".format(name))
+
+    def test_every_global_counter_is_declared_as_one_word(self):
+        module = load_dump_state()
+        for name, _ in module.DELTA_GLOBAL_COUNTERS:
+            self.assertEqual(
+                [], header_dimensions(name),
+                "{} is read as a single word but the header declares it "
+                "as an array - reading index 0 of it is one processor's "
+                "share reported as the whole".format(name))
+
+    def test_no_ring_or_state_member_is_differenced(self):
+        """The refusal, as a list this test can fail on.
+
+        Each of these is a member the cumulative reader already prints,
+        each is eight bytes wide, and each would subtract without
+        complaint.
+        """
+        module = load_dump_state()
+        differenced = set(
+            [n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+            + [n for n, _ in module.DELTA_GLOBAL_COUNTERS]
+            + [n for n, _ in module.DELTA_PER_CPU_CYCLES])
+        forbidden = [
+            # Ring buffers: the same slot holds two unrelated records.
+            "exit_trace", "l2_exit_trace", "l2_working_trace",
+            "cpuid_trace", "vtl_code0_ring", "vtl_reentry_ring",
+            "guest_stack_trace", "guest_interrupted_trace",
+            # Last-value fields: a difference of two addresses.
+            "nested_last_vmfail", "ipi_last_command",
+            "last_hypercall_code", "last_hypercall_rcx",
+            "last_hypercall_rdx", "last_hypercall_r8",
+            "last_hypercall_tsc", "vtl_protect_last_rip",
+            "vtl_protect_last_cr3", "vtl_copy_last_pfn",
+            "ap_probe_rip", "ap_probe_cs", "profile_code_physical",
+            # Current-state fields.
+            "l2_activity_state", "pending_event", "running_l2",
+            "shadow_ept_current_slot", "resume_activity_state",
+            "processor_virtualized", "l1_own_cr3", "l2_exit_cr3",
+            "host_page_table", "guest_kernel_base", "vtl_block_page",
+            "watched_apic_page", "ap_probe_activity",
+            # Min/max accumulators: monotonic and not counts.
+            "vtl_code0_min_pfn", "vtl_code0_max_pfn",
+            "vtl_copy_min_pfn", "vtl_copy_max_pfn",
+            "vtl_code0_run_longest",
+            # State histograms.
+            "cpl_seen", "guest_leaf_permissions",
+            "shadow_leaf_permissions", "vtl_protect_host_perms",
+            "vtl_protect_guest_perms",
+        ]
+        for name in forbidden:
+            self.assertNotIn(
+                name, differenced,
+                "{} is not a monotonic event count and must not be "
+                "subtracted".format(name))
+
+    def test_the_clock_is_never_rated_as_a_counter(self):
+        """`handler_last_tsc` is the span, not a quantity per second.
+
+        It is a last value. Its difference is the window; its difference
+        divided by the window is 1.0 and means nothing.
+        """
+        module = load_dump_state()
+        rated = set([n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+                    + [n for n, _ in module.DELTA_GLOBAL_COUNTERS])
+        self.assertNotIn(module.DELTA_CLOCK, rated)
+        self.assertNotIn(module.DELTA_FINGERPRINT, rated)
+
+    def test_the_refusals_are_printed_with_their_reasons(self):
+        """Silence from an instrument is not a measurement.
+
+        A member left out and a member that never existed look the same
+        in the output, so the report says what it declined and why.
+        """
+        module = load_dump_state()
+        self.assertTrue(module.DELTA_REFUSALS)
+        for what, names, why in module.DELTA_REFUSALS:
+            self.assertTrue(what and names and why)
+        text = "\n".join(module.delta_report(
+            {}, {}, [], ({}, {}, []), [],
+            module.delta_span(100, 200, 1.0),
+            ({"base": 1, "first_tsc": (2,)},
+             {"base": 1, "first_tsc": (2,)}),
+            1, 1.0, (0.1, 0.1)))
+        self.assertIn("REFUSED to difference", text)
+        for what, _names, _why in module.DELTA_REFUSALS:
+            self.assertIn(what, text)
+
+
+class DeltaModeReportsTheImpossibleAsAnError(unittest.TestCase):
+    """A monotonic counter that decreased is not a small negative rate.
+
+    This is the measured case. Differencing two dumps by hand during the
+    session that produced this mode gave **+427 halves and -11,989
+    cycles** for one column (recorded in 8c7dac9). A monotonic
+    accumulator cannot go backwards, so that scrape was wrong rather
+    than the guest surprising - and the figure it implied, about 4 us,
+    was within one step of being written down.
+
+    Four things produce it and all four have happened on this rig: a
+    torn read, a wrapped field, a reader pointed at a different binary
+    from the one running, and a guest that reset between the samples.
+    """
+
+    # The scrape, as it was measured.
+    HALVES_BEFORE, HALVES_AFTER = 22_324, 22_751          # +427
+    CYCLES_BEFORE, CYCLES_AFTER = 253_320_000, 253_308_011  # -11,989
+
+    def test_the_recorded_hand_scrape_is_refused_not_rated(self):
+        module = load_dump_state()
+        before = {("vtl_half_count", 0): self.HALVES_BEFORE,
+                  ("vtl_half_cycles", 0): self.CYCLES_BEFORE}
+        after = {("vtl_half_count", 0): self.HALVES_AFTER,
+                 ("vtl_half_cycles", 0): self.CYCLES_AFTER}
+        rows, impossible, unread = module.delta_rows(
+            before, after,
+            [(("vtl_half_count", 0), "halves"),
+             (("vtl_half_cycles", 0), "cycles")])
+        self.assertEqual([], unread)
+        self.assertEqual(1, len(rows))
+        self.assertEqual(("vtl_half_count", 0), rows[0][0])
+        self.assertEqual(427, rows[0][4])
+        self.assertEqual(1, len(impossible))
+        self.assertEqual(("vtl_half_cycles", 0), impossible[0][0])
+        self.assertEqual(-11_989, impossible[0][4])
+
+    def test_the_error_names_the_member_and_forbids_the_rest(self):
+        module = load_dump_state()
+        _rows, impossible, _unread = module.delta_rows(
+            {("exit_total", 1): 1_000_000},
+            {("exit_total", 1): 999_571},
+            [(("exit_total", 1), "exits taken")])
+        text = "\n".join(module.delta_impossible_lines(impossible))
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("exit_total[cpu 1]", text)
+        self.assertIn("-429", text)
+        self.assertIn("Do not read", text)
+        # And it is NOT presented as a rate. A negative per-second
+        # figure is the shape the hand scrape nearly produced.
+        self.assertNotIn("per second", text)
+
+    def test_a_counter_that_advanced_is_rated(self):
+        """The control that says the detector is not always firing.
+
+        A check that fails on everything catches nothing, and this file
+        already records an instrument that "confirmed" the hypothesis
+        under test because it was aimed at the wrong field.
+        """
+        module = load_dump_state()
+        rows, impossible, unread = module.delta_rows(
+            {("exit_total", 0): 1_000_000},
+            {("exit_total", 0): 1_106_380},
+            [(("exit_total", 0), "exits taken")])
+        self.assertEqual([], impossible)
+        self.assertEqual([], unread)
+        self.assertEqual(106_380, rows[0][4])
+        self.assertEqual([], module.delta_impossible_lines(impossible))
+
+    def test_a_reading_that_never_came_back_is_not_zero(self):
+        """An unanswered read and a counter at zero look identical.
+
+        The monitor drops reads - `Monitor.unanswered` exists for it -
+        and `words.get(addr, 0)` is how 26 reads once returned 78 words
+        of plausible zeroes. A missing sample must be "not read", never
+        a delta of zero.
+        """
+        module = load_dump_state()
+        rows, impossible, unread = module.delta_rows(
+            {("shadow_ept_builds", 0): 4_242},
+            {},
+            [(("shadow_ept_builds", 0), "builds")])
+        self.assertEqual([], rows)
+        self.assertEqual([], impossible)
+        self.assertEqual(1, len(unread))
+        self.assertEqual(("shadow_ept_builds", 0), unread[0][0])
+
+
+class DeltaSpanIsMeasuredNeverNominal(unittest.TestCase):
+    """`--delta 20` does not mean the span was twenty seconds.
+
+    Each sample takes a measurable time, so the interval the counters
+    accumulated over is the *midpoint to midpoint* distance and not the
+    sleep. A nominal epoch is already one of the mislabelled readings
+    this tree records, in `EpochLengthIsMeasuredNotAssumed` above.
+    """
+
+    ASKED = 20.0
+    MEASURED = 20.9
+    DELTA = 106_380
+
+    def report(self, measured=None, ticks=(0, 0)):
+        module = load_dump_state()
+        measured = self.MEASURED if measured is None else measured
+        span = module.delta_span(ticks[0], ticks[1], measured)
+        return module, "\n".join(module.delta_report(
+            {("exit_total", 0): 1_000_000},
+            {("exit_total", 0): 1_000_000 + self.DELTA},
+            [(("exit_total", 0), "exits taken")],
+            ({}, {}, []), [], span,
+            ({"base": 0x6720f000, "first_tsc": (7,)},
+             {"base": 0x6720f000, "first_tsc": (7,)}),
+            1, self.ASKED, (1.5, 1.5)))
+
+    def test_the_rate_divides_by_the_measured_span(self):
+        _module, text = self.report()
+        measured_rate = self.DELTA / self.MEASURED       # 5,089.95
+        nominal_rate = self.DELTA / self.ASKED           # 5,319.00
+        self.assertIn("{:,.2f}".format(measured_rate), text)
+        self.assertNotIn("{:,.2f}".format(nominal_rate), text)
+
+    def test_the_nominal_span_would_overstate_the_rate(self):
+        """The size of the error, so it is not dismissed as rounding."""
+        self.assertAlmostEqual(
+            4.5, 100.0 * (self.MEASURED - self.ASKED) / self.ASKED,
+            places=1)
+        _module, text = self.report()
+        self.assertIn("nominal", text)
+        self.assertIn("4.5%", text)
+
+    def test_a_span_that_is_not_positive_rates_nothing(self):
+        """A broken measurement, not a quiet guest.
+
+        The two are opposite conclusions and a zero denominator is how
+        they get confused - or a ZeroDivisionError, which at least is
+        loud.
+        """
+        _module, text = self.report(measured=0.0)
+        self.assertIn("not positive", text)
+        self.assertNotIn("per second", text)
+
+    def test_the_frequency_is_measured_when_the_ticks_allow(self):
+        module = load_dump_state()
+        ticks = int(2_000_000_000 * 20.9)
+        _t, _s, hz, source, complaint = module.delta_span(0, ticks, 20.9)
+        self.assertAlmostEqual(2_000_000_000, hz, delta=1.0)
+        self.assertIn("MEASURED", source)
+        self.assertEqual("", complaint)
+
+    def test_the_fallback_constant_says_it_is_a_fallback(self):
+        module = load_dump_state()
+        _t, _s, hz, source, _c = module.delta_span(None, None, 20.9)
+        self.assertEqual(float(module.TSC_HZ), hz)
+        self.assertIn("FALLBACK", source)
+
+    def test_a_frequency_far_from_the_measured_constant_complains(self):
+        """Two clocks, and the disagreement is the finding.
+
+        A tick span implying 4 GHz on a 1.992 GHz part means one of the
+        two clocks is not measuring what its label says, and that is
+        worth an error rather than a silently doubled microsecond.
+        """
+        module = load_dump_state()
+        _t, _s, _hz, _source, complaint = module.delta_span(
+            0, int(4_000_000_000 * 20.9), 20.9)
+        self.assertIn("clocks", complaint)
+
+    def test_the_delta_path_uses_one_frequency_constant(self):
+        """1992.0 in six places and 2e9 in four is a 0.4% disagreement.
+
+        It is invisible in any single reading and shifts every derived
+        microsecond. The delta path picks the measured one - 1.992 GHz,
+        fitted at the wall over a 90.08 s window per BACKLOG.md - and
+        the round 2 GHz appears nowhere in it.
+        """
+        import inspect
+        module = load_dump_state()
+        self.assertEqual(1_992_000_000, module.TSC_HZ)
+        for function in (module.delta_span, module.delta_report,
+                         module.delta_rows, module.delta_main,
+                         module.delta_sample):
+            source = inspect.getsource(function)
+            self.assertNotIn(
+                "2e9", source,
+                "{} carries the unmeasured 2 GHz constant".format(
+                    function.__name__))
+            self.assertNotIn("1992.0", source)
+
+
+class DeltaModeCatchesAGuestThatResetBetweenSamples(unittest.TestCase):
+    """Two machines' counters subtracted is not a measurement.
+
+    This tree has a recorded run whose counters read 8,687 then 8,258
+    then 8,014 across one poll, because the guest reset mid-poll and
+    every reading afterwards was of a different machine. The negative
+    delta check catches some of those; the fingerprint catches them
+    before any arithmetic happens, and catches the case where the new
+    boot has already climbed past the old one's totals - which the
+    negative check cannot see at all.
+    """
+
+    def fingerprints(self, base_a, tsc_a, base_b, tsc_b):
+        return ({"base": base_a, "first_tsc": tsc_a},
+                {"base": base_b, "first_tsc": tsc_b})
+
+    def test_a_changed_module_base_rates_nothing(self):
+        module = load_dump_state()
+        lines, same = module.delta_fingerprint_lines(*self.fingerprints(
+            0x6720f000, (7,), 0x67210000, (7,)))
+        self.assertFalse(same)
+        self.assertIn("CHANGED", "\n".join(lines))
+
+    def test_a_changed_first_handler_tsc_rates_nothing(self):
+        """The second field, because one field cannot disagree with itself.
+
+        A reload at the same address moves `handler_first_tsc` and not
+        the base; a reload at a different address moves the base. One
+        check would miss one of them.
+        """
+        module = load_dump_state()
+        _lines, same = module.delta_fingerprint_lines(*self.fingerprints(
+            0x6720f000, (7,), 0x6720f000, (9,)))
+        self.assertFalse(same)
+
+    def test_the_same_boot_is_rated(self):
+        """The control. A check that refuses everything measures nothing."""
+        module = load_dump_state()
+        lines, same = module.delta_fingerprint_lines(*self.fingerprints(
+            0x6720f000, (7, 7), 0x6720f000, (7, 7)))
+        self.assertTrue(same)
+        self.assertIn("unchanged", "\n".join(lines))
+        self.assertNotIn("CHANGED", "\n".join(lines))
+
+    def test_a_fingerprint_that_was_not_read_is_not_agreement(self):
+        """Absence is not evidence of sameness.
+
+        The same trap as the missing reading above: `None == None` is
+        True in Python and would have read as "the same boot".
+        """
+        module = load_dump_state()
+        _lines, same = module.delta_fingerprint_lines(*self.fingerprints(
+            None, (7,), None, (7,)))
+        self.assertFalse(same)
+
+    def test_a_reset_stops_the_report_before_any_rate(self):
+        module = load_dump_state()
+        text = "\n".join(module.delta_report(
+            {("exit_total", 0): 1_000_000},
+            {("exit_total", 0): 12},
+            [(("exit_total", 0), "exits taken")],
+            ({}, {}, []), [], module.delta_span(0, 100, 1.0),
+            self.fingerprints(0x6720f000, (7,), 0x67210000, (7,)),
+            1, 1.0, (0.1, 0.1)))
+        self.assertIn("NOT from the same boot", text)
+        self.assertNotIn("per second", text)
+
+
+# ---------------------------------------------------------------------
+# The reader, end to end, on a synthetic machine
+# ---------------------------------------------------------------------
+#
+# `rig-dump-state.py` shells out for exactly five things - member
+# offsets, array lengths, type-derived expressions, the singleton's
+# address, and physical memory over the monitor - and every one of them
+# is `subprocess.run`. One stub over that name puts the whole reader on
+# a machine this test controls, which is what makes "the default output
+# did not change" and "the delta mode catches a counter that went
+# backwards" checkable without hardware.
+
+FAKE_BASE = 0x67000000
+FAKE_SINGLETON = 0x200000
+
+
+class FakeResult:
+    def __init__(self, out):
+        self.stdout = out
+        self.stderr = ""
+        self.returncode = 0
+
+
+class FakeRig:
+    """Answers every subprocess the reader runs.
+
+    Deliberately deterministic and never zero by default: a fixture that
+    answers zero everywhere lets a reader that reads the wrong address
+    pass, which is the failure being guarded against.
+    """
+
+    # The header's own constants, so a dimension the reader derives from
+    # the type comes back the size it really is. A fixture answering
+    # every sizeof with one number indexes tables out of range, which is
+    # the fixture lying rather than the reader.
+    EXPRESSIONS = [
+        (r"vtl_differed\[0\]\[0\]\s*/\s*8", 20),
+        (r"vtl_differed\[0\] /", 3),
+        (r"vtl_stack\[0\]\s*/\s*8", 64),
+        (r"vtl_image_name\[0\]", 96),
+        (r"vtl_code\[0\]", 1024),
+        (r"vtl_assist\[0\]\[0\]", 512),
+        (r"vtl_step_count\s*/\s*8", 3),
+        (r"vtl_step_rip\[0\]\s*/\s*8", 2048),
+        (r"vtl_step_code\[0\]\[0\]", 16),
+    ]
+    LENGTHS = {"exit_reason_counts": 96, "exit_trace": 64,
+               "l2_exit_trace": 64, "l2_working_trace": 64,
+               "phase_cycles": 16, "l2_ept_dispositions": 10}
+
+    def __init__(self):
+        self.offsets = {}
+        self.cell = {}
+        self.base = FAKE_BASE
+        self.singleton = FAKE_SINGLETON
+        self.connections = 0
+        self.open_now = 0
+
+    def offset_for(self, name):
+        if name not in self.offsets:
+            self.offsets[name] = 0x10000 + 0x2000 * len(self.offsets)
+        return self.offsets[name]
+
+    def address(self, name, index=0):
+        return (FAKE_BASE + FAKE_SINGLETON + self.offset_for(name)
+                + 8 * index)
+
+    def put(self, name, index, value):
+        self.cell[self.address(name, index)] = value
+
+    def word(self, address):
+        if address in self.cell:
+            return self.cell[address]
+        return (((address >> 3) * 2654435761) % 251) + 1
+
+    def run(self, argv, **kwargs):
+        if argv and argv[0] == "x86_64-elf-gdb":
+            return self._gdb(argv)
+        return self._ssh(argv, kwargs.get("input", ""))
+
+    def _gdb(self, argv):
+        out, n = [], 0
+        for i, a in enumerate(argv):
+            if a != "-ex":
+                continue
+            expression, n = argv[i + 1], n + 1
+            member = re.search(r"->([A-Za-z0-9_]+)$", expression)
+            if expression.startswith("print/x (long)&") and member:
+                out.append("${} = 0x{:x}".format(
+                    n, self.offset_for(member.group(1))))
+                continue
+            if expression.startswith("print/x &'"):
+                out.append("${} = 0x{:x}".format(n, self.singleton))
+                continue
+            for pattern, value in self.EXPRESSIONS:
+                if re.search(pattern, expression):
+                    out.append("${} = {}".format(n, value))
+                    break
+            else:
+                row = re.search(r"->([A-Za-z0-9_]+)\[0\] / sizeof",
+                                expression)
+                out.append("${} = {}".format(
+                    n, self.LENGTHS.get(row.group(1), 8) if row else 8))
+        return FakeResult("\n".join(out) + "\n")
+
+    def _ssh(self, argv, script):
+        if "allocate_rwx" in " ".join(argv):
+            return FakeResult(
+                "allocate_rwx done at 0x{:x}\n".format(self.base))
+        self.connections += 1
+        self.open_now += 1
+        lines = []
+        for line in script.split("\n"):
+            m = re.match(r"xp/(\d+)gx 0x([0-9a-f]+)$", line.strip())
+            if not m:
+                continue
+            count, address = int(m.group(1)), int(m.group(2), 16)
+            for i in range(0, count, 4):
+                row = [self.word(address + 8 * (i + k))
+                       for k in range(min(4, count - i))]
+                lines.append("{:016x}: ".format(address + 8 * i)
+                             + " ".join("0x{:016x}".format(v)
+                                        for v in row))
+        self.open_now -= 1
+        return FakeResult("\n".join(lines) + "\n")
+
+
+def run_reader(rig, argv, clock=None, on_sleep=None):
+    """`main()` against a FakeRig, with stdout captured."""
+    import contextlib
+    import io
+    import types
+    module = load_dump_state()
+    module.subprocess = types.SimpleNamespace(run=rig.run)
+    if clock is not None:
+        ticks = iter(clock)
+        module.time = types.SimpleNamespace(
+            monotonic=lambda: next(ticks),
+            sleep=lambda n: on_sleep(n) if on_sleep else None)
+    saved = sys.argv
+    out = io.StringIO()
+    try:
+        sys.argv = ["rig-dump-state.py"] + argv
+        with contextlib.redirect_stdout(out):
+            module.main()
+    finally:
+        sys.argv = saved
+    return out.getvalue()
+
+
+class DeltaModeLeavesTheDefaultDumpAlone(unittest.TestCase):
+    """Adding a mode must not move the output every recipe already reads.
+
+    CLAUDE.md and BACKLOG.md quote this dump's headings by name. The
+    check is byte-for-byte against a run of the same reader with the
+    flag absent, on a machine whose every word is fixed.
+    """
+
+    DEFAULT = ["--elf", "/dev/null", "--cpus", "2"]
+
+    def test_the_default_dump_is_deterministic(self):
+        """The premise. Without this the comparison below proves nothing."""
+        first = run_reader(FakeRig(), self.DEFAULT)
+        second = run_reader(FakeRig(), self.DEFAULT)
+        self.assertEqual(first, second)
+        self.assertGreater(len(first.splitlines()), 1000)
+
+    def test_the_default_dump_carries_no_delta_output(self):
+        text = run_reader(FakeRig(), self.DEFAULT)
+        for marker in ("DELTA over a MEASURED", "REFUSED to difference",
+                       "IMPOSSIBLE: a monotonic counter",
+                       "fingerprint module base"):
+            self.assertNotIn(marker, text)
+
+    def test_the_default_dump_still_prints_its_own_headings(self):
+        text = run_reader(FakeRig(), self.DEFAULT)
+        for heading in ("module base 0x", "l2-activity",
+                        "resumes-reached", "exit reasons (total"):
+            self.assertIn(heading, text)
+
+    def test_delta_mode_replaces_the_dump_rather_than_joining_it(self):
+        """A total and a rate under adjacent headings is the confusion
+        this mode exists to end, so the two reports never print together.
+        """
+        text = run_reader(FakeRig(), self.DEFAULT + ["--delta", "20"],
+                          clock=[0.0, 1.5, 20.9, 22.4])
+        self.assertIn("DELTA over a MEASURED", text)
+        self.assertNotIn("l2-activity", text)
+        self.assertNotIn("exit reasons (total", text)
+
+
+class DeltaModeHoldsNoMonitorConnectionAcrossTheWait(unittest.TestCase):
+    """The monitor takes exactly ONE connection.
+
+    A socket left open makes `rig-dump-state.py` fail with no diagnosis,
+    and a poller that leaks one reports every field as None for ever
+    after. A mode that sleeps between two samples is the obvious place
+    to leak one, so it is measured rather than assumed.
+    """
+
+    def test_no_connection_is_open_during_the_sleep(self):
+        rig = FakeRig()
+        seen = {}
+
+        def on_sleep(_seconds):
+            seen["open"] = rig.open_now
+            seen["before"] = rig.connections
+
+        run_reader(rig, ["--elf", "/dev/null", "--cpus", "2",
+                         "--delta", "20"],
+                   clock=[0.0, 1.5, 20.9, 22.4], on_sleep=on_sleep)
+        self.assertEqual(0, seen["open"],
+                         "a monitor connection was open across the wait")
+        # And both samples really did connect - a mode that read nothing
+        # would also hold nothing.
+        self.assertGreater(seen["before"], 0)
+        self.assertGreater(rig.connections, seen["before"])
+
+    def test_the_second_sample_is_far_smaller_than_the_full_dump(self):
+        """Why the delta path builds its own queue.
+
+        The cumulative dump issues 144 connections for 50,605 words on
+        this fixture, and every word of it widens the read window - the
+        window being this measurement's own error bar. Measured here so
+        a member added to the delta lists cannot quietly restore the
+        full cost.
+        """
+        full = FakeRig()
+        run_reader(full, ["--elf", "/dev/null", "--cpus", "2"])
+        delta = FakeRig()
+        run_reader(delta, ["--elf", "/dev/null", "--cpus", "2",
+                           "--delta", "20"],
+                   clock=[0.0, 1.5, 20.9, 22.4])
+        # Two samples, and still a fraction of one cumulative dump.
+        self.assertLess(delta.connections, full.connections // 2)
+
+
+class DeltaModeEndToEndCatchesTheBackwardsCounter(unittest.TestCase):
+    """The whole path, from the monitor to the verdict.
+
+    The unit tests above check the arithmetic. This checks that the
+    arithmetic is reached: a classification that is right and never
+    called is worth nothing, and this file already records a verdict
+    helper that was one deletion away from exactly that.
+    """
+
+    ARGV = ["--elf", "/dev/null", "--cpus", "1", "--delta", "20"]
+    CLOCK = [0.0, 1.5, 20.9, 22.4]
+
+    def seed(self, rig, values):
+        for name, value in values.items():
+            rig.put(name, 0, value)
+
+    def run_two(self, before, after):
+        rig = FakeRig()
+        self.seed(rig, before)
+        return run_reader(rig, self.ARGV, clock=self.CLOCK,
+                          on_sleep=lambda _n: self.seed(rig, after))
+
+    def test_a_counter_that_advanced_is_reported_as_a_rate(self):
+        text = self.run_two(
+            {"handler_first_tsc": 7, "handler_last_tsc": 0,
+             "exit_total": 1_000_000},
+            {"handler_first_tsc": 7,
+             "handler_last_tsc": int(1_992_000_000 * 20.9),
+             "exit_total": 1_106_380})
+        self.assertIn("exit_total", text)
+        self.assertIn("5,089.95", text)          # 106,380 / 20.9
+        self.assertNotIn("IMPOSSIBLE", text)
+
+    def test_a_counter_that_went_backwards_is_reported_as_an_error(self):
+        text = self.run_two(
+            {"handler_first_tsc": 7, "handler_last_tsc": 0,
+             "exit_total": 1_000_000},
+            {"handler_first_tsc": 7,
+             "handler_last_tsc": int(1_992_000_000 * 20.9),
+             "exit_total": 999_571})
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("exit_total[cpu 0]", text)
+        self.assertIn("-429", text)
+
+    def test_a_boot_that_changed_stops_the_report(self):
+        text = self.run_two(
+            {"handler_first_tsc": 7, "handler_last_tsc": 0,
+             "exit_total": 1_000_000},
+            {"handler_first_tsc": 0x76adf1,
+             "handler_last_tsc": int(1_992_000_000 * 20.9),
+             "exit_total": 1_106_380})
+        self.assertIn("NOT from the same boot", text)
+        self.assertNotIn("5,089.95", text)
 
 
 if __name__ == "__main__":

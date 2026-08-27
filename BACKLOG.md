@@ -54868,3 +54868,192 @@ composition is doing exactly what it was told. That closes the last
 thread of the four-frame lead, which had already been withdrawn twice
 for being read out of an unrotated ring.
 
+
+
+## `rig-dump-state.py --delta N`: the gap above, closed
+
+The section above ends by naming the gap: the reader has no delta mode,
+every column it prints is cumulative, and every steady-state question in
+this investigation has been answered by hand-differencing two runs. That
+is where the impossible `-11,989` cycles came from, and it is where a
+boot-wide mean got quoted present-tense as "11,358 us, 90.8 exits" per
+trust-level round trip.
+
+`--delta N` takes one sample, waits N seconds, takes a second, and prints
+deltas and rates. Six things about it were decided rather than defaulted,
+and each comes from a failure recorded above.
+
+### It refuses to subtract things that are not counts
+
+A ring slot, a last value and a current state are all eight bytes in a
+dump, and all three subtract without complaint into a number with a
+plausible magnitude and no meaning. The classification is explicit -
+`DELTA_PER_CPU_COUNTERS`, `DELTA_GLOBAL_COUNTERS`, `DELTA_PER_CPU_CYCLES`,
+`DELTA_PER_CPU_HISTOGRAMS` - and `DELTA_REFUSALS` carries the rest by
+category with the reason, printed on every run.
+
+The six refused categories, and why:
+
+| category | why not |
+|---|---|
+| ring buffers | the same slot holds two unrelated records |
+| last-value fields | subtracting two addresses is a distance |
+| current-state fields | a state is not an event count |
+| min/max accumulators | a max that grew by 4096 saw one page further out, not 4096 events |
+| composite records | one struct mixing a flag, a reason and addresses |
+| state histograms | buckets of what a permission *is*, not of events |
+
+A seventh category is differenceable and deliberately left out -
+`vtl1_duration`, `vtl_call_gap_buckets`, the vector and service censuses.
+**Every member added widens the read window, and the read window is this
+measurement's own error bar.** The full cumulative dump costs 144 monitor
+connections and 50,605 words on the test fixture; the delta path takes
+two samples and still costs a fraction of one of them, and a test
+measures that so a member added later cannot quietly restore the cost.
+
+### It reports a negative delta as an error, not as a number
+
+This is the single most valuable line in the feature, and it is the one
+that would have caught the `-11,989` by itself. Four things produce a
+monotonic counter that decreased and all four have happened on this rig:
+a torn read, a wrapped field, a reader pointed at a different binary from
+the one running, and a guest that reset between the samples. All four
+make every other number in the report wrong, so the member is named, the
+two readings are printed, and the report says not to read the rest.
+
+The `+427 halves / -11,989 cycles` scrape is a test fixture now: the
+halves are rated and the cycles are refused, from the same call.
+
+### The span is measured, and so is the frequency
+
+`--delta 20` does not mean twenty seconds. Each sample takes a measurable
+time, so the span is midpoint to midpoint, the two read windows are
+printed as its error bar, and every rate divides by the measured span. On
+the fixture the nominal 20 s is 4.5% short of the measured 20.9 s, which
+would have turned 5,090 exits/s into 5,319 - and a nominal epoch is
+already one of the mislabelled readings recorded above.
+
+The frequency is measured too: the tick span over the wall span. **The
+rest of the file disagrees with itself about this** - six sites divide by
+1992.0 / 1.992e9 and three by 2e9, a silent 0.4% disagreement that is
+invisible in any single reading. The delta path uses `TSC_HZ =
+1_992_000_000` and only as a fallback that announces itself, and a test
+asserts `2e9` appears nowhere in it. The cycle-occupancy column needs no
+frequency at all: it is one tick count over another.
+
+The three 2e9 sites in the cumulative printers were **left alone on
+purpose** - changing them changes the default output, and every recipe in
+CLAUDE.md and BACKLOG.md quotes it. They are the next thing to do here,
+in their own commit, with the diff read line by line.
+
+### It fingerprints the boot, twice
+
+Two fields rather than one, per this tree's own rule: the module base off
+serial, and `handler_first_tsc`, which is written once at the first
+handler entry of a boot. A reload at the same address moves the second
+and not the first. Either changing stops the report before any
+arithmetic - which catches the case the negative-delta check cannot see
+at all, a new boot that has already climbed past the old one's totals.
+
+### The default output is unchanged, byte for byte
+
+Verified rather than asserted. `tests/python_layout` now carries a
+`FakeRig` that answers all five subprocesses the reader runs - member
+offsets, array lengths, type-derived expressions, the singleton's address
+and physical memory over the monitor - so `main()` runs end to end on a
+synthetic machine in 0.12 s. A 6,809-line dump before the change and
+after it diff clean.
+
+### Rejected: marking every cumulative mean in the default dump
+
+The round-trip line says `BOOT-WIDE MEANS` because it was misread, and
+the same treatment was considered for every mean printed from a
+`total/count` pair - there are about eight. Rejected for two reasons.
+It breaks the byte-for-byte guarantee above, which is the thing that
+makes the delta mode safe to add at all; and a wall of caveats is its own
+failure mode, since a warning on every line is a warning nobody reads.
+The delta report is the labelled answer: it says which quantities it
+differenced, which it refused, and that the only column headed `total` is
+the only total in it.
+
+The eight candidate sites, if this is revisited: `rig-dump-state.py`
+lines 1691, 2037, 2422, 2432, 2451, 3149, 3161, 6234 (after this
+change).
+
+### Not run on hardware
+
+Everything above is measured on the fixture and on unit data. `--delta`
+has not been pointed at the rig, and the first real run should be checked
+against `nested_run/s` from `/sys/kernel/debug/kvm`, which is the most
+reproducible metric in this tree - three consecutive 20 s windows agreed
+to 1.5%.
+
+## Delta mode, and the first honest steady state of this investigation
+
+`rig-dump-state.py --delta N` takes two samples, waits a *measured*
+span, and prints rates. It refuses to difference ring buffers,
+last-value fields, state histograms and min/max accumulators, prints
+what it refused, names any impossible delta rather than printing it,
+and fingerprints the boot so two different machines' counters are never
+subtracted. Its impossible-delta fixture is the real `+427 halves,
+-11,989 cycles` scrape from `8c7dac9`. Eight mutants were injected and
+all eight are caught.
+
+The first run answers more than the last several boots did:
+
+    DELTA over a MEASURED 31.206 s window (asked for 30.0 s)
+      the nominal 30.0 s is 4.0% short of the measured span
+      frequency 1,994,002,374 Hz, MEASURED in this window
+
+    MOVED
+      exit_total          255,575    8,189.92/s
+      l2_entries          127,601    4,088.98/s
+      vmcs_shadow_loads   128,043    4,103.15/s
+      stimer_arm_count     62,312    1,996.79/s
+      last_hypercall_count    168        5.38/s
+      vtl_reentries            82        2.63/s
+
+    A TOTAL THAT DID NOT MOVE
+      shadow_ept_replayed  1,773,064   +0
+      shadow_ept_leaves_filled 343,636 +0
+      vtl_protect_count       39,448   +0
+      vtl_fresh_calls         20,804   +0
+      vtl_copy_calls          10,172   +0
+
+**Every piece of trust-level and shadow-EPT work has stopped**, and in a
+cumulative dump that is indistinguishable from a large total still
+climbing. That distinction is the whole reason this mode exists, and it
+is the half that has been missing from every reading in this file.
+
+What is left running is the clock: **8,190 exits a second, 4,089
+second-level entries, and 1,997 synthetic timer arms**, against the
+guest's own 574.7 Hz tick. Three and a half arms per tick.
+
+### An invalid comparison of mine, caught by reading the declaration
+
+I put `stimer_arm_count` at 1,997/s beside `stimer_given_arms` at
+5.35/s and called it a 373:1 discrepancy. **They are not a pair.**
+`hypervisor.h:4732` says the intended comparison is
+`stimer_asked_arms` against `stimer_given_arms`, and that only
+**periodic** arms are accounted, because the interface defines a
+periodic count as a period in 100 ns units and a one-shot count as an
+absolute expiry - summing both is meaningless.
+
+And this guest arms both. `nested_entry.cpp:4996` already records it:
+`0x3000a` alternating with `0x30008` at one instruction pointer, **the
+guest toggling the periodic bit on a timer it re-arms every tick**. The
+last config written is `0x30008`, periodic clear. So `stimer_arm_count`
+counts every arm and `stimer_asked_arms` counts a subset, and the ratio
+between them is a fact about the *interface*, not about delivery.
+
+### What does survive, and is worth a number
+
+    cpu 0  13,468 arms, 2,543.1 us each, 393.2 Hz
+           -> 1.46x the 1.74 ms it asked for
+
+The periodic arms that *are* accounted fire at 393 Hz against the 574.7
+Hz requested. Recorded as-is: it is a cumulative mean over 13,468 arms
+and this file has just spent a section on cumulative means being quoted
+as present state, so it wants re-taking as a delta before it is built
+on.
+

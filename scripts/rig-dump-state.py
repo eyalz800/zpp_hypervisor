@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 SSH = ["ssh", "-o", "StrictHostKeyChecking=no",
        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15"]
@@ -3910,6 +3911,668 @@ def interrupted_context_verdicts(rows, kbase=0, ksize=0):
     return lines
 
 
+# ---------------------------------------------------------------------
+# Delta mode: two samples, and rates from the span between them
+# ---------------------------------------------------------------------
+#
+# Everything else in this file prints a cumulative reading, and a
+# cumulative reading answers "did this ever happen", not "is this
+# happening".  Eighteen mislabelled or stale readings in one
+# investigation came out of that gap, because the only way to close it
+# was to run the dump twice and subtract by hand - and hand-differencing
+# is where the errors were.  One of those hand scrapes produced -11,989
+# cycles on a monotonic accumulator, which is impossible and was within
+# one step of being reported as a 4 us cost.
+#
+# So the subtraction lives here, it refuses to subtract anything that is
+# not monotonic, and an impossible result is an error naming the member
+# rather than a number.
+
+# The one frequency constant this file's delta path uses.
+#
+# **The rest of the file disagrees with itself about this.** Six sites
+# divide by 1992.0 / 1.992e9 and three divide by 2e9 - a silent 0.4%
+# disagreement that is invisible in any single reading and shifts every
+# derived microsecond.  1.992 GHz is the measured one: BACKLOG.md records
+# it fitted at the wall over a 90.08 second window, and the part's
+# marketed 1.80 GHz base frequency is not its time-stamp counter
+# frequency.  2 GHz is a round number nobody measured.
+#
+# Delta mode prefers a frequency it measured *in this window* - the tick
+# span over the wall-clock span - and falls back to this only when the
+# tick span is unusable.  Which of the two was used is printed, because a
+# diagnostic that silently substitutes a constant for a reading is how
+# the unit slips this file keeps recording happened.
+TSC_HZ = 1_992_000_000
+
+# Per-processor monotonic event counts.  Every one of these is a
+# `std::uint64_t x[max_cpus]` that only ever `++`s, so the difference of
+# two samples is the number of events inside the window.
+#
+# `exit_trace_count` is in this list and is NOT exits - it counts ring
+# slots written, and a repeat of the newest record grows that record
+# instead of taking a slot.  It is differenceable all the same; the label
+# says what it is, which is the thing the cumulative printer got wrong
+# for five boots.
+DELTA_PER_CPU_COUNTERS = [
+    ("exit_total", "exits taken"),
+    ("resumes_reached", "handlers left"),
+    ("l2_entries", "second-level entries"),
+    ("exit_trace_count", "exit-ring slots written (NOT exits)"),
+    ("l2_exit_trace_count", "l2 ring slots written (NOT l2 exits)"),
+    ("l2_working_trace_count", "working-ring slots written"),
+    ("events_requeued", "events requeued"),
+    ("events_deferred", "events deferred"),
+    ("nested_vmfail_count", "VMfails answered upward"),
+    ("nested_entry_refusals", "second-level entries refused"),
+    ("l2_start_up_waits", "parked at wait-for-SIPI"),
+    ("ept_violation_unclaimed", "violations with no watch left"),
+    ("shadow_ept_builds", "shadow EPT builds"),
+    ("shadow_ept_cache_hits", "shadow EPT cache hits"),
+    ("shadow_ept_rebuild_new_root", "rebuilds for a new root"),
+    ("shadow_ept_rebuild_stale", "rebuilds for a stale root"),
+    ("shadow_ept_generation_discards", "generation discards"),
+    ("shadow_ept_replayed", "replayed violations"),
+    ("shadow_ept_evictions", "shadow EPT evictions"),
+    ("shadow_ept_resets", "shadow EPT resets"),
+    ("shadow_ept_leaves_filled", "leaves installed"),
+    ("shadow_ept_leaves_that_did_not_help", "leaves that did not help"),
+    ("l2_invept_single_context", "INVEPT single-context"),
+    ("l2_invept_all_context", "INVEPT all-context"),
+    ("vmcs_shadow_loads", "shadow VMCS loads"),
+    ("vmcs_shadow_stores", "shadow VMCS stores"),
+    ("evmcs_reads", "enlightened VMCS reads"),
+    ("evmcs_writes", "enlightened VMCS writes"),
+    ("hot_state_writes_skipped", "hot-state writes skipped"),
+    ("hot_state_writes_done", "hot-state writes done"),
+    ("guest_state_writes_skipped", "guest-state writes skipped"),
+    ("guest_state_writes_done", "guest-state writes done"),
+    ("control_writes_skipped", "control writes skipped"),
+    ("control_writes_done", "control writes done"),
+    ("hyperv_vp_assist_writes", "VP assist page writes"),
+    ("l2_vmfunc_calls", "VMFUNC calls"),
+    ("l2_vmfunc_refused", "VMFUNC refusals"),
+    ("vtl_fresh_calls", "fresh trust-level calls"),
+    ("vtl_reentries", "trust-level re-entries"),
+    ("vtl_code0_count", "call-class-0 blocks seen"),
+    ("vtl_copy_calls", "copy calls"),
+    ("vtl_protect_count", "protection-mask calls"),
+    ("vtl_protect_failures", "protection-mask failures"),
+    ("last_hypercall_count", "second-level hypercalls"),
+    ("stimer_arm_count", "synthetic timer arms"),
+    ("stimer_given_arms", "synthetic timer arms answered"),
+    ("guest_tick_floored", "guest ticks floored"),
+    ("guest_timer_stretched", "guest timers stretched"),
+    ("stall_withheld_total", "interrupts withheld"),
+    ("stall_forced_total", "interrupts forced"),
+    ("stall_restaged_total", "interrupts restaged"),
+    ("window_deferred_count", "interrupt windows deferred"),
+]
+
+# Monotonic counts that are single words, not per-processor rows.  Read
+# with a width of one deliberately: queued at the processor count they
+# would fetch the next member and print it under this one's name, which
+# is the shape of half the mislabelled readings this file records.
+DELTA_GLOBAL_COUNTERS = [
+    ("hypercalls_seen", "hypercalls seen (all processors)"),
+    ("guest_nmis_reinjected", "guest NMIs reinjected"),
+    ("cpuid_hypervisor_leaves_asked", "hypervisor CPUID leaves asked"),
+    ("interrupted_samples", "interrupted-context samples"),
+    ("quiet_samples", "quiet samples"),
+    # Both of these must read zero for the whole boot.  A *delta* is the
+    # stronger statement: it says nothing was fabricated or refused
+    # inside this window, which a cumulative zero cannot say about a
+    # window it does not bound.
+    ("impossible_decodes", "impossible decodes (MUST be 0)"),
+    ("refused_instruction_count", "refused guest stores (MUST be 0)"),
+]
+
+# Monotonic cycle accumulators.  Differenced and then divided by the
+# *tick* span rather than by the wall clock, which gives an occupancy
+# fraction and needs no frequency at all - so this column cannot be
+# wrong by 0.4% the way a microsecond derived from a guessed hertz can.
+DELTA_PER_CPU_CYCLES = [
+    ("l2_run_cycles", "in the second-level guest"),
+    ("l1_run_cycles", "in the first-level guest"),
+    ("handler_cycles", "inside this VMM's handler"),
+]
+
+# Per-processor histograms of *events*.  Each bucket is a count that only
+# increases, so a bucket difference is the events of that kind inside the
+# window - which is the census that says what is happening now rather
+# than what happened at some point in the boot.
+DELTA_PER_CPU_HISTOGRAMS = [
+    ("exit_reason_counts", "exit reasons"),
+    ("l2_ept_dispositions", "second-level fault dispositions"),
+]
+
+# The span source.  `handler_last_tsc` is a *last value*, not an
+# accumulator, so it is never rated - its difference is the wall clock
+# the counters were accumulating over, measured by the machine being
+# measured rather than by this script's own scheduler.
+DELTA_CLOCK = "handler_last_tsc"
+
+# The boot fingerprint.  `handler_first_tsc` is written once, at the
+# first handler entry of the boot, so it is constant for as long as the
+# same boot is running and different afterwards.  Together with the
+# module base off serial it is what catches a guest that reset between
+# the two samples - and this tree has a recorded run whose counters went
+# 8,687 then 8,258 then 8,014 mid-poll for exactly that reason.
+DELTA_FINGERPRINT = "handler_first_tsc"
+
+# What this mode refuses to subtract, and why.  Grouped by *what kind of
+# thing it is*, because the refusal generalises to members added later
+# and a list of names would not.
+#
+# Printed on every delta run.  A reader that silently omits a member and
+# one that never had it look identical, which is the failure this whole
+# file is written against.
+DELTA_REFUSALS = [
+    ("ring buffers",
+     "exit_trace, l2_exit_trace, l2_working_trace, cpuid_trace, "
+     "vtl_code0_ring, vtl_reentry_ring, guest_stack_trace, "
+     "guest_interrupted_trace, interrupted_contexts, vtl_step_rip",
+     "a slot is overwritten in place, so the same slot in two samples "
+     "holds two unrelated records and their difference is not a count "
+     "of anything"),
+    ("last-value fields",
+     "nested_last_vmfail, ipi_last_command, last_hypercall_code/rcx/rdx/"
+     "r8/tsc, vtl_protect_last_*, vtl_copy_last_pfn, ap_probe_rip/cs, "
+     "host_exception*, profile_code_*",
+     "these hold the most recent value, not a running total; "
+     "subtracting two addresses gives a distance, which is not a rate. "
+     "Read them as moved / did not move"),
+    ("current-state fields",
+     "l2_activity_state, pending_event, running_l2, "
+     "shadow_ept_current_slot, resume_activity_state, "
+     "processor_virtualized, l1_own_cr3, l2_exit_cr3, host_page_table, "
+     "guest_kernel_base, vtl_block_page, watched_apic_page",
+     "a state is not an event count; the difference of two states is "
+     "meaningless even when both readings are correct"),
+    ("min/max accumulators",
+     "vtl_code0_min_pfn, vtl_code0_max_pfn, vtl_copy_min_pfn, "
+     "vtl_copy_max_pfn, vtl_code0_run_longest",
+     "monotonic in one direction but not counts - a max that grew by "
+     "4096 saw one page further out, not 4096 events"),
+    ("composite records",
+     "unhandled_exit, vm_entry_failure, ap_fault, vtl_call_block",
+     "one struct mixing a flag, a reason and several addresses; there "
+     "is no single quantity to difference"),
+    ("state histograms",
+     "cpl_seen, guest_leaf_permissions, shadow_leaf_permissions, "
+     "vtl_protect_host_perms, vtl_protect_guest_perms, "
+     "vtl_protect_pfn_perm_seen",
+     "buckets of what a permission *is*, not of events; a bucket that "
+     "grew says a sample landed there, and the samples are not counted"),
+    ("event histograms not sampled here",
+     "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
+     "counts, vtl_service_calls, synthetic_msr_writes, "
+     "hypercall_code_counts",
+     "differenceable in principle and deliberately left out: every "
+     "member added widens the read window, and the read window is this "
+     "measurement's own error bar"),
+]
+
+
+def delta_span(clock_before, clock_after, wall_seconds):
+    """The measured span, in ticks and seconds, and the hertz between.
+
+    Returns `(ticks, seconds, hz, source, complaint)`.  `hz` is measured
+    from this window whenever the tick span is usable, and `source` says
+    which - the number and where it came from travel together, because
+    a fallback that does not announce itself is how a unit slip survives
+    a review.
+
+    `complaint` is non-empty when the two disagree by more than 5%, which
+    means one of the two clocks is not measuring what it is labelled as.
+    """
+    ticks = None
+    if clock_before is not None and clock_after is not None:
+        ticks = clock_after - clock_before
+
+    if ticks is not None and ticks > 0 and wall_seconds > 0:
+        hz = ticks / wall_seconds
+        source = "MEASURED in this window: tick span / wall span"
+        drift = abs(hz - TSC_HZ) / TSC_HZ
+        complaint = ""
+        if drift > 0.05:
+            complaint = (
+                f"the measured {hz:,.0f} Hz is {drift * 100:.1f}% from "
+                f"the tree's measured {TSC_HZ:,} Hz - one of the two "
+                f"clocks is not what its label says")
+        return ticks, wall_seconds, hz, source, complaint
+
+    return (ticks, wall_seconds, float(TSC_HZ),
+            f"FALLBACK constant {TSC_HZ:,} Hz; the tick span was "
+            f"unusable ({ticks})",
+            "")
+
+
+def delta_rows(before, after, entries):
+    """Difference a set of (key, label) readings, and refuse the impossible.
+
+    `before` and `after` are dicts keyed the same way.  A key missing
+    from either is **not** treated as zero - that is the single most
+    expensive habit this file records, because an unanswered read and a
+    counter reading zero look identical afterwards.
+
+    Returns `(rows, impossible, unread)` where a row is
+    `(key, label, before, after, delta)` and every row in `rows` has a
+    delta that is >= 0.  Anything negative goes to `impossible` instead,
+    never into `rows` - a monotonic counter cannot decrease, so the
+    number is not a measurement and must not be printed as one.
+    """
+    rows, impossible, unread = [], [], []
+    for key, label in entries:
+        a, b = before.get(key), after.get(key)
+        if a is None or b is None:
+            unread.append((key, label))
+            continue
+        if b < a:
+            impossible.append((key, label, a, b, b - a))
+            continue
+        rows.append((key, label, a, b, b - a))
+    return rows, impossible, unread
+
+
+def delta_key_name(key):
+    """`member[cpu N]`, or `member` for a member that has no processors.
+
+    Spelled out rather than printed as the tuple it is: a member name
+    with the wrong index beside it is the failure this whole file is
+    written against, and `('exit_total', 0)` reads as a Python
+    implementation detail rather than as an address in the singleton.
+    """
+    name, index = key
+    if index is None:
+        return name
+    if isinstance(index, tuple):
+        return f"{name}[cpu {index[0]}][{index[1]}]"
+    return f"{name}[cpu {index}]"
+
+
+def delta_impossible_lines(impossible):
+    """The single most valuable output this mode has.
+
+    Four things produce a counter that went backwards and every one of
+    them has happened on this rig: a torn read, a field that wrapped, a
+    reader pointed at a different binary from the one running, and a
+    guest that reset between the samples.  All four make every other
+    number in the report wrong, so this prints as an error naming the
+    member and says not to read the rest.
+    """
+    if not impossible:
+        return []
+    lines = ["", "*** IMPOSSIBLE: a monotonic counter went BACKWARDS ***"]
+    for key, label, a, b, delta in impossible:
+        lines.append(f"    {delta_key_name(key)}  {label}")
+        lines.append(f"        {a:,} -> {b:,}  ({delta:,})")
+    lines.append("    A counter that only increments cannot decrease. One "
+                 "of:")
+    lines.append("      - a torn read (the sample crossed a write)")
+    lines.append("      - the field wrapped")
+    lines.append("      - the ELF this reader used is not the binary that "
+                 "is running")
+    lines.append("      - the guest reset between the two samples")
+    lines.append("    Every rate below shares the same two samples. Do not "
+                 "read any of")
+    lines.append("    them until this is explained.")
+    return lines
+
+
+def delta_fingerprint_lines(before, after):
+    """Whether the two samples came from the same boot.
+
+    Two different machines' counters subtracted give nonsense that looks
+    like a measurement, and this rig has produced exactly that.  Two
+    independent fields are checked rather than one, per this tree's rule
+    about single-field instruments: the module base off serial, and the
+    time-stamp counter of the boot's first handler entry.
+
+    Returns `(lines, same)`.
+    """
+    def show(value):
+        if isinstance(value, tuple):
+            return "/".join("?" if v is None else f"0x{v:x}"
+                            for v in value)
+        return f"0x{value:x}"
+
+    lines, same = [], True
+    for what, a, b in (("module base", before.get("base"),
+                        after.get("base")),
+                       (DELTA_FINGERPRINT, before.get("first_tsc"),
+                        after.get("first_tsc"))):
+        if a is None or b is None:
+            lines.append(f"  fingerprint {what}: NOT READ - cannot say "
+                         f"the two samples are the same boot")
+            same = False
+            continue
+        if a != b:
+            lines.append(f"  fingerprint {what}: CHANGED "
+                         f"{show(a)} -> {show(b)}")
+            same = False
+            continue
+        lines.append(f"  fingerprint {what}: unchanged ({show(a)})")
+    if not same:
+        lines.append("  *** the samples are NOT from the same boot. The "
+                     "guest reset, or the")
+        lines.append("      module was reloaded. Subtracting them gives "
+                     "two machines' counters")
+        lines.append("      differenced, which is not a measurement. "
+                     "Nothing is rated below.")
+    return lines, same
+
+
+def delta_report(before, after, entries, cycles, histograms, span,
+                 fingerprints, cpus, asked_seconds, read_windows):
+    """The whole delta report, as lines, from data alone.
+
+    Takes no rig and no arguments object on purpose: every judgement it
+    makes is then checkable from a test with numbers chosen to make it
+    fail.
+    """
+    ticks, seconds, hz, source, complaint = span
+    lines = []
+
+    lines.append("")
+    lines.append("=" * 68)
+    lines.append(f"DELTA over a MEASURED {seconds:.3f} s window "
+                 f"(asked for {asked_seconds} s)")
+    lines.append("=" * 68)
+    lines.append("  Every number below is the change between two samples, "
+                 "not a total.")
+    a_window, b_window = read_windows
+    lines.append(f"  read window: sample A took {a_window:.2f} s, sample "
+                 f"B took {b_window:.2f} s")
+    lines.append("               <- the span is measured midpoint to "
+                 "midpoint; these are its error bar")
+    # Said out loud, with the size of the error, because a *nominal*
+    # epoch is one of the mislabelled readings this mode exists to
+    # prevent: the wait is not the span, the two reads are inside it,
+    # and dividing by what was asked for overstates every rate.
+    if asked_seconds and seconds > 0:
+        skew = (seconds - asked_seconds) / asked_seconds
+        if abs(skew) > 0.02:
+            lines.append(
+                f"  the nominal {asked_seconds} s is {abs(skew) * 100:.1f}%"
+                f" {'short of' if skew > 0 else 'longer than'} the "
+                f"measured span;")
+            lines.append(
+                f"  every rate below divides by {seconds:.3f}, not by "
+                f"{asked_seconds}")
+    if ticks is None:
+        lines.append(f"  span: {seconds:.3f} s wall, tick span NOT READ")
+    else:
+        lines.append(f"  span: {ticks:,} ticks / {seconds:.3f} s")
+    lines.append(f"  frequency: {hz:,.0f} Hz  ({source})")
+    if complaint:
+        lines.append(f"  *** {complaint}")
+
+    fingerprint_lines, same_boot = delta_fingerprint_lines(*fingerprints)
+    lines.extend(fingerprint_lines)
+
+    rows, impossible, unread = delta_rows(before, after, entries)
+    lines.extend(delta_impossible_lines(impossible))
+
+    if not same_boot:
+        return lines
+
+    if seconds <= 0:
+        lines.append("")
+        lines.append("  *** the measured span is not positive, so no rate "
+                     "can be derived from it.")
+        lines.append("      Nothing is rated. This is a broken "
+                     "measurement, not a quiet guest.")
+        return lines
+
+    moved = [r for r in rows if r[4]]
+    # A counter that is zero and stayed zero says nothing, and a hundred
+    # such lines bury the ones that do.  The interesting still counter is
+    # the one with a *large total* that stopped climbing - that is the
+    # reading a cumulative dump gets exactly backwards.
+    still = [r for r in rows if not r[4] and r[2]]
+    never = [r for r in rows if not r[4] and not r[2]]
+
+    lines.append("")
+    lines.append(f"counters that MOVED in the window ({len(moved)} of "
+                 f"{len(rows)})")
+    lines.append("  member                              cpu    delta"
+                 "        per second")
+    for key, label, _a, _b, delta in sorted(moved, key=lambda r: -r[4]):
+        name, index = key
+        where = "-" if index is None else str(index)
+        lines.append(f"  {name:<34s} {where:>4s} {delta:>10,} "
+                     f"{delta / seconds:>15,.2f}   {label}")
+
+    lines.append("")
+    lines.append(f"counters with a total that did NOT move ({len(still)})")
+    lines.append("  This is the half a cumulative dump cannot show: a "
+                 "large total here means")
+    lines.append("  it happened and has STOPPED, which is the opposite "
+                 "reading from a large")
+    lines.append("  total that is still climbing. The two are identical "
+                 "in the default dump.")
+    for key, label, a, _b, _delta in sorted(still, key=lambda r: -r[2]):
+        name, index = key
+        where = "-" if index is None else str(index)
+        lines.append(f"  {name:<34s} {where:>4s} {a:>10,} total, "
+                     f"+0 in this window   {label}")
+    if never:
+        lines.append(f"  ({len(never)} more read zero in both samples "
+                     f"and are not listed)")
+
+    if unread:
+        lines.append("")
+        lines.append(f"NOT READ ({len(unread)}) - absent from one or both "
+                     f"samples, and NOT")
+        lines.append("  counted as zero. An unanswered read and a counter "
+                     "at zero look the")
+        lines.append("  same afterwards, which is why they are separated "
+                     "here.")
+        for key, _label in unread:
+            lines.append(f"  {delta_key_name(key)}")
+
+    # Cycle accumulators, as occupancy against the tick span. No hertz
+    # enters this column, so it cannot inherit a wrong frequency.
+    cycle_rows, cycle_bad, cycle_unread = delta_rows(*cycles)
+    lines.extend(delta_impossible_lines(cycle_bad))
+    # Reported rather than dropped, for the same reason as the counter
+    # table's own unread list: a cycle accumulator that was not read and
+    # one that did not advance produce the same missing row, and only
+    # one of those is a fact about the guest.
+    for key, _label in cycle_unread:
+        lines.append(f"  {delta_key_name(key)}: NOT READ, so no "
+                     f"occupancy is derived for it")
+    if cycle_rows and ticks:
+        lines.append("")
+        lines.append("where the time went, as a fraction of the measured "
+                     "tick span")
+        lines.append("  (a ratio of two tick counts - no frequency enters "
+                     "this column)")
+        for key, label, _a, _b, delta in cycle_rows:
+            name, index = key
+            if not delta:
+                continue
+            lines.append(f"  cpu {index}  {name:<20s} "
+                         f"{100.0 * delta / ticks:6.2f}%   {label}")
+    elif cycle_rows:
+        lines.append("")
+        lines.append("  cycle accumulators read, but the tick span is "
+                     "unusable, so no")
+        lines.append("  occupancy is derived. A cycle count without a "
+                     "span is not a fraction.")
+
+    for title, cpu, buckets, namer in histograms:
+        hist_rows, hist_bad, _ = delta_rows(*buckets)
+        lines.extend(delta_impossible_lines(hist_bad))
+        moved_buckets = [r for r in hist_rows if r[4]]
+        if not moved_buckets:
+            continue
+        total = sum(r[4] for r in moved_buckets)
+        lines.append("")
+        lines.append(f"cpu {cpu} {title} IN THIS WINDOW "
+                     f"({total:,}, {total / seconds:,.1f}/s)")
+        for key, _label, _a, _b, delta in sorted(moved_buckets,
+                                                 key=lambda r: -r[4]):
+            _name, index = key
+            lines.append(f"  {namer(index):<20} {delta:>10,}  "
+                         f"{100.0 * delta / total:5.1f}%  "
+                         f"{delta / seconds:>12,.2f}/s")
+
+    lines.append("")
+    lines.append("what this mode REFUSED to difference, and why")
+    for what, names, why in DELTA_REFUSALS:
+        lines.append(f"  {what}:")
+        lines.append(f"    {names}")
+        lines.append(f"    -> {why}")
+
+    lines.append("")
+    lines.append(f"cpus sampled: {cpus}. Every number above is a change "
+                 f"over the measured span,")
+    lines.append("except the one column headed `total`.")
+    return lines
+
+
+def serial_module_base(rig):
+    """The module base the loader printed, or None.
+
+    Its own function because delta mode reads it a second time: the base
+    moves when the module is reloaded, which is what a guest reset looks
+    like from outside.
+    """
+    out = subprocess.run(
+        SSH + [rig,
+               'grep -ah "allocate_rwx done at" /home/tc/zpp/serial.out '
+               '2>/dev/null | tail -1'],
+        capture_output=True, text=True).stdout.strip()
+    m = re.search(r"done at (0x[0-9a-f]+)", out)
+    return m.group(1) if m else None
+
+
+def delta_sample(args, instance, off, cpus, reason_capacity,
+                 disposition_capacity):
+    """One complete delta sample: open, read, close.
+
+    **The monitor takes exactly one connection.**  `Monitor` opens and
+    closes one per batch and holds none between them, and this function
+    returns only after its last `run()` has come back - so nothing is
+    held across the wait between samples.  A leaked socket makes every
+    later reader fail with no diagnosis, and a poller that leaks one
+    reports every field as None for ever.
+
+    Returns `(readings, first_tsc, clock, started, ended)`.
+    """
+    monitor = Monitor(args.rig, args.port)
+
+    per_cpu = [n for n, _ in DELTA_PER_CPU_COUNTERS if n in off]
+    per_cpu += [n for n, _ in DELTA_PER_CPU_CYCLES if n in off]
+    per_cpu += [DELTA_CLOCK, DELTA_FINGERPRINT]
+    for name in per_cpu:
+        if name in off:
+            monitor.queue(instance + off[name], cpus)
+    for name, _ in DELTA_GLOBAL_COUNTERS:
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    if "exit_reason_counts" in off:
+        for cpu in range(cpus):
+            monitor.queue(instance + off["exit_reason_counts"]
+                          + cpu * reason_capacity * 8, reason_capacity)
+    if "l2_ept_dispositions" in off:
+        monitor.queue(instance + off["l2_ept_dispositions"],
+                      cpus * disposition_capacity)
+
+    started = time.monotonic()
+    words = monitor.run()
+    ended = time.monotonic()
+
+    def read(name, index=0):
+        if name not in off:
+            return None
+        return words.get(instance + off[name] + 8 * index)
+
+    readings = {}
+    for name, _ in DELTA_PER_CPU_COUNTERS + DELTA_PER_CPU_CYCLES:
+        for cpu in range(cpus):
+            readings[(name, cpu)] = read(name, cpu)
+    for name, _ in DELTA_GLOBAL_COUNTERS:
+        readings[(name, None)] = read(name)
+    for cpu in range(cpus):
+        for reason in range(reason_capacity):
+            readings[("exit_reason_counts", (cpu, reason))] = read(
+                "exit_reason_counts", cpu * reason_capacity + reason)
+        for disposition in range(disposition_capacity):
+            readings[("l2_ept_dispositions", (cpu, disposition))] = read(
+                "l2_ept_dispositions",
+                cpu * disposition_capacity + disposition)
+
+    clock = max((read(DELTA_CLOCK, cpu) or 0) for cpu in range(cpus))
+    first = tuple(read(DELTA_FINGERPRINT, cpu) for cpu in range(cpus))
+    return readings, first, clock, started, ended
+
+
+L2_DISPOSITION = ["none", "installed", "replayed", "cached", "refused",
+                  "no-entry", "mapped", "generation", "root-failed",
+                  "pointer-failed"]
+
+
+def delta_main(args, base, instance, off, cpus, reason_capacity,
+               disposition_capacity):
+    """Two samples, a measured span between them, and rates from it."""
+    print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
+          f"B ...")
+    before, first_a, clock_a, a0, a1 = delta_sample(
+        args, instance, off, cpus, reason_capacity, disposition_capacity)
+
+    # The socket is closed before this sleep and reopened after it: no
+    # connection is held across the wait.
+    time.sleep(args.delta)
+
+    after, first_b, clock_b, b0, b1 = delta_sample(
+        args, instance, off, cpus, reason_capacity, disposition_capacity)
+    base_b = serial_module_base(args.rig)
+
+    # Midpoint to midpoint, because each sample takes a measurable time
+    # and a counter read at the start of A and the start of B spans a
+    # different interval from one read at their ends.  Nominal spans have
+    # already cost this investigation one reading; this one is measured
+    # even down to which instant it is measured between.
+    seconds = ((b0 + b1) / 2.0) - ((a0 + a1) / 2.0)
+    span = delta_span(clock_a or None, clock_b or None, seconds)
+
+    entries = [((n, cpu), label)
+               for n, label in DELTA_PER_CPU_COUNTERS
+               for cpu in range(cpus)]
+    entries += [((n, None), label) for n, label in DELTA_GLOBAL_COUNTERS]
+    cycles = (before, after,
+              [((n, cpu), label) for n, label in DELTA_PER_CPU_CYCLES
+               for cpu in range(cpus)])
+
+    histograms = []
+    for cpu in range(cpus):
+        histograms.append((
+            "exit reasons", cpu,
+            (before, after,
+             [(("exit_reason_counts", (cpu, r)), "")
+              for r in range(reason_capacity)]),
+            lambda r: EXIT_REASON.get(r[1], r[1])))
+        histograms.append((
+            "second-level fault dispositions", cpu,
+            (before, after,
+             [(("l2_ept_dispositions", (cpu, d)), "")
+              for d in range(disposition_capacity)]),
+            lambda d: (L2_DISPOSITION[d[1]]
+                       if d[1] < len(L2_DISPOSITION) else str(d[1]))))
+
+    fingerprints = ({"base": base, "first_tsc": first_a},
+                    {"base": (int(base_b, 16) if base_b else None),
+                     "first_tsc": first_b})
+
+    for line in delta_report(before, after, entries, cycles, histograms,
+                             span, fingerprints, cpus, args.delta,
+                             (a1 - a0, b1 - b0)):
+        print(line)
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -3932,19 +4595,27 @@ def main():
                          "first (default all 4096 lines)")
     ap.add_argument("--l2-entries", type=int, default=24,
                     help="how many second-level entries to show")
+    # Steady state, rather than the whole boot averaged into one number.
+    #
+    # Without this every column in this dump is cumulative, and the only
+    # way to ask "is this happening now" was to run the dump twice and
+    # subtract by hand. That is where the mislabelled readings in this
+    # investigation came from, including one hand scrape that produced a
+    # negative delta on a monotonic accumulator.
+    #
+    # Nothing about the default path changes when this is absent - it is
+    # a separate report and a separate, much smaller set of reads.
+    ap.add_argument("--delta", type=float, default=None, metavar="N",
+                    help="take two samples N seconds apart and print "
+                         "rates and deltas over the MEASURED span "
+                         "instead of the cumulative dump")
     args = ap.parse_args()
 
     base = args.base
     if base is None:
-        out = subprocess.run(
-            SSH + [args.rig,
-                   'grep -ah "allocate_rwx done at" /home/tc/zpp/serial.out '
-                   '2>/dev/null | tail -1'],
-            capture_output=True, text=True).stdout.strip()
-        m = re.search(r"done at (0x[0-9a-f]+)", out)
-        if not m:
+        base = serial_module_base(args.rig)
+        if base is None:
             sys.exit("no module base on serial - did the loader run?")
-        base = m.group(1)
     base = int(base, 16)
 
     members = ["cpl_seen", "guest_leaf_permissions",
@@ -4243,6 +4914,17 @@ def main():
     scalar_cpus = max(args.cpus, 0 if args.l2 is None else args.l2 + 1)
 
     print(f"module base 0x{base:x}, singleton 0x{instance:x}")
+
+    # Delta mode is a different report from a much smaller set of reads,
+    # and it returns before the cumulative dump rather than beside it -
+    # printing both would put a total and a rate under adjacent headings,
+    # which is the confusion this mode exists to end.
+    if args.delta is not None:
+        disposition_capacity = gdb_lengths(
+            args.elf, ["l2_ept_dispositions"])["l2_ept_dispositions"]
+        delta_main(args, base, instance, off, args.cpus, reason_capacity,
+                   disposition_capacity)
+        return
 
     monitor = Monitor(args.rig, args.port)
     # The scalar per-processor arrays, one read each - they are contiguous.
