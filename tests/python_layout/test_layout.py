@@ -233,6 +233,53 @@ class Capacities(unittest.TestCase):
                 "so one of the two rings it merges is read at the wrong "
                 "pitch".format(variable, name))
 
+    def test_interrupted_context_ring_shape(self):
+        """`interrupted_contexts`' depth and width, against the header.
+
+        Both are transcribed on one line of `rig-dump-state.py`, and both
+        fail silently rather than loudly. The width is the worse of the
+        two: the ring is walked with a stride of `fields * 8`, so a
+        member added to `interrupted_context` and not counted here shifts
+        every entry after the first by one word and prints a register
+        file made of its neighbours' halves - plausible addresses, all
+        wrong. The depth failing is milder and still bad: too small
+        silently drops the oldest samples, and the whole point of the
+        table is whether the values *repeat across the ring*, so a short
+        read makes a moving register look like a stuck one and the
+        verdict line says "a retry" about a walk that is progressing.
+
+        Checked by member *count* rather than by size, because every
+        member is a quadword by construction and a count is what the
+        reader actually uses.
+        """
+        script = read(DUMP_STATE)
+
+        members = cxx_member_words(self.header, "interrupted_context")
+        capacity = cxx_constant(self.header,
+                                "interrupted_context_capacity")
+
+        match = re.search(
+            r"^\s*interrupted_context_fields, "
+            r"interrupted_context_capacity = (\d+), (\d+)$",
+            script, re.M)
+        self.assertIsNotNone(
+            match,
+            "rig-dump-state.py no longer sets the interrupted-context "
+            "ring shape on one line - the reader and this check have "
+            "drifted apart")
+        self.assertEqual(
+            int(match.group(1)), len(members),
+            "the reader walks interrupted_contexts {} words at a time "
+            "and the record has {} members ({}) - every entry after the "
+            "first would be read at the wrong offset".format(
+                match.group(1), len(members), ", ".join(members)))
+        self.assertEqual(
+            int(match.group(2)), capacity,
+            "the reader's interrupted_context_capacity disagrees with "
+            "the header's, so the ring is read short or long and the "
+            "'same in every sample' verdict is drawn from the wrong "
+            "window")
+
     def test_phase_names_and_parents_cover_every_slot(self):
         """PHASE_NAMES and PHASE_PARENT, against `phase_count`.
 

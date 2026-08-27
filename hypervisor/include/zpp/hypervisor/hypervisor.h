@@ -5705,6 +5705,98 @@ private:
                                   std::uint64_t stack,
                                   std::uint64_t base,
                                   std::uint64_t size);
+
+    void record_interrupted_context(std::size_t cpu,
+                                    std::uint64_t frame_at);
+    /** @} */
+
+    /**
+     * The interrupted thread's registers and its real interrupt request
+     * level, as a ring - **because one field cannot tell a retry from
+     * progress, and two can.**
+     *
+     * The question this exists to answer, and nothing in the tree
+     * answers it: `Phase1Initialization` is sampled inside
+     * `MiCreateSystemSection -> ... -> MiWalkEntireImage ->
+     * MiCopyPfnEntryEx -> MiCopyPage` and stays there, while the shadow
+     * extended page tables gain no new leaf for hours. Those two facts
+     * together admit exactly two readings and they want opposite work:
+     *
+     * - the walk is **retrying** - copying the same page over and over,
+     *   because something about the copy is not sticking, which would be
+     *   this VMM's to explain; or
+     * - the walk is **progressing** over pages that are all already
+     *   mapped, so it maps nothing new and is merely slow, which would
+     *   not be.
+     *
+     * An instruction pointer is identical in both. The *addresses* are
+     * not: a retry reads and writes the same pair for ever, a walk moves
+     * monotonically. So this records the registers holding them, and it
+     * records them as a **ring rather than a table**, for the reason
+     * `profile_context` gives - the addresses are expected to vary and
+     * their spread is the answer, so a table keyed on them would fill
+     * with singletons and say nothing.
+     *
+     * That is the rule this project already had to learn twice: a census
+     * over one register reported "the same request 99.8% of the time"
+     * when the register was a sentinel and the one that moved was
+     * another. Recording both candidates costs a few words per sample
+     * and is the only thing that separates "this value never changes"
+     * from "I am not reading the value".
+     *
+     * **`irql` is the field that is not available anywhere else.**
+     * `guest_thread_sample::wait_irql` is `_KTHREAD.WaitIrql`, which
+     * records the level a thread *waited* at and is stale for one that
+     * is running; the virtual task priority sampled from the
+     * virtual-APIC page is the *processor's* level, which inside an
+     * interrupt handler is the handler's. `_KTRAP_FRAME.PreviousIrql` is
+     * the interrupted code's own, and it is the only reading that can
+     * falsify "phase 1 is at PASSIVE_LEVEL" rather than assume it.
+     *
+     * Filled only when `sample_interrupted_stack` found a frame, so
+     * `occurred` has to be checked first; `rip` here is the same value
+     * as `guest_interrupted_rip` and is repeated so a ring entry is
+     * self-contained.
+     * @{
+     */
+    static constexpr std::size_t interrupted_context_capacity = 16;
+
+    struct interrupted_context
+    {
+        std::uint64_t occurred;
+        std::uint64_t rip;
+        std::uint64_t rsp;
+        std::uint64_t rcx;
+        std::uint64_t rdx;
+        std::uint64_t r8;
+        std::uint64_t rsi;
+        std::uint64_t rdi;
+
+        /** `_KTRAP_FRAME.PreviousIrql`, one byte, zero-extended. */
+        std::uint64_t irql;
+
+        /**
+         * The trap frame's own address, so a reader can go back to it
+         * with the monitor and check any field this does not carry.
+         */
+        std::uint64_t frame;
+    };
+
+    interrupted_context
+        interrupted_contexts[interrupted_context_capacity]{};
+    std::uint64_t interrupted_context_count{};
+
+    /**
+     * How many samples found a hardware frame and how many did not.
+     *
+     * The pair exists so an empty ring cannot be read as a fact about
+     * the guest. `not_found` large beside `found` zero says the shape
+     * search is failing - a different stack, a different selector, a
+     * handler that has not pushed a frame - and says nothing whatever
+     * about what the guest is doing.
+     */
+    std::uint64_t interrupted_context_found{};
+    std::uint64_t interrupted_context_not_found{};
     /** @} */
     /**
      * @}

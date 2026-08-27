@@ -6043,6 +6043,8 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
     this->guest_interrupted_rsp = 0;
     this->guest_interrupted_rip = 0;
 
+    std::uint64_t frame_at{};
+
     for (std::size_t word{}; (word + frame_words) < guest_stack_words;
          ++word) {
         std::uint64_t frame[frame_words]{};
@@ -6086,12 +6088,21 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
 
         this->guest_interrupted_rip = frame[0];
         this->guest_interrupted_rsp = frame[3];
+
+        // The *address* of the frame, not only its contents. The
+        // enclosing `_KTRAP_FRAME` is at a fixed negative offset from
+        // it, and everything the register census wants lives there.
+        frame_at = stack + (word * sizeof(std::uint64_t));
         break;
     }
 
     if (0 == this->guest_interrupted_rsp) {
+        this->interrupted_context_not_found =
+            this->interrupted_context_not_found + 1;
         return;
     }
+
+    record_interrupted_context(cpu, frame_at);
 
     // And the thread's own stack, from the pointer the frame carried.
     for (std::size_t word{};
@@ -6112,6 +6123,86 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
                 this->guest_interrupted_count + 1;
         }
     }
+}
+
+void hypervisor::record_interrupted_context(std::size_t cpu,
+                                            std::uint64_t frame_at)
+{
+    // The hardware frame's own address, minus where `_KTRAP_FRAME` puts
+    // it, is the base of the trap frame. See `ktrap_frame_rip`: the five
+    // quadwords the shape search matched are that structure's last five
+    // fields, which is what makes this subtraction sound rather than a
+    // guess about how much the handler pushed.
+    if (frame_at < guest_windows::ktrap_frame_rip) {
+        this->interrupted_context_not_found =
+            this->interrupted_context_not_found + 1;
+        return;
+    }
+
+    auto base = frame_at - guest_windows::ktrap_frame_rip;
+
+    auto read = [&](std::uint64_t linear,
+                    std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    interrupted_context record{};
+
+    record.rip = this->guest_interrupted_rip;
+    record.rsp = this->guest_interrupted_rsp;
+    record.frame = base;
+
+    // Every one of these is a diagnostic and a failed read leaves its
+    // field zero rather than abandoning the record: a register that
+    // could not be read is still worth having beside the ones that
+    // could, and `frame` says where to go and look by hand.
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rcx, record.rcx));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rdx, record.rdx));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_r8, record.r8));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rsi, record.rsi));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rdi, record.rdi));
+
+    // One byte, read as a word and masked, for the reason
+    // `sample_guest_thread` gives about the three `_KTHREAD` bytes: a
+    // shared read would tie this to the neighbours' spacing as well as
+    // to this field's own offset.
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    std::uint64_t word{};
+    if (read(base + guest_windows::ktrap_frame_previous_irql, word)) {
+        record.irql = word & byte_mask;
+    }
+
+    record.occurred = 1;
+
+    auto slot =
+        this->interrupted_context_count % interrupted_context_capacity;
+    this->interrupted_contexts[slot] = record;
+    this->interrupted_context_count =
+        this->interrupted_context_count + 1;
+    this->interrupted_context_found =
+        this->interrupted_context_found + 1;
 }
 
 void hypervisor::refresh_guest_threads(std::size_t cpu)

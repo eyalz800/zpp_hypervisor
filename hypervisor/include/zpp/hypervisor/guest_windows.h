@@ -85,6 +85,73 @@ namespace zpp::hypervisor::guest_windows
 #define ZPP_WINDOWS_KTHREAD_PROCESS 544
 #endif
 
+/**
+ * `_KTRAP_FRAME`, whose last five fields are the frame hardware pushes.
+ *
+ * These are the offsets that let a trap frame be located from the
+ * hardware frame rather than the other way round.
+ * `sample_interrupted_stack` already finds the five quadwords SDM 7.14.2
+ * describes - RIP, CS, RFLAGS, RSP, SS - by their shape; subtracting
+ * `ktrap_frame_rip` from the address of the first of them gives the base
+ * of the enclosing `_KTRAP_FRAME`, and everything below is then a fixed
+ * offset from it.
+ *
+ * Two things are wanted from there and neither is reachable any other
+ * way:
+ *
+ * - **`PreviousIrql` is the interrupted thread's real interrupt request
+ *   level.** `kthread_wait_irql` is not: `_KTHREAD.WaitIrql` records the
+ *   level at which a thread called `KeWaitForSingleObject` and is stale
+ *   for a thread that is not waiting, which is exactly the thread being
+ *   sampled here. And the virtual task priority read from the
+ *   virtual-APIC page is the *processor's* current priority, which
+ *   inside an interrupt handler is the handler's and not the thread's.
+ *   This byte is the only one that answers "what level was the
+ *   interrupted code running at".
+ * - **The interrupted general purpose registers.** An instruction
+ *   pointer alone cannot tell a loop that is retrying the same work from
+ *   one that is walking through it - the addresses being read and
+ *   written are what separate those, and they are in this structure.
+ *   See `interrupted_context` for what that settles.
+ *
+ * **Verified against `ntkrnlmp.pdb` rather than recalled**, by the type
+ * stream: `_KTRAP_FRAME` is 400 bytes with `Rip` at 360, `SegCs` 368,
+ * `EFlags` 376, `Rsp` 384 and `SegSs` 392 - the five consecutive
+ * quadwords the shape search matches, and the last five fields of the
+ * structure. Every other offset here comes from the same dump. As with
+ * every offset above, these belong to one build of one operating system
+ * and are overridable for that reason.
+ * @{
+ */
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_RIP
+#define ZPP_WINDOWS_KTRAP_FRAME_RIP 360
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_PREVIOUS_IRQL
+#define ZPP_WINDOWS_KTRAP_FRAME_PREVIOUS_IRQL 41
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_RCX
+#define ZPP_WINDOWS_KTRAP_FRAME_RCX 56
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_RDX
+#define ZPP_WINDOWS_KTRAP_FRAME_RDX 64
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_R8
+#define ZPP_WINDOWS_KTRAP_FRAME_R8 72
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_RDI
+#define ZPP_WINDOWS_KTRAP_FRAME_RDI 328
+#endif
+
+#ifndef ZPP_WINDOWS_KTRAP_FRAME_RSI
+#define ZPP_WINDOWS_KTRAP_FRAME_RSI 336
+#endif
+/** @} */
+
 #ifndef ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY
 #define ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY 1400
 #endif
@@ -110,6 +177,14 @@ constexpr std::uint64_t ethread_thread_list_entry =
     ZPP_WINDOWS_ETHREAD_THREAD_LIST_ENTRY;
 constexpr std::uint64_t eprocess_thread_list_head =
     ZPP_WINDOWS_EPROCESS_THREAD_LIST_HEAD;
+constexpr std::uint64_t ktrap_frame_rip = ZPP_WINDOWS_KTRAP_FRAME_RIP;
+constexpr std::uint64_t ktrap_frame_previous_irql =
+    ZPP_WINDOWS_KTRAP_FRAME_PREVIOUS_IRQL;
+constexpr std::uint64_t ktrap_frame_rcx = ZPP_WINDOWS_KTRAP_FRAME_RCX;
+constexpr std::uint64_t ktrap_frame_rdx = ZPP_WINDOWS_KTRAP_FRAME_RDX;
+constexpr std::uint64_t ktrap_frame_r8 = ZPP_WINDOWS_KTRAP_FRAME_R8;
+constexpr std::uint64_t ktrap_frame_rdi = ZPP_WINDOWS_KTRAP_FRAME_RDI;
+constexpr std::uint64_t ktrap_frame_rsi = ZPP_WINDOWS_KTRAP_FRAME_RSI;
 
 /**
  * How many threads of the running one's process to record.

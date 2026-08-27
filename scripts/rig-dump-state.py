@@ -3900,6 +3900,14 @@ def main():
                "quiet_samples", "quiet_overflow",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
+               # The interrupted thread's own registers and its own
+               # interrupt request level, which no other field here
+               # carries. See `interrupted_context`: the instruction
+               # pointer cannot separate a walk that is retrying from one
+               # that is progressing, and the addresses can.
+               "interrupted_contexts", "interrupted_context_count",
+               "interrupted_context_found",
+               "interrupted_context_not_found",
                # Which thread the guest is running. Sampled for sessions
                # and printed by nothing, and it is the only progress
                # metric here that a livelock cannot fake.
@@ -3937,6 +3945,16 @@ def main():
                # want to be one, which is the next thing to do here.
                "resumes_reached", "l2_start_up_waits",
                "ept_violation_unclaimed",
+               # Two counters whose own declarations say what a
+               # non-zero reading means, and which no script has
+               # ever printed. `impossible_decodes` is documented
+               # as having to read zero: non-zero means the decoder
+               # produced a value it could not justify and a
+               # fabricated write was about to happen.
+               # `refused_instruction_count` counts guest stores
+               # the emulator declined - a store the guest believes
+               # it made and did not. Scalars, not per-processor.
+               "impossible_decodes", "refused_instruction_count",
                # The application-processor liveness probe. Six members,
                # and they have to be read together - see the comment at
                # the printer and `nested_vmx::probe_aps`.
@@ -4108,6 +4126,13 @@ def main():
                "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
+    # Two singles rather than per-processor rows. Queued separately so
+    # the scalar loop's `scalar_cpus` width is not silently applied to
+    # a one-word member, which would read the next member as this one's
+    # cpu 1 and print a plausible number for a field that has no cpus.
+    singles = ["impossible_decodes", "refused_instruction_count"]
+    for name in singles:
+        monitor.queue(instance + off[name], 1)
     # The phase rows are [cpu][phase_count], so each processor's row has
     # to be queued separately rather than as one run of scalars.
     phase_count = gdb_lengths(args.elf, ["phase_cycles"])["phase_cycles"]
@@ -4342,6 +4367,8 @@ def main():
             monitor.queue(instance + off[name], stack_capacity)
     # guest_thread_sample is eight 64-bit fields; 32 of them per processor.
     thread_fields, thread_capacity = 8, 32
+    # `hypervisor::interrupted_context` - ten quadwords, sixteen deep.
+    interrupted_context_fields, interrupted_context_capacity = 10, 16
     for name in ("control_secondary_requested", "control_secondary_granted"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus)
@@ -4363,6 +4390,14 @@ def main():
         monitor.queue(instance + off["guest_thread_samples"],
                       args.cpus * thread_capacity * thread_fields)
         monitor.queue(instance + off["guest_thread_sample_count"], args.cpus)
+    if "interrupted_contexts" in off:
+        monitor.queue(instance + off["interrupted_contexts"],
+                      interrupted_context_capacity *
+                      interrupted_context_fields)
+        for name in ("interrupted_context_count",
+                     "interrupted_context_found",
+                     "interrupted_context_not_found"):
+            monitor.queue(instance + off[name], 1)
 
     words = monitor.run()
 
@@ -4431,6 +4466,26 @@ def main():
                  if (exits - reached) == 1 else
                  ("   <- IMPOSSIBLE: more exits than handlers left"
                   if (exits - reached) > 1 else "")))
+
+    # Both of these must read zero, and neither has ever been printed.
+    # Printed with what a non-zero value MEANS, because a bare number
+    # here is one somebody then has to go and look up in the header.
+    bad_decode = read('impossible_decodes', 0)
+    refused = read('refused_instruction_count', 0)
+    print("\nemulator: impossible_decodes "
+          f"{bad_decode if bad_decode is not None else '?'}"
+          "  refused_instruction_count "
+          f"{refused if refused is not None else '?'}")
+    if bad_decode:
+        print("    *** NON-ZERO impossible_decodes: the decoder produced "
+              "a value it could not justify, and a fabricated write was "
+              "about to happen ***")
+    if refused:
+        print("    *** NON-ZERO refused_instruction_count: guest stores "
+              "this emulator declined - the guest believes it made them "
+              "and it did not ***")
+    if not bad_decode and not refused:
+        print("    both zero - nothing fabricated, nothing refused")
 
     # The application-processor liveness probe.
     #
@@ -4889,6 +4944,65 @@ def main():
             print(f"    -> {distinct} distinct thread(s) in the last "
                   f"{len(seen)} samples"
                   f"{'  <- ONE THREAD, not scheduling' if distinct == 1 else ''}")
+
+    # What the interrupted code was *doing*, which the instruction
+    # pointer alone cannot say.
+    #
+    # Read the address columns, not the count. `Phase1Initialization`
+    # sits in `MiWalkEntireImage -> MiCopyPfnEntryEx -> MiCopyPage` while
+    # the shadow tables gain no new leaf, and that is equally consistent
+    # with a walk that is retrying one page and a walk that is
+    # progressing over pages already mapped. Registers that repeat across
+    # the ring are the first; registers that move are the second. The two
+    # want opposite work, and only this table separates them.
+    #
+    # `irql` here is `_KTRAP_FRAME.PreviousIrql` - the interrupted
+    # thread's own level. It is not `wait irql` in the table above, which
+    # is stale for a thread that is not waiting, and it is not the
+    # virtual task priority, which inside a handler is the handler's.
+    if "interrupted_contexts" in off:
+        found = read("interrupted_context_found") or 0
+        missed = read("interrupted_context_not_found") or 0
+        n = read("interrupted_context_count") or 0
+        print(f"\ninterrupted context ({found} frames found, "
+              f"{missed} samples with no frame)")
+        if not found:
+            # An empty ring is a fact about the search, not about the
+            # guest, and saying so is the whole reason both are counted.
+            print("    no hardware frame was ever located - this says "
+                  "nothing about the guest")
+        else:
+            base_a = instance + off["interrupted_contexts"]
+            stride = interrupted_context_fields * 8
+            rows = []
+            for slot in range(max(0, n - interrupted_context_capacity), n):
+                i = slot % interrupted_context_capacity
+                f = [words.get(base_a + i * stride + 8 * k, 0)
+                     for k in range(interrupted_context_fields)]
+                if not f[0]:
+                    continue
+                rows.append(f)
+            print("      rip                  irql  rcx"
+                  "                rdx                rsi"
+                  "                rdi")
+            for f in rows:
+                _, rip, _rsp, rcx, rdx, _r8, rsi, rdi, irql, _fr = f
+                where = (f"ntoskrnl+0x{rip - kbase:x}"
+                         if kbase and kbase <= rip < kbase + ksize
+                         else f"0x{rip:x}")
+                print(f"      {where:<20} {irql:>4}  0x{rcx:016x} "
+                      f"0x{rdx:016x} 0x{rsi:016x} 0x{rdi:016x}")
+            # The verdict, stated so it cannot be read the other way by
+            # accident. Distinct counts over the ring, per register.
+            for label, k in (("rcx", 3), ("rdx", 4), ("rsi", 6),
+                             ("rdi", 7)):
+                vals = [f[k] for f in rows]
+                d = len(set(vals))
+                if not vals:
+                    continue
+                verdict = ("SAME in every sample - a retry"
+                           if d == 1 else f"{d} distinct - moving")
+                print(f"      {label}: {verdict} over {len(vals)} samples")
 
     # The call stacks, which say what the guest is *doing* rather than
     # where it is.
