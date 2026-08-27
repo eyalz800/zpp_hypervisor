@@ -55693,3 +55693,71 @@ controller that was enabled; and an NVMe doorbell is **write-only**, so
 a doorbell reading zero says nothing about whether anything was
 submitted.
 
+## The passed-through NVMe is not responding to MMIO, and that explains the stall
+
+With a control, because this file records a wide `xp` over this exact
+BAR once reporting a disabled controller that was enabled. Same
+command, four adjacent device BARs, one connection:
+
+    xhci  0x7011100000   0x01000040 0x08001040   <- real
+    dev2  0x701110c000   0x01009701 0x001c003c   <- real
+    dev4  0x7011104000   0xffffffff 0xffffffff
+    NVMe  0x7011108000   0xffffffff 0xffffffff
+
+**The read mechanism works** - two neighbouring passed-through BARs
+return real register values through the same command in the same
+batch. The NVMe specifically returns all-ones, which is what a PCI read
+gives when nothing decodes.
+
+`info pci` puts it exactly there: bus 0 device 3, `15b7:5003`, BAR0
+`0x7011108000-0x701110bfff`. `readlink` on the host confirms
+`0000:02:00.0` is bound to **vfio-pci**, and QEMU's own arguments carry
+`vfio-pci,host=02:00.0`. So the device is assigned and the address is
+right.
+
+### It is a state change, not a constant
+
+This file records narrow reads of this BAR **repeated sixty times
+without one disagreement**, giving `CC = 0x00460001` and `CSTS = 1` -
+enabled and ready. The first read today gave the **same `CC`** and
+`CSTS = 0`; every read after it gave all-ones. So the controller was
+enabled, is no longer ready, and has stopped decoding.
+
+### And it is not us
+
+- **`ZPP_DIAG:BOOL=OFF`** in the cache, so `shadow_controller_registers`
+  - which re-points this exact BAR at a RAM shadow with `CC.EN` and
+  `CSTS.RDY` forced to zero - is dead code. The symbol is in the
+  binary; the path returns `controller_not_available`. Worth checking
+  because a forced `CSTS.RDY = 0` is *precisely* what the first read
+  showed, and it would have been a very plausible wrong answer.
+- **This VMM does not touch PCI configuration space at all** - no
+  `pci.cpp`, CF8/CFC in neither I/O bitmap, no ECAM handling - so we
+  cannot have disabled the device.
+- The EPT maps that range identity, read-write-execute, uncacheable
+  from the MTRRs, like every other physical address.
+
+### Why this is the whole stall
+
+The guest has the entire storage stack **and** `Ntfs.sys` resident, and
+78 modules is about what a boot loader preloads before the kernel must
+start reading from the volume itself. A controller that no longer
+responds gives exactly that: everything preloaded works, the first
+thing that needs the disk does not, `MiPrefetchControlArea` fails,
+`MiWalkEntireImage` retries the same page at 100 Hz for ever, and
+`smss.exe` waits on `WrPageOut`. Every one of those was measured
+separately and none of them had a mechanism until now.
+
+**A correction made in the same breath:** the host's `dmesg` shows
+`nvme nvme0: pci function 0000:02:00.0` and partitions enumerated,
+which I first read as "the host has the disk". It is a **ring buffer**
+- those lines are from before the device was rebound to vfio-pci. The
+current binding is what `readlink` says, not what `dmesg` remembers.
+
+### What is not yet known
+
+Whether the controller dies **because** of something the guest did
+under this VMM, or independently. The next boot answers it: read
+`CC`/`CSTS` narrowly at the start and watch when the answer becomes
+all-ones.
+
