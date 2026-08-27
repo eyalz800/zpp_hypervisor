@@ -66,10 +66,29 @@ def publics(pdb):
         m = re.search(r"S_PUB32 \[size = \d+\] `([^`]+)`", l)
         if not m or i + 1 >= len(lines):
             continue
-        a = re.search(r"addr = ([0-9A-Fa-f]{4}):(\d+)", lines[i + 1])
+        a = re.search(r"addr = (\d{4}):(\d+)", lines[i + 1])
         if not a:
             continue
-        sg, off = int(a.group(1), 16), int(a.group(2))
+        # BOTH fields are decimal. llvm-pdbutil zero-pads the segment to
+        # four digits, which reads like hex and is not: this parsed it
+        # base 16 and the two agree only for segments 1-9.
+        #
+        # Measured on the rig's own ntkrnlmp.pdb (36 sections). Under the
+        # hex reading, segment 0010 (PAGELK) resolved into 0016
+        # (TRACESUP), 0024 (INIT) into 0036 (.reloc), and every segment
+        # from 0026 up - .data, ALMOSTRO, PAGEDATA, INITDATA, CFGRO -
+        # parsed above 36 and was dropped by the range test below, so
+        # those symbols were silently absent rather than wrong.
+        #
+        # The check that settles it, and it needs no rig: every segment's
+        # largest public offset must fit inside that section. Decimal fits
+        # all 29 segments present; hex fails six outright. Independently,
+        # PsLoadedModuleList is seg 0026 off 1004496, which is 0xef53d0
+        # read decimal - the RVA scripts/guest-modules.py has hardcoded
+        # and walks successfully - and unresolvable read hex.
+        sg, off = int(a.group(1), 10), int(a.group(2))
+        # Segment len(rv) + 1 with offset 0xffffffff is the absolute /
+        # unmapped sentinel, not a section. It fails the test below.
         if 1 <= sg <= len(rv):
             syms.append((rv[sg - 1] + off, m.group(1)))
     syms.sort()

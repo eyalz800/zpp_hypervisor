@@ -55547,3 +55547,71 @@ which is a documented and deliberate interference with firmware's own
 enumeration, and `hypervisor/src/hypervisor/pci.cpp` exists. Both are
 now in scope for the first time in this investigation.
 
+## RETRACTED: the module walk was timing out, and both counts are rates
+
+`guest-modules.py` prints each module **inside** the walk loop with
+`flush=True`, and the summary line - `N modules; walk ended because:
+...` - comes after it. Every walk this session was run under `timeout
+400` or `timeout 500`, so **the process was killed mid-list and the
+summary never printed.** The absence of that line was visible in the
+output the whole time and was read as "no verdict" rather than as "no
+completion".
+
+So both numbers are **how far the walker got in the time allowed**:
+
+    36 modules, last pci.sys      (truncating walker, 300 s)
+    69 modules, last fvevol.sys   (fixed walker, 500 s)
+
+And "identical sixty seconds apart" - the observation the whole
+`pci.sys` conclusion rested on - is identical **because the walker
+covers the same ground in the same wall clock**. It is a rate, not a
+terminus. Two runs of the same program against the same machine
+agreeing on how far they got in the same time is not evidence about the
+guest at all.
+
+**Both readings are withdrawn.** The guest is not "stuck immediately
+after `pci.sys`", and it is not stuck at `fvevol.sys` either. The
+module list has said **nothing** about stuck versus slow, in either
+direction.
+
+### What survives from that entry, and it is not nothing
+
+- **The 36 was also truncation of a second kind.** The walker returned
+  `None` on a failed translation and ended the walk silently, printing
+  a count indistinguishable from a real terminus. Fixed: it now
+  distinguishes "reached the list head" from "READ FAILED walking
+  Flink", and cross-checks the last entry against the head's `Blink`.
+- **The fixed walker reaches much further**: `ndis.sys`, `NETIO.SYS`,
+  `tcpip.sys`, `wfplwfs.sys`, `fvevol.sys`, `VmsProxy.sys` - networking
+  and full-volume-encryption drivers that load long after `pci.sys`. So
+  the guest is **far past** PCI bus enumeration, which retires the
+  "stuck at PnP enumerating the NVMe" chain built on top of it.
+- **This VMM does nothing to PCI configuration space.** There is no
+  `pci.cpp`; CF8/CFC are not in either I/O bitmap - the only
+  intercepted port in the tree is the ACPI sleep control port - and no
+  MMCONFIG or ECAM handling exists anywhere. We are architecturally
+  incapable of altering what `pci.sys` reads. That closes the whole
+  question rather than answering it.
+- **`connect_all_controllers` is eliminated as a differentiator.** It
+  is gated on `ZPP_SEARCH_ALL_DEVICES`, which the rig's own boot skill
+  sets **always**, so it ran in the hundred-plus-module configuration
+  too. It also writes nothing: the loader's PCI walkers only ever write
+  the `0xcf8` selector, and `pci_config::write32`/`write8` have **no
+  callers anywhere in the repository**.
+
+### And a symbol reader that was wrong for six thousand symbols
+
+`symbolize-trace.py`'s `publics()` parsed the PDB **segment** as hex;
+`llvm-pdbutil` prints the segment and the offset **both in decimal**.
+Sections 1-9 coincide by luck. Measured against this guest's own PDB:
+
+    old (hex)  42,458 symbols resolved
+    new (dec)  48,896 symbols resolved
+      silently dropped by the old reader          6,438
+      resolved by the old reader to a WRONG address  6,326
+
+`PsLoadedModuleList` is `seg 0026 off 1004496` = `0xef53d0` decimal,
+which is exactly the address `guest-modules.py` already walks - read as
+hex it is dropped entirely. CLAUDE.md warns the offset is decimal; the
+segment is too.
+
