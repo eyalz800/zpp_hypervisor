@@ -3893,6 +3893,15 @@ def main():
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
                "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable",
                "vtl_protect_failures", "vtl_protect_last_failure",
                "vtl_protect_reps_short", "vtl_protect_reps_asked",
                "vtl_protect_reps_done", "vtl_protect_last_rip",
@@ -4140,6 +4149,15 @@ def main():
                "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
                "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
                "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable",
                "vtl_protect_failures", "vtl_protect_last_failure",
                "vtl_protect_reps_short", "vtl_protect_reps_asked",
                "vtl_protect_reps_done", "vtl_protect_last_rip",
@@ -4351,6 +4369,18 @@ def main():
                "vtl_code0_consecutive", "vtl_code0_pfn_calls"):
         monitor.queue(instance + off[_n], scalar_cpus)
     monitor.queue(instance + off["vtl_code0_ring"], scalar_cpus * 8 * 3)
+    for _n in ("vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    for _n in ("vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls"):
+        monitor.queue(instance + off[_n], scalar_cpus * 64)
+    for _n in ("vtl_code0_word_value", "vtl_code0_word_count"):
+        monitor.queue(instance + off[_n], scalar_cpus * 16)
     for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
                "vina_set_count", "vina_clear_count",
                "vina_block_physical", "vina_at_call_set",
@@ -5352,7 +5382,16 @@ def main():
             if rc:
                 pfns = [read('vtl_protect_readonly_pfn', (cpu * 8) + k) or 0
                         for k in range(min(rc, 8))]
-                print(f"          the read-only frames ({rc}):")
+                # `vtl_protect_readonly_count` increments outside the
+                # `n < 8` guard that fills the slots, so it can exceed
+                # them - and these are the FIRST eight read-only frames
+                # ever seen, not the last eight. Say so: the ring above
+                # is newest-last and these are oldest-only, and reading
+                # one as the other is the same error twice.
+                print(f"          the read-only frames: {rc:,} seen, "
+                      f"first {min(rc, 8)} recorded"
+                      + ("   <- FIRST eight, not the last eight"
+                         if rc > 8 else ""))
                 for k, pf in enumerate(pfns):
                     hp = read('vtl_protect_host_perms', (cpu * 8) + k) or 0
                     hs = read('vtl_protect_host_status', (cpu * 8) + k) or 0
@@ -5652,21 +5691,118 @@ def main():
                 nc = read('vtl_code0_pfn_calls', 0) or 0
                 cons = read('vtl_code0_consecutive', 0) or 0
                 if nc:
+                    # `lo` and `hi` are the extremes of what was ASKED
+                    # FOR, so the span is defined by what the walk
+                    # reached and nothing can fall short of it. The old
+                    # "short of the span - it stopped inside" verdict
+                    # read a DENSITY as a completion fraction; it was
+                    # retracted in 83818da and is not reinstated here,
+                    # because reading it as completion is what revived
+                    # the four-frame lead after 1e22213 killed it.
                     span = hi - lo + 1
                     print(f"  page-walk span: 0x{lo:x}..0x{hi:x} "
                           f"= {span:,} pages ({span * 4096 / 1048576:.1f} MB)"
-                          f", {nc:,} page requests, {cons:,} consecutive")
-                    print("    " + ("COVERED THE SPAN - the walk finished a "
-                                    "region, so the fault is in what should "
-                                    "happen next" if nc >= span * 0.9 else
-                                    "SHORT OF THE SPAN - it stopped inside"))
-                print("  the last code-0 blocks seen:")
-                for sl in range(8):
+                          f", {nc:,} page requests")
+                    print(f"    density {100.0 * nc / span:.1f}% of the range "
+                          f"its own extremes define - NOT a completion "
+                          f"fraction, and 0x{hi:x} was reached by definition")
+                    same = read('vtl_code0_same', 0)
+                    back = read('vtl_code0_back', 0)
+                    skip = read('vtl_code0_skip', 0)
+                    longest = read('vtl_code0_run_longest', 0)
+                    if None in (same, back, skip, longest):
+                        print(f"    {cons:,} '+1' steps - a COUNT of steps, "
+                              f"not a run length; rebuild for the partition")
+                    else:
+                        total = cons + same + back + skip
+                        print(f"    steps: {cons:,} +1, {same:,} repeat, "
+                              f"{back:,} backward, {skip:,} forward-gap")
+                        print(f"      longest run {longest + 1:,} pages "
+                              f"(~{nc / max(1, back + skip + same + 1):.1f} "
+                              f"pages per run over "
+                              f"{back + skip + same + 1:,} runs)")
+                        # The identity is the reader checking its own
+                        # arithmetic - every transition is exactly one of
+                        # the four. A partition that does not add up is a
+                        # miscount, and this is the only class of error
+                        # this file has ever caught without a second
+                        # instrument.
+                        print("      partition " + (
+                            f"HOLDS ({total:,} == {nc - 1:,})"
+                            if total == nc - 1 else
+                            f"BROKEN: {total:,} != {nc - 1:,} - do not "
+                            f"believe any figure on this line"))
+                        if back:
+                            print("      backward steps present: the walk "
+                                  "RESTARTS or revisits; it is not one "
+                                  "monotonic pass")
+                # Newest LAST. Reading these eight slots in raw order is
+                # exactly what produced the four-frame lead, and 1e22213
+                # retracted that lead for this reason - but the printer
+                # was never fixed, so 0c20f16 revived it from the same
+                # unrotated buffer. See hypervisor.h `vtl_code0_wide`.
+                print(f"  the last code-0 blocks seen (oldest first, "
+                      f"newest LAST; ring position {c0 % 8}):")
+                for n in range(8):
+                    sl = (c0 + n) % 8
                     w = [read('vtl_code0_ring', (sl * 3) + k) or 0
                          for k in range(3)]
                     if any(w):
+                        tag = "   <- NEWEST" if n == 7 else ""
                         print(f"    +0x00 0x{w[0]:016x}  "
-                              f"+0x08 0x{w[1]:016x}  +0x10 0x{w[2]:016x}")
+                              f"+0x08 0x{w[1]:016x}  +0x10 0x{w[2]:016x}"
+                              f"{tag}")
+                # The population the 0x01010002 filter selects from. That
+                # constant appears nowhere in ntoskrnl.exe, and this
+                # file's own later reading makes bytes 2-3 a batch COUNT
+                # - under which the filter selects one batch size and the
+                # span above is that batch size's span alone.
+                wv = [read('vtl_code0_word_value', k) for k in range(16)]
+                wc = [read('vtl_code0_word_count', k) for k in range(16)]
+                if any(v is not None for v in wc) and any(wc):
+                    print("  request word, low half, as a population:")
+                    for v, c in sorted(zip(wv, wc),
+                                       key=lambda p: -(p[1] or 0)):
+                        if c:
+                            print(f"    0x{v:08x}  {c:9,d}  "
+                                  f"{100.0 * c / c0:5.1f}%"
+                                  + ("   <- what the PFN filter selects"
+                                     if v == 0x01010002 else ""))
+                    oth = read('vtl_code0_word_other', 0) or 0
+                    if oth:
+                        print(f"    (beyond sixteen distinct) {oth:,}")
+                # Progress against wall-clock time. One dump, not two.
+                ec = read('vtl_code0_epoch_count', 0)
+                if ec:
+                    print(f"  the walk's RATE over time ({ec:,} epochs, "
+                          f"newest last) - a flat pfn column beside a "
+                          f"climbing calls column is a walk that STOPPED:")
+                    n_slots = min(ec, 64)
+                    prev = None
+                    for n in range(n_slots):
+                        sl = (ec - n_slots + n) % 64
+                        t = read('vtl_code0_epoch_tsc', sl) or 0
+                        pf = read('vtl_code0_epoch_pfn', sl) or 0
+                        c0e = read('vtl_code0_epoch_code0', sl) or 0
+                        ca = read('vtl_code0_epoch_calls', sl) or 0
+                        d = "" if prev is None else (
+                            f"  (+{pf - prev[0]:,} pfn, "
+                            f"+{c0e - prev[1]:,} code0, "
+                            f"+{ca - prev[2]:,} calls)")
+                        print(f"    tsc {t:>18,}  pfn {pf:>8,}  "
+                              f"code0 {c0e:>8,}  calls {ca:>8,}{d}")
+                        prev = (pf, c0e, ca)
+                # How many calls the census never saw. Every total above
+                # is a lower bound until these read zero.
+                bf = read('vtl_call_block_below_floor', 0)
+                ut = read('vtl_call_block_untranslated', 0)
+                ur = read('vtl_call_block_unreadable', 0)
+                if None not in (bf, ut, ur):
+                    print(f"  trust-level calls the census MISSED: "
+                          f"{bf:,} below the kernel floor, {ut:,} "
+                          f"untranslated, {ur:,} unreadable"
+                          + ("   <- census complete" if not (bf or ut or ur)
+                             else "   <- every total above is a LOWER BOUND"))
         signed = status - (1 << 32) if status & 0x80000000 else status
         # The priority each trust-level call is made at. Class 13
         # masks both the clock vector 0xd1 and the deferred-call vector

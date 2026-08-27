@@ -54248,3 +54248,87 @@ signature of a single refused page being re-asked, so "we deny a write
 and it retries the same page" does not fit as stated. The span is
 short by ~26,000 pages, which is a lot to be explained by two.
 
+## RETRACTED: the walk does not stop at 0x11aac9, and this file had already said so
+
+`0c20f16` reported that the secure kernel's page walk stops at PFN
+`0x11aac9`/`0x11aaca`, and that two independent instruments agreeing on
+one address was a first. **Every load-bearing number in it is wrong,
+and two of them had already been retracted in this file before that
+run re-quoted them.**
+
+### The ring was printed in raw order
+
+`vtl_code0_ring` is **circular, eight slots**, and the reader printed
+`for sl in range(8)` under the label "the last code-0 blocks seen".
+With `vtl_code0_count = 21,162` and `21162 % 8 = 2`, **the newest entry
+is slot 1** - so the two frames quoted as "the last two requests" were
+mid-window, and the walk passed straight through them.
+
+`1e22213`, five days earlier, withdrew this identical four-frame lead
+for this identical reason, and `hypervisor.h:14138` documents the
+convention while **naming this error**: "reading the narrow ring as
+though slot 0 were oldest is exactly what produced the four-frame
+lead." It produced it again. **The retraction lived in prose, and prose
+does not run.**
+
+### "SHORT OF THE SPAN" is a category error
+
+`lo` and `hi` are the **minimum and maximum PFNs asked for**. The span
+is therefore defined by what the walk reached, and `hi = 0x122620` is
+proof the guest asked about `0x122620`. **Nothing can fall short of a
+bound it set by reaching it.** The test was a *density* - 7,207 of
+33,182, 21.7% - printed as a completion fraction. `83818da`'s own entry
+already says it "assumes the wrong shape and should not be believed".
+
+### "6,295 consecutive" is not a run length
+
+It counts `pfn == last + 1` steps. 7,206 transitions with 911 breaks is
+**912 runs averaging 7.9 pages**, and the counter cannot tell that from
+one run of 6,296.
+
+### "14.5 VtlReturns a second" is not a VtlReturn rate
+
+`seen` is `last_hypercall_count`, incremented for **every vmcall
+whatever its code**. 872 hypercalls of an unknown mix in 60 s. The
+per-code census exists and was not used.
+
+### And the "crux" was not a tension at all
+
+`differs` compares each code-0 call against **only the immediately
+previous one**, so it detects adjacent duplicates, not repetition: a
+strictly alternating stream scores 100% "differs" while being perfectly
+periodic. A `for (pfn in list) hypercall(pfn)` loop at fixed call depth
+produces distinct parameters *and* a byte-identical stack frame at the
+same time. There was nothing to reconcile.
+
+### What survives, and it is worth more than what did not
+
+- **The read-only answer is Hyper-V's, not ours**, and now provably per
+  leaf rather than in aggregate. `compose_ept` is a bitwise AND and
+  `normalised` only drops, so composed permissions are a subset of the
+  guest's leaf by leaf; the count of leaves carrying the write bit is
+  monotone under AND, and guest and composed both total **1,412,946**.
+  Equal totals under a monotone operation means **no leaf lost the
+  write bit**. Our tables read the frames in question as `rwx`.
+- **The walk is bounded work that completes and stops - it does not
+  restart.** Two runs on different boots: 7,209 requests / 6,297 steps
+  and 7,207 / 6,295. Reproducible to two. A restarting loop's total
+  would grow with observation time.
+- **The subcode reading is an assumption, not a decode.** `0x01010002`
+  as "a PFN request" rests on a magnitude argument, and the constant
+  appears **nowhere in `ntoskrnl.exe`**. Under this file's own later
+  reading - byte 0 the operation, bytes 2-3 a count - the filter
+  matches one batch size and **discards 13,955 of 21,162 code-0
+  calls**, so the reported span is one batch size's span alone.
+- **The census has no completeness bound.** Three silent guards, none
+  counted, in a function that counts exactly this for the block eighty
+  lines above.
+- `vtl_protect_readonly_pfn[0..7]` are the **first** eight read-only
+  frames ever seen, not the last, while the ring beside them is
+  newest-last.
+
+The instruments are fixed rather than the machine, and the ring
+rotation now has a **test with a measured negative control**:
+reintroducing `for sl in range(8)` fails it. That is the difference
+between a retraction that holds and one that gets re-quoted.
+

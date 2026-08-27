@@ -879,5 +879,196 @@ class ApLivenessProbeReadings(unittest.TestCase):
             "from the constant the code branches on")
 
 
+class Code0RingIsRotated(unittest.TestCase):
+    """The ring that revived a retracted lead, and the check that stops it.
+
+    `vtl_code0_ring` is a circular buffer of eight with the newest entry
+    at `(count - 1) % 8`. `1e22213` (2026-08-22) retracted the
+    "four-frame lead" - `0x11aac9`..`0x11aacc` - precisely because the
+    reader printed slots 0..7 in raw order, so frames in the MIDDLE of
+    the window were read as the last ones the walk made.
+
+    **The printer was never fixed.** Five days later `0c20f16` read the
+    same unrotated buffer and reported "the walk stops at two known
+    frames", reviving the lead its own file had killed. That is the
+    failure this class exists to make impossible: the retraction lived
+    in prose, and prose does not run.
+
+    `hypervisor.h` states the convention beside `vtl_code0_wide` -
+    "newest at `(count - 1) % 32`. That ordering is not decoration:
+    reading the narrow ring as though slot 0 were oldest is exactly what
+    produced the four-frame lead".
+    """
+
+    # The code-0 count from the dump in `0c20f16`. Kept as the literal
+    # from that run so the negative control below is a measurement of
+    # the real failure rather than of an invented one.
+    REVIVING_COUNT = 21162
+
+    def test_the_rotation_puts_the_newest_entry_last(self):
+        for count in (0, 1, 7, 8, 9, self.REVIVING_COUNT):
+            order = [(count + n) % 8 for n in range(8)]
+            self.assertEqual(
+                (count - 1) % 8, order[-1],
+                "the reader's rotation does not print the newest entry "
+                "last for count {}".format(count))
+            self.assertEqual(
+                sorted(order), list(range(8)),
+                "the rotation does not visit every slot exactly once "
+                "for count {}".format(count))
+
+    def test_the_unrotated_reader_fails_this_check(self):
+        """NEGATIVE CONTROL - measured against the run that misled.
+
+        A check that cannot fail is not a check. This asserts that the
+        OLD expression - `for sl in range(8)` - is actually caught, and
+        it is: at the count `0c20f16` dumped, the newest entry is slot
+        1 while raw order prints slot 7 last. The two frames reported as
+        "where the walk stops" were slots 1 and 2, six positions from
+        the end of the window.
+        """
+        raw = list(range(8))
+        newest = (self.REVIVING_COUNT - 1) % 8
+        self.assertEqual(1, newest)
+        self.assertEqual(7, raw[-1])
+        self.assertNotEqual(
+            newest, raw[-1],
+            "the unrotated reader would pass this check, so the check "
+            "has no power to detect the defect it was written for")
+
+    def test_the_reader_rotates_the_ring(self):
+        source = read(DUMP_STATE)
+        self.assertTrue(
+            "sl = (c0 + n) % 8" in source,
+            "rig-dump-state.py no longer rotates `vtl_code0_ring`, so "
+            "it prints slots in raw order under a 'last ... seen' "
+            "label - the exact defect 1e22213 retracted a lead for")
+        self.assertFalse(
+            "for sl in range(8):" in source,
+            "rig-dump-state.py walks the code-0 ring in raw slot order "
+            "again")
+
+    def test_the_retracted_span_verdict_is_not_reinstated(self):
+        # `83818da` measured the walk as ~900 runs of ~8 pages and
+        # recorded that the verdict "assumes the wrong shape and should
+        # not be believed". `min`/`max` are the extremes of what was
+        # asked for, so nothing can fall short of a bound it set by
+        # reaching it.
+        source = read(DUMP_STATE)
+        self.assertFalse(
+            "SHORT OF THE SPAN" in source,
+            "rig-dump-state.py prints the span verdict retracted in "
+            "83818da - it reads a density as a completion fraction")
+        self.assertIn(
+            "NOT a completion", source,
+            "rig-dump-state.py no longer says what the span figure is "
+            "not, so the next reader re-derives the retracted reading")
+
+
+class WalkShapeInstrument(unittest.TestCase):
+    """The counters that separate one long run from nine hundred short.
+
+    Every member here is written by the VMM and has to be in both reader
+    lists or it resolves an offset, is never fetched, and prints as a
+    plausible zero - the failure `FrozenExitCountReadings` and
+    `LivenessProbeMembers` above both exist for.
+    """
+
+    MEMBERS = ["vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable"]
+
+    def test_header_declares_every_member(self):
+        source = read(HEADER)
+        missing = [name for name in self.MEMBERS
+                   if not re.search(
+                       r"std::uint64_t\s+" + re.escape(name)
+                       + r"\[max_cpus\]", source)]
+        self.assertEqual(
+            [], missing,
+            "hypervisor.h no longer declares as a per-cpu array: "
+            + ", ".join(missing))
+
+    def test_every_member_is_in_the_offsets_list(self):
+        source = read(DUMP_STATE)
+        start = source.index("    members = [")
+        members = source[start:source.index(
+            "off = gdb_offsets(args.elf, members)", start)]
+        missing = [name for name in self.MEMBERS
+                   if '"{}"'.format(name) not in members]
+        self.assertEqual(
+            [], missing,
+            "rig-dump-state.py's `members` list no longer names, so "
+            "`gdb_offsets` never resolves an offset for: "
+            + ", ".join(missing))
+
+    def test_every_member_is_queued(self):
+        # Named in the offsets list and never queued is the silent half:
+        # the offset resolves, the word is never fetched, and it reads
+        # as zero. Each name has to appear at least twice.
+        source = read(DUMP_STATE)
+        missing = [name for name in self.MEMBERS
+                   if source.count('"{}"'.format(name)) < 2]
+        self.assertEqual(
+            [], missing,
+            "rig-dump-state.py names these in one list only, so they "
+            "resolve an offset and are never fetched: "
+            + ", ".join(missing))
+
+    def test_the_epoch_ring_capacity_agrees_with_the_header(self):
+        # The reader queues a fixed 64 words per processor. A capacity
+        # changed in the header and not here reads into its neighbour -
+        # ecc4b70's bug exactly, and the reason this file exists.
+        self.assertEqual(
+            64, cxx_constant(read(HEADER), "vtl_code0_epoch_slots"),
+            "hypervisor.h's `vtl_code0_epoch_slots` no longer matches "
+            "the 64 words per processor rig-dump-state.py queues")
+        self.assertEqual(
+            16, cxx_constant(read(HEADER), "vtl_code0_word_slots"),
+            "hypervisor.h's `vtl_code0_word_slots` no longer matches "
+            "the 16 words per processor rig-dump-state.py queues")
+        source = read(DUMP_STATE)
+        self.assertIn("scalar_cpus * 64", source)
+        self.assertIn("scalar_cpus * 16", source)
+
+    def test_the_reader_checks_its_own_partition(self):
+        # The identity `consecutive + same + back + skip == calls - 1`
+        # is the only self-check in this family of counters. Twelve
+        # instruments in this investigation measured the wrong thing and
+        # every one was caught by a second reading disagreeing.
+        source = read(DUMP_STATE)
+        self.assertIn(
+            "partition ", source,
+            "rig-dump-state.py no longer checks that the step "
+            "partition adds up to the request count")
+        self.assertIn(
+            "LOWER BOUND", source,
+            "rig-dump-state.py no longer says that a census with "
+            "missed calls is a lower bound")
+
+    def test_the_partition_identity_holds_by_construction(self):
+        # The C++ increments exactly one of the four per transition.
+        source = read(os.path.join(
+            ROOT, "hypervisor", "src", "hypervisor", "nested_entry.cpp"))
+        start = source.index("vtl_code0_run_current[cpu]")
+        window = source[start - 2000:start + 2000]
+        # The declarations wrap at 75 columns, so `+= 1` can sit on the
+        # next line. Matching the literal would make this a formatting
+        # test rather than a partition test.
+        for name in ("vtl_code0_consecutive", "vtl_code0_same",
+                     "vtl_code0_back", "vtl_code0_skip"):
+            self.assertTrue(
+                re.search(re.escape(name) + r"\[cpu\]\s*\+= 1", window),
+                "nested_entry.cpp no longer increments {} on the step "
+                "partition, so the reader's identity cannot "
+                "hold".format(name))
+
+
 if __name__ == "__main__":
     unittest.main()

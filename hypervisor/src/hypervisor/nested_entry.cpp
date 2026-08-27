@@ -10134,6 +10134,36 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 this->last_hypercall_r8[cpu] = context.r8;
                 this->last_hypercall_tsc[cpu] = arch::x86_64::rdtsc();
                 this->last_hypercall_count[cpu] += 1;
+
+                // And the walk's progress beside it, on a wall-clock
+                // interval. See `vtl_code0_epoch_tsc`: this is the
+                // "rate over time" reading `BACKLOG.md` names as the one
+                // that separates a walk which finished from a walk which
+                // was cut off, and it is taken **here**, on the hypercall
+                // path, precisely so that a walk which has stopped keeps
+                // being sampled. Sampling it on the walk would stop the
+                // moment the answer became available.
+                {
+                    auto now = this->last_hypercall_tsc[cpu];
+                    auto since = now - this->vtl_code0_epoch_last[cpu];
+
+                    if ((0 == this->vtl_code0_epoch_last[cpu]) ||
+                        (since >= vtl_code0_epoch_ticks)) {
+                        auto slot = this->vtl_code0_epoch_count[cpu] %
+                                    vtl_code0_epoch_slots;
+
+                        this->vtl_code0_epoch_tsc[cpu][slot] = now;
+                        this->vtl_code0_epoch_pfn[cpu][slot] =
+                            this->vtl_code0_pfn_calls[cpu];
+                        this->vtl_code0_epoch_code0[cpu][slot] =
+                            this->vtl_code0_count[cpu];
+                        this->vtl_code0_epoch_calls[cpu][slot] =
+                            this->last_hypercall_count[cpu];
+
+                        this->vtl_code0_epoch_count[cpu] += 1;
+                        this->vtl_code0_epoch_last[cpu] = now;
+                    }
+                }
             }
 
             // Censused before the decode, so a code with no case here is
@@ -11028,6 +11058,43 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                 this->vtl_code0_previous[cpu][2] =
                                     this->vtl_call_block[cpu][2];
 
+                                // Every distinct low half, with its
+                                // count. See `vtl_code0_word_value`: the
+                                // `0x01010002` filter below is an
+                                // assumption about what that word means,
+                                // and this is the population that tests
+                                // it. A filter cannot report that it is
+                                // aimed at the wrong field.
+                                {
+                                    auto low = word & 0xffffffff;
+                                    auto placed = false;
+
+                                    for (std::size_t s{};
+                                         s < vtl_code0_word_slots;
+                                         ++s) {
+                                        if (0 ==
+                                            this->vtl_code0_word_count
+                                                [cpu][s]) {
+                                            this->vtl_code0_word_value
+                                                [cpu][s] = low;
+                                        }
+
+                                        if (low ==
+                                            this->vtl_code0_word_value
+                                                [cpu][s]) {
+                                            this->vtl_code0_word_count
+                                                [cpu][s] += 1;
+                                            placed = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (!placed) {
+                                        this->vtl_code0_word_other[cpu]
+                                            += 1;
+                                    }
+                                }
+
                                 // The span it covered, over the one
                                 // subcode that carries a page frame
                                 // number. See `vtl_code0_min_pfn`: the
@@ -11052,10 +11119,43 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                                     // Against its own previous value,
                                     // captured before it is overwritten.
-                                    if ((0 != this->vtl_code0_pfn_calls[cpu]) &&
-                                        (pfn ==
-                                         (this->vtl_code0_last_pfn[cpu] + 1))) {
-                                        this->vtl_code0_consecutive[cpu] += 1;
+                                    //
+                                    // Partitioned rather than merely
+                                    // counted - see
+                                    // `vtl_code0_run_current`. A count
+                                    // of `+1` steps cannot tell one run
+                                    // of six thousand pages from nine
+                                    // hundred runs of eight, and this
+                                    // investigation published the second
+                                    // as though it were the first.
+                                    if (0 != this->vtl_code0_pfn_calls[cpu]) {
+                                        auto last =
+                                            this->vtl_code0_last_pfn[cpu];
+
+                                        if (pfn == (last + 1)) {
+                                            this->vtl_code0_consecutive[cpu]
+                                                += 1;
+                                            this->vtl_code0_run_current[cpu]
+                                                += 1;
+                                        } else {
+                                            if (pfn == last) {
+                                                this->vtl_code0_same[cpu] += 1;
+                                            } else if (pfn < last) {
+                                                this->vtl_code0_back[cpu] += 1;
+                                            } else {
+                                                this->vtl_code0_skip[cpu] += 1;
+                                            }
+
+                                            this->vtl_code0_run_current[cpu] =
+                                                0;
+                                        }
+
+                                        if (this->vtl_code0_run_current[cpu] >
+                                            this->vtl_code0_run_longest[cpu]) {
+                                            this->vtl_code0_run_longest[cpu] =
+                                                this->vtl_code0_run_current
+                                                    [cpu];
+                                        }
                                     }
 
                                     this->vtl_code0_last_pfn[cpu] = pfn;
@@ -11242,8 +11342,20 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                                 seen = seen + 1;
                             }
+                        } else {
+                            // Counted, not dropped. See
+                            // `vtl_call_block_unreadable`: without these
+                            // three, "no such calls" and "thousands of
+                            // such calls dropped" are the same reading,
+                            // and every total above is a lower bound of
+                            // unknown tightness.
+                            this->vtl_call_block_unreadable[cpu] += 1;
                         }
+                    } else {
+                        this->vtl_call_block_untranslated[cpu] += 1;
                     }
+                } else {
+                    this->vtl_call_block_below_floor[cpu] += 1;
                 }
             }
         }

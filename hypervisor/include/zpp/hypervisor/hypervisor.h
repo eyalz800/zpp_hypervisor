@@ -14152,10 +14152,19 @@ private:
      * stops because a page failed and a walk that stops because it reached
      * the end of what it was given look identical in a ring.
      *
-     * If (max - min + 1) equals the request count and the steps are
-     * consecutive, the walk covered a contiguous region completely and the
-     * fault is in whatever should have happened *next*. If the count falls
-     * short of the span, it stopped somewhere inside.
+     * **The "short of the span means it stopped inside" reading of these
+     * is withdrawn - it assumes a shape this walk does not have.** `min`
+     * and `max` are the extremes of what was *asked for*, so the span is
+     * defined by what the walk reached: `max` being 0x122620 is proof the
+     * guest asked about 0x122620. Nothing can fall short of a bound it
+     * established by reaching it. `count / span` is a **density**, and
+     * this walk is sparse - measured at 87% `+1` steps in roughly nine
+     * hundred runs of eight pages, scattered rather than contiguous. A
+     * density read as a completion fraction is how the four-frame lead
+     * was revived after being retracted.
+     *
+     * Use `vtl_code0_run_longest` for the shape and
+     * `vtl_code0_epoch_pfn` for whether it is still going.
      */
     std::uint64_t vtl_code0_min_pfn[max_cpus]{};
     std::uint64_t vtl_code0_max_pfn[max_cpus]{};
@@ -14170,6 +14179,105 @@ private:
      * on a walk the ring plainly shows stepping by one.
      */
     std::uint64_t vtl_code0_last_pfn[max_cpus]{};
+
+    /**
+     * How the walk's steps are shaped, partitioned rather than counted.
+     *
+     * `vtl_code0_consecutive` counts `+1` steps and nothing else, so it
+     * cannot separate one run of six thousand pages from nine hundred
+     * runs of eight - and this file has published the second reading as
+     * though it were the first. These make the partition explicit: every
+     * transition is exactly one of consecutive, `same`, `back` or `skip`,
+     * so
+     *
+     *     consecutive + same + back + skip == pfn_calls - 1
+     *
+     * is an identity the reader can check against itself. A counter that
+     * cannot fail an arithmetic check is the kind this file has been
+     * misled by twelve times.
+     *
+     * `run_longest` is what "consecutive" was always *read* as meaning.
+     * Both run figures count **steps**, so the longest run spans
+     * `run_longest + 1` page frames.
+     */
+    std::uint64_t vtl_code0_run_current[max_cpus]{};
+    std::uint64_t vtl_code0_run_longest[max_cpus]{};
+    std::uint64_t vtl_code0_same[max_cpus]{};
+    std::uint64_t vtl_code0_back[max_cpus]{};
+    std::uint64_t vtl_code0_skip[max_cpus]{};
+
+    /**
+     * The walk's progress against wall-clock time, so **one** dump
+     * answers what two dumps were needed for.
+     *
+     * `BACKLOG.md` names the deciding measurement and could not take it:
+     * "the walk's *rate* over time. A walk that finished stops cleanly at
+     * a boundary; a walk that is blocked stops mid-run with more of the
+     * same to do." Every other counter here is cumulative, and a
+     * cumulative total read once cannot separate a walk that stopped from
+     * a walk still going - which is the entire open question.
+     *
+     * Sampled on the **hypercall** path rather than the walk's, and that
+     * choice is the instrument: hypercalls continue at about fifteen a
+     * second while the guest is stalled, so a walk that has stopped
+     * leaves a flat `pfn` tail beside a climbing `calls` column. Sampling
+     * on the walk itself would stop sampling at exactly the moment the
+     * answer arrives, which is the failure mode of every ring above.
+     *
+     * Newest at `(count - 1) % vtl_code0_epoch_slots`.
+     */
+    static constexpr std::size_t vtl_code0_epoch_slots = 64;
+    static constexpr std::uint64_t vtl_code0_epoch_ticks = 1ull << 34;
+
+    std::uint64_t vtl_code0_epoch_tsc[max_cpus][vtl_code0_epoch_slots]{};
+    std::uint64_t vtl_code0_epoch_pfn[max_cpus][vtl_code0_epoch_slots]{};
+    std::uint64_t
+        vtl_code0_epoch_code0[max_cpus][vtl_code0_epoch_slots]{};
+    std::uint64_t
+        vtl_code0_epoch_calls[max_cpus][vtl_code0_epoch_slots]{};
+    std::uint64_t vtl_code0_epoch_count[max_cpus]{};
+    std::uint64_t vtl_code0_epoch_last[max_cpus]{};
+
+    /**
+     * Every distinct low half of the request word, with its count.
+     *
+     * The walk instrument filters on `(word & 0xffffffff) == 0x01010002`
+     * and calls it a subcode. **That is an assumption, not a decode**:
+     * the constant appears nowhere in `ntoskrnl.exe`, as an immediate or
+     * as data, and this file's own later reading of the neighbouring
+     * values - `0x00fe0002`, `0x00020002`, `0x00d30002` - is that byte 0
+     * is the operation and bytes 2-3 are a **count**, which would make
+     * `0x01010002` operation `2` with a batch of 257 rather than a
+     * request type at all.
+     *
+     * Under that reading the filter selects one batch size and discards
+     * every other batch of the same operation, so the span it reports is
+     * the span of that batch size alone - and "short of the span" would
+     * be an artefact of the filter. Sixteen distinct values with their
+     * counts settles which reading is right by showing the population
+     * instead of arguing from one member of it.
+     */
+    static constexpr std::size_t vtl_code0_word_slots = 16;
+
+    std::uint64_t vtl_code0_word_value[max_cpus][vtl_code0_word_slots]{};
+    std::uint64_t vtl_code0_word_count[max_cpus][vtl_code0_word_slots]{};
+    std::uint64_t vtl_code0_word_other[max_cpus]{};
+
+    /**
+     * The trust-level calls the census never saw, by reason.
+     *
+     * A call whose block pointer is below the kernel floor, or does not
+     * translate, or does not read, is silently absent from every counter
+     * in this group - so "no such calls" and "thousands of such calls
+     * dropped" read identically, and every total here is a lower bound of
+     * unknown tightness. `vina_at_call_unread` counts exactly this for
+     * the VINA block eighty lines above it in the same function, so the
+     * omission was inconsistent with the code beside it rather than a
+     * considered choice.
+     */
+    std::uint64_t vtl_call_block_below_floor[max_cpus]{};
+    std::uint64_t vtl_call_block_untranslated[max_cpus]{};
+    std::uint64_t vtl_call_block_unreadable[max_cpus]{};
 
     /**
      * Every status `HvCallModifyVtlProtectionMask` has ever returned, and
