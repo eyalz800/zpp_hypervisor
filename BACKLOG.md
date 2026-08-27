@@ -56965,3 +56965,32 @@ into it, so **what the secure kernel returns, and why the caller treats
 it as not-done, is directly observable** - the same before/after window
 `vtl_protect_after_stack` already takes for the protection call, pointed
 at this block instead.
+
+### Two qualifiers on the entry above, from the same dump
+
+**VTL1 is not returning immediately.** The duration histogram's smallest
+populated bucket is 526 us, and the bulk is at 1,052 us - including the
+11,238 returns with VINA **clear**, which are turns VTL1 ended
+voluntarily rather than being kicked out of. So the reading "it cannot
+resume, so it bounces straight back" is refuted: it runs half a
+millisecond to two milliseconds of real work on every entry.
+
+**And the static block is weaker evidence than it looks.**
+`HvlSwitchToVsmVtl1` marshals the request into *registers* and writes
+back afterwards, which `vtl_reentry_ring`'s own comment already records
+- the memory copy is current at the call and stale at the return. So
+"the block never changes" says VTL0 re-marshals the same input, not that
+VTL1 answered nothing. The answer comes back in registers and is not
+visible at that address.
+
+What survives both qualifiers is the part that is still a fact: the
+**input** is byte-identical 3,778 times, charged mostly to
+`VslFinishStartSecureProcessor`, at about 55 a second, while nothing
+downstream advances. The caller is re-asking; whether the answer is
+"not done" or is being lost is not yet distinguished.
+
+**The instrument that would distinguish them does not exist yet.** It is
+the return registers at `HvCallVtlReturn` for these re-entries -
+`vtl_protect_after_stack` does the equivalent for the protection call
+and there is no counterpart here. That is the next thing to build, and
+it is a code change rather than another read.
