@@ -56254,3 +56254,50 @@ the guest is actually doing at the end of a `nested=1` run is
 **unmeasured**, and the cheapest instrument for it - asking what is on
 the screen - was never used in that configuration.
 
+## The graphics subsystem started and no display driver ever bound
+
+From module lists already captured, no rig needed:
+
+    nested run          dxgkrnl.sys  win32k.sys   BasicDisplay.sys ABSENT
+                                                  BasicRender.sys  ABSENT
+    the further run     dxgkrnl.sys               BasicDisplay.sys present
+                                                  BasicRender.sys  present
+
+**`win32k.sys` and `dxgkrnl.sys` are loaded and no display miniport
+is** - not the vendor driver, and not even `BasicDisplay.sys`, which is
+Microsoft's fallback and loads when nothing better is available. The
+Win32 and DirectX kernels came up; the thing that actually puts pixels
+on a device did not.
+
+### Why this may be the whole remaining question
+
+The goal is stated as *reaching the login screen*, and on this rig the
+only way to observe that is the **passed-through GPU** - QEMU answers
+`screendump` with "There is no console to take a screendump from", so
+the user's eyes are the instrument. If no display miniport is bound,
+**a login screen can be reached and be invisible**, and every
+observation this session has made would look exactly the same.
+
+That reframes what is left. It is no longer obviously "the guest does
+not get there"; it may be "the guest gets there and nothing draws it".
+Those want opposite work - the first is a boot problem, the second is a
+device-binding problem on a passed-through GPU.
+
+### Stated as a comparison, not a control
+
+The two runs are **different configurations**, and this file has been
+burned by exactly that before. What the comparison supports is that a
+display miniport *can* bind on this hardware, and did not in the nested
+run. It does not establish why, and it does not establish that the
+nested run reached a login screen.
+
+### The two cheapest things on the next boot, in this order
+
+1. **Ask what is on the screen.** It was asked for the `nested=0` run -
+   answer: "the desktop is shown" - and **never for `nested=1`**. It
+   costs nothing and it is the goal's own success condition.
+2. **Walk the device nodes** (`scripts/guest-devnodes.py`) and look for
+   the display device's `State`: **773** no resources, **774** start
+   never issued, **775** start in flight never completed, **778**
+   failure above it. That names whether the GPU was enumerated at all.
+
