@@ -3963,6 +3963,16 @@ DELTA_PER_CPU_COUNTERS = [
     ("l2_working_trace_count", "working-ring slots written"),
     ("events_requeued", "events requeued"),
     ("events_deferred", "events deferred"),
+    # A monotonic per-processor count and it was readable only
+    # cumulatively, which for this member is the wrong question: it is
+    # the count of interrupts the second-level guest was owed and that
+    # `reflect_l2_exit` destroyed, so what matters is whether it is
+    # still happening, not whether it ever happened during a boot. The
+    # guest's clock arrives as vector 0xd1 through the same path, so a
+    # non-zero rate here is a clock interrupt going missing - which
+    # leaves the message sitting in the SynIC slot with nothing to
+    # announce it.
+    ("pending_event_lost", "events owed to L2 and destroyed"),
     ("nested_vmfail_count", "VMfails answered upward"),
     ("nested_entry_refusals", "second-level entries refused"),
     ("l2_start_up_waits", "parked at wait-for-SIPI"),
@@ -4075,6 +4085,48 @@ DELTA_CLOCK = "handler_last_tsc"
 # 8,687 then 8,258 then 8,014 mid-poll for exactly that reason.
 DELTA_FINGERPRINT = "handler_first_tsc"
 
+# A *targeted slice* of the synthetic-MSR census, not the whole census.
+#
+# The whole census is 320 entries per processor and reading it would
+# widen the read window by about a hundred monitor round trips - which
+# is exactly the reason `DELTA_REFUSALS` gives for leaving it out, and
+# that reason still stands.  Five indices per processor is ten
+# quadwords, under two round trips, and it answers the one question
+# counting the whole range would.
+#
+# Why these five.  The synthetic interrupt message page holds sixteen
+# 256-byte slots and the guest's HAL timer posts to SINT3, so slot 3 at
+# page offset 0x300 is where an expiry message lands.  Draining it is a
+# plain store from `HalpHvTimerAcknowledgeInterrupt`, which takes no
+# exit at all and so cannot be counted from in here; what *can* be
+# counted is the handshake around it:
+#
+#   0x84 EOM            written by the guest only when the message it
+#                       drained had MessagePending set - that is, only
+#                       when the controller had already tried to deliver
+#                       into an occupied slot and been refused.  **This
+#                       is the backpressure rate, and it is the whole
+#                       point of this slice.**
+#   0xb1 STIMER0_COUNT  one write per arm; with auto-enable set in
+#                       CONFIG this is what re-arms the one-shot, so its
+#                       rate is the guest's own tick rate as the guest
+#                       sees it
+#   0xb0 STIMER0_CONFIG the rare re-arm that changes mode rather than
+#                       just the deadline
+#   0x70 EOI, 0x83 SIMP the denominator and the page identity
+#
+# EOM/s divided by STIMER0_COUNT/s is the fraction of ticks that hit
+# backpressure, measured as a rate over a window.  A cumulative
+# percentage of "all synthetic MSR writes" is not that quantity and has
+# already been read as though it were.
+DELTA_SYNTHETIC_SLOTS = [
+    (0x70, "HV_X64_MSR_EOI written"),
+    (0x83, "HV_X64_MSR_SIMP written (message page named)"),
+    (0x84, "HV_X64_MSR_EOM written (SynIC backpressure acknowledged)"),
+    (0xb0, "HV_X64_MSR_STIMER0_CONFIG written"),
+    (0xb1, "HV_X64_MSR_STIMER0_COUNT written (one-shot re-armed)"),
+]
+
 # What this mode refuses to subtract, and why.  Grouped by *what kind of
 # thing it is*, because the refusal generalises to members added later
 # and a list of names would not.
@@ -4121,12 +4173,19 @@ DELTA_REFUSALS = [
      "grew says a sample landed there, and the samples are not counted"),
     ("event histograms not sampled here",
      "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
-     "counts, vtl_service_calls, synthetic_msr_writes, "
-     "hypercall_code_counts, clock_gap_buckets, l2_injected_vector, "
-     "l2_synthetic_msr_writes, l2_msr_write_counts",
+     "counts, vtl_service_calls, hypercall_code_counts, "
+     "clock_gap_buckets, l2_injected_vector, l2_synthetic_msr_writes, "
+     "l2_msr_write_counts",
      "differenceable in principle and deliberately left out: every "
      "member added widens the read window, and the read window is this "
      "measurement's own error bar"),
+    ("synthetic_msr_writes - a FIVE-INDEX SLICE, not the census",
+     "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0xb0 STIMER0_CONFIG, "
+     "0xb1 STIMER0_COUNT, per processor",
+     "the other 315 indices per processor are still refused for the "
+     "reason above. Do not read the five as a distribution - they are "
+     "five named counters that happen to live in one array, and their "
+     "sum is not the synthetic-MSR total"),
 ]
 
 
@@ -4556,7 +4615,7 @@ def serial_module_base(rig):
 
 
 def delta_sample(args, instance, off, cpus, reason_capacity,
-                 disposition_capacity):
+                 disposition_capacity, synthetic_capacity=None):
     """One complete delta sample: open, read, close.
 
     **The monitor takes exactly one connection.**  `Monitor` opens and
@@ -4586,6 +4645,25 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
     if "l2_ept_dispositions" in off:
         monitor.queue(instance + off["l2_ept_dispositions"],
                       cpus * disposition_capacity)
+    # The five named synthetic-MSR counters, one quadword each, plus the
+    # two state fields that turn them into an address and a deadline.
+    # `synthetic_capacity` is the row length read out of the ELF, never
+    # a literal 320 - `gdb_lengths` exists because a capacity copied
+    # here once went stale and every processor but cpu 0 read the wrong
+    # slot, which reported plausible counts for MSRs nothing writes.
+    if synthetic_capacity and "synthetic_msr_writes" in off:
+        for cpu in range(cpus):
+            for slot, _ in DELTA_SYNTHETIC_SLOTS:
+                monitor.queue(instance + off["synthetic_msr_writes"]
+                              + (cpu * synthetic_capacity + slot) * 8, 1)
+            for name in ("synthetic_msr_last_value",
+                         "synthetic_msr_last_write_tsc"):
+                if name not in off:
+                    continue
+                for slot in (0x83, 0x84, 0xb1):
+                    monitor.queue(instance + off[name]
+                                  + (cpu * synthetic_capacity + slot) * 8,
+                                  1)
 
     started = time.monotonic()
     words = monitor.run()
@@ -4610,6 +4688,20 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
             readings[("l2_ept_dispositions", (cpu, disposition))] = read(
                 "l2_ept_dispositions",
                 cpu * disposition_capacity + disposition)
+        if synthetic_capacity and "synthetic_msr_writes" in off:
+            for slot, _ in DELTA_SYNTHETIC_SLOTS:
+                readings[("synthetic_msr_writes", (cpu, slot))] = read(
+                    "synthetic_msr_writes",
+                    cpu * synthetic_capacity + slot)
+            # State, not events: recorded under a key delta mode never
+            # differences, and printed as a value.  A last-value field
+            # subtracted from itself gives a distance, not a rate - the
+            # second entry in DELTA_REFUSALS.
+            for name in ("synthetic_msr_last_value",
+                         "synthetic_msr_last_write_tsc"):
+                for slot in (0x83, 0x84, 0xb1):
+                    readings[("state", name, cpu, slot)] = read(
+                        name, cpu * synthetic_capacity + slot)
 
     clock = max((read(DELTA_CLOCK, cpu) or 0) for cpu in range(cpus))
     first = tuple(read(DELTA_FINGERPRINT, cpu) for cpu in range(cpus))
@@ -4621,20 +4713,114 @@ L2_DISPOSITION = ["none", "installed", "replayed", "cached", "refused",
                   "pointer-failed"]
 
 
+def delta_synic_lines(after, cpus):
+    """The synthetic message page, and the two fields that date it.
+
+    **This prints the address to read and the value to compare it
+    against - it does not print a verdict**, because the verdict needs
+    one `xp` this script does not issue.
+
+    The question it is built for: the message slot for SINT3 has been
+    read by hand and found occupied most of the time, and a duty cycle
+    estimated from a handful of monitor reads against a 574.7 Hz event
+    cannot tell "occupied because the guest is slow to drain" from
+    "occupied because it is refilled the moment it is drained".  Those
+    want opposite fixes and look identical under sampling.
+
+    One field settles it without any sampling at all.  The message
+    payload for a timer expiry is 24 bytes - timer index, reserved,
+    expiration time, delivery time - so the expiry the occupying message
+    was posted for sits at page offset 0x318 and the moment the
+    controller wrote it at 0x320, both in 100 ns reference units.  The
+    guest arms the one-shot by writing that same absolute deadline to
+    STIMER0_COUNT, which is the last value printed here.  So:
+
+      message expiration_time == last STIMER0_COUNT written
+          the occupying message belongs to the arm currently
+          outstanding.  It is at most one tick old and the slot is a
+          pipeline, not a wedge.
+
+      message expiration_time <  last STIMER0_COUNT written
+          the guest has re-armed at least once since that message was
+          posted and never drained it.  The message is stale and the
+          drain is genuinely failing.
+
+    Sampled twice a few hundred milliseconds apart, a value at 0x318
+    that moves is turnover and a value that does not is one stuck
+    message.  Two absolute timestamps compared against each other, with
+    no duty cycle and no rate anywhere in the argument.
+    """
+    lines = []
+    rows = []
+    for cpu in range(cpus):
+        simp = after.get(("state", "synthetic_msr_last_value", cpu, 0x83))
+        count = after.get(("state", "synthetic_msr_last_value", cpu, 0xb1))
+        eom_tsc = after.get(
+            ("state", "synthetic_msr_last_write_tsc", cpu, 0x84))
+        now = after.get((DELTA_CLOCK, cpu))
+        if simp or count or eom_tsc:
+            rows.append((cpu, simp, count, eom_tsc, now))
+    if not rows:
+        return lines
+
+    lines.append("")
+    lines.append("synthetic interrupt controller, per processor "
+                 "(state, NOT differenced)")
+    for cpu, simp, count, eom_tsc, now in rows:
+        lines.append(f"  cpu {cpu}")
+        if simp:
+            lines.append(f"    SIMP  0x{simp:016x}  enabled {simp & 1}  "
+                         f"page 0x{simp & ~0xfff:x}")
+            slot3 = (simp & ~0xfff) + 0x300
+            lines.append(f"      header  xp /2xw 0x{slot3:x}       "
+                         f"type, then payload_size|flags|reserved")
+            lines.append(f"      expiry  xp /1xg 0x{slot3 + 0x18:x}       "
+                         f"<- compare with STIMER0_COUNT below")
+            lines.append(f"      posted  xp /1xg 0x{slot3 + 0x20:x}       "
+                         f"when the controller wrote it")
+        else:
+            lines.append("    SIMP  not recorded on this processor - no "
+                         "wrmsr to 0x40000083 was seen here, which is "
+                         "NOT the same as the page not existing")
+        if count is not None:
+            lines.append(f"    last STIMER0_COUNT written  "
+                         f"0x{count:x} ({count:,})")
+        if eom_tsc:
+            age = (now - eom_tsc) if (now and now >= eom_tsc) else None
+            when = (f"{age:,} ticks ago" if age is not None
+                    else "age unavailable")
+            lines.append(f"    last EOM written at tsc 0x{eom_tsc:x}  "
+                         f"({when})")
+        else:
+            lines.append("    no EOM has EVER been written on this "
+                         "processor - the guest has never drained a "
+                         "message that had MessagePending set")
+
+    lines.append("  The SIMP recorded here is whatever last wrote "
+                 "0x40000083 *on this processor*, and that array does "
+                 "not distinguish trust levels: VTL0's kernel and VTL1's "
+                 "secure kernel each run their own controller with their "
+                 "own page, and both write the same MSR. A page read "
+                 "from here is not attributed to a VTL by this reader.")
+    return lines
+
+
 def delta_main(args, base, instance, off, cpus, reason_capacity,
-               disposition_capacity):
+               disposition_capacity, synthetic_capacity=None):
     """Two samples, a measured span between them, and rates from it."""
     print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
           f"B ...")
     before, first_a, clock_a, a0, a1 = delta_sample(
-        args, instance, off, cpus, reason_capacity, disposition_capacity)
+        args, instance, off, cpus, reason_capacity, disposition_capacity,
+        synthetic_capacity)
 
     # The socket is closed before this sleep and reopened after it: no
     # connection is held across the wait.
     time.sleep(args.delta)
 
     after, first_b, clock_b, b0, b1 = delta_sample(
-        args, instance, off, cpus, reason_capacity, disposition_capacity)
+        args, instance, off, cpus, reason_capacity, disposition_capacity,
+        synthetic_capacity)
     base_b = serial_module_base(args.rig)
 
     # Midpoint to midpoint, because each sample takes a measurable time
@@ -4649,6 +4835,9 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
                for n, label in DELTA_PER_CPU_COUNTERS
                for cpu in range(cpus)]
     entries += [((n, None), label) for n, label in DELTA_GLOBAL_COUNTERS]
+    entries += [(("synthetic_msr_writes", (cpu, slot)), label)
+                for cpu in range(cpus)
+                for slot, label in DELTA_SYNTHETIC_SLOTS]
     cycles = (before, after,
               [((n, cpu), label) for n, label in DELTA_PER_CPU_CYCLES
                for cpu in range(cpus)])
@@ -4676,6 +4865,9 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
     for line in delta_report(before, after, entries, cycles, histograms,
                              span, fingerprints, cpus, args.delta,
                              (a1 - a0, b1 - b0)):
+        print(line)
+
+    for line in delta_synic_lines(after, cpus):
         print(line)
 
 
@@ -4998,6 +5190,11 @@ def main():
         # protected them' from 'our composition is wrong'".
         "vtl_protect_guest_perms", "vtl_protect_guest_status",
         "vtl_protect_status_seen",
+        # When the guest last wrote each synthetic MSR, which is what
+        # dates the EOM in delta mode. Optional for the reason above:
+        # `synthetic_msr_writes` and `synthetic_msr_last_value` are in
+        # the required list already, and this one is newer than both.
+        "synthetic_msr_last_write_tsc",
     ], optional=True))
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -5033,8 +5230,21 @@ def main():
     if args.delta is not None:
         disposition_capacity = gdb_lengths(
             args.elf, ["l2_ept_dispositions"])["l2_ept_dispositions"]
+        # Optional: a deployed binary can predate the member, and a
+        # reader that dies on its absence is worse than one that says
+        # so. The row length comes from the ELF for the reason
+        # gdb_lengths exists - a literal 320 here would read cpu 0
+        # correctly and every other processor wrong.
+        try:
+            synthetic_capacity = gdb_lengths(
+                args.elf,
+                ["synthetic_msr_writes"])["synthetic_msr_writes"]
+        except SystemExit:
+            synthetic_capacity = None
+            print("note: synthetic_msr_writes is absent from this ELF; "
+                  "the synthetic-MSR slice will not be reported")
         delta_main(args, base, instance, off, args.cpus, reason_capacity,
-                   disposition_capacity)
+                   disposition_capacity, synthetic_capacity)
         return
 
     monitor = Monitor(args.rig, args.port)

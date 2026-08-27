@@ -55130,3 +55130,67 @@ nobody has found. On this run it gives 127,683 attempts against 127,601
 entries - **82 attempts that did not enter**, which
 `nested_entry.cpp:2813` predicts in words.
 
+## The timer message is seven seconds old, and the slot turns over at about 1 Hz
+
+Read atomically - both fields in **one** `xp` command, because the first
+attempt issued them as separate commands and the slot refills, which is
+a torn read of two different messages:
+
+    xp /2xg 0x117a31318        expiration          delivery      delta
+      sample 1            48,929,369,055    49,001,445,490   7.2076 s
+      samples 2-8         48,929,381,313    49,001,459,813   7.2078 s
+
+**Two facts, both reproducible.**
+
+`delivery_time - expiration_time` is a stable **7.2078 seconds**. The
+payload's `expiration_time` is when the timer was due and
+`delivery_time` is when the message was posted (KVM's
+`stimer_send_msg`, `.references/kvm/hyperv.c:824-826`, and the layout
+is confirmed by the measured `payload_size = 0x18`). So every message
+in that slot describes a timer that expired **seven seconds before the
+message announcing it was delivered**.
+
+And across eight rapid reads the values are **frozen** - one change at
+the start, then nothing - while across a one-second gap they advanced
+by about one second. **The slot turns over at roughly 1 Hz**, not at the
+guest's 574.7 Hz tick.
+
+### What that does to the previous section
+
+The 88% occupancy is still true and now means something different. A
+slot refilled 574 times a second and drained promptly would read
+occupied most of the time *and* show constantly moving timestamps. This
+one is occupied *and* static. Those are different states and the duty
+cycle alone cannot tell them apart - which is exactly why the two
+absolute timestamps were the right measurement and the percentage was
+not.
+
+### And the EOM contradiction is resolved in favour of the census
+
+The first atomic sample carried `0x00000118` in the second word -
+**`MessagePending` SET**. So the bit is set sometimes, the guest does
+write end-of-message sometimes, and the ~4.1% EOM share of synthetic
+MSR writes is real. `hypervisor.h:4838`'s "the counts say no message is
+ever acknowledged" is **stale** and should be corrected at the
+declaration.
+
+### Held open, deliberately
+
+Three readings now have to be reconciled and at most a subset can be
+right as stated:
+
+- `clock_gap_buckets` says vector `0xd1` arrives with 96.3% of gaps in
+  the bucket holding the 1.74 ms period - **the period is met**.
+- the message slot turns over at about **1 Hz**.
+- every message is **7.2 s** older than its delivery.
+
+If `0xd1` really arrives at 574 Hz while messages arrive at 1 Hz, then
+most clock interrupts carry no new message, and the timer's *message*
+channel is not what is pacing the guest. That would make the 7.2 s
+figure a property of a channel nobody is waiting on. Alternatively the
+gap histogram is measuring a different vector than the SINT3 one.
+
+**Nothing above should be built on until those three are reconciled**,
+and the session's own record is the reason for saying so rather than
+picking the interesting one.
+
