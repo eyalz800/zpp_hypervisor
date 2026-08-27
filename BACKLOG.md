@@ -55644,3 +55644,52 @@ them.
 complete walk is a snapshot. The measurement is two complete walks, and
 the second is running.
 
+## Two COMPLETE walks agree: stuck at 78 modules, ending CLASSPNP.SYS
+
+    walk 1   78 modules; reached the list head - complete
+             blink: CLASSPNP.SYS   cross-check: AGREES
+    walk 2   78 modules; reached the list head - complete
+             blink: CLASSPNP.SYS   cross-check: AGREES
+
+About twelve minutes apart, and **both carry a completion verdict and
+an independent backward cross-check.** That is the difference from the
+two retracted readings: those were walks killed by a `timeout` whose
+counts were distances, and their agreement was the walker covering the
+same ground in the same wall clock. These two ran to the list head.
+
+**So the guest is genuinely stuck**, and it is stuck a long way from
+where the retracted entries put it.
+
+### What is loaded, which retires the storage theory as stated
+
+`stornvme.sys` is in the list - the **NVMe miniport itself**, not the
+`dump_stornvme.sys` crash-dump copy that a previous reading confused it
+with. So is `storport.sys`, `disk.sys`, `partmgr.sys`, `mountmgr.sys`,
+`fvevol.sys`, `volmgr`. The storage stack **loaded**.
+
+That kills "the storage function driver never comes up", which was the
+mechanism the last three entries were built on. The driver is there.
+
+### What that leaves
+
+`CLASSPNP.SYS` is the storage **class library**, pulled in by
+`disk.sys`. The guest has the whole storage stack resident and stops
+immediately after it. The next thing a boot does is bind that stack to
+the disk, mount the boot volume, and continue loading drivers **from**
+it - and 78 modules is roughly where a boot runs out of what was
+preloaded by the boot loader and must start reading from the volume
+itself.
+
+So the question is no longer "does the driver load" - it does - but
+**does the disk complete an I/O**. `smss.exe` waiting on `WrPageOut`,
+`MiPrefetchControlArea` failing, and MSI-X sitting at architectural
+reset on that NVMe all point the same way, and all three are consistent
+with a controller that is present, driven, and not completing.
+
+**CLAUDE.md's own rules apply to reading it and have already caught one
+wrong answer here:** read device registers one or two words at a time
+and repeat, because a wide `xp` over that BAR reported `CC.EN = 0` on a
+controller that was enabled; and an NVMe doorbell is **write-only**, so
+a doorbell reading zero says nothing about whether anything was
+submitted.
+
