@@ -2638,7 +2638,17 @@ def dump_handler_by_reason(args, elf, instance):
         print("\n[handler by reason: not in this binary]")
         return
 
-    slots = 64
+    # From the ELF, not a literal. `handler_reason_slots` is 64 today,
+    # and a copy of it here would not move when the header does - which
+    # is the whole reason `gdb_lengths` exists. The flat query is the
+    # right one: these are one-dimensional, and asking the nested
+    # question about a flat member returns nothing at all.
+    slots = gdb_flat_lengths(elf, ["handler_reason_exits"]).get(
+        "handler_reason_exits")
+    if not slots:
+        print("\n[handler by reason: cannot size handler_reason_exits "
+              "from this ELF - not printed rather than guessed at 64]")
+        return
     reader = Monitor(args.rig, args.port)
     for member in ("handler_reason_cycles", "handler_reason_exits",
                    "handler_reason_from_l2", "handler_reason_reads",
@@ -2890,7 +2900,15 @@ def dump_profile(args, elf, instance):
         print("\n[l2 profile: not in this binary]")
         return
 
-    slots = 64
+    # Sized from the ELF for the same reason as the by-reason table
+    # above: a literal here is a constant that does not move when the
+    # array does, and this one indexes a ring whose stride a wrong
+    # value would silently shift.
+    slots = gdb_flat_lengths(elf, ["profile_rip"]).get("profile_rip")
+    if not slots:
+        print("\n[l2 profile: cannot size profile_rip from this ELF - "
+              "not printed rather than guessed at 64]")
+        return
     reader = Monitor(args.rig, args.port)
     reader.queue(instance + off["profile_rip"], slots)
     reader.queue(instance + off["profile_hits"], slots)
