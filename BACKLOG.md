@@ -56283,13 +56283,34 @@ not get there"; it may be "the guest gets there and nothing draws it".
 Those want opposite work - the first is a boot problem, the second is a
 device-binding problem on a passed-through GPU.
 
-### Stated as a comparison, not a control
+### Both sides are nested=1, and that was established rather than assumed
 
-The two runs are **different configurations**, and this file has been
-burned by exactly that before. What the comparison supports is that a
-display miniport *can* bind on this hardware, and did not in the nested
-run. It does not establish why, and it does not establish that the
-nested run reached a login screen.
+The obvious way this entry could be worthless is if the run that *had*
+the miniport was a `nested=0` run - Hyper-V stands down there, so
+"a display driver bound" would say nothing. `nested=0` runs did happen
+repeatedly earlier in that session, so the worry was real.
+
+It was checked and it does not apply. The run carrying
+`BasicDisplay.sys` was built `-DZPP_NESTED_VMX=ON` and deployed with
+**no** `ZPP_ALLOW_NO_NESTED`, and `check-bootable.sh` refuses a
+`nested=0` loader unless that variable is set - so the guard was live
+and the deployed loader reported VMX to the guest. It booted
+`ZPP_CPUS=1`. **Both sides of the comparison are nested=1.**
+
+Note what did *not* settle this, because it looked like it would:
+counting mentions of `ZPP_ALLOW_NO_NESTED` in the session. Prose about
+the rule, and the rule's own memory file, both contain the string, so
+the count answers a different question than the one asked. Only
+extracting the actual `tool_use` commands and finding the last *deploy*
+before the reading identified the configuration.
+
+### Still a comparison, not a control
+
+The two runs remain different in other switches - the miniport run had
+`ZPP_EVMCS_TO_KVM=ON` and `ZPP_PUBLISH_REFERENCE_TSC=OFF`. So this
+supports that a display miniport *can* bind on this hardware with
+nesting on, and did not in the later run. It does not establish why, and
+it does not establish that either run reached a login screen.
 
 ### The two cheapest things on the next boot, in this order
 
