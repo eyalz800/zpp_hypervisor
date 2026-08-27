@@ -322,6 +322,53 @@ def read_wide(args, runs):
     return reader.run(), reader.unanswered
 
 
+def read_control(args):
+    """Prove the reader before believing an all-one-colour screen.
+
+    Why this exists, and it is the whole point of the function.  The
+    calibration below compares reads of the **same** address, so if the
+    bar answers zero to every one of them they agree perfectly and the
+    screen is reported STATIC.  An all-black frame then has three
+    causes and the script could distinguish only two of them:
+
+      - the screen really is black;
+      - the base is wrong (named in the note at the end);
+      - **the bar is not answering at all**, which was not named.
+
+    The third is not hypothetical here.  This tree measured it on the
+    rig's NVMe: `xp` over a passed-through device's bar returned values
+    that were confidently wrong, and CLAUDE.md's rule from it is to read
+    a *control* in the same batch - two neighbouring bars answered when
+    the device under test did not, and that is what proved the reader
+    rather than the device.
+
+    So: read something whose value is **known in advance**, in the same
+    way, at the same time.  The hypervisor module's first bytes are an
+    ELF header, so `\x7fELF` is the expected answer and anything else is
+    a reader that cannot be trusted about pixels either.  This is the
+    same discipline as `rig-dump-state.py`'s `reader proven:` line.
+
+    Returns (address, value, ok) or None when no control is available.
+    """
+    address = int(args.control, 16) if args.control else None
+    if address is None:
+        try:
+            address = module_base(args)
+        except Exception:
+            return None
+    if not address:
+        return None
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(address, 2)
+    words = reader.run()
+    value = words.get(address)
+    if value is None:
+        return (address, None, False)
+    # ELF magic is the low four bytes of the first quadword: 7f 45 4c 46
+    return (address, value, (value & 0xffffffff) == 0x464c457f)
+
+
 def calibrate(args):
     """Decide whether wide reads may be believed on this bar.
 
@@ -554,6 +601,8 @@ def main():
                     help="never use wide reads, whatever the check says")
     ap.add_argument("--out", default=None,
                     help="write the last frame to this .png or .ppm")
+    ap.add_argument("--control", default=None,
+                    help="hex guest-physical address whose content is\nknown, read in the same way to prove the reader. Defaults to the\nhypervisor module base, whose first bytes are an ELF header.")
     ap.add_argument("--no-preview", action="store_true",
                     help="skip the ASCII preview")
     args = ap.parse_args()
@@ -643,9 +692,32 @@ def main():
     colours = {cell for row in frames[-1] for cell in row
                if cell is not None}
     if len(colours) <= 1:
-        print(f"  NOTE the whole frame is one value {colours} - that is "
-              f"also what a wrong base looks like. Check the framebuffer "
-              f"address against the state dump before believing it.")
+        print(f"  NOTE the whole frame is one value {colours}.")
+        # Three things produce this and they want opposite work, so the
+        # reader is proven before any of them is reported. See
+        # read_control for why the calibration above cannot do it.
+        control = read_control(args)
+        if control is None:
+            print("     no control available - pass --control ADDR, or "
+                  "let the module base resolve, before believing this")
+        else:
+            address, value, ok = control
+            if ok:
+                print(f"     reader proven: 0x{address:x} = "
+                      f"0x{value:016x}, ELF magic as expected.")
+                print("     So the reader reaches guest physical memory "
+                      "and this frame is what is there: either the "
+                      "screen is blank or the base is wrong. Check the "
+                      "base against the state dump.")
+            elif value is None:
+                print(f"     READER BROKEN: the control at 0x{address:x} "
+                      f"never came back. This frame is not evidence "
+                      f"about the screen at all.")
+            else:
+                print(f"     READER BROKEN: the control at 0x{address:x} "
+                      f"read 0x{value:016x}, not ELF magic. Every pixel "
+                      f"above is a value this reader invented; do not "
+                      f"record a blank screen from it.")
 
     if args.out:
         write_image(args.out, frames[-1])
