@@ -2022,11 +2022,25 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // guest that never considered entering VMX operation, and one
         // that read the capabilities and declined. Counted here, at
         // the exit, so it does not matter which path below answers.
-        if (auto index = static_cast<std::uint32_t>(context.rcx);
-            (index >= 0x480) && (index <= 0x491)) {
-            this->vmx_capability_reads = this->vmx_capability_reads + 1;
-        } else if (0x3a == index) {
-            this->feature_control_reads = this->feature_control_reads + 1;
+        //
+        // **`basic_reason::rdmsr == reason`, because this label is
+        // reached by falling through from `wrmsr`.** Without the test
+        // both counters counted writes as reads. It mattered least for
+        // 0x480-0x491, which are read-only and whose writes #GP - but
+        // `feature_control_reads` is IA32_FEATURE_CONTROL, which a
+        // guest genuinely writes, so "the guest read the capabilities
+        // and declined" was being reported for a guest that had
+        // written the lock bit and read nothing. Two different guests,
+        // one number.
+        if (basic_reason::rdmsr == reason) {
+            if (auto index = static_cast<std::uint32_t>(context.rcx);
+                (index >= 0x480) && (index <= 0x491)) {
+                this->vmx_capability_reads =
+                    this->vmx_capability_reads + 1;
+            } else if (0x3a == index) {
+                this->feature_control_reads =
+                    this->feature_control_reads + 1;
+            }
         }
 
         // The read half of the same set. Answered before the fault
@@ -3632,7 +3646,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 // The exit ring reads the field and was coherent
                 // throughout; this did not and was not.
                 this->l1_vmcall_rip[slot] = vmcs.guest_rip();
+            }
 
+            // **The code histogram, and only for VMCALL.**
+            //
+            // The four captures above are raw registers with no
+            // interpretation put on them, which is why they are taken
+            // for all thirteen instructions. This is not: it reads the
+            // low sixteen bits of RCX as a *hypercall code*, and RCX is
+            // a hypercall code for `vmcall` alone. For `VMPTRLD`,
+            // `VMCLEAR` and `VMPTRST` it is a memory operand's address
+            // or its encoding; for `VMREAD` and `VMWRITE` it is a VMCS
+            // field encoding. Censusing those as call codes filled the
+            // table with addresses wearing a hypercall's name.
+            //
+            // This is the same defect as the RDX census CLAUDE.md
+            // records under "Census two fields, not one": an instrument
+            // aimed at a register that does not carry what it is
+            // labelled with, which cannot report that it is wrong
+            // because it has nothing to disagree with. Here the second
+            // field is the exit reason, and it settles it outright.
+            if (from_above && (basic_reason::vmcall == reason)) {
                 auto code = context.rcx & 0xffff;
                 auto placed = false;
 

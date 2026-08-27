@@ -5847,7 +5847,7 @@ def main():
                "shadow_ept_reclaims", "guest_nmis_reinjected",
                "pending_event_lost", "pending_event_lost_first",
                "pending_event_lost_last", "pending_event_lost_reason",
-               "l2_simp_msr", "l2_siefp_msr",
+               "l2_simp_msr", "l2_siefp_msr", "l2_synic_eptp",
                # Read by `--delta` as a windowed histogram. The
                # cumulative reader has its own offsets for it; this one
                # is the delta path's, and it is in the required list
@@ -6437,8 +6437,13 @@ def main():
                "pending_event_lost_last", "pending_event_lost_reason"):
         if _m in off:
             monitor.queue(instance + off[_m], scalar_cpus)
-    monitor.queue(instance + off["l2_simp_msr"], scalar_cpus)
-    monitor.queue(instance + off["l2_siefp_msr"], scalar_cpus)
+    # Two slots per processor each, keyed by the extended-page-table
+    # pointer beside them: the synthetic interrupt controller is
+    # per-VTL and both trust levels write the same MSR index. See
+    # `l2_simp_msr` in hypervisor.h.
+    monitor.queue(instance + off["l2_simp_msr"], scalar_cpus * 2)
+    monitor.queue(instance + off["l2_siefp_msr"], scalar_cpus * 2)
+    monitor.queue(instance + off["l2_synic_eptp"], scalar_cpus * 2)
 
     # The IUM secure-call block. See hypervisor.h `vtl_call_block`.
     monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
@@ -7826,12 +7831,21 @@ def main():
     # one to the level above. Both KVM (`vmx_check_nested_events`) and the
     # architecture say it should be reflected when vmcs12 asked. This
     # counter says whether it ever fires.
+    # Two slots per processor, keyed by the extended-page-table pointer
+    # in force at the write. **The level a page belongs to is the eptp
+    # beside it and nothing else** - the slot index is allocation order,
+    # so it is not "0 is VTL0". A single-slot reading of this was quoted
+    # as VTL0's message page and was whichever level wrote last.
     for _c in range(min(args.cpus, 1)):
-        _simp = read('l2_simp_msr', _c) or 0
-        _sief = read('l2_siefp_msr', _c) or 0
-        if _simp or _sief:
+        for _level in range(2):
+            _simp = read('l2_simp_msr', _c * 2 + _level) or 0
+            _sief = read('l2_siefp_msr', _c * 2 + _level) or 0
+            _eptp = read('l2_synic_eptp', _c * 2 + _level) or 0
+            if not (_simp or _sief):
+                continue
             print(f"\nsynthetic interrupt controller pages, as the guest "
-                  f"named them:")
+                  f"named them - cpu {_c} slot {_level}, "
+                  f"eptp 0x{_eptp:x}:")
             print(f"  SIMP  0x{_simp:016x}  enabled {_simp & 1}  "
                   f"gpa 0x{_simp & ~0xfff:x}")
             print(f"  SIEFP 0x{_sief:016x}  enabled {_sief & 1}  "

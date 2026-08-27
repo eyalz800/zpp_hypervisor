@@ -678,6 +678,72 @@ else
     status=1
 fi
 
+# === Two censuses that were aimed at the wrong field ==================
+#
+# CLAUDE.md's "Census two fields, not one, and let them disagree": a
+# single-field instrument cannot tell you it is aimed at the wrong field,
+# because it has nothing to disagree with. Both of these were exactly
+# that, and both are in the dispatch, so they are checked here.
+#
+# Neither counter has a reader in scripts/ today. That is why the checks
+# exist rather than why they do not: a wrong counter that later gets read
+# is how several hours went in one session, and it costs nothing to keep
+# it right while nobody is looking.
+echo "== a census reads the register that carries what it is named for"
+
+# (a) The hypercall-code histogram beside `l1_vmcall_count`.
+#
+# The `case` labels above it are all thirteen VMX instructions, and the
+# four raw-register captures are deliberately taken for all of them. The
+# *histogram* is not: it reads RCX's low sixteen bits as a hypercall
+# code, and RCX carries one for VMCALL alone. For VMPTRLD, VMCLEAR and
+# VMPTRST it is a memory operand; for VMREAD and VMWRITE a VMCS field
+# encoding.
+if grep -B2 'auto code = context.rcx & 0xffff' "$handler" \
+    | grep -q 'basic_reason::vmcall == reason'; then
+    echo "  ok    the hypercall-code histogram is gated on VMCALL"
+else
+    echo "  FAIL  the l1_vmcall code histogram censuses RCX without" >&2
+    echo "        testing the exit reason, so it is filled from all" >&2
+    echo "        thirteen VMX instructions - and RCX is a hypercall" >&2
+    echo "        code for VMCALL alone. A VMPTRLD's operand lands in" >&2
+    echo "        the table wearing a call code's name." >&2
+    status=1
+fi
+
+# (b) The VMX capability read counters.
+#
+# `case basic_reason::wrmsr:` falls through into `case
+# basic_reason::rdmsr:`, so everything at the top of the rdmsr label runs
+# for writes too. IA32_FEATURE_CONTROL is writable, so this was not
+# theoretical: a guest that wrote the lock bit and read nothing was
+# reported as having read the capabilities and declined.
+if grep -B4 'this->vmx_capability_reads =$' "$handler" \
+    | grep -q 'basic_reason::rdmsr == reason'; then
+    echo "  ok    the capability-read counters count reads only"
+else
+    echo "  FAIL  vmx_capability_reads and feature_control_reads sit" >&2
+    echo "        at the top of the rdmsr label, which wrmsr falls" >&2
+    echo "        *through* into, and nothing tests the reason - so" >&2
+    echo "        both count writes as reads. Gate them on" >&2
+    echo "        basic_reason::rdmsr == reason." >&2
+    status=1
+fi
+
+# And the fall-through itself, which is what makes (b) possible and is
+# easy to lose in a refactor. If it goes, the check above stops meaning
+# anything and should be re-derived rather than kept.
+if grep -B1 'case basic_reason::rdmsr:' "$handler" \
+    | grep -q 'fallthrough'; then
+    echo "  ok    and the wrmsr fall-through that makes that necessary"\
+         "is still there"
+else
+    echo "  XPASS wrmsr no longer falls through into rdmsr, so the" >&2
+    echo "        reason test above guards nothing. Re-read the label" >&2
+    echo "        and either drop the test or keep it deliberately." >&2
+    status=1
+fi
+
 echo
 if [ "$status" = "0" ]; then
     echo "exit handler invariants hold"

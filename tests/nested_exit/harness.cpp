@@ -6330,6 +6330,382 @@ static void test_tsc_composition()
     reset(registers);
 }
 
+// ------------- 17. the secondary controls named for the wrong bit,
+//                   and the field a control was advertised without
+/**
+ * Three bits at the top of the secondary controls, and what vmcs02 does
+ * with each.
+ *
+ * SDM Table 27-7, "Definitions of Secondary Processor-Based VM-Execution
+ * Controls" (`.references/sdm.txt:199591`):
+ *
+ *     18  EPT-violation #VE
+ *     19  Conceal VMX from PT
+ *     20  Enable XSAVES/XRSTORS
+ *
+ * `build_vmcs02` declared `secondary_conceal_vmx_from_pt = 1ull << 18`
+ * and reasoned about Intel Processor Trace over the #VE bit, which left
+ * bit 19 - the real one - inherited from vmcs01 by the union, being in
+ * neither `secondary_not_inherited` nor the block that clears it.
+ *
+ * **Two of the three checks below pass whatever the naming is**, and
+ * they are here as pins rather than as controls. The one that does not
+ * is bit 19 out of vmcs01: that is the measured negative control, and it
+ * fails against the tree as it was.
+ */
+static void test_the_top_secondary_controls()
+{
+    std::println("\nthe secondary controls above bit 17, by SDM number");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    constexpr std::uint64_t ept_violation_ve = 1ull << 18;
+    constexpr std::uint64_t conceal_vmx_from_pt = 1ull << 19;
+    constexpr std::uint64_t enable_xsaves = 1ull << 20;
+    constexpr auto secondary_field =
+        field::secondary_processor_based_vm_execution_controls;
+
+    zpp::arch::x86_64::context registers{};
+
+    // vmcs01 and vmcs12 in place, vmcs02 a region of its own, and the
+    // once-per-processor control cache re-filled from *this* vmcs01 -
+    // the shape `test_tsc_composition` uses, for the same reason: the
+    // cache would otherwise answer with whatever an earlier case left.
+    auto compose_over = [&](std::uint64_t secondary01,
+                            std::uint64_t secondary12,
+                            std::uint64_t xss12) {
+        auto own = std::uint64_t{0x1000};
+        static_cast<void>(vmx::vmptrld(&own));
+
+        auto & vmcs = hv().vmcs;
+        vmcs.write(field::pin_based_vm_execution_controls, own_pin);
+        vmcs.write(field::primary_processor_based_vm_execution_controls,
+                   own_primary);
+        vmcs.write(field::secondary_processor_based_vm_execution_controls,
+                   secondary01);
+        vmcs.write(field::vm_exit_controls, own_exit);
+        vmcs.write(field::vm_entry_controls, own_entry);
+        vmcs.write(field::vpid, cpu + 1);
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::pin_based_vm_execution_controls, pin_default1);
+        shadow.write(field::primary_processor_based_vm_execution_controls,
+                     primary_default1 | primary_secondary_controls);
+        shadow.write(
+            field::secondary_processor_based_vm_execution_controls,
+            secondary12);
+        shadow.write(field::vm_exit_controls,
+                     exit_default1 | exit_host_address_space_size);
+        shadow.write(field::vm_entry_controls, entry_default1);
+        shadow.write(field::xss_exiting_bitmap, xss12);
+
+        hv().host_state_cached[cpu] = false;
+        hv().vmcs12_controls_captured = 0;
+
+        return hv().build_vmcs02(cpu);
+    };
+
+    auto fresh = [&] {
+        reset(registers);
+        hv().vmcs02_physical[cpu] = 0x2000;
+        hv().vmcs02_launched[cpu] = false;
+        hv().guest_state_deferred[cpu] = false;
+        hv().forget_vmcs02_contents(cpu);
+    };
+
+    // The fixture's processor offers all three, so nothing below is
+    // answered by the hardware refusing it. Asserted, because a fixture
+    // that did not would make every check here pass for the wrong
+    // reason - the same failure the TRUE-MSR values in this file were
+    // three times.
+    check(0 != ((hv().cached_vmx_msr(0x48b) >> 32) & ept_violation_ve),
+          "the fixture processor offers EPT-violation #VE, so vmcs01 "
+          "carrying it is a state this VMM could really be in");
+    check(0 != ((hv().cached_vmx_msr(0x48b) >> 32) & conceal_vmx_from_pt),
+          "and 'conceal VMX from PT'");
+    check(0 != ((hv().cached_vmx_msr(0x48b) >> 32) & enable_xsaves),
+          "and 'enable XSAVES/XRSTORS'");
+
+    // --------------------------------- bit 19 must not come from vmcs01
+    //
+    // **THE NEGATIVE CONTROL.** SDM Table 27-7 bit 19 scopes the control
+    // to VMX non-root operation, which under vmcs02 is the *second-level*
+    // guest - so it is the guest hypervisor's statement about its own
+    // guest and nothing to do with what this VMM wants for the level
+    // above. Against a `build_vmcs02` that names bit 18 as the conceal
+    // bit, nothing clears 19 and the union carries it in.
+    {
+        fresh();
+
+        auto built = compose_over(conceal_vmx_from_pt, 0, 0);
+
+        check(built.has_value(),
+              "a vmcs01 with 'conceal VMX from PT' set still builds");
+        check(0 == (hv().vmcs.read(secondary_field) & conceal_vmx_from_pt),
+              "SDM Table 27-7 bit 19, 'conceal VMX from PT', is not "
+              "carried into vmcs02 from this VMM's own controls - it is "
+              "a statement about the second-level guest, and the level "
+              "above never asked for it");
+    }
+
+    // --------------------------------- bit 18 must not come from vmcs01
+    //
+    // A pin, not a control: the tree cleared this already, under the
+    // wrong name. Kept because the clearing is now argued from what bit
+    // 18 *is*, and the argument is much stronger than the old one - the
+    // second-level guest runs against the shadow extended page tables
+    // this VMM builds, and an incomplete shadow is the ordinary case, so
+    // converting those violations into a #VE injected into the guest
+    // would stop `on_l2_ept_fault` ever running.
+    {
+        fresh();
+
+        auto built = compose_over(ept_violation_ve, 0, 0);
+
+        check(built.has_value(),
+              "a vmcs01 with EPT-violation #VE set still builds");
+        check(0 == (hv().vmcs.read(secondary_field) & ept_violation_ve),
+              "SDM Table 27-7 bit 18, EPT-violation #VE, is not carried "
+              "into vmcs02 - vmcs02 runs against the shadow tables this "
+              "VMM builds and there is no virtualization-exception "
+              "information address in vmcs02 to receive one");
+    }
+
+    // ------------------------- and neither may be asked for from vmcs12
+    //
+    // Which is why both of the above are guards rather than repairs:
+    // `supported_secondary_controls` offers neither, so `within_
+    // capability` refuses a vmcs12 naming either. If one of these ever
+    // fails, the bit has been advertised - go and give it the state it
+    // needs rather than deleting the case.
+    for (auto bit : {ept_violation_ve, conceal_vmx_from_pt}) {
+        fresh();
+
+        check(!compose_over(0, bit, 0).has_value(),
+              "a guest hypervisor naming a secondary control above bit "
+              "17 that this VMM never offered is refused outright");
+    }
+
+    // ------------------------------------------ the XSS-exiting bitmap
+    //
+    // **THE SECOND NEGATIVE CONTROL.** Bit 20 is offered, carried into
+    // vmcs02 from vmcs12, and `l1_wants_l2_exit` reflects the `xsaves`
+    // and `xrstors` exits - and the field that decides whether either
+    // exit can happen was never written to vmcs02. SDM Table 28-1
+    // reasons 63 and 64 (`.references/sdm.txt:224385`) make the exit
+    // conditional on a bit being set in the AND of EDX:EAX, IA32_XSS and
+    // this field, so an unwritten one is "never exit". KVM writes it at
+    // `.references/kvm/nested.c:2578`.
+    {
+        fresh();
+
+        constexpr std::uint64_t asked_bitmap = 0x0000000000000100ull;
+
+        auto built = compose_over(0, enable_xsaves, asked_bitmap);
+
+        check(built.has_value(),
+              "a guest hypervisor may enable XSAVES/XRSTORS for its "
+              "guest - the control is in supported_secondary_controls");
+        check(0 != (hv().vmcs.read(secondary_field) & enable_xsaves),
+              "and the control reaches vmcs02");
+        check(asked_bitmap == hv().vmcs.read(field::xss_exiting_bitmap),
+              "vmcs12's XSS-exiting bitmap reaches vmcs02 - without it "
+              "the control is advertised with its backing field left at "
+              "zero, so no execution of XSAVES in the second-level guest "
+              "can ever exit and the interception the guest hypervisor "
+              "asked for silently does not happen");
+    }
+
+    // And the other half of KVM's condition: with the control off the
+    // field is not written at all, so a build that offers nothing here
+    // touches one fewer VMCS field per entry.
+    {
+        fresh();
+
+        hv().vmcs.write(field::xss_exiting_bitmap, 0);
+
+        auto built = compose_over(0, 0, 0xdeadbeef);
+
+        check(built.has_value(), "and the control-off case builds");
+        check(0 == hv().vmcs.read(field::xss_exiting_bitmap),
+              "with 'enable XSAVES/XRSTORS' clear in vmcs02 the bitmap "
+              "is left alone, which is KVM's own condition "
+              "(nested_cpu_has_xsaves)");
+    }
+
+    // Back to one region and a clean cache, so nothing after this
+    // inherits two or the vmcs01 this function wrote.
+    hv().vmcs02_physical[cpu] = 0;
+    hv().host_state_cached[cpu] = false;
+    reset(registers);
+}
+
+// ------------- 18. the synthetic interrupt controller's pages, per level
+/**
+ * `record_synic_page`, which is the census behind `l2_simp_msr`.
+ *
+ * The synthetic interrupt controller is **per-VTL**: VTL0's kernel and
+ * VTL1's secure kernel each run their own, each with its own message
+ * page and event-flag page, and both write the same synthetic MSR index.
+ * A single slot per processor therefore held whichever wrote last, and
+ * no page read out of it was attributable to a trust level - which is
+ * what invalidated the reading that quoted the message slots as VTL0's.
+ *
+ * `l2_vp_assist` had the identical defect one member over and was fixed
+ * by keying on the extended-page-table pointer in force; this is that
+ * template applied here, and the checks below are what "keyed" has to
+ * mean.
+ */
+static void test_synic_pages_are_kept_per_trust_level()
+{
+    std::println("\nthe synthetic interrupt controller's pages, keyed by "
+                 "trust level");
+
+    constexpr std::uint64_t simp_slot = 0x83;
+    constexpr std::uint64_t siefp_slot = 0x82;
+
+    constexpr std::uint64_t vtl0_eptp = 0x0000000011111005ull;
+    constexpr std::uint64_t vtl1_eptp = 0x0000000022222005ull;
+
+    constexpr std::uint64_t vtl0_simp = 0x00000000aaaaa001ull;
+    constexpr std::uint64_t vtl1_simp = 0x00000000bbbbb001ull;
+
+    auto fresh = [&] {
+        for (std::size_t i{}; i < 2; ++i) {
+            hv().l2_simp_msr[cpu][i] = 0;
+            hv().l2_siefp_msr[cpu][i] = 0;
+            hv().l2_synic_eptp[cpu][i] = 0;
+        }
+    };
+
+    auto slot_of = [&](std::uint64_t eptp) -> int {
+        for (int i{}; i < 2; ++i) {
+            if (hv().l2_synic_eptp[cpu][i] == eptp) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
+    // ------------------------------------------- THE NEGATIVE CONTROL
+    //
+    // Two levels write the same MSR on the same processor. Both pages
+    // have to survive, and each has to be findable by the pointer that
+    // identifies its level. Against a single-slot member - or against a
+    // keyed one whose slot search is stubbed to 0 - the second write
+    // destroys the first and this fails.
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, simp_slot, vtl0_simp, vtl0_eptp);
+        hv().record_synic_page(cpu, simp_slot, vtl1_simp, vtl1_eptp);
+
+        auto first = slot_of(vtl0_eptp);
+        auto second = slot_of(vtl1_eptp);
+
+        check((first >= 0) && (second >= 0),
+              "two trust levels writing HV_X64_MSR_SIMP on one processor "
+              "occupy two slots - a single slot holds whichever wrote "
+              "last, and no page read out of it is attributable to a "
+              "level");
+        check(first != second,
+              "and they are different slots");
+
+        if ((first >= 0) && (second >= 0)) {
+            check(vtl0_simp == hv().l2_simp_msr[cpu][first],
+                  "the page the first level named is still there after "
+                  "the second level wrote");
+            check(vtl1_simp == hv().l2_simp_msr[cpu][second],
+                  "and the second level's is beside it");
+        }
+    }
+
+    // A level that writes again lands in the slot it already claimed
+    // rather than taking the free one, which is what makes the slot
+    // count mean "levels" instead of "writes".
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, simp_slot, vtl0_simp, vtl0_eptp);
+        hv().record_synic_page(cpu, simp_slot, vtl1_simp, vtl0_eptp);
+
+        check(0 == hv().l2_synic_eptp[cpu][1],
+              "a second write from the same level does not take a "
+              "second slot");
+        check(vtl1_simp == hv().l2_simp_msr[cpu][0],
+              "it overwrites its own, which is the newest value that "
+              "level named");
+    }
+
+    // The event-flag page shares the key with the message page, because
+    // they are two halves of one controller. A level whose SIEFP is read
+    // against another level's SIMP is a reading of two machines.
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, simp_slot, vtl0_simp, vtl0_eptp);
+        hv().record_synic_page(cpu, siefp_slot, 0x0000000ccccc001ull,
+                               vtl0_eptp);
+
+        check(0 == hv().l2_synic_eptp[cpu][1],
+              "SIMP and SIEFP from one level share that level's slot");
+        check((vtl0_simp == hv().l2_simp_msr[cpu][0]) &&
+                  (0x0000000ccccc001ull == hv().l2_siefp_msr[cpu][0]),
+              "and both are readable side by side");
+    }
+
+    // A third level would mean the assumption that there are two is
+    // wrong. It is dropped rather than overwriting one of the two, so
+    // the dump shows two intact levels and not a third wearing a
+    // second's key. **This is the failure the whole change is about**,
+    // and silently overwriting would reproduce it one level further up.
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, simp_slot, vtl0_simp, vtl0_eptp);
+        hv().record_synic_page(cpu, simp_slot, vtl1_simp, vtl1_eptp);
+        hv().record_synic_page(cpu, simp_slot, 0x00000000ccccc001ull,
+                               0x0000000033333005ull);
+
+        check((vtl0_simp == hv().l2_simp_msr[cpu][0]) &&
+                  (vtl1_simp == hv().l2_simp_msr[cpu][1]),
+              "a third extended-page-table pointer does not evict either "
+              "of the two - the two that are there stay attributable, "
+              "and the third is visibly absent");
+    }
+
+    // An index outside the two the controller uses records nothing, so
+    // the rest of the synthetic range cannot land in these slots.
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, 0x93, vtl0_simp, vtl0_eptp);
+
+        check((0 == hv().l2_synic_eptp[cpu][0]) &&
+                  (0 == hv().l2_simp_msr[cpu][0]),
+              "a synthetic MSR that is neither SIMP nor SIEFP records "
+              "nothing here");
+    }
+
+    // A guest hypervisor that has not published an extended-page-table
+    // pointer yet still gets recorded, in slot 0. Zero is the free-slot
+    // marker, so keying on it would make the first real level
+    // unrecordable.
+    {
+        fresh();
+
+        hv().record_synic_page(cpu, simp_slot, vtl0_simp, 0);
+
+        check(vtl0_simp == hv().l2_simp_msr[cpu][0],
+              "a write seen before vmcs12 carries an extended-page-table "
+              "pointer is recorded rather than dropped");
+        check(0 == hv().l2_simp_msr[cpu][1],
+              "and it does not consume the second slot");
+    }
+
+    fresh();
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -6369,6 +6745,8 @@ int main()
     test_the_measured_control_words();
     test_injection_against_activity_state();
     test_tsc_composition();
+    test_the_top_secondary_controls();
+    test_synic_pages_are_kept_per_trust_level();
     test_guest_thread_sample_stride();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);

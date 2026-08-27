@@ -4843,9 +4843,29 @@ private:
      *
      * `HV_X64_MSR_SIEFP` (0x40000082) is the event-flag page, the other
      * half of the same interface.
+     *
+     * **Recorded per trust level, keyed on the extended-page-table
+     * pointer in force**, exactly as `l2_vp_assist` is and for the same
+     * reason: the synthetic interrupt controller is *per-VTL*. VTL0's
+     * kernel and VTL1's secure kernel each run their own, each with its
+     * own message page and its own event-flag page, and both write the
+     * same MSR index. One slot per processor held whichever wrote last,
+     * so no page read out of here was attributable to a trust level -
+     * which is what invalidated the measurement that read the message
+     * slots and reported them as VTL0's.
+     *
+     * Two slots, because there are two trust levels. A third would mean
+     * the assumption that there are two is wrong, and
+     * `l2_synic_eptp` makes that visible - the third level's writes land
+     * nowhere rather than silently overwriting one of the two.
+     * @{
      */
-    std::uint64_t l2_simp_msr[max_cpus]{};
-    std::uint64_t l2_siefp_msr[max_cpus]{};
+    std::uint64_t l2_simp_msr[max_cpus][2]{};
+    std::uint64_t l2_siefp_msr[max_cpus][2]{};
+    std::uint64_t l2_synic_eptp[max_cpus][2]{};
+    /**
+     * @}
+     */
 
     std::uint64_t synthetic_msr_last_write_tsc[max_cpus]
                                               [synthetic_msr_capacity]{};
@@ -5258,6 +5278,23 @@ private:
      * `vp_assist_l2_physical`.
      */
     void settle_vp_assist_page(std::size_t cpu);
+
+    /**
+     * Records the synthetic interrupt controller's message page or
+     * event-flag page against the trust level that named it.
+     *
+     * `slot` is the low byte of the synthetic MSR index - 0x83 for
+     * `HV_X64_MSR_SIMP`, 0x82 for `HV_X64_MSR_SIEFP` - and anything
+     * else is ignored. `eptp` is the extended-page-table pointer in
+     * vmcs12 at the write, which is what distinguishes the levels.
+     *
+     * A free function of the arguments and nothing else, so the rule can
+     * be exercised without a processor. See `l2_simp_msr`.
+     */
+    void record_synic_page(std::size_t cpu,
+                           std::uint64_t slot,
+                           std::uint64_t written,
+                           std::uint64_t eptp);
 
     /** The write-watch handler for the VP assist page. See
      * `vp_assist_writes`. */

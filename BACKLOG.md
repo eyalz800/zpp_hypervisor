@@ -1,5 +1,150 @@
 # Known defects
 
+## Four instruments and one control bit, all repaired 2026-08-27
+
+No hardware in any of it - the rig is down - so every one is closed with
+a hosted negative control run in both directions, and the numbers are
+here rather than "verified".
+
+### `secondary_conceal_vmx_from_pt` was declared as bit 18, and bit 18 is not that
+
+SDM Table 27-7, "Definitions of Secondary Processor-Based VM-Execution
+Controls" (`.references/sdm.txt:199591`): **18 EPT-violation #VE, 19
+Conceal VMX from PT, 20 Enable XSAVES/XRSTORS**. `build_vmcs02` declared
+the conceal bit as `1ull << 18` and reasoned about Intel Processor Trace
+over the #VE bit, which left bit 19 - the real one - inherited from
+`secondary01` by the union, being in neither `secondary_not_inherited`
+nor the block that cleared it.
+
+Both are now named correctly. Bit 19 is taken from vmcs12 alone, which
+is what the old reasoning wanted and got the wrong bit for. Bit 18 is
+cleared **unconditionally** and not taken from vmcs12: vmcs02 runs
+against the shadow extended page tables this VMM builds, an incomplete
+shadow is the ordinary case, and granting the control would turn those
+violations into a #VE injected into the second-level guest so that
+`on_l2_ept_fault` never ran - with no virtualization-exception
+information address in vmcs02 to receive one either.
+
+Neither is in `nested_vmx::supported_secondary_controls`, so
+`within_capability` refuses a vmcs12 naming either and `setup_vmcs`
+asks for neither; SDM A.3.3 reserves IA32_VMX_PROCBASED_CTLS2's
+allowed-0 half to zero so `adjust_msr` cannot add one. **So this is a
+correction of the reasoning and a guard, not a behaviour change on any
+machine that exists today.**
+
+Negative control: `tests/nested_exit` drives vmcs01 with bit 19 set and
+asserts vmcs02 comes out without it. With the declaration put back to
+bit 18 the harness reports **1157 checks, 1 failure**; with the fix,
+**1157 checks, 0 failures**. The bit-18 case passes in both directions
+and is documented in the harness as a pin rather than a control, because
+the old code cleared bit 18 by accident.
+
+#### The evidence beside it was borrowed, and the arithmetic is worth writing down
+
+That block cited "requested 0x1010ae against granted 0x1050ae, the
+difference being exactly this bit". **Those are the two numbers the
+`secondary_not_inherited` block above it quotes**, and their difference
+is `0x4000` - bit 14, VMCS shadowing - which that block already
+accounts for. Nothing was ever measured carrying bit 18 or bit 19 into
+vmcs02.
+
+    0x1010ae = bits 1, 2, 3, 5, 7, 12, 20
+    0x1050ae = the same, plus bit 14
+    xor      = 0x4000
+
+Written out because the hex *reads* as though the difference sat in the
+16-19 nibble, and a re-derivation of it went wrong that way once more
+while this was being fixed - the wrong answer, bit 18, agrees with the
+mis-declared constant and would have confirmed itself. The
+`secondary_not_inherited` paragraph is correct as it stands and is not
+to be "repaired".
+
+### The XSS-exiting bitmap was advertised without its field
+
+Secondary bit 20 is in `supported_secondary_controls`, carried into
+vmcs02 from vmcs12, and `l1_wants_l2_exit` reflects the `xsaves` and
+`xrstors` exits - and `field::xss_exiting_bitmap` (0x202c) was never
+written to vmcs02. SDM Table 28-1 reasons 63 and 64
+(`.references/sdm.txt:224385`) make the exit conditional on a bit set in
+"the logical-AND of the following three values: EDX:EAX, the IA32_XSS
+MSR, and the XSS-exiting bitmap", so an unwritten bitmap is *never
+exit*: a guest hypervisor that set it to intercept a state component
+silently did not intercept it, and the reflection path could not fire.
+
+Now written from vmcs12 when the control is on in vmcs02, which is KVM
+exactly - `if (nested_cpu_has_xsaves(vmcs12)) vmcs_write64(XSS_EXIT_-
+BITMAP, vmcs12->xss_exit_bitmap);` (`.references/kvm/nested.c:2578`).
+Not written when the control is off, so a build offering nothing here is
+unchanged.
+
+Negative control: with the write disabled the harness reports **1157
+checks, 1 failure**; with it, **0 failures**.
+
+### The diag switch class was invisible to `zpp switches:`
+
+`build_switches.cpp` emitted 51 fields, every one a `nested_vmx::` or
+VMCS constant, and **no diag field at all** - so the one switch class
+that can make a real controller look dead to the guest was the class the
+anti-stale-switch instrument could not see.
+`shadow_controller_registers` re-points the passed-through NVMe's BAR0
+extended-page-table entry at a RAM shadow with **CC.EN and CSTS.RDY
+forced to zero**, and `reserve_channel_queue_allocation` write-protects
+the doorbell page; both are gated on
+`diag::policy_of(diag::sink::esp_blocks).present`.
+
+Three fields added - `diag=`, `blocks=`, `win=` - read from
+`zpp::diag`'s own constants and from `policy_of` itself, not from the
+`-D` macros, for the reason at the top of that file. Debug reads
+`diag=1 blocks=0 win=0`; release reads `diag=0 blocks=0 win=0`, which is
+the release forcing showing through and a second proof the field is not
+a literal.
+
+Negative control is in `check-invariants.sh`, and it reads the **ELF**,
+not the source - which is the whole point of the manifest existing.
+With the three fields removed it reports `FAIL: the switch manifest does
+not carry the diagnostic channel's state - diag= blocks= win=` and exits
+1; with them, `ok` and exit 0.
+
+### Two censuses aimed at the wrong field
+
+Both in `exit_dispatch.cpp`, both with no reader in `scripts/` - fixed
+anyway, because a wrong counter that later gets read is how several
+hours went in one session, and CLAUDE.md's "Census two fields, not one"
+is about exactly this shape: a single-field instrument has nothing to
+disagree with.
+
+- The `l1_vmcall` code histogram censused RCX's low sixteen bits as a
+  hypercall code for **all thirteen** VMX instructions. RCX is a
+  hypercall code for `vmcall` alone; for `VMPTRLD`, `VMCLEAR` and
+  `VMPTRST` it is a memory operand, and for `VMREAD` and `VMWRITE` a
+  VMCS field encoding. Now gated on `basic_reason::vmcall == reason`.
+  The four raw-register captures beside it are **kept** for all
+  thirteen: they put no interpretation on what they hold, which is what
+  their own comment says they are for.
+- `vmx_capability_reads` and `feature_control_reads` sat at the top of
+  the `rdmsr` label, which `wrmsr` falls **through** into, so both
+  counted writes as reads. It was not theoretical: IA32_FEATURE_CONTROL
+  is writable, so a guest that wrote the lock bit and read nothing was
+  reported as having "read the capabilities and declined". Now gated on
+  `basic_reason::rdmsr == reason`.
+
+Negative control in `check-exit-handler.sh`, which reads the source.
+With both reverted it reports two FAILs and exits 1; with them, two
+`ok`s and exit 0. A third check pins the `wrmsr` fall-through itself, so
+that if it ever goes the reason test is re-derived rather than kept
+guarding nothing.
+
+### Not attempted, and why
+
+- **The MBEC `execute_user` gap.** Secondary bit 22 is clear in this
+  rig's IA32_VMX_PROCBASED_CTLS2, so it cannot be exercised and a fix
+  cannot be validated. The withdrawal note in `nested_vmx.h` already
+  lists the three things re-advertising needs.
+- **`pending_event` destruction on reflect** (`nested_entry.cpp`).
+  Confirming that a change there changes anything needs hardware, and
+  the path is instrumented already - `pending_event_lost` and its three
+  companions.
+
 ## RETRACTED AND REVERSED: this VMM's own handler clears the mapping
 
 **2026-08-26.** With the walker repaired and the reachability probe
@@ -55405,6 +55550,32 @@ own - one slot would hold whichever wrote last". **So no reading of
 `0x117a31000` is attributable to a trust level**, and everything above
 about that page is a statement about *a* SynIC, not necessarily
 VTL0's.
+
+**Done, 2026-08-27.** `l2_simp_msr`, `l2_siefp_msr` and the new
+`l2_synic_eptp` are `[max_cpus][2]`, filled by
+`hypervisor::record_synic_page`, which is `l2_vp_assist`'s slot search
+verbatim: the slot this level already claimed, or the first free one,
+and **nothing** when both are taken by other levels - a third level is
+visibly absent rather than silently wearing a second's key. An
+extended-page-table pointer of zero goes to slot 0 rather than claiming
+the free-slot marker, so a write seen before vmcs12 carries a pointer
+is still recorded.
+
+`rig-dump-state.py` reads both slots and prints the pointer beside each.
+**The slot index is allocation order, not the trust level** - the eptp
+beside it is the only thing that identifies a level, and the reader says
+so, because "slot 0 is VTL0" is the same mistake one step further on.
+
+Negative control, measured both ways in `tests/nested_exit`: with the
+slot search stubbed back to a single slot the harness reports
+**2 failures** ("two trust levels ... occupy two slots" and "a third
+extended-page-table pointer does not evict either of the two"); with it
+in place, **1157 checks, 0 failures**.
+
+Nothing above about `0x117a31000` is retrospectively repaired by this.
+The readings that were taken through the unkeyed member are still
+un-attributable and stay withdrawn; what changes is that the next one
+will not be.
 
 ## Phase 1 returned. The guest is loading system-start drivers from disk
 

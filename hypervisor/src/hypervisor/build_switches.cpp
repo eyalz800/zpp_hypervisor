@@ -1,4 +1,5 @@
 #include "zpp/arch/x86_64/vmx/vmcs.h"
+#include "zpp/diag/config.h"
 #include "zpp/hypervisor/nested_vmx.h"
 
 namespace zpp::hypervisor
@@ -336,6 +337,43 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // than guessing.
         ' ', 'p', 'r', 'o', 'b', 'e', '=',
         digit(nested_vmx::probe_aps),
+        // === The diagnostic channel ==============================
+        //
+        // **This whole class was invisible here, and it is the one
+        // class that can make a real controller look dead to the
+        // guest.** Every field above is a `nested_vmx::` constant or a
+        // VMCS one; nothing said anything about `zpp::diag`, so the
+        // instrument that exists to answer "what is actually compiled
+        // in" could not answer it for the switches that reach a
+        // passed-through disk.
+        //
+        // What hangs off `blocks=`, which is
+        // `diag::policy_of(diag::sink::esp_blocks).present`:
+        // `shadow_controller_registers` re-points the NVMe's BAR0
+        // extended-page-table entry at a RAM shadow with **CC.EN and
+        // CSTS.RDY forced to zero**, and `reserve_channel_queue_-
+        // allocation` write-protects the doorbell page. Both are inert
+        // while it reads 0. A boot where it reads 1 is a boot where the
+        // guest's driver can be told its controller is disabled, and
+        // "the disk is dead" is exactly the reading this project has
+        // already taken twice off a wide `xp` and once off a doorbell.
+        //
+        // `diag=` is the facility itself, forced to 0 in release, and
+        // `win=` is the loader's reservation of a tail of the EFI
+        // system partition - which edits firmware tables the guest
+        // reads and takes space from a real disk, so it is worth
+        // reading before a boot rather than after one.
+        //
+        // Read from `zpp::diag`'s own `constexpr bool`s and from
+        // `policy_of` itself, not from the `-D` macros behind them,
+        // for the reason at the top of this file: a manifest assembled
+        // from the flags would have agreed with the cache.
+        ' ', 'd', 'i', 'a', 'g', '=',
+        digit(diag::enabled),
+        ' ', 'b', 'l', 'o', 'c', 'k', 's', '=',
+        digit(diag::policy_of(diag::sink::esp_blocks).present),
+        ' ', 'w', 'i', 'n', '=',
+        digit(diag::reserve_controller_window),
         '\0'};
 
 } // namespace zpp::hypervisor

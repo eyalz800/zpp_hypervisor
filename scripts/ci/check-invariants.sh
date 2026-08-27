@@ -54,4 +54,54 @@ for symbol in _GLOBAL__sub_I __libc_start_main; do
 done
 echo "ok: no hosted C runtime entry points"
 
+# 4. The switch manifest is in the binary, and it covers the diagnostic
+#    channel.
+#
+#    Read out of the ELF rather than out of the source, which is the whole
+#    point of `build_switches.cpp` existing: a CMake cache reading ON is
+#    not evidence, and `ZPP_PUBLISH_REFERENCE_TSC` was ON in both caches
+#    and in compile_commands.json against a stale object file.
+#
+#    The diag class is checked by name because it was the class the
+#    manifest could not see, and it is the one class that can make a real
+#    controller look dead to the guest: `blocks=` gates
+#    `shadow_controller_registers`, which re-points the passed-through
+#    NVMe's BAR0 extended-page-table entry at a RAM shadow with CC.EN and
+#    CSTS.RDY forced to zero, and `reserve_channel_queue_allocation`,
+#    which write-protects the doorbell page. A boot that had those on
+#    without knowing is a boot whose disk readings mean nothing.
+#
+#    Presence, not value. Which switches should be on is per experiment;
+#    a field that is missing is what nobody can find out.
+switches=$(LC_ALL=C strings "$elf" 2>/dev/null |
+    LC_ALL=C grep -a 'zpp switches:' | head -1)
+
+if [ -z "$switches" ]; then
+    echo "FAIL: no 'zpp switches:' manifest in $elf - what is compiled" >&2
+    echo "      into it cannot be read back, so no measurement taken" >&2
+    echo "      with it can be attributed to a configuration." >&2
+    status=1
+else
+    missing=""
+    for field in diag= blocks= win=; do
+        case "$switches" in
+        *"$field"*) ;;
+        *) missing="$missing $field" ;;
+        esac
+    done
+
+    if [ -n "$missing" ]; then
+        echo "FAIL: the switch manifest does not carry the diagnostic" >&2
+        echo "      channel's state -$missing" >&2
+        echo "      Add the field to build_switches.cpp. Until it is" >&2
+        echo "      there, the class that can present a disabled" >&2
+        echo "      NVMe controller to the guest is invisible to the" >&2
+        echo "      instrument that exists to say what was built." >&2
+        status=1
+    else
+        echo "ok: the switch manifest covers the diagnostic channel"
+        echo "    $switches"
+    fi
+fi
+
 exit "$status"

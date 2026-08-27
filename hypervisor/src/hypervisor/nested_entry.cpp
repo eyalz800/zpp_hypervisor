@@ -115,6 +115,14 @@ constexpr std::uint64_t primary_secondary_controls = 1ull << 31;
 /**
  * The secondary processor-based controls this code names, from SDM Table
  * 25-7.
+ *
+ * The table is **27-7** in the edition under `.references/`
+ * (`.references/sdm.txt:199591`); the numbering moved when Volume 3's
+ * chapters were renumbered, and the older number is left as written
+ * everywhere it already appears rather than swept. Cite the line number
+ * beside it when adding one, which is what settles which table was
+ * actually read - `secondary_conceal_vmx_from_pt` was declared as bit 18
+ * for a whole investigation and bit 18 is EPT-violation #VE.
  * @{
  */
 constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
@@ -2385,6 +2393,15 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // VMREAD exits or silently VMfails would be decided by whatever the
     // firmware left there.
     //
+    // **Re-checked 2026-08-27, and this paragraph is right - the block
+    // further down that quoted the same two numbers is the wrong one.**
+    // `0x1010ae` is bits 1, 2, 3, 5, 7, 12 and 20; `0x1050ae` is those
+    // plus bit 14; the difference is `0x4000` and nothing else. The
+    // decomposition is worth having written down because the hex reads
+    // as though the difference were in the 16-19 nibble and it is not,
+    // which is how a re-derivation of it went wrong once more before
+    // this line existed.
+    //
     // KVM clears the same class explicitly in `prepare_vmcs02_early`
     // (`nested.c`, "VMCS shadowing for L2 is emulated for now"), and Xen
     // clears shadowing in `nvmx_update_secondary_exec_control`. This is
@@ -2402,21 +2419,71 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                  (secondary_unrestricted_guest |
                   secondary_mode_based_execute | secondary_enable_vmfunc);
 
-    // And concealing VMX from Intel Processor Trace comes from the
-    // guest hypervisor alone too, for the same reason as the three
-    // above: it is a statement about *its* guest and not about this
-    // VMM's.
+    // **This block was named for the wrong bit.** It declared
+    // `secondary_conceal_vmx_from_pt = 1ull << 18` and argued about
+    // Intel Processor Trace. SDM Table 27-7, "Definitions of Secondary
+    // Processor-Based VM-Execution Controls"
+    // (`.references/sdm.txt:199591`), gives
     //
-    // It was the last asymmetry between what the guest hypervisor asks
-    // for and what vmcs02 is given - requested 0x1010ae against granted
-    // 0x1050ae, the difference being exactly this bit, carried in by the
-    // union with this VMM's own controls without ever having been asked
-    // for. Every other difference between those two sets was closed by
-    // measurement; this one is closed by not making it.
-    constexpr std::uint64_t secondary_conceal_vmx_from_pt = 1ull << 18;
+    //     18  EPT-violation #VE
+    //     19  Conceal VMX from PT
+    //     20  Enable XSAVES/XRSTORS
+    //
+    // so every word of the old reasoning applied to a bit it was not
+    // operating on, and the actual conceal bit - 19 - was inherited from
+    // `secondary01` unasked, being in neither `secondary_not_inherited`
+    // nor here.
+    //
+    // **The evidence it cited was not its own.** It read "requested
+    // 0x1010ae against granted 0x1050ae, the difference being exactly
+    // this bit". Those are the two numbers the `secondary_not_inherited`
+    // block above quotes, and their difference is `0x4000` - bit 14,
+    // VMCS shadowing - which that block already accounts for. Nothing
+    // was ever measured carrying bit 18 or bit 19 into vmcs02; the
+    // measurement was borrowed and relabelled. Do not restore it here.
+    //
+    // Both are cleared today whatever this does, because neither is in
+    // `nested_vmx::supported_secondary_controls`, so `within_capability`
+    // refuses a vmcs12 naming either and `setup_vmcs` asks for neither -
+    // and `adjust_msr` cannot add them, since SDM A.3.3 reserves
+    // IA32_VMX_PROCBASED_CTLS2's allowed-0 half to zero. So this is a
+    // correction of the reasoning and a guard for the day one of them is
+    // offered, not a change of behaviour. The test beside it in
+    // `tests/nested_exit` drives vmcs01 with each bit set and asserts
+    // vmcs02 comes out without it, which is the part that would silently
+    // stop being true.
+    constexpr std::uint64_t secondary_ept_violation_ve = 1ull << 18;
+    constexpr std::uint64_t secondary_conceal_vmx_from_pt = 1ull << 19;
 
+    // Concealing VMX from Intel Processor Trace comes from the guest
+    // hypervisor alone, for the same reason as the three above: it is a
+    // statement about *its* guest and not about this VMM's, and SDM
+    // Table 27-7 bit 19 scopes it to VMX non-root operation - which
+    // under vmcs02 is the second-level guest.
     secondary &= ~secondary_conceal_vmx_from_pt;
     secondary |= secondary12 & secondary_conceal_vmx_from_pt;
+
+    // EPT-violation #VE is **not** taken from vmcs12, which is the one
+    // behavioural difference from the block this replaces - it used to
+    // re-add bit 18 whenever vmcs12 named it.
+    //
+    // SDM Table 27-7 bit 18: an EPT violation "may cause virtualization
+    // exceptions (#VE) instead of VM exits". vmcs02 runs against the
+    // *shadow* extended page tables this VMM builds, not against
+    // vmcs12's, and an incomplete shadow is the ordinary case - it is
+    // what `on_l2_ept_fault` exists to fill in. Granting the control
+    // would convert those faults into a #VE injected straight into the
+    // second-level guest and the shadow would never be built, with no
+    // exit anywhere to notice. It also needs a virtualization-exception
+    // information address in vmcs02, and nothing here writes that field.
+    //
+    // This is the same rule as `xss_exiting_bitmap` below and as
+    // virtualize-APIC-accesses in `nested_vmx.h`: a control whose
+    // backing state this VMM does not maintain is not passed through.
+    // CLAUDE.md states it as "answer the whole of whatever it is, or
+    // fault".
+    secondary &= ~secondary_ept_violation_ve;
+
     secondary |= secondary_enable_ept | secondary_enable_vpid;
 
     // And the VM-function controls, which are **always zero** in vmcs02
@@ -2468,6 +2535,35 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                            field::eio_exit_bitmap_3}) {
             write_vmcs02_control(cpu, entry, shadow.read(entry));
         }
+    }
+
+    // The XSS-exiting bitmap, which the control above it has no meaning
+    // without.
+    //
+    // `nested_vmx::supported_secondary_controls` offers bit 20, "enable
+    // XSAVES/XRSTORS", `secondary_enable_xsaves` is in
+    // `secondary_not_inherited` so vmcs02 carries it only where vmcs12
+    // asked, and `l1_wants_l2_exit` is ready to reflect the `xsaves` and
+    // `xrstors` exits - and **the field that decides whether either exit
+    // can happen at all was never written**. SDM Table 28-1 reasons 63
+    // and 64 (`.references/sdm.txt:224385`): the exit occurs when a bit
+    // is set in "the logical-AND of the following three values: EDX:EAX,
+    // the IA32_XSS MSR, and the XSS-exiting bitmap". An unwritten
+    // bitmap is zero, the AND is empty, and no execution of XSAVES in
+    // the second-level guest can ever exit - so a guest hypervisor that
+    // set the bitmap to intercept a state component silently does not
+    // intercept it. IA32_XSS is on the MSR-area list, so the other two
+    // terms of that AND are live.
+    //
+    // Written only where the control is on, which is KVM exactly:
+    // `if (nested_cpu_has_xsaves(vmcs12)) vmcs_write64(XSS_EXIT_BITMAP,
+    // vmcs12->xss_exit_bitmap);` (`.references/kvm/nested.c:2578`).
+    // With the control off the field has no effect, and not writing it
+    // keeps a build that offers nothing here byte-identical.
+    if (0 != (secondary02 & secondary_enable_xsaves)) {
+        write_vmcs02_control(cpu,
+                             field::xss_exiting_bitmap,
+                             shadow.read(field::xss_exiting_bitmap));
     }
 
     // What the guest hypervisor asked for against what it got. See
@@ -7806,6 +7902,73 @@ void hypervisor::on_vp_assist_write(void * context,
     self->vp_assist_write_page = page;
 }
 
+/**
+ * The synthetic interrupt controller's two pages, recorded against the
+ * trust level that named them.
+ *
+ * See `l2_simp_msr` in hypervisor.h for why this is keyed at all. The
+ * slot search is `settle_vp_assist_page`'s neighbour at the VP assist
+ * MSR, deliberately identical: the slot this level already claimed, or
+ * the first free one, and nothing when both are claimed by other
+ * levels. Overwriting one instead would put a third level's page under
+ * a second level's key, which is the failure this exists to end - and
+ * it would be invisible, since the value written is plausible either
+ * way.
+ *
+ * **An extended-page-table pointer of zero is not a key.** A guest
+ * hypervisor that has not set one yet, or a write seen before vmcs12
+ * carries one, would otherwise claim the free-slot marker and make the
+ * first real level unrecordable. Recorded in slot 0 in that case, which
+ * is where a single-level guest's writes belong anyway.
+ */
+void hypervisor::record_synic_page(std::size_t cpu,
+                                   std::uint64_t slot,
+                                   std::uint64_t written,
+                                   std::uint64_t eptp)
+{
+    constexpr std::uint64_t siefp_slot = 0x82;
+    constexpr std::uint64_t simp_slot = 0x83;
+
+    if ((simp_slot != slot) && (siefp_slot != slot)) {
+        return;
+    }
+
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    constexpr std::size_t levels = sizeof(this->l2_synic_eptp[0]) /
+                                   sizeof(this->l2_synic_eptp[0][0]);
+
+    // Slot 0 with no key, so a level that has not published a pointer is
+    // still recorded rather than being given the free-slot marker.
+    auto which = levels;
+
+    if (0 == eptp) {
+        which = 0;
+    } else {
+        for (std::size_t i{}; i < levels; ++i) {
+            if ((this->l2_synic_eptp[cpu][i] == eptp) ||
+                (0 == this->l2_synic_eptp[cpu][i])) {
+                which = i;
+                break;
+            }
+        }
+    }
+
+    if (which >= levels) {
+        return;
+    }
+
+    this->l2_synic_eptp[cpu][which] = eptp;
+
+    if (simp_slot == slot) {
+        this->l2_simp_msr[cpu][which] = written;
+    } else {
+        this->l2_siefp_msr[cpu][which] = written;
+    }
+}
+
 void hypervisor::settle_vp_assist_page(std::size_t cpu)
 {
     constexpr std::uint64_t enabled = 1;
@@ -10025,19 +10188,15 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // guest never consumes stops the controller delivering
                 // into it, which is what a lost handshake looks like from
                 // outside, and nothing here has ever read that page.
-                constexpr std::uint64_t siefp_slot = 0x82;
-                constexpr std::uint64_t simp_slot = 0x83;
-
-                if ((simp_slot == slot) || (siefp_slot == slot)) {
-                    auto written = (context.rax & 0xffffffff) |
-                                   (context.rdx << 32);
-
-                    if (simp_slot == slot) {
-                        this->l2_simp_msr[cpu] = written;
-                    } else {
-                        this->l2_siefp_msr[cpu] = written;
-                    }
-                }
+                //
+                // Keyed on the extended-page-table pointer, because the
+                // controller is per-VTL and both levels write the same
+                // MSR index - see `record_synic_page`.
+                record_synic_page(
+                    cpu,
+                    slot,
+                    (context.rax & 0xffffffff) | (context.rdx << 32),
+                    this->guest_vmcs12[cpu].read(field::ept_pointer));
 
                 // Where the trust levels talk to each other. See
                 // `l2_vp_assist`: the loop's decision to call again is
