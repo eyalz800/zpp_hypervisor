@@ -56900,3 +56900,68 @@ interrupt is unavailable. So the remaining lever is the other side of
 the same ratio - what VTL1's 1,052 us is spent on, and whether any of it
 is this VMM's cost rather than the secure kernel's work.
 `shadow_ept_replayed` at 1.8 million is where to look first.
+
+## It is not a time budget. The same secure call is retried for ever
+
+`vtl_reentry_block_same` exists to tell "one stuck call retrying" from
+"many distinct calls each retrying once", and its own comment says those
+are opposite diagnoses. Read on the baseline build (`lazy=0`), it says
+**stuck**:
+
+    block address  same 3,778   moved 1,775   last 0x11baa5860
+
+    the last re-entries, oldest first:
+      class 0 reason 4 service 0x0000 cont 0x00000001 block 0x11baa5860 owner 0x20003
+      class 0 reason 4 service 0x0000 cont 0x00000001 block 0x11baa5860 owner 0x20003  + 0.018s
+      class 0 reason 4 service 0x0000 cont 0x00000001 block 0x11baa5860 owner 0x20003  + 0.018s
+      ... every field identical, every time
+
+    re-entries CHARGED TO the call that issued them:
+      0x0003  2,763  VslFinishStartSecureProcessor
+      0x00f4  1,426  VslCopyProtectedPage
+      0x0101  1,028  VslSetPlaceholderPages
+
+The top charge is `VslFinishStartSecureProcessor` - the frame the
+symbolised stall stack ends in. The continuation word is `1` and never
+moves.
+
+### What this retires
+
+The account this file has been building - that VTL1 needs an
+uninterrupted window of about 1,052 us and is interrupted at about that
+period, so the deciding quantity is work-per-interrupt - **is wrong, and
+this is the measurement that says so.**
+
+- The re-entries are **18 ms apart**, not 1 ms. Nothing is taking the
+  processor away at the clock period.
+- The request block is **identical on every re-entry**, including the
+  continuation. A call that had been interrupted part-way and resumed
+  would carry a different continuation; a call making progress would
+  move its block. Neither happens.
+
+So VTL1 is not being starved of time. It is being asked the same
+question about fifty-five times a second and giving the same answer, and
+the caller asks again.
+
+Every "give it a longer window" intervention was therefore aimed at a
+mechanism that is not operating, which is the sixth in this family -
+after four time lies, `deliver_on_drop`, and both preemption timers.
+
+### Why `ZPP_LAZY_TICK` still got further
+
+It did pass `MakeGdtReadOnly`, and that remains the only forward
+movement recorded here. On this account it did not do so by granting a
+window. Something else about withholding the injection changed the
+path, and **what** is now an open question rather than a settled
+explanation. Recorded so the old explanation is not carried forward as
+if it survived.
+
+### The question now
+
+`VslFinishStartSecureProcessor` issues a secure call that never
+completes, at block `0x11baa5860`, continuation `1`. The block is
+readable at that guest-physical address and its answer is written back
+into it, so **what the secure kernel returns, and why the caller treats
+it as not-done, is directly observable** - the same before/after window
+`vtl_protect_after_stack` already takes for the protection call, pointed
+at this block instead.
