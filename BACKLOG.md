@@ -56378,11 +56378,37 @@ mid-run.** The controls answering in the same batch is what makes this
 the device rather than the reader, which is the distinction the earlier
 attempt could not make and had to withdraw.
 
-That closes the loop with the paragraph above: a guest with no runnable
-thread, no new memory faulted in over four minutes
-(`shadow_ept_replayed` +0), and a boot spinner still animating, is a
-guest **waiting on I/O that can never complete**. That is why the login
-screen is never reached.
+**The causal reading of that is withdrawn the same day it was written.**
+It said: a guest with no runnable thread and a disk that stopped
+answering is a guest waiting on I/O that can never complete, and that is
+why the login screen is never reached. That is one reading of the
+evidence and it was stated as the finding.
+
+The other reading inverts it, and nothing measured distinguishes them:
+
+- **the device failed**, so Windows waits for I/O for ever and idles; or
+- **the device is in D3**, because a PCI function in D3hot does not
+  decode MMIO and every register reads all-ones - which is *normal
+  power management* on a controller whose driver has been idle, and
+  makes the idleness the **cause** rather than the consequence.
+
+The second fits the evidence at least as well. The transition was
+abrupt - `CAP` and `CC` answered, and `CSTS` in the *same batch* did
+not - and it took every register including `CAP`, which is read-only and
+always readable on a live function. Sudden, total, and all registers at
+once is what a power-state change looks like.
+
+**The discriminator is cheap and safe: does it come back.** A device in
+D3 returns to answering when the driver writes PMCSR back to D0 for the
+next request, so polling the BAR narrow with controls over several
+minutes separates an oscillation from a device that never returns.
+`rig-watch-nvme.sh` already is that instrument. What must **not** be
+used is host config space - see below, it costs the machine.
+
+So what is established is the observation, not the mechanism: at one
+moment the NVMe stopped answering while two neighbouring passed-through
+BARs answered in the same batch, with the VM running. Why, and whether
+it recovers, is unmeasured.
 
 ### Two instrument bugs found doing it
 
@@ -56414,11 +56440,18 @@ config space.
 
 ### What this makes next
 
-The question is no longer "why is the guest stuck" but **"why does the
-NVMe drop off the bus while we are running"**, which is a different and
-much narrower question. Worth knowing before the next boot: whether it
-drops with a plain-KVM guest on the same launcher, since that separates
-"passthrough on this rig" from "this VMM". Note the launcher difference
-already recorded in CLAUDE.md - `boot.sh` and `boot-zpp.sh` are not a
-single-variable control until equalised.
+The first question is **does the disk come back**, because the answer
+decides which investigation to run. Poll it narrow with controls across
+several minutes, from the start of a boot; an oscillation says power
+management and makes the guest's idleness the thing to explain, while a
+device that never returns says the opposite. Only then is "why does it
+drop while we are running" the right question.
+
+Not to be re-proposed: the leftover host mount of the ESP is **not** a
+lead. Binding the NVMe to the guest and rebinding it on stop is the
+design, the host runs from RAM so nothing of its own lives there, and
+the guest has booted from that disk many times with the mount in exactly
+that state. A refusal was added to `rig-boot.sh` on that reasoning and
+reverted the same hour; it had no evidence behind it and would only have
+blocked boots.
 
