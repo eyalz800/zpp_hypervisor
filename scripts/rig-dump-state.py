@@ -1397,6 +1397,84 @@ def dump_vmcs12_regions(args, elf, instance):
               "write that was discarded at the call site ***")
 
 
+def vtl_round_trip_verdict(halves, hz, epoch_delta, epoch_span_ticks):
+    """The trust-level halves as a rate, checked against the epoch.
+
+    `vtl_half_cycles`/`_exits`/`_count` are accumulated from the first
+    switch of the boot and never reset (`mark_vtl_half`,
+    `nested_entry.cpp:8543`), so dividing by the count gives a mean over
+    the **whole boot** - which the member's own comment says
+    (`hypervisor.h:7756`) and which the reader printed without saying.
+
+    That is the difference between "a round trip costs 11 ms" and "a
+    round trip cost 11 ms on average, mostly during a phase that ended".
+    Measured on the 0392123 dump: the halves imply 77.6 round trips a
+    second while `l2_hypercall_epoch_delta` for `HvCallVtlCall` in the
+    same dump says 5.45/s. Fourteen times apart, printed four screens
+    apart, and neither number carried a unit that made the other look
+    wrong.
+
+    So the two are divided here and made to disagree out loud. This is
+    the "census two fields and let them disagree" rule from CLAUDE.md
+    applied to a quantity that had only ever been read one way: a
+    single-field instrument cannot tell you it is aimed at the wrong
+    phase, because it has nothing to disagree with.
+
+    Pure so it can be tested without a rig. Returns the lines to print.
+    """
+    lines = []
+    period = 0.0
+    for count, cycles, _exits in halves:
+        if count:
+            period += cycles / count / hz
+    if not period:
+        return lines
+
+    implied = 1.0 / period
+    span = sum(cycles for _c, cycles, _e in halves) / hz
+    counted = min((c for c, _y, _e in halves if c), default=0)
+
+    lines.append(
+        f"    BOOT-WIDE MEANS, not the current state: {counted:,} round "
+        f"trips")
+    lines.append(
+        f"    spanning {span:,.1f} s of wall clock = {implied:,.2f} "
+        f"round trips/s")
+
+    if not (epoch_span_ticks and epoch_delta):
+        lines.append(
+            "    (no HvCallVtlCall epoch to check against - cannot say "
+            "whether")
+        lines.append(
+            "     this mean still describes the guest)")
+        return lines
+
+    secs = epoch_span_ticks / hz
+    if not secs:
+        return lines
+    now = epoch_delta / secs
+    lines.append(
+        f"    most recent epoch says {now:,.2f}/s "
+        f"(+{epoch_delta:,} over {secs:,.1f} s)")
+
+    if not now:
+        return lines
+    ratio = implied / now
+    if 0.5 <= ratio <= 2.0:
+        lines.append(
+            "    <- AGREE: the mean above still describes the guest.")
+    else:
+        lines.append(
+            f"    <- DISAGREE by {ratio:,.1f}x. The means above are "
+            f"dominated by a")
+        lines.append(
+            "       different, faster phase and do NOT describe the "
+            "guest now.")
+        lines.append(
+            "       Difference two dumps to get the current cost.")
+    return lines
+
+
 def dump_priority(args, elf, instance):
     """What priority the guest runs at, and what it is told to run at.
 
@@ -1415,7 +1493,9 @@ def dump_priority(args, elf, instance):
                "clock_gap_buckets", "l2_entry_ppr", "l2_given_vector",
                "l2_low_priority_no_event", "interrupt_request_vtpr_seen",
                "interrupt_request_vector", "vtl_half_cycles",
-               "vtl_half_exits", "vtl_half_count"]
+               "vtl_half_exits", "vtl_half_count",
+               "l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_span"]
     off = gdb_offsets(elf, members)
     vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
@@ -1446,6 +1526,14 @@ def dump_priority(args, elf, instance):
     reader.queue(instance + off["l2_low_priority_no_event"], args.cpus)
     for member in ("vtl_half_cycles", "vtl_half_exits", "vtl_half_count"):
         reader.queue(instance + off[member], args.cpus * 2)
+    # The epoch census, to check the halves against. See
+    # `vtl_round_trip_verdict`: the halves are a whole-boot mean and
+    # this is the only counter in the dump that says what the rate is
+    # *now*, so reading one without the other is how a mean over a
+    # finished phase got quoted as the current cost.
+    for member in ("l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta"):
+        reader.queue(instance + off[member], args.cpus * 32)
+    reader.queue(instance + off["l2_hypercall_epoch_span"], args.cpus)
     got = reader.run()
 
     def word(member, index):
@@ -1589,16 +1677,31 @@ def dump_priority(args, elf, instance):
                   "HvCallVtlReturn -> HvCallVtlCall (ordinary kernel)"]
         if any(word("vtl_half_count", cpu * 2 + h) for h in range(2)):
             print("\n  what one trust-level round trip costs")
+            rows = []
             for h in range(2):
                 n = word("vtl_half_count", cpu * 2 + h)
-                if not n:
-                    continue
                 cycles = word("vtl_half_cycles", cpu * 2 + h)
                 exits = word("vtl_half_exits", cpu * 2 + h)
+                rows.append((n, cycles, exits))
+                if not n:
+                    continue
                 print(f"    {halves[h]}")
                 print(f"      {n:,} halves, {cycles // n:,} cycles "
                       f"({cycles / n / 1992.0:.1f} us at 1.992 GHz), "
                       f"{exits / n:.1f} exits")
+
+            # And whether that mean still describes the guest. The
+            # `HvCallVtlCall` slot of the epoch census is the second
+            # field; see `vtl_round_trip_verdict`.
+            delta = 0
+            for i in range(32):
+                if word("l2_hypercall_cpu_codes", cpu * 32 + i) == 0x11:
+                    delta = word("l2_hypercall_epoch_delta", cpu * 32 + i)
+                    break
+            for line in vtl_round_trip_verdict(
+                    rows, 1992000000.0, delta,
+                    word("l2_hypercall_epoch_span", cpu)):
+                print(line)
 
 
 def dump_interrupt_window(args, elf, instance):

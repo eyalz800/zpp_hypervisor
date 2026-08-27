@@ -54674,3 +54674,197 @@ and takes another. **The question is what those ninety exits per round
 trip are**, and the exit-reason census is per processor and already
 printed - it has simply never been read against the VTL round trip.
 
+
+## The ninety exits are a mean over a phase that ended, and the reader now says so
+
+The section above asks what the ninety exits per round trip are. The
+first thing to check was the instrument, and the instrument does not
+measure what the sentence claims.
+
+### `90.8 exits` and `11,358 us` are whole-boot means, not the current state
+
+`mark_vtl_half` (`nested_entry.cpp:8543-8576`) accumulates into
+`vtl_half_cycles/_exits/_count` from the first switch of the boot and
+never resets. Its own comment says so - "a reader divides by the count
+and gets a mean over the whole boot", `hypervisor.h:7756-7759` - and
+`rig-dump-state.py` printed the quotient under the heading **"what one
+trust-level round trip costs"**, which reads as the present tense. It
+was then quoted as the present tense.
+
+Divide the two fields that were already in the same dump:
+
+    the halves:  1,531 us + 11,358 us = 12,889 us  ->  77.6 round trips/s
+    the epoch:   0x0011 +47 over 8.6 s             ->   5.45 round trips/s
+                                                       ------------------
+                                                       14.2x apart
+
+Both numbers were printed. Neither was divided by the other. And the
+denominator was on screen the whole time: the reader prints `{n} halves`,
+and `n` is the same 22,324 as the cumulative `HvCallVtlCall` total four
+screens away.
+
+**The means describe an early phase running twenty to a hundred times
+faster than the guest is running now.** A second route agrees: the
+halves span `22,324 x 12,889 us` = **287.7 s**, against
+`212,137 / 574.7 Hz` = **369 s** of clock vectors in the same run. The
+instrument therefore accounts for about 78% of the boot and its mean is
+dominated by whatever filled those 288 seconds - which was the 22,324
+round trips of real page-protection work the service census decodes
+(`VslCopyProtectedPage` 45.6%, `VslSetPlaceholderPages` 32.3%), all of
+which are now **frozen**.
+
+So there is no "ninety exits in the clock path per round trip" to
+explain. The round trips that cost ninety exits are over. What is
+happening now is 1-5 round trips a second with 183-980 ms between them,
+which at 574.7 Hz is **105 to 563 clock ticks of idling between calls** -
+the same "idling at dispatch level, tick after tick" this file already
+recorded, and not a new phenomenon.
+
+### The two per-tick figures do not disagree - they count different things
+
+`90.8 exits / 6.53 ticks` is **13.9 exits per tick**, against the
+measured **4.3 second-level entries per tick** and the composed
+**8.63 exits per tick** (`wrmsr 2.31 + int-window 1.23 + vmcall 0.46 +
+ext-int 0.26` L2 exits, plus `vmresume 4.37` L1 exits).
+
+They are three different populations and only the last is comparable:
+
+- `vtl_half_exits` is fed from `exit_total[cpu]`, **every** exit on that
+  processor, L1 and L2 alike;
+- "4.3 entries per tick" counts second-level **entries** only;
+- the ratio between them is about 2 (`nested_run/s` 5,334 against
+  `l2-entries/s` 2,653), so 4.3 entries/tick is ~8.6 exits/tick.
+
+13.9 against 8.6 is the phase bias above, not a discrepancy. **Ninety
+exits per round trip is six and a half ticks of ordinary clock traffic
+and nothing else.** There is no per-round-trip surcharge to find.
+
+### The reflections are already minimal, and the premise that they are not is false
+
+Counted rather than argued. The synthetic MSR census gives 1.6 million
+writes each of `0x40000070` (EOI), `0x40000071` (ICR) and `0x400000b1`
+(STIMER0_COUNT) over **1,599,396 ticks** - that is **1.00 write per tick
+each**, to within 2%.
+
+**So "the timer is armed once per something smaller than a tick" is
+measured false, and the saving from arming it once per tick is zero.**
+It already is.
+
+What the reflections do cost is most of the exit budget. At 2.31-3.19
+synthetic `wrmsr` per tick, each costing two of our exits - the `wrmsr`
+out of L2 and the `vmresume` back out of L1 - they are **4.6 to 6.4 of
+the 8.6-9.7 exits per tick, or 53-66%**. Per round trip that is roughly
+48-60 of the ninety.
+
+And they cannot be reduced, which `nested_entry.cpp:11737-11746` already
+says with the citation: those registers lie outside both ranges an MSR
+bitmap can describe (SDM 26.6.9), so they exit **unconditionally**,
+`l0_wants_l2_exit` deliberately declines every MSR exit
+(`nested_entry.cpp:3455-3480`), and `l1_wants_l2_exit` returns true
+unconditionally for them (`nested_entry.cpp:3898-3905`). No bitmap, no
+switch, and no build of this tree can answer `0x40000070` or
+`0x400000b1` locally. **This is a floor, not a lever.**
+
+### What was added, and it is reader-only
+
+`vtl_round_trip_verdict` in `rig-dump-state.py`, called from
+`dump_priority`'s half-printing site. It labels the quotients
+`BOOT-WIDE MEANS`, prints the round-trip rate they imply and the wall
+clock they span, and then divides that against the `HvCallVtlCall` slot
+of `l2_hypercall_epoch_delta` - the one counter in the dump that says
+what the rate is *now* - and prints `AGREE` or `DISAGREE by Nx`.
+
+No hypervisor change, no new state, no boot. Both fields were already
+being read; they were being read separately.
+
+This is CLAUDE.md's "census two fields and let them disagree" applied to
+a quantity that had only ever been read one way. **A single-field
+instrument cannot tell you it is aimed at the wrong phase, because it
+has nothing to disagree with** - which is the same failure as the RDX
+census that would have confirmed the loop it was pointed at.
+
+`tests/python_layout` covers it, including the negative control that
+matters: agreeing rates must print `AGREE` and never `DISAGREE`, or the
+disagreement above is an artefact of the instrument rather than a fact
+about the dump.
+
+### One coincidence that will cost somebody an hour
+
+**`90.8` appears in this file as two unrelated quantities.** It is
+`90.8%` of interrupts landing at `KiDpcInterruptBypass+0x12` - a reading
+already withdrawn as sampling bias - and it is `90.8` exits per round
+trip. They are not related and neither supports the other.
+
+## The round-trip cost was a boot-wide mean, and the reader now says so
+
+`vtl_half_cycles/_exits/_count` accumulate from the first switch of the
+boot and never reset - `hypervisor.h:7756` says so at the declaration -
+and the reader printed the quotient under **"what one trust-level round
+trip costs"**, which reads present-tense. It was quoted present-tense,
+in `0392123`, as "11,358 us and 90.8 exits per round trip".
+
+The dump contained its own refutation twice over. The halves imply
+77.6 round trips a second against the epoch's measured 5.45, and they
+span 287.7 s of a 369 s run - so the mean is dominated by the 22,324
+round trips of real work that are now **frozen**. The denominator was
+on screen the whole time: the same line prints `{n} halves`, and `n` is
+the cumulative `HvCallVtlCall` total from four screens away.
+
+**So there is no "ninety exits per round trip" to explain.** Those
+round trips are over. The reader now prints the verdict rather than the
+quotient alone, and on a later run it says:
+
+    BOOT-WIDE MEANS, not the current state: 25,637 round trips
+    spanning 1,134.3 s of wall clock = 22.60 round trips/s
+    most recent epoch says 10.50/s (+91 over 8.7 s)
+    <- DISAGREE by 2.2x
+
+### And the synthetic-MSR lever does not exist
+
+The premise that the guest arms its timer more often than once a tick
+is measured false: 1.6 M writes each of `0x40000070`, `0x40000071` and
+`0x400000b1` over 1,599,396 ticks is **1.00 per tick each**. Arming it
+once per tick saves nothing because it already is. And those MSRs lie
+outside both bitmap ranges, so they exit **unconditionally** (SDM
+26.6.9, cited in `nested_entry.cpp:11737`), `l0_wants_l2_exit` declines
+every MSR exit and `l1_wants_l2_exit` returns true for them. They are a
+**floor, not a lever**: no switch in this tree can answer EOI or
+STIMER0_COUNT locally.
+
+### The two per-tick figures were never in conflict
+
+`90.8 / 6.53 ticks` is 13.9 exits a tick against the 4.3 recorded
+earlier - but `vtl_half_exits` is fed from `exit_total`, every exit at
+both levels, while 4.3 counts second-level *entries*. At about two
+exits per entry they reconcile. Ninety exits is six and a half ticks of
+ordinary clock traffic and there is no per-round-trip surcharge.
+
+### A reading of my own that was impossible, and is discarded
+
+Differencing two dumps thirty seconds apart with a quick script gave
+`+427 halves, -11,989 cycles` for the VTL1 half. **A monotonic
+accumulator cannot go backwards**, so the scrape is wrong rather than
+the guest surprising, and the 4 us per half it implied for the other
+column is not reported. The lesson is the one this file keeps
+recording: ask whether a reading is *possible* before asking whether it
+is believable.
+
+What that leaves is a real gap in the tooling rather than in the
+hypervisor: `rig-dump-state.py` has **no delta mode** - no `--delta`,
+no `--watch`, no second pass - and every counter it prints is
+cumulative. Every steady-state question in this investigation has had
+to be answered by hand-differencing two runs, which is where that
+impossible number came from.
+
+### Closed for good: the read-only frames are Hyper-V's own
+
+With the eptp12 column finally printed beside our own:
+
+    0x11aac9  shadow r--  our tables: rwx  eptp12: r--  <- AGREES
+    0x11aaca  shadow r--  our tables: rwx  eptp12: r--  <- AGREES
+
+**The guest hypervisor asked for read-only on those frames.** Our
+composition is doing exactly what it was told. That closes the last
+thread of the four-frame lead, which had already been withdrawn twice
+for being read out of an unrotated ring.
+

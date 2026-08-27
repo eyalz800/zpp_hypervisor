@@ -1408,5 +1408,116 @@ class ServiceZeroIsReEntriesNotFlushEntireTb(unittest.TestCase):
                 "tree".format(name))
 
 
+def load_dump_state():
+    """`rig-dump-state.py` as a module, despite the hyphen in its name."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("rds", DUMP_STATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TrustLevelRoundTripIsAMeanNotARate(unittest.TestCase):
+    """The halves are a whole-boot mean, and the reader said "costs".
+
+    `mark_vtl_half` (`nested_entry.cpp:8543`) accumulates from the first
+    switch of the boot and never resets, so `vtl_half_cycles / count` is
+    a mean over every round trip that ever happened. The reader printed
+    it under "what one trust-level round trip costs", which reads as the
+    present tense, and `0392123` quoted it as the current cost.
+
+    The numbers below are the measured ones from that dump.
+    """
+
+    GHZ = 1992000000.0
+
+    def halves(self, us0, us1, count):
+        return [(count, int(us0 * 1992.0) * count, 0),
+                (count, int(us1 * 1992.0) * count, 0)]
+
+    def test_the_measured_dump_disagrees_by_fourteen_times(self):
+        """MEASURED: 0392123's own two fields, divided against each other.
+
+        1,531 us + 11,358 us over 22,324 round trips is 77.6 a second.
+        The `HvCallVtlCall` epoch in the same dump is +47 over 8.6 s,
+        which is 5.5 a second. Both were printed; neither was divided.
+        """
+        module = load_dump_state()
+        lines = module.vtl_round_trip_verdict(
+            self.halves(1531.0, 11358.0, 22324), self.GHZ,
+            47, int(8.6 * self.GHZ))
+        text = "\n".join(lines)
+        self.assertIn(
+            "DISAGREE", text,
+            "the reader accepts a whole-boot mean as the current cost, "
+            "which is exactly how 90.8 exits per round trip was quoted "
+            "for a phase that had ended")
+        self.assertIn("14.2x", text, "the measured ratio moved")
+        self.assertIn(
+            "BOOT-WIDE MEANS", text,
+            "the mean is still printed as though it were a rate")
+
+    def test_agreeing_rates_stay_silent(self):
+        """NEGATIVE CONTROL - measured, and it must NOT fire.
+
+        A check that fires on every input is not a check. Here the
+        halves are made to imply the rate the epoch reports, and the
+        verdict has to say so and say nothing else - otherwise the
+        DISAGREE above is an artefact of the instrument rather than a
+        fact about the dump.
+
+        12,889 us a round trip is 77.6/s; the epoch is given +776 over
+        10 s to match it.
+        """
+        module = load_dump_state()
+        lines = module.vtl_round_trip_verdict(
+            self.halves(1531.0, 11358.0, 22324), self.GHZ,
+            776, int(10.0 * self.GHZ))
+        text = "\n".join(lines)
+        self.assertIn(
+            "AGREE", text,
+            "the verdict cannot stay quiet on agreeing rates, so its "
+            "DISAGREE carries no information")
+        self.assertNotIn("DISAGREE", text)
+
+    def test_a_missing_epoch_never_claims_agreement(self):
+        """The third outcome, which is not the other two.
+
+        No epoch is not agreement. A reader that printed nothing here
+        would leave the mean looking checked when it had not been.
+        """
+        module = load_dump_state()
+        text = "\n".join(module.vtl_round_trip_verdict(
+            self.halves(1531.0, 11358.0, 22324), self.GHZ, 0, 0))
+        self.assertNotIn("AGREE", text)
+        self.assertIn("cannot say", text)
+
+    def test_no_halves_prints_nothing(self):
+        module = load_dump_state()
+        self.assertEqual(
+            [], module.vtl_round_trip_verdict(
+                [(0, 0, 0), (0, 0, 0)], self.GHZ, 47, 1000))
+
+    def test_the_reader_still_calls_the_verdict(self):
+        """The wiring, not the arithmetic.
+
+        The helper being correct is worth nothing if `dump_priority`
+        stops calling it, and that is a one-line deletion away.
+        """
+        dump = read(DUMP_STATE)
+        self.assertIn(
+            "vtl_round_trip_verdict(", dump)
+        self.assertGreaterEqual(
+            dump.count("vtl_round_trip_verdict"), 3,
+            "the verdict is defined but no longer called from the "
+            "half-printing site")
+        for name in ("l2_hypercall_epoch_delta", "l2_hypercall_epoch_span",
+                     "l2_hypercall_cpu_codes"):
+            self.assertIn(
+                name, dump,
+                "the second field the halves are checked against is no "
+                "longer read, so the check is vacuous")
+
+
 if __name__ == "__main__":
     unittest.main()
