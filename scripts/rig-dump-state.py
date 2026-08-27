@@ -488,6 +488,14 @@ def monitor_vector_counts(monitor, instance, off, cpu, member):
     Read as one block of 1024 bytes rather than 256 words, because the
     counters are 32 bit - two per quadword, low half first.
     """
+    # A member the ELF does not carry is not an error and must not be a
+    # crash: an older or differently-configured build simply lacks it,
+    # and the callers already treat an empty result as "nothing to
+    # print". Reporting absence is the instrument saying it failed,
+    # which is always better than a traceback halfway through a dump.
+    if member not in off:
+        return {}
+
     base = instance + off[member] + cpu * 1024
     monitor.queue(base, 128)
     words = monitor.run()
@@ -9580,6 +9588,19 @@ def main():
                 # declaration. A run whose vectors are all timer and
                 # inter-processor and none belongs to a device says the
                 # devices are silent, which is a different fault.
+                # What the entry **actually carried**, read from
+                # vmcs02 at the last instant it could still change.
+                # `l2_injected_vector` above records what was *staged*;
+                # this records what was still there on entry, and the
+                # two are different questions. Its own declaration
+                # records 0xd1 staged 52,799 times into a guest that
+                # never vectored once, and until now **nothing in this
+                # script printed it** - it was listed only under
+                # "deliberately left out". A counter that is recorded
+                # on the machine and never read answers nothing.
+                ("l2_entry_vector",
+                 "vectors the entry actually CARRIED into the second "
+                 "level"),
                 ("l2_external_vector",
                  "external interrupt vectors reflected upward")):
             vectors = monitor_vector_counts(monitor, instance, off, cpu,
@@ -9593,6 +9614,43 @@ def main():
                                         key=lambda kv: -kv[1]):
                 print(f"  0x{vector:02x}  {value:>10}  "
                       f"{100.0 * value / total:5.1f}%")
+
+    # Staged against carried, which is the functional question the two
+    # censuses exist to answer and neither answers alone. A vector the
+    # level above asked to inject and that the entry did not carry was
+    # dropped by this VMM; equal counts mean the injection survived to
+    # the guest, and whether the guest then *vectored* is a question for
+    # the guest's own state, not for these.
+    for cpu in range(args.cpus):
+        staged = monitor_vector_counts(monitor, instance, off, cpu,
+                                       "l2_injected_vector")
+        carried = monitor_vector_counts(monitor, instance, off, cpu,
+                                        "l2_entry_vector")
+        if not staged and not carried:
+            continue
+        nothing = (read("l2_entries_carrying_nothing", cpu)
+                   if "l2_entries_carrying_nothing" in off else None)
+        print(f"\ncpu {cpu} injection reconciliation: staged vs carried")
+        vectors = sorted(set(staged) | set(carried))
+        for vector in vectors:
+            a, b = staged.get(vector, 0), carried.get(vector, 0)
+            if a == b:
+                note = "carried what was staged"
+            elif b < a:
+                note = f"** {a - b:,} STAGED AND NOT CARRIED - dropped here"
+            else:
+                note = f"** {b - a:,} carried and never staged"
+            print(f"  0x{vector:02x}  staged {a:>10,}  carried {b:>10,}"
+                  f"   {note}")
+        if nothing is not None:
+            print(f"  entries carrying no injection at all: {nothing:,}")
+        if not staged and carried:
+            print("  NOTE nothing staged but entries carried vectors - "
+                  "l2_injected_vector may not be recorded in this build")
+        if staged and not carried:
+            print("  NOTE vectors staged and NONE carried. Either the "
+                  "census is off (needs census=1 in the manifest) or "
+                  "every injection is being lost before entry.")
 
     for cpu in range(args.cpus):
         count = read("exit_trace_count", cpu)
