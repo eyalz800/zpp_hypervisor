@@ -1541,6 +1541,200 @@ def header_dimensions(name):
     return [b.strip() for b in re.findall(r"\[([^\]]*)\]", match.group(1))]
 
 
+class TheClockGapHistogramCannotReportItsOwnAbsence(unittest.TestCase):
+    """`clock_gap_buckets`, and the three ways its label was wrong.
+
+    The reading it produced - "96.3% of gaps in the bucket holding the
+    guest's 1.74 ms period, so the period is met" - was quoted in
+    CLAUDE.md as a statement about a guest that was making no progress
+    at all. Three separate faults, each of which this class pins:
+
+    1.  **It counts stagings, not arrivals.** The increment is in
+        `build_vmcs02` on the value copied out of *vmcs12*
+        (`nested_entry.cpp:3251`), which is what the level above asked
+        for. `l2_entry_vector` exists because that disagrees with what
+        the entry carries, and `hypervisor.h` records the rig showing
+        `0xd1` "injected 52,799 times ... and a second-level guest that
+        never vectored once".
+    2.  **It counts one hardcoded vector.** Nothing checked that the
+        guest programmed that vector into the interrupt source its timer
+        posts to, and the value it did program has been recorded all
+        along at `synthetic_msr_last_value[cpu][0x93]`.
+    3.  **It survives the event stream ending.** A histogram of
+        intervals cannot record the interval it is inside, so a clock
+        that stops leaves the distribution frozen and still reading
+        96.3% for ever. A stall that *ends* contributes one count in one
+        bucket, which rounds away.
+
+    Fault 3 is the one with no fix but measurement, so the reader now
+    states its own coverage and `--delta` differences the buckets.
+    """
+
+    def test_the_reader_and_the_header_agree_on_the_counted_vector(self):
+        """A constant copied into the reader that does not move.
+
+        The same failure `gdb_lengths` exists for, one array over: the
+        header owns `clock_gap_vector` and the reader prints a verdict
+        against it.
+        """
+        module = load_dump_state()
+        match = re.search(
+            r"static\s+constexpr\s+std::uint64_t\s+clock_gap_vector"
+            r"\s*=\s*(0x[0-9a-fA-F]+|\d+)\s*;", read(HEADER))
+        self.assertIsNotNone(
+            match, "hypervisor.h no longer declares clock_gap_vector, so "
+                   "the reader's verdict is against nothing")
+        self.assertEqual(int(match.group(1), 16 if
+                             match.group(1).startswith("0x") else 10),
+                         module.CLOCK_GAP_VECTOR)
+
+    def test_the_sint3_slot_is_read_so_the_vector_can_be_checked(self):
+        """0x93 is in the slice, and its last value is read as state."""
+        module = load_dump_state()
+        self.assertIn(0x93, [s for s, _ in module.DELTA_SYNTHETIC_SLOTS])
+        self.assertIn(0x93, module.DELTA_SYNTHETIC_STATE_SLOTS)
+
+    def test_a_disagreeing_sint3_vector_is_called_out(self):
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0x93): 0x00a5}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("vector 0xa5", text)
+        self.assertIn("DISAGREES", text)
+
+    def test_an_agreeing_sint3_vector_is_not_called_out(self):
+        """The negative control for the check above."""
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0x93):
+                 module.CLOCK_GAP_VECTOR}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("AGREES with clock_gap_vector", text)
+        self.assertNotIn("DISAGREES", text)
+
+    def test_an_unwritten_sint3_is_unchecked_and_says_so(self):
+        """Silence is not agreement.
+
+        A processor on which no `wrmsr 0x40000093` was seen must not
+        read as "the vector is confirmed" - it is the case where nothing
+        checked it, which is what the whole class is about.
+        """
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0xb1): 17400}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("UNCHECKED", text)
+        self.assertNotIn("AGREES", text)
+
+    def test_direct_mode_is_decoded_from_bit_twelve(self):
+        """`0x30008` is message mode to SINT3, and that is the whole
+        question the number was being asked.
+
+        Bit layout from Linux's `union hv_stimer_config`, which is what
+        `.references/kvm/hyperv.c` indexes at lines 233, 696-706 and
+        812-854. `0x30008` therefore reads: not enabled, not periodic,
+        auto-enable set, **direct_mode clear**, sintx 3.
+        """
+        module = load_dump_state()
+        bits = module.stimer_config_decode(0x30008)
+        self.assertEqual(0, bits["direct_mode"])
+        self.assertEqual(3, bits["sintx"])
+        self.assertEqual(1, bits["auto_enable"])
+        self.assertEqual(0, bits["periodic"])
+        self.assertEqual(0, bits["enable"])
+        # And the positive control, so a decoder that returns zero for
+        # everything cannot pass the assertion above.
+        self.assertEqual(1, module.stimer_config_decode(
+            0x30008 | (1 << 12))["direct_mode"])
+
+    def test_message_mode_says_the_two_rates_must_agree(self):
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0xb0): 0x30008}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("message mode to SINT3", text)
+        self.assertNotIn("DIRECT MODE", text)
+
+    def test_direct_mode_retires_every_reading_of_the_message_page(self):
+        """The negative control for the line above."""
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0xb0):
+                 0x30008 | (1 << 12)}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("DIRECT MODE", text)
+        self.assertIn("NO message", text)
+
+    def test_the_two_payload_fields_are_not_declared_a_latency(self):
+        """`delivery_time - expiration_time` needs one clock, not two.
+
+        A stable 7.2078 s was read as a delivery latency. For a one-shot
+        arm the expiry is the deadline the *guest* computed, and this
+        VMM publishes its own reference-TSC page into the address the
+        guest named (`publish_reference_tsc_page`), so the two fields
+        need not share an epoch - and a latency that is constant to four
+        decimals is the one thing a latency is not.
+        """
+        module = load_dump_state()
+        after = {("state", "synthetic_msr_last_value", 0, 0x83): 0x1000 | 1}
+        text = "\n".join(module.delta_synic_lines(after, 1))
+        self.assertIn("only a latency if", text)
+        self.assertIn("epoch", text)
+
+    def test_the_buckets_are_differenced_rather_than_refused(self):
+        """The positive control: it is out of the refusal list *and* in
+        the histogram list. Removing it from one alone leaves a reader
+        that neither reports it nor says it declined to."""
+        module = load_dump_state()
+        named = [n for n, _ in module.DELTA_PER_CPU_HISTOGRAMS]
+        self.assertIn("clock_gap_buckets", named)
+        for _what, names, _why in module.DELTA_REFUSALS:
+            self.assertNotIn("clock_gap_buckets", names)
+
+    def test_a_histogram_that_covers_the_run_is_not_complained_about(self):
+        """The negative control for the coverage check.
+
+        Without this, a check that always complains passes the test
+        below and tells the next reader nothing.
+        """
+        module = load_dump_state()
+        hz = module.TSC_HZ
+        # 574 gaps of about 1.74 ms each is one second, measured against
+        # a one second run.
+        lines = "\n".join(module.clock_gap_coverage_lines(
+            [(21, 574)], hz, int(574 * 1.5 * (1 << 21))))
+        self.assertIn("accounts for the run", lines)
+        self.assertNotIn("DOES NOT COVER", lines)
+
+    def test_a_histogram_that_covers_a_tenth_of_the_run_says_so(self):
+        """MEASURED shape: 241,551 gaps at about 1.6 ms is 420 s of
+        clock, and the guest whose reference counter read 4,900 s was
+        reported from it as meeting its period."""
+        module = load_dump_state()
+        hz = module.TSC_HZ
+        covered_ticks = int(241551 * 1.5 * (1 << 21))
+        lines = "\n".join(module.clock_gap_coverage_lines(
+            [(21, 232690), (22, 4139), (21, 4722)], hz, covered_ticks * 10))
+        self.assertIn("DOES NOT COVER", lines)
+        self.assertIn("cannot", lines)
+
+    def test_coverage_above_the_run_is_an_error_not_a_number(self):
+        """Gaps between successive events cannot outlast the run.
+
+        The case that produces it is the one this tree keeps hitting: a
+        reader pointed at a rebuilt ELF against a deployed older binary,
+        which reads plausible garbage rather than failing.
+        """
+        module = load_dump_state()
+        lines = "\n".join(module.clock_gap_coverage_lines(
+            [(21, 1000)], module.TSC_HZ, 1 << 21))
+        self.assertIn("IMPOSSIBLE", lines)
+        self.assertNotIn("accounts for the run", lines)
+
+    def test_no_span_produces_no_verdict(self):
+        """A denominator that was not read is not a small denominator."""
+        module = load_dump_state()
+        self.assertEqual([], module.clock_gap_coverage_lines(
+            [(21, 100)], module.TSC_HZ, 0))
+        self.assertEqual([], module.clock_gap_coverage_lines(
+            [], module.TSC_HZ, 1 << 40))
+
+
 class DeltaModeDifferencesOnlyWhatIsMonotonic(unittest.TestCase):
     """What `--delta` will subtract, and what it refuses to.
 

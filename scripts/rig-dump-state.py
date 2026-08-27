@@ -1398,6 +1398,90 @@ def dump_vmcs12_regions(args, elf, instance):
               "write that was discarded at the call site ***")
 
 
+# The vector `clock_gap_buckets` counts, transcribed from
+# `hypervisor.h`'s `clock_gap_vector`.  A test in
+# `tests/python_layout` fails if the two ever disagree, for the reason
+# that file exists: a constant copied here is a constant that does not
+# move when the header does.
+CLOCK_GAP_VECTOR = 0xd1
+
+
+def clock_gap_coverage_lines(gaps, hz, span_ticks):
+    """How much of the run the gap histogram actually accounts for.
+
+    **A histogram of intervals between events cannot record the interval
+    it is currently inside.** `clock_gap_buckets` gains a count only when
+    vector `0xd1` is staged (`nested_entry.cpp:3251`), and
+    `clock_gap_last` is only written there too - so a clock that stops
+    leaves the histogram frozen with whatever distribution it had when it
+    stopped, and a reader gets the same "96.3% at the 1.74 ms period" for
+    ever.  A stall that *ends* contributes exactly **one** count in one
+    high bucket, which is 0.0004% of 241,551 and rounds away in every
+    column printed beside it.
+
+    So the histogram is checked against its own integral.  Each count in
+    bucket `i` stands for an interval in `[2^i, 2^(i+1))` ticks; summing
+    the geometric midpoint over every bucket gives the wall-clock time
+    the `0xd1` stream spans.  If that is much less than the run, the
+    percentages describe a *phase* and not the guest now.
+
+    This is free - it needs no extra read, only the two `handler_*_tsc`
+    values the dump already has - and it is the negative control the
+    percentage has never had.  `--delta` is the positive one.
+
+    `gaps` is `[(bucket_index, count), ...]`, `hz` the time-stamp counter
+    frequency, `span_ticks` the run length from `handler_first_tsc` to
+    `handler_last_tsc`.  Returns lines; an empty list when there is
+    nothing to check against.
+    """
+    if not gaps or not hz or not span_ticks or span_ticks <= 0:
+        return []
+    # The geometric midpoint of [2^i, 2^(i+1)) rather than the arithmetic
+    # one: the bucket is a log-scale bin and its counts are not uniform
+    # inside it.  Either choice is within 6% and neither changes the
+    # verdict, but saying which is used stops the next reader deriving a
+    # third.
+    covered = sum(count * (2 ** i) * 1.5 for i, count in gaps)
+    fraction = covered / float(span_ticks)
+    lines = [
+        f"    these gaps span {covered / hz:,.1f} s of the "
+        f"{span_ticks / hz:,.1f} s this boot has been handling exits "
+        f"({100.0 * fraction:.1f}%)"]
+    if fraction > 1.15:
+        # Impossible, not merely large: intervals between successive
+        # events cannot sum to more than the span containing them.  This
+        # file's rule is that an impossible reading is an error naming
+        # what produced it, never a number - `delta_impossible_lines`
+        # exists for the same reason one array over.
+        lines.append(
+            "    *** IMPOSSIBLE: gaps between successive events cannot "
+            "sum to more than the run")
+        lines.append(
+            "        that contains them. Either the span is not this "
+            "boot's or the histogram is")
+        lines.append(
+            "        not this binary's. Check the module base and "
+            "`--elf` before reading any of it. ***")
+    elif fraction < 0.9:
+        lines.append(
+            "    *** CUMULATIVE, AND IT DOES NOT COVER THE RUN. The "
+            "percentages above are of a")
+        lines.append(
+            "        phase, not of now: a histogram of intervals cannot "
+            "record the interval it")
+        lines.append(
+            "        is inside, so a clock that stopped leaves this "
+            "frozen and still reading")
+        lines.append(
+            "        96%. Difference two dumps - `--delta N` reports "
+            "these buckets per window. ***")
+    else:
+        lines.append(
+            "    <- accounts for the run, so the distribution is of the "
+            "whole of it")
+    return lines
+
+
 def vtl_round_trip_verdict(halves, hz, epoch_delta, epoch_span_ticks):
     """The trust-level halves as a rate, checked against the epoch.
 
@@ -1496,7 +1580,11 @@ def dump_priority(args, elf, instance):
                "interrupt_request_vector", "vtl_half_cycles",
                "vtl_half_exits", "vtl_half_count",
                "l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta",
-               "l2_hypercall_epoch_span"]
+               "l2_hypercall_epoch_span",
+               # Not printed here - they are the denominator the gap
+               # histogram below is checked against. See
+               # `clock_gap_coverage_lines`.
+               "handler_first_tsc", "handler_last_tsc"]
     off = gdb_offsets(elf, members)
     vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
@@ -1535,6 +1623,8 @@ def dump_priority(args, elf, instance):
     for member in ("l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta"):
         reader.queue(instance + off[member], args.cpus * 32)
     reader.queue(instance + off["l2_hypercall_epoch_span"], args.cpus)
+    for member in ("handler_first_tsc", "handler_last_tsc"):
+        reader.queue(instance + off[member], args.cpus)
     got = reader.run()
 
     def word(member, index):
@@ -1581,7 +1671,18 @@ def dump_priority(args, elf, instance):
             # part's marketed 1.80 GHz base frequency is *not* its TSC
             # frequency, and this label previously used 2.6 GHz, which
             # understated every period by 31%.
-            print(f"  time-stamp counter between clock interrupts "
+            # **What this counts, spelled out, because the label was
+            # read as something else for a week.** The counter is
+            # incremented in `build_vmcs02` when the event copied out of
+            # *vmcs12* carries `clock_gap_vector`
+            # (`nested_entry.cpp:3251`), so it is the interval between
+            # successive **stagings** of that vector into vmcs02 by the
+            # level above - not between interrupts the guest took, and
+            # not between synthetic timer messages. `l2_entry_vector`
+            # exists precisely because those disagree; see its
+            # declaration in `hypervisor.h`.
+            print(f"  time-stamp counter between stagings of vector "
+                  f"0x{CLOCK_GAP_VECTOR:02x} into vmcs02 "
                   f"({total:,} gaps, TSC 1.992 GHz measured)")
             for i, v in gaps:
                 low = 1 << i
@@ -1593,6 +1694,14 @@ def dump_priority(args, elf, instance):
                 print(f"    2^{i:<2} ({low / 1992000.0:8.2f} - "
                       f"{2.0 * low / 1992000.0:.2f} ms)  {v:>10}  "
                       f"{100.0 * v / total:5.1f}%")
+            # And whether the whole run is in there at all. See
+            # `clock_gap_coverage_lines`: this histogram is the only one
+            # in the dump that stays confident after the thing it
+            # measures has stopped.
+            span = (word("handler_last_tsc", cpu)
+                    - word("handler_first_tsc", cpu))
+            for line in clock_gap_coverage_lines(gaps, TSC_HZ, span):
+                print(line)
 
         # PPR, not TPR, is what an arriving interrupt's class must
         # exceed - SDM 12.8.3.1 - so this is the reading that says
@@ -4069,6 +4178,17 @@ DELTA_PER_CPU_CYCLES = [
 DELTA_PER_CPU_HISTOGRAMS = [
     ("exit_reason_counts", "exit reasons"),
     ("l2_ept_dispositions", "second-level fault dispositions"),
+    # **The one that most needed windowing and was the one refused.**
+    # It is a monotonic event histogram exactly like the two above -
+    # `nested_entry.cpp:3251` only ever `+= 1`s a bucket - and it was
+    # left out for read-window cost.  That cost is 64 quadwords per
+    # processor, under two round trips, and what the refusal bought was
+    # a boot-cumulative "96.3% of clock gaps are at the guest's own
+    # period" quoted as a statement about a guest that had stopped
+    # making progress.  A histogram of intervals cannot record the
+    # interval it is inside, so the cumulative reading survives the
+    # event stream ending; the difference of two samples cannot.
+    ("clock_gap_buckets", "gaps between stagings of the clock vector"),
 ]
 
 # The span source.  `handler_last_tsc` is a *last value*, not an
@@ -4090,7 +4210,7 @@ DELTA_FINGERPRINT = "handler_first_tsc"
 # The whole census is 320 entries per processor and reading it would
 # widen the read window by about a hundred monitor round trips - which
 # is exactly the reason `DELTA_REFUSALS` gives for leaving it out, and
-# that reason still stands.  Five indices per processor is ten
+# that reason still stands.  Six indices per processor is twelve
 # quadwords, under two round trips, and it answers the one question
 # counting the whole range would.
 #
@@ -4119,13 +4239,60 @@ DELTA_FINGERPRINT = "handler_first_tsc"
 # backpressure, measured as a rate over a window.  A cumulative
 # percentage of "all synthetic MSR writes" is not that quantity and has
 # already been read as though it were.
+#
+# 0x93 SINT3 joined them later and is a *sixth*, for a different
+# question: `clock_gap_buckets` counts one hardcoded vector and nothing
+# had ever checked that the guest programmed that vector into the
+# interrupt source the timer posts to.  `HalpHvTimerSetInterruptVector`
+# (ntoskrnl+0x55cd40) writes `0x40000093` with the vector in EAX and
+# nothing else, so `synthetic_msr_last_value[cpu][0x93] & 0xff` **is**
+# the SINT3 vector - already recorded by `nested_entry.cpp:11812` and
+# never read out.
 DELTA_SYNTHETIC_SLOTS = [
     (0x70, "HV_X64_MSR_EOI written"),
     (0x83, "HV_X64_MSR_SIMP written (message page named)"),
     (0x84, "HV_X64_MSR_EOM written (SynIC backpressure acknowledged)"),
+    (0x93, "HV_X64_MSR_SINT3 written (the vector the timer posts on)"),
     (0xb0, "HV_X64_MSR_STIMER0_CONFIG written"),
     (0xb1, "HV_X64_MSR_STIMER0_COUNT written (one-shot re-armed)"),
 ]
+
+# The last-value slots printed as state beside the counts above.
+# 0x93 and 0xb0 answer "is the histogram counting the right vector" and
+# "is this timer in message mode or direct mode", and neither can be
+# answered from a count.
+DELTA_SYNTHETIC_STATE_SLOTS = (0x83, 0x84, 0x93, 0xb0, 0xb1)
+
+
+def stimer_config_decode(value):
+    """`HV_X64_MSR_STIMER0_CONFIG`, field by field.
+
+    Layout from Linux's `union hv_stimer_config`, which is the reference
+    implementation this tree reads (`.references/kvm/hyperv.c` uses
+    `config.direct_mode`, `config.periodic`, `config.sintx` and
+    `config.apic_vector` at lines 233, 696-706 and 812-854): bit 0
+    enable, bit 1 periodic, bit 2 lazy, bit 3 auto-enable, bits 4-11 the
+    APIC vector, **bit 12 direct mode**, bits 16-19 the synthetic
+    interrupt source.
+
+    Why it is decoded rather than printed raw.  Direct mode delivers the
+    vector with **no message at all** - `stimer_notify_direct` calls
+    `kvm_apic_set_irq` and never touches the message page, while
+    `stimer_send_msg` is the only path that writes `expiration_time` and
+    `delivery_time`.  So a timer in direct mode makes every reading of
+    the message slot irrelevant to the clock, and a timer in message
+    mode makes the two rates comparable.  Reading `0x30008` as a number
+    does not say which.
+    """
+    return {
+        "enable": value & 1,
+        "periodic": (value >> 1) & 1,
+        "lazy": (value >> 2) & 1,
+        "auto_enable": (value >> 3) & 1,
+        "apic_vector": (value >> 4) & 0xff,
+        "direct_mode": (value >> 12) & 1,
+        "sintx": (value >> 16) & 0xf,
+    }
 
 # What this mode refuses to subtract, and why.  Grouped by *what kind of
 # thing it is*, because the refusal generalises to members added later
@@ -4174,15 +4341,15 @@ DELTA_REFUSALS = [
     ("event histograms not sampled here",
      "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
      "counts, vtl_service_calls, hypercall_code_counts, "
-     "clock_gap_buckets, l2_injected_vector, l2_synthetic_msr_writes, "
+     "l2_injected_vector, l2_entry_vector, l2_synthetic_msr_writes, "
      "l2_msr_write_counts",
      "differenceable in principle and deliberately left out: every "
      "member added widens the read window, and the read window is this "
      "measurement's own error bar"),
-    ("synthetic_msr_writes - a FIVE-INDEX SLICE, not the census",
-     "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0xb0 STIMER0_CONFIG, "
+    ("synthetic_msr_writes - a SIX-INDEX SLICE, not the census",
+     "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0x93 SINT3, 0xb0 STIMER0_CONFIG, "
      "0xb1 STIMER0_COUNT, per processor",
-     "the other 315 indices per processor are still refused for the "
+     "the other 314 indices per processor are still refused for the "
      "reason above. Do not read the five as a distribution - they are "
      "five named counters that happen to live in one array, and their "
      "sum is not the synthetic-MSR total"),
@@ -4615,7 +4782,8 @@ def serial_module_base(rig):
 
 
 def delta_sample(args, instance, off, cpus, reason_capacity,
-                 disposition_capacity, synthetic_capacity=None):
+                 disposition_capacity, synthetic_capacity=None,
+                 gap_capacity=None):
     """One complete delta sample: open, read, close.
 
     **The monitor takes exactly one connection.**  `Monitor` opens and
@@ -4645,6 +4813,13 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
     if "l2_ept_dispositions" in off:
         monitor.queue(instance + off["l2_ept_dispositions"],
                       cpus * disposition_capacity)
+    # Optional, and read per processor rather than as one run: the row
+    # length comes from the ELF, never a literal 64, for the reason
+    # `gdb_lengths` exists.
+    if gap_capacity and "clock_gap_buckets" in off:
+        for cpu in range(cpus):
+            monitor.queue(instance + off["clock_gap_buckets"]
+                          + cpu * gap_capacity * 8, gap_capacity)
     # The five named synthetic-MSR counters, one quadword each, plus the
     # two state fields that turn them into an address and a deadline.
     # `synthetic_capacity` is the row length read out of the ELF, never
@@ -4660,7 +4835,7 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
                          "synthetic_msr_last_write_tsc"):
                 if name not in off:
                     continue
-                for slot in (0x83, 0x84, 0xb1):
+                for slot in DELTA_SYNTHETIC_STATE_SLOTS:
                     monitor.queue(instance + off[name]
                                   + (cpu * synthetic_capacity + slot) * 8,
                                   1)
@@ -4688,6 +4863,10 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
             readings[("l2_ept_dispositions", (cpu, disposition))] = read(
                 "l2_ept_dispositions",
                 cpu * disposition_capacity + disposition)
+        if gap_capacity and "clock_gap_buckets" in off:
+            for bucket in range(gap_capacity):
+                readings[("clock_gap_buckets", (cpu, bucket))] = read(
+                    "clock_gap_buckets", cpu * gap_capacity + bucket)
         if synthetic_capacity and "synthetic_msr_writes" in off:
             for slot, _ in DELTA_SYNTHETIC_SLOTS:
                 readings[("synthetic_msr_writes", (cpu, slot))] = read(
@@ -4699,7 +4878,7 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
             # second entry in DELTA_REFUSALS.
             for name in ("synthetic_msr_last_value",
                          "synthetic_msr_last_write_tsc"):
-                for slot in (0x83, 0x84, 0xb1):
+                for slot in DELTA_SYNTHETIC_STATE_SLOTS:
                     readings[("state", name, cpu, slot)] = read(
                         name, cpu * synthetic_capacity + slot)
 
@@ -4755,19 +4934,82 @@ def delta_synic_lines(after, cpus):
     for cpu in range(cpus):
         simp = after.get(("state", "synthetic_msr_last_value", cpu, 0x83))
         count = after.get(("state", "synthetic_msr_last_value", cpu, 0xb1))
+        sint3 = after.get(("state", "synthetic_msr_last_value", cpu, 0x93))
+        config = after.get(("state", "synthetic_msr_last_value", cpu, 0xb0))
         eom_tsc = after.get(
             ("state", "synthetic_msr_last_write_tsc", cpu, 0x84))
         now = after.get((DELTA_CLOCK, cpu))
-        if simp or count or eom_tsc:
-            rows.append((cpu, simp, count, eom_tsc, now))
+        if simp or count or eom_tsc or sint3 or config:
+            rows.append((cpu, simp, count, sint3, config, eom_tsc, now))
     if not rows:
         return lines
 
     lines.append("")
     lines.append("synthetic interrupt controller, per processor "
                  "(state, NOT differenced)")
-    for cpu, simp, count, eom_tsc, now in rows:
+    for cpu, simp, count, sint3, config, eom_tsc, now in rows:
         lines.append(f"  cpu {cpu}")
+        # **The check the gap histogram has never had.** It counts one
+        # hardcoded vector; this is the vector the guest actually
+        # programmed into the source the timer posts to. A disagreement
+        # means the histogram is a census of something else entirely
+        # and its percentages say nothing about the clock.
+        if sint3:
+            vector = sint3 & 0xff
+            agrees = ("AGREES with clock_gap_vector"
+                      if vector == CLOCK_GAP_VECTOR
+                      else f"DISAGREES with clock_gap_vector "
+                           f"0x{CLOCK_GAP_VECTOR:02x} - the gap "
+                           f"histogram is counting a different vector")
+            lines.append(
+                f"    SINT3 (0x40000093) 0x{sint3:016x}  "
+                f"vector 0x{vector:02x}  masked {(sint3 >> 16) & 1}  "
+                f"auto_eoi {(sint3 >> 17) & 1}")
+            lines.append(f"      -> {agrees}")
+        else:
+            lines.append(
+                "    SINT3 not recorded on this processor - no wrmsr to "
+                "0x40000093 was seen here, so the vector the gap "
+                "histogram counts is UNCHECKED, not confirmed")
+        # Message mode or direct mode. In direct mode the expiry is an
+        # APIC vector with no message at all (KVM's
+        # `stimer_notify_direct`), so nothing is ever written to the
+        # message page and every reading of that page is off the clock
+        # path. In message mode the two rates are comparable.
+        if config is not None and config:
+            bits = stimer_config_decode(config)
+            lines.append(
+                f"    STIMER0_CONFIG (0x400000b0) 0x{config:016x}")
+            lines.append(
+                f"      enable {bits['enable']}  periodic "
+                f"{bits['periodic']}  lazy {bits['lazy']}  auto_enable "
+                f"{bits['auto_enable']}")
+            lines.append(
+                f"      direct_mode {bits['direct_mode']}  sintx "
+                f"{bits['sintx']}  apic_vector "
+                f"0x{bits['apic_vector']:02x}")
+            if bits["direct_mode"]:
+                lines.append(
+                    "      -> DIRECT MODE: the expiry is delivered as a "
+                    "bare vector and NO message")
+                lines.append(
+                    "         is ever posted. Every reading of the "
+                    "message page is off the clock path.")
+            else:
+                lines.append(
+                    f"      -> message mode to SINT{bits['sintx']}: every "
+                    f"expiry posts a message into slot "
+                    f"{bits['sintx']}, so the message")
+                lines.append(
+                    "         rate and the interrupt rate are the same "
+                    "quantity and must agree.")
+            if not bits["periodic"]:
+                lines.append(
+                    "      -> one-shot, so STIMER0_COUNT below is an "
+                    "ABSOLUTE reference-time deadline,")
+                lines.append(
+                    "         not a period - and the guest computed it "
+                    "from its own clock.")
         if simp:
             lines.append(f"    SIMP  0x{simp:016x}  enabled {simp & 1}  "
                          f"page 0x{simp & ~0xfff:x}")
@@ -4802,17 +5044,45 @@ def delta_synic_lines(after, cpus):
                  "secure kernel each run their own controller with their "
                  "own page, and both write the same MSR. A page read "
                  "from here is not attributed to a VTL by this reader.")
+    # **`delivery_time - expiration_time` is not a latency unless the two
+    # fields share an epoch, and here they may not.** KVM's
+    # `stimer_send_msg` (`.references/kvm/hyperv.c:824-826`) writes
+    # `expiration_time = stimer->exp_time` and
+    # `delivery_time = get_time_ref_counter(...)`.  For a **one-shot**
+    # arm `exp_time` is the absolute deadline the *guest* wrote, computed
+    # from whatever the guest reads reference time out of - and this VMM
+    # publishes its own reference-TSC page into the address the guest
+    # named (`nested_entry.cpp:6868` `publish_reference_tsc_page`, with
+    # the offset re-anchored on every revision at line 7076).
+    # `delivery_time` comes from the level above's counter.  Two
+    # producers, two anchors: a difference that is *constant* across
+    # samples is what a fixed epoch skew looks like, and a difference
+    # that *grows* is what a clock-rate divergence looks like.  Neither
+    # is a delivery latency, which would jitter.
+    lines.append("  delivery_time - expiration_time is only a latency if "
+                 "both fields are on the same")
+    lines.append("  clock. For a one-shot arm expiration_time is the "
+                 "deadline the GUEST computed and")
+    lines.append("  delivery_time is the level above's reference "
+                 "counter; this VMM publishes its own")
+    lines.append("  reference-TSC page to the guest, so they need not "
+                 "share an epoch. Sample the pair")
+    lines.append("  twice a minute apart: constant = epoch skew, growing "
+                 "= rate divergence, jittering")
+    lines.append("  = a real latency. A value stable to four decimals is "
+                 "NOT a latency.")
     return lines
 
 
 def delta_main(args, base, instance, off, cpus, reason_capacity,
-               disposition_capacity, synthetic_capacity=None):
+               disposition_capacity, synthetic_capacity=None,
+               gap_capacity=None):
     """Two samples, a measured span between them, and rates from it."""
     print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
           f"B ...")
     before, first_a, clock_a, a0, a1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity)
+        synthetic_capacity, gap_capacity)
 
     # The socket is closed before this sleep and reopened after it: no
     # connection is held across the wait.
@@ -4820,7 +5090,7 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
 
     after, first_b, clock_b, b0, b1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity)
+        synthetic_capacity, gap_capacity)
     base_b = serial_module_base(args.rig)
 
     # Midpoint to midpoint, because each sample takes a measurable time
@@ -4857,6 +5127,22 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
               for d in range(disposition_capacity)]),
             lambda d: (L2_DISPOSITION[d[1]]
                        if d[1] < len(L2_DISPOSITION) else str(d[1]))))
+        if gap_capacity:
+            # The bucket label carries the period it stands for, at the
+            # frequency this window measured rather than the constant -
+            # `delta_span` already picked one and said which, and a
+            # histogram labelled from a different frequency than the
+            # rates beside it is the unit slip this file keeps
+            # recording.
+            hz = span[2] or TSC_HZ
+            histograms.append((
+                f"gaps between stagings of vector "
+                f"0x{CLOCK_GAP_VECTOR:02x} into vmcs02", cpu,
+                (before, after,
+                 [(("clock_gap_buckets", (cpu, b)), "")
+                  for b in range(gap_capacity)]),
+                lambda b, hz=hz: f"2^{b[1]:<2} "
+                                 f"({(1 << b[1]) / (hz / 1000.0):8.3f} ms)"))
 
     fingerprints = ({"base": base, "first_tsc": first_a},
                     {"base": (int(base_b, 16) if base_b else None),
@@ -4951,6 +5237,13 @@ def main():
                "pending_event_lost", "pending_event_lost_first",
                "pending_event_lost_last", "pending_event_lost_reason",
                "l2_simp_msr", "l2_siefp_msr",
+               # Read by `--delta` as a windowed histogram. The
+               # cumulative reader has its own offsets for it; this one
+               # is the delta path's, and it is in the required list
+               # rather than the optional one because a run that
+               # silently omitted it would print the same report as a
+               # run where the clock stream had stopped.
+               "clock_gap_buckets",
                "shadow_ept_leaves_filled",
                # How each second-level fault was answered. Without this
                # the only visible fact is that faults arrive, and a fault
@@ -5243,8 +5536,18 @@ def main():
             synthetic_capacity = None
             print("note: synthetic_msr_writes is absent from this ELF; "
                   "the synthetic-MSR slice will not be reported")
+        # Same treatment, same reason: optional so an older deployed
+        # binary still reports, and the row length from the ELF so the
+        # stride cannot go stale.
+        try:
+            gap_capacity = gdb_lengths(
+                args.elf, ["clock_gap_buckets"])["clock_gap_buckets"]
+        except SystemExit:
+            gap_capacity = None
+            print("note: clock_gap_buckets is absent from this ELF; the "
+                  "clock-gap histogram will not be reported")
         delta_main(args, base, instance, off, args.cpus, reason_capacity,
-                   disposition_capacity, synthetic_capacity)
+                   disposition_capacity, synthetic_capacity, gap_capacity)
         return
 
     monitor = Monitor(args.rig, args.port)

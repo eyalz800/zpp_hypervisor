@@ -55194,3 +55194,215 @@ gap histogram is measuring a different vector than the SINT3 one.
 and the session's own record is the reason for saying so rather than
 picking the interesting one.
 
+
+## The three readings reconcile, and the one that has to go is the 96.3%
+
+Held open in the section above; settled here from the source, with no
+boot. **Two of the three were measuring something other than their
+label, and the third is not a latency.**
+
+### `clock_gap_buckets` does not measure the guest's clock
+
+Three separate faults, and each on its own is enough to retire the
+"the period is met" reading.
+
+**It counts stagings, not arrivals.** The increment is in
+`build_vmcs02`, on the value copied out of *vmcs12*
+(`nested_entry.cpp:3251`, inside the `if (0 != (injection &
+interruption_valid))` block at 3207). That is what the level above
+asked for, at the moment this VMM transcribed it - not what the guest
+took. `hypervisor.h`'s own declaration of `l2_entry_vector` says why
+the two differ and records the disagreement: "the rig shows vector
+`0xd1` injected 52,799 times, no entry failure, and a second-level
+guest that never vectored once". `l2_entry_vector` is the census built
+to close exactly this gap and **no reader in this tree has ever read
+it** - `grep l2_entry_vector scripts/` returns nothing.
+
+**It counts one hardcoded vector, and nothing had checked it.**
+`clock_gap_vector = 0xd1` (`hypervisor.h:7726`) is a constant. The
+vector the guest actually programmed has been recorded all along at
+`synthetic_msr_last_value[cpu][0x93]` (`nested_entry.cpp:11812`) and
+was never read out. `HalpHvTimerSetInterruptVector`
+(`ntoskrnl+0x55cd40`, disassembled) writes `0x40000093` with
+`movzbl %r11b, %edx; xor upper; wrmsr` and nothing else, so
+`& 0xff` of that recorded value **is** the SINT3 vector, with masked
+and auto-EOI both clear.
+
+**It survives the event stream ending.** `clock_gap_last[cpu]` is only
+written where the bucket is only incremented, so a clock that stops
+leaves the histogram frozen with whatever distribution it had. A stall
+that *ends* contributes exactly one count in one high bucket - 0.0004%
+of 241,551, which rounds away in the column beside it. And the mode
+built to answer "is this happening now" **refused this member by
+name**: `DELTA_REFUSALS`, "event histograms not sampled here". So every
+figure ever quoted from it has been boot-cumulative.
+
+The arithmetic that settles it needs no new read at all. 241,551 gaps
+in the 1.05-2.11 ms bucket integrate to about **420 seconds** of clock.
+The same guest's reference counter read **4,900 seconds**
+(`0x117a31320` = 49,001,459,813 in 100 ns units). The histogram
+accounts for under a tenth of the run it was quoted as describing.
+`clock_gap_coverage_lines` now prints that ratio on every dump, and
+`--delta` differences the buckets.
+
+### The timer is in message mode, so the two rates cannot disagree
+
+`HV_STIMER0_CONFIG = 0x30008` is not a reading, it is a **literal in
+`ntoskrnl`**: `HalpHvTimerSetInterruptVector` does
+`movl $0x30008, %eax; xorl %edx, %edx; wrmsr $0x400000b0`. Decoded
+against `union hv_stimer_config`, which is what
+`.references/kvm/hyperv.c` indexes (`config.direct_mode` at 233 and
+696-706, `config.sintx`/`config.apic_vector` at 812-854):
+
+    enable 0  periodic 0  lazy 0  auto_enable 1
+    apic_vector 0x00   direct_mode 0   sintx 3
+
+**`direct_mode` is clear.** `stimer_expiration` (hyperv.c:845) sends a
+message when it is clear and calls `stimer_notify_direct` - a bare
+`kvm_apic_set_irq`, no message page touched - only when it is set. So
+"the vector arrives at 574 Hz while messages arrive at 1 Hz" is not
+available as a resolution: in message mode every expiry posts a
+message, and the two rates are the same quantity.
+
+Which means one of the two rates is wrong, and the one with three
+independent faults is the 96.3%.
+
+### 7.2078 s is not a latency
+
+Two reasons, either sufficient.
+
+**It is stable to four decimals.** Real delivery latency jitters. What
+is constant to four decimals is an epoch difference.
+
+**The two fields have different producers.** `stimer_send_msg`
+(hyperv.c:824-826) writes `expiration_time = stimer->exp_time` and
+`delivery_time = get_time_ref_counter(...)`. With `periodic` clear the
+interface defines the count as an **absolute deadline**, so `exp_time`
+is a number the *guest* computed from its own reading of reference
+time - and this VMM publishes its own reference-TSC page into the
+address the guest named (`publish_reference_tsc_page`,
+`nested_entry.cpp:6868`, re-anchoring the offset on every revision at
+7076). `delivery_time` comes from the level above's counter. Two
+producers, two anchors.
+
+The sign agrees: `delivery - expiration = +7.2 s` means the clock the
+deadline was computed on reads **lower** than the clock that stamped
+the delivery, so every deadline the guest sets is already in the past
+when the level above sees it. This tree measured that directly and
+wrote it down two months ago and it was never followed up -
+`nested_entry.cpp:12013`: "the root partition writes 156,250 ... **and
+a time nine hours in the past as an absolute deadline**, when the
+reference counter stands at about 1.5e9."
+
+And the eight samples contradict the 1 Hz turnover on their own.
+Between the two distinct messages observed, `expiration_time` advanced
+**12,258 units = 1.2258 ms** and `delivery_time` advanced 14,323 units
+= 1.4323 ms. A channel turning over once a second would show
+consecutive expiries about 10,000,000 units apart. 1.2 ms apart is the
+guest's own tick scale. So "1 Hz" is most likely the monitor read
+cadence beating against the channel, not the channel's rate - and the
+ratio 12,258/14,323 = 0.856 is, on two samples, the same rate
+divergence the constant offset implies. Two samples is not a
+measurement; the ratio is what to measure next.
+
+### What was retracted, and what replaces it
+
+Retracted: "the period is met", "the guest meets its clock and reaches
+PASSIVE_LEVEL constantly", and the reading of 7.2 s as a delivery
+latency. Also retracted is the framing that made them contradictory -
+there was never a three-way conflict, only one instrument measuring
+stagings, one sampling artifact, and one subtraction across two clocks.
+
+Not retracted: the 88% slot occupancy, the `MessagePending` bit being
+set sometimes, and the payload layout, which the measured
+`payload_size = 0x18` and `0x0118` at slot+0x304 both confirm.
+
+Cheapest next measurements, in order, none of them a boot:
+
+    # 1. Is the clock still arriving at all, and at what rate NOW?
+    #    Also prints the SINT3 vector and decodes STIMER0_CONFIG.
+    scripts/rig-dump-state.py --elf .rig-deployed-hypervisor.elf --delta 30
+
+    # 2. Does the epoch gap GROW? Constant = skew, growing = rate
+    #    divergence, jittering = a real latency. One command, both
+    #    fields, twice, sixty seconds apart.
+    printf 'xp /2xg 0x117a31318\n' | nc <rig> 4446
+    sleep 60
+    printf 'xp /2xg 0x117a31318\n' | nc <rig> 4446
+
+### Still open, and it needs one hypervisor change
+
+`l2_simp_msr[cpu]` and `synthetic_msr_last_value[cpu][0x83]` are
+**last-write-wins and not keyed by trust level**, so `gpa 0x117a31000`
+is whichever of VTL0's or VTL1's synthetic interrupt controller wrote
+`0x40000083` last on that processor. The tree already fixed exactly
+this shape one member over: the VP assist page is keyed by the
+extended-page-table pointer in force, "because the register is per-VTL
+and each level configures its own - one slot would hold whichever wrote
+last and there would be no way to tell which"
+(`nested_entry.cpp:10063-10079`). Mirroring that for `SIMP` is
+additive, changes no behaviour, and is what makes the page reading
+attributable. Until it exists, no reading of that page is attributed to
+a trust level and none should be quoted as VTL0's clock.
+
+## Settled: 7.2 s is a clock epoch, and the message channel is healthy
+
+The growth test, two atomic reads about twenty-five minutes apart:
+
+    t0        expiration 48,929,381,313   delivery 49,001,459,813   7.2078 s
+    t0+~25m   expiration 63,795,414,169   delivery 63,867,542,398   7.2128 s
+
+**The gap grew by 5 milliseconds while `expiration_time` advanced
+14,866,032,856 units - 1,486.6 seconds - which matches the wall time
+between the reads.** Two things follow and both are clean.
+
+**The 7.2 s is a fixed epoch difference between two clocks running at
+nearly the same rate.** 0.005 / 1,487 is **3.4 parts per million** of
+drift, which is crystal-level. It is not a latency - a latency does not
+hold four decimal places for twenty-five minutes - and it is not the
+~14% rate divergence a two-sample estimate had suggested. The two
+fields simply have different anchors: `expiration_time` is a deadline
+the guest computed against **our** published reference-TSC page, and
+`delivery_time` comes from the level above's own counter.
+
+**And the message channel advances at real time.** `expiration_time`
+tracking the wall clock over 1,487 seconds kills "the slot turns over
+at about 1 Hz" outright. The slot turns over continuously; the eight
+frozen reads were a read-cadence artifact, and the same eight samples
+already contradicted the claim - the two distinct messages in them are
+1.2258 ms and 1.4323 ms apart, the guest's own tick scale, not one
+second.
+
+### So the whole timer line is a red herring, and one older reading goes with it
+
+The synthetic timer, its message slot, the `MessagePending` handshake
+and the drain path are **all working**. The drain takes zero VM exits
+(disassembled in full), the slot turns over at real time, and the
+epoch gap is two anchors rather than a delay.
+
+**What is retracted is the 96.3%**, and it is worse than being wrong:
+`clock_gap_buckets` counts **stagings out of vmcs12**, not clock
+arrivals - the comment three lines below the site says "nothing in this
+VMM decides this vector" - it is boot-cumulative, `--delta` explicitly
+refused to difference it, and its own integral covers **8.6% of the
+run** (241,551 gaps at ~1.6 ms is 420 s against a reference counter
+reading 4,900 s). "The period is met" was a percentage of a tenth of
+the boot, of the wrong quantity, and this file has quoted it for
+several sessions.
+
+**Direct mode is not an escape hatch either.** `0x30008` is a literal
+baked into `HalpHvTimerSetInterruptVector`, and bit 12 is clear, so the
+timer is in message mode to SINT3 and the message rate and the
+interrupt rate are **one quantity**.
+
+### The one thing that would still be worth fixing here
+
+`l2_simp_msr` is **last-write-wins across trust levels**
+(`nested_entry.cpp:10036`, no key), and this tree fixed the identical
+bug one member over - `l2_vp_assist` is keyed by EPTP at `:10063`,
+with the comment "the register is per-VTL and each level configures its
+own - one slot would hold whichever wrote last". **So no reading of
+`0x117a31000` is attributable to a trust level**, and everything above
+about that page is a statement about *a* SynIC, not necessarily
+VTL0's.
+

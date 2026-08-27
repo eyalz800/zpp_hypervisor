@@ -4859,14 +4859,36 @@ private:
      * sixteen 256-byte slots, one per interrupt source. Slot 3 is where a
      * timer configured to post to SINT3 puts its expiry message.
      *
-     * Reading it settles what counting cannot. The counts say no message
-     * is ever acknowledged; they do not say whether one was ever
-     * *written*. If slot 3 holds a message - type `0x80000010`,
+     * Reading it settles what counting cannot: whether a message was
+     * ever *written*. If slot 3 holds a message - type `0x80000010`,
      * "timer expired" - then Hyper-V wrote it and only the interrupt that
      * announces it failed to arrive. If the slot is empty, Hyper-V never
      * got as far as writing, and the fault is earlier. Those are
      * different bugs in different layers and nothing recorded so far
      * separates them.
+     *
+     * **"The counts say no message is ever acknowledged" used to stand
+     * here and is withdrawn.** The end-of-message register *is* written:
+     * a message read out of slot 3 carried `0x0118` at slot+0x304, which
+     * is `payload_size` 0x18 with `MessagePending` set, and the census
+     * puts `0x84` at about 4.1% of synthetic-MSR writes. The bit is set
+     * sometimes and the guest drains sometimes.
+     *
+     * **Slot `0x93` is the one nothing had read.** It holds the vector
+     * the guest programmed into SINT3, which is what
+     * `clock_gap_vector` was assumed to be and never checked against -
+     * see `clock_gap_buckets`. `HalpHvTimerSetInterruptVector` writes
+     * `0x40000093` with the vector alone, so `& 0xff` of this is that
+     * vector, with masked and auto-EOI both clear.
+     *
+     * **This array does not distinguish trust levels.** VTL0's kernel
+     * and VTL1's secure kernel each run their own synthetic interrupt
+     * controller with their own message page and both write the same
+     * MSR, so `[0x83]` holds whichever wrote last on that processor.
+     * `l2_vp_assist` solves the identical problem one member over by
+     * keying on the extended-page-table pointer in force; until this
+     * does the same, a page read out of here is not attributable to a
+     * trust level and must not be quoted as VTL0's.
      */
     std::uint64_t synthetic_msr_last_value[max_cpus]
                                           [synthetic_msr_capacity]{};
@@ -7721,6 +7743,28 @@ private:
      * time-stamp composition in `build_vmcs02`. Bucketed by logarithm
      * so the whole range from a microsecond to a second fits in
      * sixty-four counters with no constant to choose.
+     *
+     * **Read what this counts before quoting it. The reading above was
+     * quoted for a week and was wrong.** Three faults, each enough on
+     * its own:
+     *
+     * - It is incremented in `build_vmcs02` on the event copied out of
+     *   *vmcs12*, so it is the interval between successive **stagings**
+     *   of the vector by the level above - not between interrupts the
+     *   guest took. `l2_entry_vector` exists because those disagree,
+     *   and its own declaration records `0xd1` staged 52,799 times into
+     *   a guest that never vectored once. Nothing in `scripts/` reads
+     *   `l2_entry_vector`.
+     * - `clock_gap_vector` is a constant nobody had checked. What the
+     *   guest actually programmed into SINT3 is recorded at
+     *   `synthetic_msr_last_value[cpu][0x93]`.
+     * - **A histogram of intervals cannot record the interval it is
+     *   inside.** If the stream stops, this stays frozen with the
+     *   distribution it had and keeps reading 96%; a stall that *ends*
+     *   adds one count in one bucket, which rounds away. Difference two
+     *   samples - `rig-dump-state.py --delta N` now does - or check the
+     *   integral: 241,551 gaps at ~1.6 ms is 420 s of clock, and the
+     *   guest it was read from had been up 4,900 s.
      * @{
      */
     static constexpr std::uint64_t clock_gap_vector = 0xd1;

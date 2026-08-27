@@ -668,21 +668,50 @@ rounding of either.
 **The "the guest never leaves the clock handler" reading of that is
 withdrawn - measured 2026-08-21, and it was wrong.** It said a tick costs
 this VMM about 2.46 ms so the handler cannot finish inside its own period.
-The gap histogram says otherwise:
+
+**And the histogram that withdrew it is itself withdrawn - 2026-08-27.**
+It read:
 
     time-stamp counter between clock interrupts (241,551 gaps, 1.992 GHz)
       2^21 ( 1.05 - 2.11 ms)   232,690   96.3%    <- the 1.74 ms period, met
-      2^22 ( 2.11 - 4.21 ms)     4,139    1.7%
 
-    virtual task priority at second-level entry (1,085,015 entries)
-      0x00    27,169   2.5%      0x10     2,777   0.3%   <- PASSIVE_LEVEL
+and was quoted as "the guest meets its clock". `clock_gap_buckets`
+measures none of that, for three separate reasons, any one of which is
+enough:
 
-96.3% of intervals land in the bucket holding the guest's own 1.74 ms
-period, and it enters at task priority `0x00` twenty-seven thousand times.
-**The guest meets its clock and reaches PASSIVE_LEVEL constantly.** What is
-still true is the *shape* of the hot set - eight instruction pointers, all
-in the clock path, zero new memory - but that is a guest **waiting**, not
-one saturated. Those look identical in a profile and are opposite problems.
+- **It counts stagings, not arrivals.** The increment is in
+  `build_vmcs02` on the event copied out of *vmcs12*
+  (`nested_entry.cpp:3251`) - what the level above asked for, not what
+  the guest took. `l2_entry_vector` exists precisely because the two
+  disagree, and its own declaration records "vector `0xd1` injected
+  52,799 times ... and a second-level guest that never vectored once".
+  Nothing in `scripts/` has ever read it.
+- **It counts a hardcoded vector.** `clock_gap_vector = 0xd1` is a
+  constant, and the vector the guest programmed is recorded at
+  `synthetic_msr_last_value[cpu][0x93]` and was never read out.
+- **It cannot report its own absence.** A histogram of intervals cannot
+  record the interval it is inside, so a clock that stops leaves the
+  distribution frozen and still reading 96.3%. A stall that *ends*
+  contributes one count in one bucket. And `--delta` **refused this
+  member by name**, so every figure ever quoted from it was
+  boot-cumulative.
+
+The arithmetic needs no new read: 241,551 gaps at ~1.6 ms integrate to
+**420 s** of clock, in a guest whose reference counter read **4,900 s**.
+The dump now prints that ratio, and `--delta` differences the buckets.
+`BACKLOG.md` has the full reconciliation, including why the SynIC
+message slot's `delivery_time - expiration_time` of 7.2078 s is an epoch
+difference between two clocks and not a latency.
+
+**The general rule, which is the third instance of it in this file: an
+instrument that cannot report the absence of what it counts will
+report health for ever after the thing stops.** Check the integral
+against the run before quoting a percentage.
+
+What is still true is the *shape* of the hot set - eight instruction
+pointers, all in the clock path, zero new memory - and the task-priority
+census beside it (`0x00` on 27,169 of 1,085,015 entries), which is a
+different member and not affected.
 
 **Four attempts to help the guest cope have now failed**, and the reason
 they all failed is most likely this: every one of them was aimed at a
