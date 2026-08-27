@@ -57043,3 +57043,58 @@ continuation it accepted thousands of times earlier in the same boot.
 The `vtl_reentry` charge says the caller is
 `VslFinishStartSecureProcessor`, the symbolised stack says the same, and
 both agree with `MakeGdtReadOnly` above it.
+
+## The whole chain, measured end to end
+
+Every link below was measured separately over this investigation, and
+they compose into one account with nothing inferred between them.
+
+    Windows raises IRQL to 2 for KeWriteProtectProcessorState
+      -> a DPC is queued, dispatch self-IPI 0x2f requested
+        -> class-2 vector is masked by class-2 TPR, stays PENDING
+          -> a pending VTL0 interrupt asserts VINA
+            -> the secure kernel yields on every VTL1 entry
+              -> it returns the request block UNMODIFIED
+                -> VTL0 re-asks, about 55 times a second, for ever
+                  -> and cannot lower IRQL, because it is waiting
+                     for exactly that call to finish
+
+The evidence, one line each:
+
+- **IRQL 2**: task priority class 2 on 61.4% of trust-level calls, and
+  `irql 2` on every interrupted-context sample.
+- **The request**: `HV_ICR = 0x4002f` written **700,852** times.
+- **The masking**: only **8,142** deliveries of `0x2f`, and the hot
+  instruction pointer is `KiDpcInterruptBypass+0x12` - the path Windows
+  takes precisely when the dispatch interrupt cannot be delivered.
+- **VINA stuck**: the flag at guest-physical `0x117a1e008` reads
+  `0x00000001` on six consecutive samples.
+- **The unmodified answer**: `rbx 0x0000000100000400` at
+  `HvCallVtlReturn`, byte-for-byte the block that went in.
+- **The waiter**: `MakeGdtReadOnly -> KeWriteProtectProcessorState ->
+  VslFinishStartSecureProcessor` in the symbolised stack.
+
+It is a deadlock with a cycle of length two: the DPC needs IRQL to drop,
+and IRQL cannot drop until the secure call finishes, and the secure call
+will not finish while the DPC is pending.
+
+### What this says about the three interventions aimed at 0x2f
+
+`ZPP_DELIVER_SELF_IPI`, `window_on_tpr` and `deliver_on_drop` all aimed
+at exactly the right link - and the reason to keep aiming there is now
+established rather than assumed. But **none of them actually raised
+delivery**, which is the thing that would break the cycle:
+
+    deliver_on_drop:  0x2f as a share of carried vectors 1.108% -> 0.837%
+
+That is not "delivering 0x2f does not help". It is "delivering 0x2f was
+not achieved". The distinction matters because the first retires the
+approach and the second retires only the implementation, and the chain
+above says the approach is right.
+
+**So the test that has never been run is one that demonstrably increases
+`0x2f` deliveries.** Its pre-registered read is now three-deep and cheap
+to check: `0x2f` carried must rise, the VINA flag must be observed
+*clear* at least sometimes, and `vtl_return_rbx` must stop repeating.
+Any intervention that does not move the first cannot be said to have
+tested the hypothesis at all - which is what happened three times.
