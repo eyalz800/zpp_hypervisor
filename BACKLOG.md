@@ -54188,3 +54188,63 @@ VTL1 returning, with nothing changing**. That is the same boundary the
 72,510 reps asked against 72,342 done, three short answers - and the
 first thing to check is whether those are the same event.
 
+## The retry survives a corrected instrument, and the walk stops at two known frames
+
+`9539912`'s "the guest repeats identical work" was withdrawn in
+`3a88f58` because the sampler fired on `l2_entries % 4096`, phase-locked
+to the guest's own periodic loop. **With the stride jittered into
+[4096, 8192) the reading holds**, which is the outcome that makes it
+evidence rather than an artefact:
+
+    two dumps, 60 s and 360,752 second-level entries apart
+      2 interleaved contexts, every field identical within each
+      rsp    0xfffffd8d1fc07410   frozen in both
+      frame  0xfffffd8d1fc07280   frozen in both
+
+A frozen **frame address** is the discriminator the fix added: it means
+the same call depth and the same stack frame, not the shape search
+re-finding a stale one.
+
+And the guest is **looping, not parked**. `last_hypercall` - a member
+that had never been read - advances across the two dumps:
+
+    tsc   647,225,760,373 -> 827,154,134,603
+    seen           87,169 ->          88,041      ~14.5 VtlReturns/s
+
+so "called once and never returned" is out.
+
+### Where it stops, and it is two frames this file already named
+
+    code-0 requests: 21,162, parameters differed 21,149 times (99.9%)
+    page-walk span: 0x11a483..0x122620 = 33,182 pages (129.6 MB)
+                    7,207 page requests, 6,295 consecutive
+        SHORT OF THE SPAN - it stopped inside
+    last code-0 blocks: subcode 0x01010002, PFN 0x11aac9 / 0x11aaca
+
+**The secure kernel is walking a 129.6 MB span one page at a time and
+stopped part way through it.** Its requests are distinct 99.9% of the
+time, so it is not re-asking one question - it is a *sequence* that
+always ends in the same place, which is consistent with the byte-
+identical sample point without contradicting it.
+
+**And the two frames it stopped on are the two this file already
+flagged**, far above, from an entirely different instrument:
+
+    the read-only frames (2):
+      0x11aac9  shadow r--   our own tables: status 0 perms rwx
+      0x11aaca  shadow r--   our own tables: status 0 perms rwx
+
+That reading was dismissed at the time as "the protection working" - a
+frame the secure kernel had just asked to protect *should* read
+read-only. **It stops being ordinary when the walk stops there.**
+
+That is the first time two independent instruments have pointed at the
+same address in this investigation, and it is the thing to chase: what
+does the secure kernel need at `0x11aac9`/`0x11aaca` that our composed
+extended page tables do not give it, and why does the walk not resume.
+
+Held open rather than concluded: 99.9% distinct requests is *not* the
+signature of a single refused page being re-asked, so "we deny a write
+and it retries the same page" does not fit as stated. The span is
+short by ~26,000 pages, which is a lot to be explained by two.
+
