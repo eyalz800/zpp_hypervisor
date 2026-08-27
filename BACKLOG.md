@@ -54604,3 +54604,73 @@ what does the secure kernel return?** That is one narrow question about
 1,158 recorded events, and it is the first time this investigation has
 been pointed at something that small.
 
+## Both predictions refuted: the re-entries are spread, and the time is VTL0's
+
+The re-entry instrument answers, and it refutes the hypothesis it was
+built to test - which is the point of stating it first.
+
+    fresh calls 20,804   re-entries 2,704
+      (partition BROKEN vs 23,510 blocks - do not use these numbers)
+    re-entry by reason  0=366  4=2,340
+    block address  same 2,356  moved 348
+    re-entries CHARGED TO the call that issued them:
+      0x00f4  1,301  VslCopyProtectedPage
+      0x0003    702  VslFinishStartSecureProcessor
+      0x0101    330  VslSetPlaceholderPages
+      0x00d9    314  VslCompleteSecureDriverLoad
+
+**B1 predicted the re-entries would charge almost entirely to
+`0x0003`, with `block_moved` near zero.** They charge mostly to the
+image validation, `0x0003` holds a quarter of them, and 348 blocks
+moved. **This is not one stuck call.** The "cpu 0 blocked waiting for a
+secure processor" shape is dead, and it was already halfway dead: one
+call to `VslFinishStartSecureProcessor` is the *healthy* count on a
+one-processor guest, since its only caller is a per-processor INIT
+routine and the additional-VP service `VslStartSecureProcessor` never
+appears at all.
+
+**And the instrument says its own partition is BROKEN** - 20,804 +
+2,704 = 23,508 against 23,510 blocks. Two out of 23,510 is a sampling
+skew across a dump, but the check exists so the numbers are quoted as
+indicative and not as exact. That is what it is for.
+
+### B2 refuted, and this is the useful number
+
+    what one trust-level round trip costs
+      VtlCall  -> VtlReturn (secure kernel)    1,531 us,  7.2 exits
+      VtlReturn -> VtlCall  (ordinary kernel) 11,358 us, 90.8 exits
+
+**The time is spent in VTL0.** Seven point four times as long in the
+ordinary kernel as in the secure kernel, and **90.8 of this VMM's exits
+per round trip** against 7.2. The secure kernel answers promptly.
+Windows takes eleven milliseconds between calls, and takes ninety-one
+exits doing it.
+
+That also retires the reading one section above that the second must be
+spent inside VTL1 because the guest's own loop has no delay. The loop
+has no delay and the guest still takes 11 ms, so the delay is in what
+VTL0 does between calls - which is where the ninety exits are.
+
+### And the rate is not 1 Hz
+
+    earlier epoch:  0x0011 +9  1.02/s
+    this epoch:     0x0011 +47 5.45/s
+
+**Five times faster in the same configuration.** "One round trip per
+second" was nine events in one 8.8 second window, quoted as a constant.
+It is not one. The traffic is still exclusively `HvCallVtlCall` and
+`HvCallVtlReturn` with every other code at zero, and that part holds.
+
+### What is actually left
+
+The guest spends its time in VTL0, taking about ninety exits per
+trust-level round trip, and `vmcs02` carried **212,137 clock vectors
+against 815 dispatch vectors** over the same run. So the ninety exits
+are overwhelmingly the clock.
+
+Which returns to the oldest measured fact in this investigation, now
+with a number attached: the guest takes its tick, does a little work,
+and takes another. **The question is what those ninety exits per round
+trip are**, and the exit-reason census is per processor and already
+printed - it has simply never been read against the VTL round trip.
+
