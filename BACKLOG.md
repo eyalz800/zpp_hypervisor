@@ -55406,3 +55406,89 @@ own - one slot would hold whichever wrote last". **So no reading of
 about that page is a statement about *a* SynIC, not necessarily
 VTL0's.
 
+## Phase 1 returned. The guest is loading system-start drivers from disk
+
+Disassembled from the real `ntoskrnl.exe` rather than inferred from a
+counter, and it moves the target a long way.
+
+`Phase1Initialization` (rva `0x6FB520`) is a thin frame of seven steps:
+
+    KeQueryPerformanceCounter -> Phase1InitializationDiscard
+      -> InbvSetProgressBarSubset -> IoInitSystem
+      -> Phase1InitializationIoReady -> MmEnumerateSystemImages -> flag
+
+`MiCreateSystemSection` (rva `0x446238`) has **exactly two call sites**
+in the whole image, and a reverse walk of the complete direct call
+graph says `Phase1InitializationDiscard` **does not reach either**.
+Only `IoInitSystem` does:
+
+    IoInitSystem -> IopInitializeSystemDrivers -> IopLoadDriver
+      -> MmLoadSystemImageEx -> MiObtainSectionForDriver
+      -> MiCreateSectionForDriver -> MiCreateSystemSection
+
+**So phase-1 discard completed.** Symmetric multiprocessing is up, the
+object, executive, security, process, registry, memory, power and
+plug-and-play phase-1 stages are done, code-integrity policy is
+initialised, and boot-start drivers have run their entry points. The
+guest is at **step four of seven**, loading *system-start* drivers off
+the disk one at a time.
+
+### Two unbounded sleep-and-retry loops sit on that path
+
+| loop | delay | condition |
+|---|---|---|
+| `MiCreateSystemSection`, `jmp 0x446292` | `MiHalfSecond`, **0.5 s** | `MiCreateSection` returned `0xC0000054 STATUS_FILE_LOCK_CONFLICT`. **No attempt counter** - it re-walks the whole image every half second. |
+| `MiWalkEntireImage`, `jmp 0x33FA3C` | `MiShortTime`, **10 ms** | `MiPrefetchControlArea` failed. The jump lands on the loop *test*, not past the current entry - it retries **the same page** for ever. |
+
+**Both sleep. Neither spins.** That reconciles every measurement in
+this file at once:
+
+- the profile showing only clock-path instruction pointers - the guest
+  is **asleep between retries**, so the clock is the only thing left
+  running,
+- the same stack in all 326 thread samples - it genuinely is the same
+  stack,
+- and the one reading recorded as anomalous, **zero new extended-page-
+  table leaves in 31.2 seconds** - it retries *the same page*, so there
+  is no new page to map. That stops being strange and becomes a
+  prediction the data already satisfied.
+
+### The chain, joined at both ends this time
+
+A system-start driver's image pages never arrive from disk ->
+`MiPrefetchControlArea` fails -> `MiWalkEntireImage` retries at 100 Hz
+for ever -> `IoInitSystem` never returns -> phase 1 never returns ->
+`StartFirstUserProcess` is never reached.
+
+It is **not** the chain retracted earlier in this file: it needs
+neither starved deferred calls nor an unstarted storage stack, both of
+which were correctly withdrawn. And it predicts the two independent
+observations that were never connected - `smss.exe` waiting on
+`WrPageOut`, and MSI-X never being enabled on the passed-through NVMe.
+
+### First measurements
+
+**The MSR-area refusal hypothesis is dead, for no boots at all.** The
+entry check refuses any MSR outside an eighteen-entry allow-list -
+which excludes every control-flow-enforcement MSR - and reports it as
+VMfailValid error 7, a control problem rather than an MSR-area one, on
+a counter that is blind to that path. Grepping the log ring for it:
+**zero refusals.** It never fired.
+
+**The loaded-module list walks, and the guest has 36 modules**, ending
+`intelpep.sys`, `WindowsTrustedRTProxy.sys`, `IntelPMT.sys`, `pcw.sys`,
+`msisadrv.sys`, `pci.sys`. Kernel base `0xfffff805e2000000`, Windows'
+CR3 `0x1ae002`, both from this VMM's own log line. A second walk sixty
+seconds later decides it: **a count that grows means slow, a count and
+a last name that do not means stuck on that named driver** - and the
+name is the answer.
+
+### A tooling correction that invalidates earlier symbol work
+
+`scripts/symbolize-trace.py`'s `publics()` parses the PDB segment as
+**hex** while `llvm-pdbutil` prints both the segment and the offset in
+**decimal**. Sections 1-9 coincide by luck; `PAGELK`, `INIT` (24),
+`.data` (26) and `ALMOSTRO` (27) were all wrong, and it placed
+`Phase1InitializationDiscard` past the end of the image. CLAUDE.md
+already warns that the offset is decimal - **the segment is too.**
+

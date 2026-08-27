@@ -4141,6 +4141,25 @@ DELTA_PER_CPU_COUNTERS = [
     ("stall_forced_total", "interrupts forced"),
     ("stall_restaged_total", "interrupts restaged"),
     ("window_deferred_count", "interrupt windows deferred"),
+    # **The two numbers that separate "the guest is busy" from "the guest
+    # has nothing to run", and neither had ever been windowed.**
+    #
+    # `hlt_reflect_count` is the decisive one. The guest hypervisor sets
+    # HLT exiting, so every `hlt` the second-level guest executes is an
+    # exit here and is counted at `nested_entry.cpp:11830`. A thread
+    # blocked in `KeWaitForSingleObject` puts the processor on the idle
+    # thread, which halts; a thread spinning does not. Those two are the
+    # only remaining accounts of a `Phase1Initialization` that never
+    # returns and they are indistinguishable in every other counter in
+    # this file - the exit rate, the tick rate and the priority census
+    # read the same either way.
+    ("hlt_reflect_count", "second-level HLTs reflected (idle, NOT spin)"),
+    # And the `rdmsr` half of the clock loop, counted at
+    # `nested_vmx.cpp:2577`. `stimer_arm_count` covers the writes; this
+    # is the read of the reference counter that goes with them, and
+    # without it the `rdmsr` share of the exit histogram has nothing to
+    # be attributed to.
+    ("reference_read_count", "reference-counter RDMSRs"),
 ]
 
 # Monotonic counts that are single words, not per-processor rows.  Read
@@ -4189,6 +4208,38 @@ DELTA_PER_CPU_HISTOGRAMS = [
     # interval it is inside, so the cumulative reading survives the
     # event stream ending; the difference of two samples cannot.
     ("clock_gap_buckets", "gaps between stagings of the clock vector"),
+]
+
+# Global histograms indexed by basic exit reason, not by processor.
+#
+# **These answer the one question `exit_reason_counts` structurally
+# cannot: whose exit it was.**  `record_exit` runs at the top of the
+# handler for both levels and counts into one row, so a `wrmsr` the
+# guest hypervisor executed and a `wrmsr` its guest executed are the
+# same bucket.  `handler_reason_from_l2` is sampled from
+# `handler_was_l2`, taken at `exit_dispatch.cpp:647` *before*
+# `load_l1_host_state` clears `running_l2` on the reflection, and closed
+# in `resume_guest` at `resume.cpp:1388-1394` against
+# `handler_reason_exits` over the same span.  So the pair is a subset
+# and its superset by construction.
+#
+# Both were already resident, already read by `dump_handler_by_reason`,
+# and read **cumulatively only** - which for this pair is the wrong
+# question twice over.  A boot has phases, and the split the cumulative
+# reader printed (`vmresume at 38% of exits and vmptrld at 8%`) is a
+# mean over a configuration that no longer exists: VMCS shadowing was
+# not in force when it was taken, and with shadowing on the guest
+# hypervisor's VMREADs and VMWRITEs stop exiting entirely.  Quoting it
+# against a windowed `exit_total` is the same class of error as the
+# 96.3% two entries above.
+#
+# `handler_reason_slots` is 64 while `exit_reason_capacity` is 96, so
+# reasons at or above 64 appear in `exit_reason_counts` and *not* here.
+# The report says so rather than letting the two totals differ in
+# silence.
+DELTA_GLOBAL_HISTOGRAMS = [
+    ("handler_reason_exits", "exits, by reason, BOTH levels"),
+    ("handler_reason_from_l2", "of those, taken from the second level"),
 ]
 
 # The span source.  `handler_last_tsc` is a *last value*, not an
@@ -4505,6 +4556,172 @@ def delta_fingerprint_lines(before, after):
     return lines, same
 
 
+def delta_level_split_lines(before, after, slots, seconds, l2_entries):
+    """Exits by reason **and by level**, differenced over the window.
+
+    The decomposition question this mode could not answer.
+    `exit_reason_counts` says a window held N `wrmsr` exits; it cannot
+    say whether the guest hypervisor executed them or its guest did, and
+    the two have opposite consequences.  A second-level `wrmsr` is
+    reflected and comes back as the level above's `VMRESUME`, so it is
+    *one round trip costing two exits*; a first-level `wrmsr` is one
+    exit standing alone.  Halving the first halves two counts and
+    halving the second halves one.
+
+    Three things are printed and each is falsifiable on its own:
+
+    - the per-reason split, L1 against L2;
+    - the **round-trip identity**, `L2 exits` against `vmlaunch +
+      vmresume`.  Every reflected second-level exit is answered by the
+      level above with one entry instruction, and every entry
+      instruction that reaches `on_guest_vmlaunch` increments
+      `l2_entries`, so in a steady state those two are equal and their
+      sum is the whole window.  What is left over is the only traffic
+      that is neither - second-level exits this VMM answered itself
+      without reflecting, plus the guest hypervisor's own instructions
+      other than its entries.  That residue is a *small number* in a
+      settled clock loop and naming it is the point;
+    - the reasons this table cannot see, because
+      `handler_reason_slots` stops at 64.
+
+    Refuses, rather than reporting, three impossibilities:
+
+    - a bucket that went backwards, for the four reasons
+      `delta_impossible_lines` gives;
+    - **`from_l2` exceeding `exits` for the same reason**, which is a
+      subset larger than its superset.  They are written by adjacent
+      statements over one span (`resume.cpp:1388` and `:1392`), so this
+      cannot happen to a coherent pair and means the two members were
+      read at different strides or from different binaries.  Without
+      this the reader prints an L1 count as a negative number and a
+      share above 100%, both of which look like findings;
+    - a total that is not the sum of its parts.
+
+    Takes dictionaries and numbers only, no rig, so every judgement
+    here is reachable from a test with values chosen to make it fail.
+    """
+    exits_rows, exits_bad, exits_unread = delta_rows(
+        before, after,
+        [(("handler_reason_exits", r), "") for r in range(slots)])
+    l2_rows, l2_bad, l2_unread = delta_rows(
+        before, after,
+        [(("handler_reason_from_l2", r), "") for r in range(slots)])
+
+    if exits_unread or l2_unread:
+        return ["",
+                "exits by level: NOT READ. `handler_reason_exits` or "
+                "`handler_reason_from_l2` is",
+                "  absent from this ELF, so the L1/L2 split is unknown "
+                "rather than zero."]
+
+    lines = []
+    for what, bad in (("handler_reason_exits", exits_bad),
+                      ("handler_reason_from_l2", l2_bad)):
+        for key, _label, a, b, delta in bad:
+            lines.append(f"    {what}[reason {key[1]}]  {a:,} -> {b:,} "
+                         f"({delta:,})")
+    if lines:
+        return (["", "*** IMPOSSIBLE: a monotonic counter went "
+                     "BACKWARDS ***"] + lines
+                + ["    The exit-by-level split is not printed. See the "
+                   "four causes above."])
+
+    exits = {key[1]: delta for key, _l, _a, _b, delta in exits_rows}
+    from_l2 = {key[1]: delta for key, _l, _a, _b, delta in l2_rows}
+
+    over = [(r, from_l2[r], exits[r])
+            for r in sorted(exits) if from_l2[r] > exits[r]]
+    if over:
+        lines = ["",
+                 "*** IMPOSSIBLE: a SUBSET exceeds its superset ***"]
+        for reason, l2, total in over:
+            lines.append(f"    {EXIT_REASON.get(reason, reason)}: "
+                         f"from_l2 {l2:,} of {total:,} exits")
+        lines.append("    `handler_reason_from_l2` is incremented only "
+                     "inside the `if` that")
+        lines.append("    increments `handler_reason_exits` "
+                     "(resume.cpp:1388-1394), so it cannot")
+        lines.append("    exceed it. One of the two was read at the "
+                     "wrong stride, or the two")
+        lines.append("    samples are from different binaries. Nothing "
+                     "below is printed.")
+        return lines
+
+    total = sum(exits.values())
+    if not total:
+        return ["",
+                "exits by level: every reason unchanged in this window. "
+                "Not printed -",
+                "  a table of zeroes is not a distribution."]
+
+    total_l2 = sum(from_l2.values())
+    total_l1 = total - total_l2
+
+    lines = ["",
+             f"exits by REASON and by LEVEL IN THIS WINDOW "
+             f"({total:,}, {total / seconds:,.1f}/s)",
+             "  reason              total       from L1      from L2"
+             "        total/s"]
+    for reason in sorted(exits, key=lambda r: -exits[r]):
+        if not exits[reason]:
+            continue
+        name = EXIT_REASON.get(reason, reason)
+        l2 = from_l2[reason]
+        lines.append(f"  {name:<14} {exits[reason]:>11,} "
+                     f"{exits[reason] - l2:>13,} {l2:>12,} "
+                     f"{exits[reason] / seconds:>14,.2f}")
+    lines.append(f"  {'ALL':<14} {total:>11,} {total_l1:>13,} "
+                 f"{total_l2:>12,} {total / seconds:>14,.2f}")
+
+    # The round trip, stated as an identity rather than left to be
+    # divided out of two rows by hand.
+    entries = (exits.get(20, 0) + exits.get(24, 0))
+    lines.append("")
+    lines.append("  the round trip, as an identity")
+    lines.append(f"    vmlaunch + vmresume        {entries:>11,}  "
+                 f"{entries / seconds:>12,.2f}/s")
+    lines.append(f"    exits taken from L2        {total_l2:>11,}  "
+                 f"{total_l2 / seconds:>12,.2f}/s")
+    residue = total - entries - total_l2
+    lines.append(f"    everything else            {residue:>11,}  "
+                 f"{residue / seconds:>12,.2f}/s")
+    if residue < 0:
+        lines.append("    -> NEGATIVE, which is impossible: the entry "
+                     "instructions and the")
+        lines.append("       second-level exits cannot outnumber every "
+                     "exit taken. Read no")
+        lines.append("       further - the two members disagree about "
+                     "which exits exist.")
+    else:
+        lines.append("    -> 'everything else' is second-level exits "
+                     "this VMM answered")
+        lines.append("       WITHOUT reflecting, plus the guest "
+                     "hypervisor's own exits other")
+        lines.append("       than its entry instructions. In a settled "
+                     "clock loop it is small,")
+        lines.append("       and a large one is the finding.")
+
+    # And the independent cross-check the caller can supply.
+    if l2_entries is not None:
+        agree = (entries == l2_entries)
+        lines.append(
+            f"    l2_entries in the same window {l2_entries:>11,}  "
+            f"{'AGREES' if agree else 'DISAGREES'} with vmlaunch+vmresume")
+        if not agree:
+            lines.append("    -> `hypervisor.h` states these are equal "
+                         "when no entry is refused.")
+            lines.append("       Check `nested_entry_refusals` and "
+                         "`nested_vmfail_count` before")
+            lines.append("       reading anything above as a rate.")
+
+    unseen = [r for r in range(slots, 96) if r in EXIT_REASON]
+    lines.append(f"    reasons >= {slots} are outside this table "
+                 f"({len(unseen)} defined). They appear in")
+    lines.append("       `exit_reason_counts` and not here, so the two "
+                 "totals may differ.")
+    return lines
+
+
 def delta_report(before, after, entries, cycles, histograms, span,
                  fingerprints, cpus, asked_seconds, read_windows):
     """The whole delta report, as lines, from data alone.
@@ -4783,7 +5000,7 @@ def serial_module_base(rig):
 
 def delta_sample(args, instance, off, cpus, reason_capacity,
                  disposition_capacity, synthetic_capacity=None,
-                 gap_capacity=None):
+                 gap_capacity=None, reason_slots=None):
     """One complete delta sample: open, read, close.
 
     **The monitor takes exactly one connection.**  `Monitor` opens and
@@ -4813,6 +5030,13 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
     if "l2_ept_dispositions" in off:
         monitor.queue(instance + off["l2_ept_dispositions"],
                       cpus * disposition_capacity)
+    # The by-level split.  Global rows, one read each, at the row length
+    # the ELF reports - never a literal 64, for the reason `gdb_lengths`
+    # exists.  Two rows is 128 quadwords, under three round trips.
+    if reason_slots:
+        for name, _ in DELTA_GLOBAL_HISTOGRAMS:
+            if name in off:
+                monitor.queue(instance + off[name], reason_slots)
     # Optional, and read per processor rather than as one run: the row
     # length comes from the ELF, never a literal 64, for the reason
     # `gdb_lengths` exists.
@@ -4855,6 +5079,10 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
             readings[(name, cpu)] = read(name, cpu)
     for name, _ in DELTA_GLOBAL_COUNTERS:
         readings[(name, None)] = read(name)
+    if reason_slots:
+        for name, _ in DELTA_GLOBAL_HISTOGRAMS:
+            for reason in range(reason_slots):
+                readings[(name, reason)] = read(name, reason)
     for cpu in range(cpus):
         for reason in range(reason_capacity):
             readings[("exit_reason_counts", (cpu, reason))] = read(
@@ -5076,13 +5304,13 @@ def delta_synic_lines(after, cpus):
 
 def delta_main(args, base, instance, off, cpus, reason_capacity,
                disposition_capacity, synthetic_capacity=None,
-               gap_capacity=None):
+               gap_capacity=None, reason_slots=None):
     """Two samples, a measured span between them, and rates from it."""
     print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
           f"B ...")
     before, first_a, clock_a, a0, a1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity)
+        synthetic_capacity, gap_capacity, reason_slots)
 
     # The socket is closed before this sleep and reopened after it: no
     # connection is held across the wait.
@@ -5090,7 +5318,7 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
 
     after, first_b, clock_b, b0, b1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity)
+        synthetic_capacity, gap_capacity, reason_slots)
     base_b = serial_module_base(args.rig)
 
     # Midpoint to midpoint, because each sample takes a measurable time
@@ -5152,6 +5380,21 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
                              span, fingerprints, cpus, args.delta,
                              (a1 - a0, b1 - b0)):
         print(line)
+
+    # After the report rather than inside it, because it is a *global*
+    # table and every histogram `delta_report` prints is per processor.
+    # Folding it in would put a figure summed over every processor under
+    # a `cpu 0` heading, which is the mislabelling this mode exists to
+    # end.
+    if reason_slots:
+        entered = sum(
+            d for (n, cpu), _l, _a, _b, d in
+            delta_rows(before, after,
+                       [(("l2_entries", cpu), "") for cpu in range(cpus)])[0])
+        for line in delta_level_split_lines(
+                before, after, reason_slots, span[1] or args.delta,
+                entered):
+            print(line)
 
     for line in delta_synic_lines(after, cpus):
         print(line)
@@ -5488,6 +5731,13 @@ def main():
         # `synthetic_msr_writes` and `synthetic_msr_last_value` are in
         # the required list already, and this one is newer than both.
         "synthetic_msr_last_write_tsc",
+        # The by-level exit split, and the two per-processor counts that
+        # go with it.  Optional for the reason above: all three are
+        # newer than binaries that are still deployed, and a name a
+        # deployed binary predates would take the whole dump down
+        # instead of one section.
+        "handler_reason_exits", "handler_reason_from_l2",
+        "hlt_reflect_count", "reference_read_count",
     ], optional=True))
     instance = base + gdb_symbol(
         args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
@@ -5546,8 +5796,23 @@ def main():
             gap_capacity = None
             print("note: clock_gap_buckets is absent from this ELF; the "
                   "clock-gap histogram will not be reported")
+        # Same treatment again.  The row length comes from the ELF, not
+        # from `handler_reason_slots` copied here: the header owns that
+        # constant and a copy of it does not fail when it changes, it
+        # reads the second row at the wrong stride and prints a coherent
+        # histogram of exits the guest never took.  `exit_reason_counts`
+        # has already cost this file exactly that.
+        try:
+            reason_slots = gdb_lengths(
+                args.elf,
+                ["handler_reason_exits"])["handler_reason_exits"]
+        except SystemExit:
+            reason_slots = None
+            print("note: handler_reason_exits is absent from this ELF; "
+                  "the exits-by-level split will not be reported")
         delta_main(args, base, instance, off, args.cpus, reason_capacity,
-                   disposition_capacity, synthetic_capacity, gap_capacity)
+                   disposition_capacity, synthetic_capacity, gap_capacity,
+                   reason_slots)
         return
 
     monitor = Monitor(args.rig, args.port)

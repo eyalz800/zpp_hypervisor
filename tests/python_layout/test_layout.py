@@ -1852,6 +1852,213 @@ class DeltaModeDifferencesOnlyWhatIsMonotonic(unittest.TestCase):
             self.assertIn(what, text)
 
 
+class TheExitHistogramCannotSayWhoseExitItWas(unittest.TestCase):
+    """`exit_reason_counts` mixes both levels, and the split that does
+    not was read cumulatively only.
+
+    `record_exit` runs once per exit at the top of the handler, for the
+    guest hypervisor and for its guest alike, and counts into one row -
+    so a `wrmsr` bucket is the sum of two populations with opposite
+    consequences.  A second-level `wrmsr` is reflected and answered with
+    a `VMRESUME` that comes straight back, so it is one round trip
+    costing two exits; a first-level one is a single exit.  Halving the
+    first halves two counts.
+
+    `handler_reason_exits` and `handler_reason_from_l2` are the members
+    that separate them, they have been resident all along, and
+    `dump_handler_by_reason` printed them **cumulatively**.  Its own
+    output quotes `vmresume at 38% of exits and vmptrld at 8%` - a mean
+    over a configuration that no longer exists, since VMCS shadowing was
+    not in force when it was taken.  That is the same shape as the 96.3%
+    this file already has a class for.
+
+    The measured window these numbers come from: 31.2 s, one processor,
+    nesting on, shadowing in force, `exit_total` 8,189.92/s and
+    `l2_entries` 4,088.98/s - which is 2.00 exits per second-level
+    entry, and that ratio is the whole reason a split is worth having.
+    """
+
+    SECONDS = 31.2
+    ENTRIES = 127_576                       # 4,088.98/s x 31.2 s
+    # 255,525 total, which is 8,189.92/s over the same span.
+    WINDOW = {
+        24: (127_576, 0),                   # vmresume: the level above
+        32: (90_000, 90_000),               # wrmsr:    all second level
+        31: (37_200, 37_200),               # rdmsr:    all second level
+        18: (168, 168),                     # vmcall
+        12: (208, 208),                     # hlt
+        21: (373, 0),                       # vmptrld:  the level above
+    }
+
+    def samples(self, window=None, slots=64, base=1_000_000):
+        """`(before, after)` for one window, with a non-zero baseline.
+
+        The baseline matters: a member that reads zero in both samples
+        and a member that was never read are different facts, and a test
+        starting from zero cannot tell them apart either.
+        """
+        window = self.WINDOW if window is None else window
+        before, after = {}, {}
+        for reason in range(slots):
+            total, l2 = window.get(reason, (0, 0))
+            before[("handler_reason_exits", reason)] = base
+            before[("handler_reason_from_l2", reason)] = base // 2
+            after[("handler_reason_exits", reason)] = base + total
+            after[("handler_reason_from_l2", reason)] = base // 2 + l2
+        return before, after
+
+    def split(self, before, after, slots=64, entries=None):
+        module = load_dump_state()
+        return "\n".join(module.delta_level_split_lines(
+            before, after, slots, self.SECONDS,
+            self.ENTRIES if entries is None else entries))
+
+    def test_the_split_members_are_one_row_indexed_by_reason(self):
+        """Not `[max_cpus]`, and the reader must not read them as such.
+
+        The stride bug this file already records - a 96-entry row read
+        at a stride of 64 - cancelled for processor 0 and printed a
+        coherent histogram of instructions the guest never executes for
+        every other.  These two are global rows, so a reader that
+        queued them per processor would read the *next member* and print
+        it under this name.
+        """
+        module = load_dump_state()
+        for name, _ in module.DELTA_GLOBAL_HISTOGRAMS:
+            self.assertEqual(
+                ["handler_reason_slots"], header_dimensions(name),
+                "{} is read as one global row indexed by exit reason "
+                "but the header does not declare it that way".format(
+                    name))
+
+    def test_the_split_is_not_also_differenced_as_a_counter(self):
+        """One member, one classification.
+
+        In `DELTA_PER_CPU_COUNTERS` it would be read at index `cpu` -
+        i.e. reason 0 and reason 1 reported as two processors' exits.
+        In `DELTA_GLOBAL_COUNTERS` it would be read as one word, i.e.
+        reason 0 reported as the whole.
+        """
+        module = load_dump_state()
+        elsewhere = set([n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+                        + [n for n, _ in module.DELTA_GLOBAL_COUNTERS]
+                        + [n for n, _ in module.DELTA_PER_CPU_CYCLES]
+                        + [n for n, _ in module.DELTA_PER_CPU_HISTOGRAMS])
+        for name, _ in module.DELTA_GLOBAL_HISTOGRAMS:
+            self.assertNotIn(name, elsewhere)
+
+    def test_the_idle_and_reference_counts_are_rated_per_processor(self):
+        """`hlt_reflect_count` is the one number that separates the two
+        remaining accounts of the stall.
+
+        A thread blocked in a wait puts the processor on the idle
+        thread, which halts, and the guest hypervisor sets HLT exiting
+        so that halt is an exit counted here.  A thread spinning does
+        not halt.  Every other counter in this file reads the same
+        either way.
+        """
+        module = load_dump_state()
+        rated = [n for n, _ in module.DELTA_PER_CPU_COUNTERS]
+        for name in ("hlt_reflect_count", "reference_read_count"):
+            self.assertIn(name, rated)
+            self.assertEqual(["max_cpus"], header_dimensions(name))
+
+    def test_the_split_names_both_levels_and_the_round_trip(self):
+        """The positive control, on the measured steady state."""
+        text = self.split(*self.samples())
+        self.assertIn("by LEVEL IN THIS WINDOW", text)
+        self.assertIn("255,525", text)                 # the whole window
+        self.assertIn("127,576", text)                 # entries, and L2
+        # wrmsr is entirely second level, so its L1 column is zero and
+        # its L2 column is the bucket.
+        self.assertRegex(text, r"wrmsr\s+90,000\s+0\s+90,000")
+        # vmresume is entirely the level above's.
+        self.assertRegex(text, r"vmresume\s+127,576\s+127,576\s+0")
+        self.assertIn("the round trip, as an identity", text)
+        # And the residue, which is the number the decomposition is for.
+        self.assertRegex(text, r"everything else\s+373")
+        self.assertIn("AGREES with vmlaunch+vmresume", text)
+
+    def test_a_subset_larger_than_its_superset_is_refused(self):
+        """**The negative control.**
+
+        `handler_reason_from_l2` is incremented inside the `if` that
+        increments `handler_reason_exits`, over one span, so it cannot
+        exceed it.  If it does, the two were read at different strides
+        or from different binaries.
+
+        Without this the reader prints an L1 column of `-5,000` and a
+        second-level share of 105%, and both read as findings: "the
+        level above took a negative number of exits" is not a sentence
+        anyone would write, but a negative in a column is easy to skim
+        past, and this tree has skimmed past worse.
+        """
+        before, after = self.samples()
+        after[("handler_reason_from_l2", 32)] += 5_000   # 95,000 of 90,000
+        text = self.split(before, after)
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("SUBSET exceeds its superset", text)
+        self.assertIn("wrmsr", text)
+        # And nothing is rated: no table, no identity, no percentage.
+        self.assertNotIn("by LEVEL IN THIS WINDOW", text)
+        self.assertNotIn("the round trip", text)
+        self.assertNotIn("-5,000", text)
+
+    def test_a_bucket_that_went_backwards_is_refused(self):
+        """The other negative control, and the one this mode already
+        applies everywhere else."""
+        before, after = self.samples()
+        after[("handler_reason_exits", 24)] = \
+            before[("handler_reason_exits", 24)] - 1
+        text = self.split(before, after)
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("BACKWARDS", text)
+        self.assertIn("handler_reason_exits[reason 24]", text)
+        self.assertNotIn("by LEVEL IN THIS WINDOW", text)
+
+    def test_a_window_in_which_nothing_moved_says_so(self):
+        """A table of zeroes is not a distribution.
+
+        This is the failure mode the 96.3% had: a cumulative histogram
+        keeps reporting its shape for ever after the event stream ends.
+        A windowed one reads all zeroes, and printing them as a table
+        with percentages would restore exactly the property that made
+        the cumulative reading wrong.
+        """
+        before, after = self.samples(window={})
+        text = self.split(before, after)
+        self.assertIn("every reason unchanged in this window", text)
+        self.assertNotIn("%", text)
+
+    def test_a_member_that_was_not_read_is_not_read_as_zero(self):
+        """An unanswered read and a counter reading zero look identical
+        afterwards.  This mode's oldest rule, applied here."""
+        before, after = self.samples()
+        del after[("handler_reason_from_l2", 32)]
+        text = self.split(before, after)
+        self.assertIn("NOT READ", text)
+        self.assertIn("unknown rather than zero", text)
+        self.assertNotIn("by LEVEL IN THIS WINDOW", text)
+
+    def test_the_entry_count_disagreeing_is_named_not_absorbed(self):
+        """`hypervisor.h` states VMLAUNCH plus VMRESUME equals
+        `l2_entries` when no entry is refused, and that equality is what
+        makes the residue meaningful.  A reader that formed the residue
+        without checking it would attribute a refused entry to
+        'everything else'."""
+        text = self.split(*self.samples(), entries=self.ENTRIES - 9)
+        self.assertIn("DISAGREES with vmlaunch+vmresume", text)
+        self.assertIn("nested_entry_refusals", text)
+
+    def test_the_reasons_above_the_table_are_declared_missing(self):
+        """`handler_reason_slots` is 64 and `exit_reason_capacity` is
+        96, so the two totals may legitimately differ.  Said out loud,
+        because a difference nobody expects gets explained by inventing
+        a mechanism."""
+        text = self.split(*self.samples())
+        self.assertIn("reasons >= 64 are outside this table", text)
+
+
 class DeltaModeReportsTheImpossibleAsAnError(unittest.TestCase):
     """A monotonic counter that decreased is not a small negative rate.
 
