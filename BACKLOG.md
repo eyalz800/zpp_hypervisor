@@ -55615,3 +55615,32 @@ which is exactly the address `guest-modules.py` already walks - read as
 hex it is dropped entirely. CLAUDE.md warns the offset is decimal; the
 segment is too.
 
+## The first module walk allowed to finish: 78 modules, ending CLASSPNP.SYS
+
+    78 modules; walk ended because: reached the list head - complete
+    blink (last loaded module, read independently): CLASSPNP.SYS
+    cross-check: AGREES - list genuinely ends here
+
+**Three statements, and the second and third are the ones that matter.**
+The walk reached the list head rather than dying on a failed
+translation, and the last entry read forward agrees with the last entry
+read *backward* from the head's `Blink` - two independent paths to the
+same name. Neither check existed before today, and without them a
+truncated walk is indistinguishable from a complete one.
+
+So the guest has **78 modules loaded**, ending at `CLASSPNP.SYS`, with
+`disk.sys`, `hwpolicy.sys`, `iorate.sys`, `fvevol.sys`, `tcpip.sys`,
+`ndis.sys` and `NETIO.SYS` behind it. It is deep into the storage and
+networking stacks.
+
+**Both earlier counts were my own timeouts.** 36 and 69 were how far
+the walker got in 300 and 500 seconds; the real walk takes about ten
+minutes, because every entry costs several page-table walks over a
+monitor that accepts one connection. The `pci.sys` and `fvevol.sys`
+conclusions are already withdrawn and this is the number that replaces
+them.
+
+**What it does *not* yet say is whether the guest is stuck.** One
+complete walk is a snapshot. The measurement is two complete walks, and
+the second is running.
+
