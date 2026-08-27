@@ -54526,3 +54526,81 @@ has no `[max_cpus]` dimension, so it sums across processors under a
 heading that says "cpu 0"; it holds sixteen codes and drops the
 seventeenth without counting it; and it is cumulative, so it cannot
 say what is being called *now*.
+
+## The loop is one trust-level round trip per second, and nothing else
+
+The service census answers, and four of six predictions held. What the
+guest is *still doing*, over the most recent 8.8-second epoch:
+
+    0x0011  +9   1.02/s   total 22,324   HvCallVtlCall
+    0x0012  +9   1.02/s   total 22,324   HvCallVtlReturn
+    every other code  +0            HvCallModifyVtlProtectionMask
+                                    frozen at 39,446
+
+**One round trip into the secure kernel and back, once a second, for
+ever.** That is not a livelock and it is not saturation - it is a
+**1 Hz retry**, which is the shape of something timing out and being
+tried again.
+
+### The decode is right, and it renames the target
+
+    0x00f4  10,172  45.6%  VslCopyProtectedPage      <- MiCopyPage
+    0x0101   7,207  32.3%  VslSetPlaceholderPages
+    0x00f3   2,929  13.1%  VslRemoveProtectedPage
+    0x0000   1,520   6.8%  VslFlushEntireTb
+    0x00d3      87   0.4%  VslReserveProtectedPages
+    0x00dc      79   0.4%  VslEnableKernelCfgTarget
+    0x00d9      78   0.3%  VslCompleteSecureDriverLoad
+    0x0003       1   0.0%  VslFinishStartSecureProcessor
+
+Predicted at 48/34/14 before the boot, measured at 45.6/32.3/13.1. The
+service-number decode taken out of `VslpEnterIumSecureMode`'s prologue
+is confirmed.
+
+### The image walk was nearly monotonic, and it also stopped
+
+    10,172 calls, frames 0x100000..0x11d749, last 0x11d749
+    +1 10,097   same 0   back 8   skip 66   partition OK
+
+Eight backward steps out of 10,171, against **890** for the placeholder
+walk. So the two walks have completely different shapes, and every
+"the walk revisits" reading above was about slab bookkeeping, not image
+validation.
+
+Both are frozen: `pfn 7,207`, `code0 21,165`, unchanged across the last
+eight epochs while `calls` still advances.
+
+### Predictions, stated before the boot
+
+| | outcome |
+|---|---|
+| service shares ≈ 48/34/14 | **held** - 45.6/32.3/13.1 |
+| entry reason has a non-zero bucket besides 0 | **held** - `4 = 1,158` |
+| image walk ≈ 10,000 calls, partition OK | **held** - 10,172, OK |
+| `VslFinishStartSecureProcessor` called 1-2 times | **held** - **once** |
+| the last epochs are stretched, `xN` with N >> 1 | **refuted** - `x1.0` to `x1.4` |
+| hypercall census does not overflow | held |
+
+**The stretched-epoch reading is dead**, and with it my "seventy
+seconds of silence then a burst". The epochs are normal and the guest
+never stopped calling - it settled to 1 Hz. That also retires "about
+fifty an epoch": the truth is **nine**.
+
+### What it means
+
+`VslFinishStartSecureProcessor` was called **exactly once** and never
+again, so this is a **block, not a loop over starts**. Beside it, the
+application processor is idle in `MONITOR`/`MWAIT` waiting for a write
+that never comes.
+
+The remaining 1 Hz traffic carries **entry reason 4** - the re-entry
+shape, which is precisely what the old byte-1 filter excluded and why
+the secure-service census reads frozen while calls continue. So the
+guest is re-entering the secure kernel once a second and getting back
+whatever it got last time.
+
+**The question is now: what is the reason-4 re-entry asking for, and
+what does the secure kernel return?** That is one narrow question about
+1,158 recorded events, and it is the first time this investigation has
+been pointed at something that small.
+
