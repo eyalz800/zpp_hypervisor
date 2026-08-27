@@ -56735,3 +56735,56 @@ proxy for progress and progress itself was measurable all along - the
 stack, `leaves-filled`, the secure-request count. **Prefer the
 measurement of the thing over a proxy for it**, and when a proxy and the
 thing disagree, the proxy is what is wrong.
+
+## The lazy-tick freeze is Hyper-V spinning, not the guest and not us
+
+The preemption-timer fix was built, verified in the shipped binary
+(`0x97fa4` = 622,500 units present, field `0x482e` written) and booted.
+**It changed nothing**: `--delta 120` again moved 0 of 537 counters,
+`exit_total` frozen at 595,451.
+
+That null result located the freeze, which three earlier guesses had
+not.
+
+- `info status` says **running**; there is no unhandled exit and no
+  entry failure.
+- The vCPU thread burns **100% of a core in system time** - `stime`
+  61,414 -> 61,715 in three seconds - while taking zero exits. It is
+  spinning, not halted.
+- `info registers` reads `RIP=fffff86394da6b5e`, **identical across
+  three samples**. That is the first level: the exit ring's `l1-rip`
+  for the same run is `fffff86394da843d`, the same page. Our own module
+  is at `0x670ef000` and nowhere near it.
+
+So **Hyper-V is spinning in its own code, taking no VM exits.** Not the
+second-level guest, and not this VMM's exit handler, which was the
+reading the 100%-in-kernel figure first suggested.
+
+That is why the preemption timer did nothing: it was armed on
+**vmcs02**, which governs only entries to the second-level guest. While
+the first level runs, that VMCS is not current and its timer does not
+count. `arm_controller_poll` owns vmcs01's timer and deliberately skips
+while `running_l2` is set, so on this path neither VMCS has one.
+
+### What it says about the mechanism
+
+The gap is starving the level above, not only the guest. Withholding the
+clock injection stops Hyper-V getting whatever it waits on, and with no
+timer on either VMCS there is nothing left to break the spin. The
+deadlock is the same shape as the one the preemption timer was meant to
+fix - the wake-up removed along with the interrupt - one level up.
+
+Also deterministic, and worth more than either run on its own: the exit
+immediately before the freeze is an instruction-fetch EPT violation
+(`qual=0x184`) at guest-physical **`0x11f200030` in both the pre-fix and
+post-fix runs**, at second-level instruction pointers whose low bits
+agree (`...1030`). Different KASLR, same page, same access type.
+
+### Next
+
+Arm a timer that covers **whichever level is running**, not only the
+second. The vmcs02 arming committed here is correct and insufficient;
+vmcs01 needs the same treatment while a gap is outstanding, which means
+`arm_controller_poll`'s `running_l2` skip has to stop applying when
+`lazy_tick_microseconds` is set. Pre-registered read, unchanged:
+`exit_total` must keep climbing across a `--delta`.

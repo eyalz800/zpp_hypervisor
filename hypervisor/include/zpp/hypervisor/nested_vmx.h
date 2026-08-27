@@ -1611,6 +1611,37 @@ inline constexpr std::uint64_t tick_floor_units = ZPP_TICK_FLOOR;
 inline constexpr std::uint64_t ticks_per_microsecond = 1992;
 
 /**
+ * The VMX-preemption timer value that guarantees the withheld tick a
+ * delivery opportunity.
+ *
+ * **Why the gap alone deadlocks without this.** Measured 2026-08-28 at
+ * `ZPP_LAZY_TICK=10000`: the guest got further than any build in this
+ * tree - past `MakeGdtReadOnly` and into `MiReloadBootLoadedDrivers` -
+ * and then stopped dead, `exit_total` frozen at 604,983 with **0 of 537
+ * counters moving** across two minutes. The last records show it
+ * *running*, a `vmresume` into the second level, not halted.
+ *
+ * The owed tick is put back "on the first later entry". If the guest is
+ * spinning in the second level waiting for that very tick it never
+ * exits, so there is no later entry, so the tick never arrives: the
+ * tick waits for an exit and the exit waits for the tick.
+ * `lazy_tick_delivered` read **4** for the whole run, which is the
+ * count that says so. Keeping the withheld injection whole was
+ * necessary and is not sufficient.
+ *
+ * So withholding an interrupt must not also remove the only opportunity
+ * to deliver it. The timer forces an exit once the gap has elapsed, and
+ * the existing owed path then delivers on the entry that follows.
+ *
+ * The counter decrements once per time-stamp counter tick shifted right
+ * by IA32_VMX_MISC bits 4:0, which is five on every processor this has
+ * run on, so a unit is 32 ticks - the same derivation
+ * `profile_timer_value` records.
+ */
+inline constexpr std::uint64_t lazy_tick_timer_value =
+    (lazy_tick_microseconds * ticks_per_microsecond) / 32;
+
+/**
  * How long after the last start-up IPI the watch is considered to have
  * done its job, in time-stamp counter ticks.
  *

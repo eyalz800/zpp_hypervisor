@@ -1811,6 +1811,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         pin02 |= pin_preemption_timer;
     }
 
+    // The lazy tick's wake-up, and the whole reason it is not a
+    // deadlock. See `nested_vmx::lazy_tick_timer_value`: withholding a
+    // clock interrupt from a guest that is spinning *for that
+    // interrupt* removes the only entry on which it could be put back.
+    // The timer guarantees an exit once the gap has elapsed and the
+    // owed path below delivers on the entry after it.
+    //
+    // Armed on every entry rather than only when one is owed, because
+    // the withhold decision is taken further down this same function -
+    // after this control has been written - so an entry that decides to
+    // withhold would otherwise be exactly the entry with no timer. The
+    // cost is one exit per gap on a guest that has stopped exiting by
+    // itself, and none at all on a guest that has not: with "save
+    // VMX-preemption timer value" clear in the exit controls the
+    // counter reloads from the field on every entry (SDM 26.6.4), so a
+    // guest exiting more often than the gap never reaches zero.
+    if constexpr (!nested_vmx::profile_l2 &&
+                  (0 != nested_vmx::lazy_tick_microseconds)) {
+        pin02 |= pin_preemption_timer;
+    }
+
     write_vmcs02_control(
         cpu,
         field::pin_based_vm_execution_controls,
@@ -1825,6 +1846,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         // same interval.
         vmcs.write(field::vmx_preemption_timer_value,
                    nested_vmx::profile_timer_value);
+    } else if constexpr (0 != nested_vmx::lazy_tick_microseconds) {
+        // The gap itself. The profiler wins when both are on, since it
+        // is a diagnostic and wants the shorter interval; its exits
+        // serve this purpose too, being exits.
+        vmcs.write(field::vmx_preemption_timer_value,
+                   nested_vmx::lazy_tick_timer_value);
     }
 
     // Primary controls: the union, with the two window controls taken from
