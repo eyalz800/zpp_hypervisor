@@ -850,6 +850,72 @@ candidates and let the data say which one moves.** It costs one more
 word per sample and it is the only thing that distinguishes "this value
 never changes" from "I am not reading the value".
 
+### An instrument that cannot report its own failure reports health for ever
+
+One session produced **thirty** readings that measured something other
+than their label. Every one was caught by a *second* reading, never by
+doubting the first, and the family is small enough to list. Check for
+these before believing any number in this tree.
+
+**A total is not a rate.** `vtl_half_cycles` and friends accumulate from
+the first switch of the boot and never reset, and the reader printed the
+quotient under "what one trust-level round trip costs" - present tense.
+Quoted present tense, it said 11,358 us and 90.8 exits per round trip
+for a phase that had ended long before. The same dump contained the
+refutation twice: the implied rate was 14x the measured one, and the
+halves spanned 288 s of a 369 s run. **Use `--delta N`**, which
+differences over a *measured* span, refuses to difference anything that
+is not monotonic, and names an impossible delta instead of printing it.
+
+**A percentage is of a population.** "96.3% of clock gaps meet the
+period" counted *stagings out of vmcs12*, not arrivals, cumulatively,
+over 8.6% of the run. Three faults in one number, quoted for sessions.
+
+**A ring is circular.** `vtl_code0_ring` holds eight and the reader
+printed slots 0..7 in order, so "the last blocks seen" were mid-window.
+This produced a false lead, was retracted in prose, and **produced the
+same false lead again five days later**. Prose does not run: it is now a
+test with a measured negative control.
+
+**A sampler phase-locked to the guest is a constant generator.** A ring
+sampled every 4,096 second-level entries, on a guest whose entries come
+from a periodic clock loop, reports identical registers whether or not
+the work behind them progresses. Jitter the stride; a power of two is
+the worst case.
+
+**A timeout turns a count into a distance.** Two module walks under
+`timeout` returned the same count with the same last name and were read
+as "stuck". They agreed because the walker covers the same ground in the
+same wall clock. A walk must say **why it ended** and cross-check its
+last entry a second way.
+
+**A constant to four decimal places is not a latency.** `delivery_time -
+expiration_time` held 7.2078 s across twenty-five minutes. Latency
+jitters; that is two clocks with different anchors, and the growth test
+(5 ms over 1,487 s = 3.4 ppm) proved it.
+
+**Read the value, not the expression.** "Our start-up vector is
+`start_up_memory >> 12`" is not a vector. The value was logged eighteen
+records earlier in the same file being quoted: `vector 0x9c`.
+
+**Verify on the artifact.** `llvm-objdump` the shipped ELF, not the
+source. A claim that an instruction is gone is checkable in seconds and
+was wrong twice by inspection.
+
+**A negative control must be built before it can be run.** A test shim's
+`VMPTRST` returned success and wrote nothing, so a reverted build would
+have failed for the shim's reasons rather than the change's. **Run every
+control both ways and report both results.**
+
+**A number can borrow its neighbour's measurement.** A comment justified
+a control-bit constant with `0x1050ae ^ 0x1010ae`, called it bit 18, and
+was believed for months. It is `0x4000` - bit 14. The wrong arithmetic
+**agreed with the mis-declared constant**, so it confirmed itself.
+
+The rule underneath all of them: **ask whether a reading is *possible*
+before asking whether it is believable**, and prefer an instrument that
+can say "I failed" over one that can only say a number.
+
 ### KVM's own statistics are on the rig, and they are the cheapest instrument
 
 **This section used to say the target had no tracefs and no
