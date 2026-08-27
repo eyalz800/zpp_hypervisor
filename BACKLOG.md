@@ -56152,3 +56152,62 @@ says which.
 "never processed" and "cleared on retry" - so it is never printed
 without `State` beside it.
 
+## RETRACTED: 78 modules is not winload's boot-critical set, and phase 1 finished
+
+The claim that the guest is stalled inside `Phase1Initialization` with
+"nothing read from the volume" rested on one inference accepted second
+hand: that 78 modules is *exactly* what the boot loader preloads. It is
+not. The list is in the tree and contradicts it outright:
+
+    win32k.sys      the Win32 kernel subsystem
+    dxgkrnl.sys     the DirectX graphics kernel
+    lxss.sys, LXCORE.SYS        the Linux subsystem
+    VmsProxy.sys, VmsProxyHNic.sys   Hyper-V's switch proxy
+    WinSetupMon.sys, winaccel.sys, globmerger.sys
+
+**`win32k.sys` is loaded when a session is created**, which requires
+`smss.exe` to have run and started `csrss`. `dxgkrnl.sys` comes up with
+the display stack. Neither is a boot-start driver, and neither can be
+resident before phase 1 hands off to the session manager.
+
+So the guest **did** finish phase 1, **did** start the session manager,
+and **did** read from the volume - every one of those drivers came off
+the disk. The chain built on top of that inference collapses with it:
+
+- "nothing has been read from the volume" - false, most of this list
+  was,
+- "`IoInitSystem` never returns" - false, it returned,
+- "the storage function driver never comes up" - already retracted once
+  on other grounds, and now twice.
+
+### The contradiction that is left, and it is worth more than the claim
+
+The thread sampler reported `Phase1Initialization` as the running thread
+across hundreds of samples. If phase 1 completed, **that thread has
+exited** and cannot be current. Both readings cannot be right.
+
+Two ways out, and nothing in the current data chooses between them:
+
+- the module list and the thread samples are from **different phases of
+  the same run**, and the thread census is the older,
+- or the thread census is reading something other than the current
+  thread - and its own start-routine field would then be a stale or
+  mis-walked pointer rather than a live one.
+
+The second is not idle: `walk_guest_threads` reads `KPRCB.CurrentThread`
+and follows `ETHREAD.StartAddress`, and this session has already found
+one sampler phase-locked to the guest's own period and two counts read
+as termini when they were rates.
+
+### And a question that was never asked
+
+The user was asked what was on the screen for the `nested=0` run and
+answered **"the desktop is shown"**. **The same question was never asked
+for `nested=1`.** With `win32k.sys` and `dxgkrnl.sys` resident, the
+nested guest may have been much closer to - or at - a login screen than
+any counter here suggested, and the one instrument that can see it costs
+nothing and was sitting unused.
+
+That is the first thing to do on the next run, before any dump:
+**ask what is on the screen.**
+
