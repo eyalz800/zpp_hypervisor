@@ -56994,3 +56994,52 @@ the return registers at `HvCallVtlReturn` for these re-entries -
 `vtl_protect_after_stack` does the equivalent for the protection call
 and there is no counterpart here. That is the next thing to build, and
 it is a code change rather than another read.
+
+## The answer side, at last: VTL1 hands the VINA block back unchanged
+
+The instrument the previous entry called for is built
+(`vtl_return_rbx`/`vtl_return_rax`, captured at `HvCallVtlReturn`), and
+it answers the question the whole request-side census could not.
+
+    what VTL1 ANSWERED at HvCallVtlReturn (24,981 returns)
+      answers that differed from the one before: 14,899
+        rbx 0x0000000100000400  rax 0x0000000000000001
+        rbx 0x0000000100000400  rax 0x0000000000000001
+        ... all eight of the most recent identical
+
+**`0x0000000100000400` is the request.** It is byte-for-byte what VTL0
+sent in - the same value read out of the block at its guest-physical
+address: call class `0`, entry reason `0x04` (VINA), service `0x0000`,
+continuation `1`. RBX is where the block comes home
+(`006a7750 movq %rbx,(%rdx)` in `HvlSwitchToVsmVtl1`), so **VTL1 is
+returning the block unmodified.**
+
+The stuck state is therefore VTL0 and VTL1 passing an **unconsumed VINA
+continuation** back and forth: VTL0 says "you were interrupted,
+continue", VTL1 returns "you were interrupted, continue", VTL0 asks
+again, about fifty-five times a second.
+
+### The instrument is not broken, and that is checkable here
+
+14,899 of 24,981 answers differed from the one before. If the census
+were reading a constant - the failure mode this file has recorded eight
+times - it would read zero distinct over the whole run. It reads more
+than half. **The reply moves normally for most of the boot and freezes
+only at the end**, which is the shape a real stall has and a
+mis-aimed instrument does not.
+
+### One caveat on the second column, stated rather than glossed
+
+`rax 0x1` is read at the **VMCALL exit**, before the hypercall has been
+performed, so it is the caller's RAX going in and **not** a returned
+status. It is kept because it is constant and cheap, not because it has
+been shown to mean anything. Do not read it as `HV_STATUS`.
+
+### What this makes the next question
+
+Not "is the answer lost" - it is not, it arrives and it is the request
+unchanged. The question is why VTL1 declines to consume a VINA
+continuation it accepted thousands of times earlier in the same boot.
+The `vtl_reentry` charge says the caller is
+`VslFinishStartSecureProcessor`, the symbolised stack says the same, and
+both agree with `MakeGdtReadOnly` above it.

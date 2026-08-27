@@ -10313,6 +10313,28 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // *which* processors it names, and that is the difference
             // between a flush waiting on a parked processor and a flush
             // that never targeted one.
+            // What VTL1 answered, for `HvCallVtlReturn` only. See
+            // `vtl_return_rbx`: the request side is already censused
+            // to death and says the same question is asked 3,778
+            // times; nothing yet watches the reply, and the two
+            // readings it separates want opposite fixes.
+            if (constexpr std::uint64_t vtl_return_code = 0x12;
+                (vtl_return_code == code) && (cpu < max_cpus)) {
+                auto slot = this->vtl_return_count[cpu] %
+                            vtl_return_slots;
+
+                this->vtl_return_rbx[cpu][slot] = context.rbx;
+                this->vtl_return_rax[cpu][slot] = context.rax;
+
+                if ((0 != this->vtl_return_count[cpu]) &&
+                    (context.rbx != this->vtl_return_previous[cpu])) {
+                    this->vtl_return_distinct[cpu] += 1;
+                }
+
+                this->vtl_return_previous[cpu] = context.rbx;
+                this->vtl_return_count[cpu] += 1;
+            }
+
             if (cpu < max_cpus) {
                 this->last_hypercall_code[cpu] = code;
                 this->last_hypercall_rcx[cpu] = context.rcx;

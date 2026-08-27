@@ -14618,6 +14618,45 @@ private:
     std::uint64_t vtl_fresh_calls[max_cpus]{};
     std::uint64_t vtl_reentries[max_cpus]{};
     std::uint64_t vtl_class0_with_service[max_cpus]{};
+
+    /**
+     * What VTL1 **answered**, captured at `HvCallVtlReturn`.
+     *
+     * The whole investigation ends on a question this is the only thing
+     * that can settle. `VslFinishStartSecureProcessor` re-issues a
+     * **byte-identical** request 3,778 times at about fifty-five a
+     * second - `vtl_reentry_block_same` says `same 3,778 / moved
+     * 1,775` - while nothing downstream advances. Either the answer
+     * says "not done" and the caller is right to re-ask, or the answer
+     * is fine and something here is losing it. **Those want opposite
+     * fixes and every census in this tree so far watches the request.**
+     *
+     * The answer is in **RBX**, which is not a guess:
+     * `HvlSwitchToVsmVtl1` marshals the block into registers and reads
+     * it back afterwards, and the read-back is
+     * `006a7750 movq %rbx,(%rdx)` - the block's first quadword comes
+     * home in RBX and nowhere else. See `vtl_reentry_ring`, which
+     * records that disassembly and the fact that the copy **in memory**
+     * is stale at the return, which is why reading the block at its
+     * guest-physical address showed a value that never changed and
+     * proved nothing.
+     *
+     * RAX beside it because a hypercall's own status lives there, so a
+     * refused `HvCallVtlReturn` and a completed one that answered
+     * "pending" are distinguishable rather than conflated.
+     *
+     * A ring, not a latest: the question is whether successive answers
+     * are **identical**, and one value cannot say. `vtl_return_distinct`
+     * counts how often an answer differed from the one before it - zero
+     * over thousands of returns is a stuck answer, and that is the
+     * reading the request side already gives for the question.
+     */
+    static constexpr std::size_t vtl_return_slots = 16;
+    std::uint64_t vtl_return_rbx[max_cpus][vtl_return_slots]{};
+    std::uint64_t vtl_return_rax[max_cpus][vtl_return_slots]{};
+    std::uint64_t vtl_return_count[max_cpus]{};
+    std::uint64_t vtl_return_distinct[max_cpus]{};
+    std::uint64_t vtl_return_previous[max_cpus]{};
     std::uint64_t vtl_reentry_by_reason[max_cpus][8]{};
     std::uint64_t vtl_reentry_reason_other[max_cpus]{};
     std::uint64_t vtl_reentry_orphan[max_cpus]{};

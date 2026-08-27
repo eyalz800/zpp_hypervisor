@@ -6538,6 +6538,8 @@ def main():
                "vtl_protect_reps_done", "vtl_protect_last_rip",
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_return_rbx", "vtl_return_rax",
+               "vtl_return_count", "vtl_return_distinct",
                "vtl_protect_after_stack", "vtl_protect_after_read",
                "vtl_protect_early_before", "vtl_protect_early_after",
                "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
@@ -6912,6 +6914,8 @@ def main():
                "vtl_protect_reps_done", "vtl_protect_last_rip",
                "vtl_protect_last_cr3", "vtl_protect_last_caller",
                "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_return_rbx", "vtl_return_rax",
+               "vtl_return_count", "vtl_return_distinct",
                "vtl_protect_after_stack", "vtl_protect_after_read",
                "vtl_protect_early_before", "vtl_protect_early_after",
                "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
@@ -8820,6 +8824,37 @@ def main():
                     rr = [read('vtl_reentry_by_reason', i) or 0
                           for i in range(8)]
                     rro = read('vtl_reentry_reason_other', 0) or 0
+                    # What VTL1 ANSWERED. Everything below this
+                    # watches the request; this is the only thing that
+                    # watches the reply, and it separates "the answer
+                    # says not-done" from "the answer is fine and is
+                    # being lost", which want opposite fixes.
+                    rcount = read("vtl_return_count", cpu) or 0
+                    if rcount:
+                        distinct = read("vtl_return_distinct", cpu) or 0
+                        slots = min(rcount, 16)
+                        start = (rcount - slots) % 16
+                        print(f"\n  what VTL1 ANSWERED at HvCallVtlReturn "
+                              f"({rcount:,} returns)")
+                        print(f"    answers that differed from the one "
+                              f"before: {distinct:,}")
+                        if 0 == distinct and rcount > 1:
+                            print("    *** every answer identical - the "
+                                  "reply is stuck, so the caller re-asking "
+                                  "is a consequence and not the fault")
+                        elif distinct:
+                            print(f"    the reply moves, so a re-asked "
+                                  f"request is being answered differently "
+                                  f"each time")
+                        for i in range(slots):
+                            k = (start + i) % 16
+                            rbx = read("vtl_return_rbx", cpu * 16 + k)
+                            rax = read("vtl_return_rax", cpu * 16 + k)
+                            if rbx is None:
+                                continue
+                            print(f"      rbx 0x{rbx:016x}  rax "
+                                  f"0x{(rax or 0):016x}")
+
                     print(f"\n  fresh calls {fresh:,}   re-entries "
                           f"{rent:,}   (partition "
                           + ("OK" if (fresh + rent) == blocks
