@@ -3946,6 +3946,355 @@ def dump_ap_census(args, elf, instance):
               f"started_by_start_up_ipi {started}  launch_error {error}")
 
 
+# Windows' own enumerations, read out of the PDB rather than recalled.
+#
+# `llvm-pdbutil dump --types ntkrnlmp.pdb` on the exact build the rig
+# runs - GUID {C8A7F11B-37FE-2822-7B6B-11412E3A0519}, the same one
+# `guest_windows.h` names - carries full `LF_FIELDLIST` records, so
+# these are transcribed and not remembered. The type stream is NOT
+# publics-only on this file; `dump --summary` says `Has Types: true`.
+#
+# Every offset `guest_windows.h` uses was checked against the same dump
+# at the same time and all seven agree: `_KTHREAD.State` 388,
+# `.WaitIrql` 390, `.WaitReason` 643, `.Process` 544,
+# `_ETHREAD.StartAddress` 1248, `.ThreadListEntry` 1400,
+# `_EPROCESS.ThreadListHead` 880. That check is the only reason the
+# numbers below mean anything - the offsets are build specific and the
+# VMM cannot verify them from inside.
+THREAD_STATE = {
+    0: "Initialized", 1: "Ready", 2: "Running", 3: "Standby",
+    4: "Terminated", 5: "Waiting", 6: "Transition", 7: "DeferredReady",
+    8: "GateWaitObsolete", 9: "WaitingForProcessInSwap",
+}
+
+WAIT_REASON = {
+    0: "Executive", 1: "FreePage", 2: "PageIn", 3: "PoolAllocation",
+    4: "DelayExecution", 5: "Suspended", 6: "UserRequest",
+    7: "WrExecutive", 8: "WrFreePage", 9: "WrPageIn",
+    10: "WrPoolAllocation", 11: "WrDelayExecution", 12: "WrSuspended",
+    13: "WrUserRequest", 14: "WrSpare0", 15: "WrQueue",
+    16: "WrLpcReceive", 17: "WrLpcReply", 18: "WrVirtualMemory",
+    19: "WrPageOut", 20: "WrRendezvous", 21: "WrKeyedEvent",
+    22: "WrTerminated", 23: "WrProcessInSwap", 24: "WrCpuRateControl",
+    25: "WrCalloutStack", 26: "WrKernel", 27: "WrResource",
+    28: "WrPushLock", 29: "WrMutex", 30: "WrQuantumEnd",
+    31: "WrDispatchInt", 32: "WrPreempted", 33: "WrYieldExecution",
+    34: "WrFastMutex", 35: "WrGuardedMutex", 36: "WrRundown",
+    37: "WrAlertByThreadId", 38: "WrDeferredPreempt", 39: "WrPhysicalFault",
+    40: "WrIoRing", 41: "WrMdlCache", 42: "WrRcu",
+    43: "MaximumWaitReason",
+}
+
+# What a wait reason says about the diagnosis, which is the whole point
+# of reading it. A thread parked in `DelayExecution` is sleeping on its
+# own timer and is not blocked on anything this VMM does; one parked in
+# `Executive` on a storage stack thread is waiting for an object
+# somebody else has to signal, and an I/O completion is exactly that.
+#
+# Deliberately coarse. The classification is a hint for whoever reads
+# the table, not a verdict - a single wait reason cannot distinguish
+# "waiting for a device that will never answer" from "waiting for a
+# device that is about to", and pretending otherwise is how this
+# investigation has been misled before.
+WAIT_MEANING = {
+    4: "sleeping on its own timer - NOT blocked on anything external",
+    11: "sleeping on its own timer - NOT blocked on anything external",
+    0: "waiting on a dispatcher object somebody else must signal",
+    7: "waiting on a dispatcher object somebody else must signal",
+    15: "waiting on a work queue - idle worker, normal",
+    26: "waiting on a kernel-internal object",
+    27: "waiting on an ERESOURCE - somebody holds it",
+    30: "quantum end",
+    2: "waiting for a page to be read in - THIS IS DISK I/O",
+    9: "waiting for a page to be read in - THIS IS DISK I/O",
+    39: "waiting on a physical fault - THIS IS DISK I/O",
+    6: "waiting at a user request",
+    13: "waiting at a user request",
+}
+
+
+def guest_symbolizer(directory):
+    """Nearest-public-symbol lookup against the guest kernel, or None.
+
+    Reuses `scripts/symbolize-trace.py`'s `publics`, which is the copy
+    that had the segment-parsing bug fixed: `llvm-pdbutil dump --publics`
+    prints `addr = SSSS:OOOOOO` with **both fields decimal**, and the
+    four-digit zero-padded segment reads like hex and is not. Parsed as
+    hex it dropped 6,438 symbols and mis-resolved 6,326 - which does not
+    fail, it answers with a plausible wrong name.
+
+    Imported rather than copied for exactly that reason: a second copy of
+    that parser is a second chance to reintroduce the bug.
+    """
+    pdb = os.path.join(directory, "ntkrnlmp.pdb")
+    if not os.path.exists(pdb):
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import importlib
+        module = importlib.import_module("symbolize-trace".replace("-", "_"))
+    except Exception:
+        # The module name has a hyphen in it, so a plain import cannot
+        # reach it. Load it by path instead.
+        try:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            spec = importlib.util.spec_from_file_location(
+                "symbolize_trace", os.path.join(here, "symbolize-trace.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as failure:
+            print(f"  [no guest symbols: {failure}]")
+            return None
+    try:
+        syms, keys = module.publics(pdb)
+    except Exception as failure:
+        print(f"  [no guest symbols: {failure}]")
+        return None
+
+    def lookup(rva):
+        import bisect
+        j = bisect.bisect_right(keys, rva) - 1
+        if j < 0:
+            return None
+        return syms[j][1], rva - syms[j][0]
+
+    return lookup
+
+
+def dump_guest_threads(args, elf, instance):
+    """What the guest's own threads are doing, by name and wait reason.
+
+    **This member has existed since it was written and nothing in
+    `scripts/` has ever read it**, which is the same failure
+    `dump_l1_host_audit` records one screen below: a counter nobody
+    prints is a measurement nobody has.
+
+    It is the reading that separates the two diagnoses this
+    investigation is stuck between, and neither the exit ring nor the
+    module walk can separate them:
+
+      - a thread in `Waiting`/`DelayExecution` is asleep on its own
+        timer and is waiting for *time*, which means the guest is slow
+        and not stuck;
+      - a thread in `Waiting`/`Executive` on the storage stack is
+        blocked on a dispatcher object somebody else has to signal,
+        which is what an I/O that never completes looks like from
+        inside.
+
+    Those are opposite problems and they produce an identical exit
+    profile - the idle loop, at a hundred exits a second, for ever.
+
+    Read straight out of the singleton, so no guest page-table walk is
+    needed for the table itself: `walk_guest_threads` already did the
+    walk, inside the VMM, on a processor that had the address space
+    current. What is read here is this VMM's own `.bss`.
+
+    Every number is checked before it is believed, because this reader
+    can be wrong in four separate ways and three of them look like
+    data:
+
+      - the walk may never have run, and the array is zero-filled by
+        construction, which reads as "no threads";
+      - the refresh may never have run, so `state` and `wait_reason`
+        are from whichever moment the walk happened to succeed and can
+        be minutes stale;
+      - `guest_windows.h`'s offsets belong to one Windows build, and a
+        different one puts plausible bytes in every field;
+      - the list is bounded at `thread_walk_limit`, so a full one is
+        evidence of truncation and not of the process's size.
+
+    The range checks below catch the third: `State` has ten legal
+    values, `WaitIrql` sixteen, `WaitReason` forty-four, and a thread
+    pointer must be a canonical kernel address. Wrong offsets fail
+    those almost immediately - which is the property that makes this
+    instrument able to report its own failure, and the reason for the
+    `ActiveThreads` cross-check further down.
+    """
+    members = ["guest_thread_list", "guest_thread_list_count",
+               "guest_thread_list_process", "guest_thread_list_walked",
+               "guest_thread_refreshes", "guest_kernel_base",
+               "guest_kernel_size"]
+    off = gdb_offsets(elf, members, optional=True)
+    missing = [m for m in members if m not in off]
+    if "guest_thread_list" in missing or "guest_thread_list_count" in missing:
+        print("\n[guest threads: not in this ELF - the deployed binary "
+              "predates walk_guest_threads]")
+        return
+
+    # Stride and capacity from the type, never from the header's
+    # constants. `gdb_lengths` above records what a second copy of a
+    # capacity cost when the header moved and the reader did not: it did
+    # not fail, it reported exits for instructions the guest does not
+    # execute.
+    stride, capacity = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list / "
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list[0]"])
+
+    fields = ["thread", "start_address", "state", "wait_reason", "wait_irql"]
+    inner = gdb_offsets(elf, [f"guest_thread_list[0].{f}" for f in fields])
+    base = off["guest_thread_list"]
+    inner = {f: inner[f"guest_thread_list[0].{f}"] - base for f in fields}
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + base, (stride * capacity) // 8)
+    for m in ("guest_thread_list_count", "guest_thread_list_process",
+              "guest_thread_list_walked", "guest_thread_refreshes",
+              "guest_kernel_base", "guest_kernel_size"):
+        if m in off:
+            reader.queue(instance + off[m], 1)
+    got = reader.run()
+
+    def scalar(member):
+        if member not in off:
+            return None
+        return got.get(instance + off[member])
+
+    def field(index, name):
+        return got.get(instance + base + index * stride + inner[name])
+
+    count = scalar("guest_thread_list_count")
+    walked = scalar("guest_thread_list_walked")
+    refreshes = scalar("guest_thread_refreshes")
+    process = scalar("guest_thread_list_process")
+    kbase = scalar("guest_kernel_base") or 0
+    ksize = scalar("guest_kernel_size") or 0
+
+    print(f"\nguest thread list: {count} threads, walk ran {walked} time(s), "
+          f"refreshed {refreshes} time(s)")
+
+    if reader.unanswered:
+        print(f"  READER INCOMPLETE: {len(reader.unanswered)} read(s) never "
+              f"came back - every zero below may be an unread word rather "
+              f"than a value. Check nothing else holds the monitor.")
+
+    # The walk never firing and the process having no threads produce the
+    # same zero-filled array, and only this counter tells them apart.
+    if not walked:
+        print("  THE WALK NEVER RAN. `walk_guest_threads` fires from the "
+              "exit path and stops for good once it finds a process with "
+              "more than one thread; a zero here means it never found "
+              "one, so the array below is zero by construction and is "
+              "NOT evidence about the guest.")
+        return
+
+    if not count:
+        print("  the walk ran and recorded nothing - the list head read "
+              "back empty or the first link was not a kernel address")
+        return
+
+    if not refreshes:
+        print("  NOTE refreshes = 0: `state` and `wait_reason` are from "
+              "the moment the walk succeeded, not from now. During Phase "
+              "1 that moment can be minutes ago, and a thread recorded "
+              "`Running` then may have been `Waiting` ever since.")
+
+    if count >= capacity:
+        print(f"  NOTE the list is FULL at {capacity} - `thread_walk_limit` "
+              f"truncated it, so this is a prefix of the process's threads "
+              f"and not all of them")
+
+    print(f"  process 0x{(process or 0):x}"
+          + (f"   kernel image 0x{kbase:x} + 0x{ksize:x}" if kbase else ""))
+
+    symbolize = guest_symbolizer(args.guest_syms)
+    if symbolize is None:
+        print(f"  [start addresses unsymbolized: no ntkrnlmp.pdb under "
+              f"{args.guest_syms}/ - pass --guest-syms]")
+
+    # Guilty until read. Wrong offsets do not fail, they answer - so the
+    # legal ranges are checked and the count of violations is printed
+    # before any of the values are interpreted.
+    suspect = []
+    rows = []
+    for i in range(count if count <= capacity else capacity):
+        thread = field(i, "thread") or 0
+        start = field(i, "start_address") or 0
+        state = field(i, "state")
+        reason = field(i, "wait_reason")
+        irql = field(i, "wait_irql")
+        rows.append((thread, start, state, reason, irql))
+        if thread and thread < 0xffff800000000000:
+            suspect.append(f"thread[{i}] 0x{thread:x} is not a canonical "
+                           f"kernel address")
+        if state is not None and state not in THREAD_STATE:
+            suspect.append(f"thread[{i}] state {state} is not a legal "
+                           f"_KTHREAD_STATE")
+        if reason is not None and reason not in WAIT_REASON:
+            suspect.append(f"thread[{i}] wait_reason {reason} is not a legal "
+                           f"_KWAIT_REASON")
+        if irql is not None and irql > 15:
+            suspect.append(f"thread[{i}] wait_irql {irql} is above HIGH_LEVEL")
+
+    if suspect:
+        print(f"  OFFSETS SUSPECT: {len(suspect)} value(s) outside their "
+              f"legal range. `guest_windows.h`'s offsets are for ntkrnlmp "
+              f"GUID C8A7F11B37FE28227B6B11412E3A0519; a different Windows "
+              f"build moves them and nothing else notices.")
+        for line in suspect[:6]:
+            print(f"    {line}")
+        print("  The table below is printed anyway, and should not be "
+              "quoted until this is resolved.")
+
+    print("  idx  thread              state         irql  wait reason")
+    for i, (thread, start, state, reason, irql) in enumerate(rows):
+        name = ""
+        if symbolize and kbase and kbase <= start < kbase + (ksize or 1 << 30):
+            hit = symbolize(start - kbase)
+            if hit:
+                name = f"  {hit[0]}" + (f"+0x{hit[1]:x}" if hit[1] else "")
+        elif start:
+            name = f"  start 0x{start:x}"
+        print(f"  [{i:2d}] 0x{thread:016x}  "
+              f"{THREAD_STATE.get(state, f'?{state}'):<13} "
+              f"{(irql if irql is not None else -1):>4}  "
+              f"{WAIT_REASON.get(reason, f'?{reason}')}{name}")
+
+    # The verdict, which is the reason the table is here at all.
+    #
+    # `WaitReason` and `WaitIrql` are only about the *current* wait.
+    # `guest_windows.h` already records why: `_KTHREAD.WaitIrql` is the
+    # level at which a thread last called `KeWaitForSingleObject` and is
+    # stale for a thread that is not waiting. The same is true of
+    # `WaitReason`, so both are read only for threads in `Waiting`.
+    waiting = [r for r in rows if r[2] == 5]
+    running = [r for r in rows if r[2] in (2, 3)]
+    ready = [r for r in rows if r[2] in (1, 7)]
+
+    print(f"\n  {len(waiting)} waiting, {len(running)} running/standby, "
+          f"{len(ready)} ready, {len(rows) - len(waiting) - len(running) - len(ready)} other")
+
+    if running or ready:
+        print("  AT LEAST ONE THREAD IS RUNNABLE. The guest is executing "
+              "work, not blocked - which points at throughput and away "
+              "from a stalled device.")
+
+    seen = {}
+    for _, _, _, reason, _ in waiting:
+        seen[reason] = seen.get(reason, 0) + 1
+    for reason, n in sorted(seen.items(), key=lambda kv: -kv[1]):
+        meaning = WAIT_MEANING.get(reason, "")
+        print(f"    {n:>2} x {WAIT_REASON.get(reason, reason)}"
+              + (f" - {meaning}" if meaning else ""))
+
+    # The one number that says whether the two clocks in this reading
+    # agree, and it costs one more read of a member already resolved.
+    #
+    # `guest_thread_refreshes` climbing between two dumps means the
+    # sampler is still running and the states above are live; frozen
+    # means the exit path that calls it has stopped being reached, and
+    # every state above is a fossil. That distinction is exactly the one
+    # `clock_gap_buckets` could not make about itself.
+    print(f"\n  is this reading live? `guest_thread_refreshes` = "
+          f"{refreshes:,}. Run:")
+    print(f"    python3 scripts/rig-dump-state.py --elf {args.elf} "
+          f"--delta 20 2>&1 | grep -i thread")
+    print("  A refresh count that does not move over the window means "
+          "the sampler stopped and the states above are stale - NOT that "
+          "the threads stopped changing.")
+
+
 def interrupted_context_verdicts(rows, kbase=0, ksize=0):
     """Is each interrupted context retrying, or progressing?
 
@@ -4178,6 +4527,19 @@ DELTA_GLOBAL_COUNTERS = [
     # window it does not bound.
     ("impossible_decodes", "impossible decodes (MUST be 0)"),
     ("refused_instruction_count", "refused guest stores (MUST be 0)"),
+    # **Not a fact about the guest - a fact about the instrument.**
+    #
+    # `dump_guest_threads` prints each thread's state and wait reason,
+    # and those are only as fresh as the last `refresh_guest_threads`.
+    # Frozen here means the exit path that calls it has stopped being
+    # reached and every state in that table is a fossil; climbing means
+    # the table is live. Nothing inside the table itself can say which,
+    # which is precisely the failure mode `clock_gap_buckets` above is
+    # in this list to avoid - an instrument that cannot report the
+    # absence of what it measures reports health for ever after it
+    # stops.
+    ("guest_thread_refreshes", "guest thread-state refreshes"),
+    ("guest_thread_list_walked", "guest thread-list walks"),
 ]
 
 # Monotonic cycle accumulators.  Differenced and then divided by the
@@ -5422,6 +5784,12 @@ def main():
                          "first (default all 4096 lines)")
     ap.add_argument("--l2-entries", type=int, default=24,
                     help="how many second-level entries to show")
+    # Where the guest's own symbols are, for naming thread start
+    # addresses. Defaults to the directory `symbolize-trace.py` already
+    # assumes, so the two agree by default rather than by discipline.
+    ap.add_argument("--guest-syms", default="syms", metavar="DIR",
+                    help="directory holding the guest's ntkrnlmp.pdb, "
+                         "used to name thread start addresses")
     # Steady state, rather than the whole boot averaged into one number.
     #
     # Without this every column in this dump is cumulative, and the only
@@ -5632,6 +6000,11 @@ def main():
                # and printed by nothing, and it is the only progress
                # metric here that a livelock cannot fake.
                "guest_thread_samples", "guest_thread_sample_count",
+               # How often the thread table below was rebuilt and
+               # re-read. In `--delta` these say whether
+               # `dump_guest_threads`' output is live or a fossil, and
+               # nothing inside that table can say so itself.
+               "guest_thread_refreshes", "guest_thread_list_walked",
                # Which hypercalls each level makes. Recorded for sessions
                # and printed by nothing, and the second-level one names
                # what Windows is asking Hyper-V to do.
@@ -8498,6 +8871,16 @@ def main():
         dump_own_field_use(args, args.elf, base)
     except SystemExit as failure:
         print(f"\n[dump_own_field_use skipped: {failure}]")
+
+    # Before the per-handler breakdowns, because it answers a different
+    # and prior question: those say what this VMM spent its time on, and
+    # this says whether the guest is waiting or working. A cost
+    # breakdown of a guest that is blocked is a breakdown of its idle
+    # loop.
+    try:
+        dump_guest_threads(args, args.elf, instance)
+    except SystemExit as failure:
+        print(f"\n[dump_guest_threads skipped: {failure}]")
 
     dump_handler_by_reason(args, args.elf, instance)
     dump_vmcs02_split(args, args.elf, instance)

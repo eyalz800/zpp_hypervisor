@@ -55761,3 +55761,65 @@ under this VMM, or independently. The next boot answers it: read
 `CC`/`CSTS` narrowly at the start and watch when the answer becomes
 all-ones.
 
+## The rig went down, and it confounds the reading before it
+
+Immediately after the NVMe measurements, the machine became completely
+unreachable: `ping` 100% loss, ssh port closed, monitor port closed,
+"No route to host" then "Host is down". It needs a physical power
+cycle.
+
+**That casts the entry above in a different light and the honest thing
+is to say so now rather than after somebody acts on it.** The sequence
+was:
+
+1. narrow reads of the NVMe BAR return real values once - `CC =
+   0x00460001`, `CSTS = 0`,
+2. every subsequent read of that BAR returns all-ones,
+3. two neighbouring passed-through BARs still read correctly,
+4. minutes later the whole host is gone.
+
+Read forwards, (3) is a clean control and (2) is a dead controller.
+Read backwards, (2) and (4) may be the same event - **a host on its way
+down, with one device's MMIO failing first.** A control taken *before*
+the failure does not rule that out, because the neighbours were read in
+the same batch as the last good NVMe read, not after it.
+
+So the finding "the passed-through NVMe stopped responding" **stands as
+an observation and is withdrawn as a diagnosis.** What it explains -
+storage stack resident, nothing read from disk, phase 1 retrying for
+ever - it explains just as well if the cause is the host dying as if it
+is anything this VMM did.
+
+**What would settle it, on the next boot, and it is cheap:** read
+`CC`/`CSTS` narrowly at intervals from the very start of the run. If
+the controller answers for minutes and then stops while the host stays
+up, it is real. If the first all-ones coincides with the host becoming
+unreachable, it was the machine.
+
+### Corroboration that does survive, from a different direction
+
+**78 modules is exactly `winload`'s boot-critical set.** Everything
+after it must be read by Windows through its own storage stack. So the
+module count says, independently of any device reading: **the boot
+drivers are resident and not one byte has been read from the volume.**
+That is a fact about the guest, not about the BAR, and it points at the
+same place.
+
+### And a blocker that was thought to be one is not
+
+`_DEVICE_NODE` **does** have a full field list in the public PDB - 73
+members, `sizeof` 904 - and all five relevant RVAs verify exactly,
+including `IopRootDeviceNode` at `0xf8ba58`. The earlier "no field
+list, so no walker" conclusion came from `llvm-pdbutil pretty`, which
+fails on macOS for want of DIA; `dump --types` answers fine.
+
+So `scripts/guest-devnodes.py` now exists, and the device node's
+`State` partitions the whole failure space: **773** no resources,
+**774** start never issued, **775** start in flight and never completed,
+**778** the failure is above storage. One walk names the device and
+says which.
+
+**Caution built into it:** `Problem == 0` is not health - it is also
+"never processed" and "cleared on retry" - so it is never printed
+without `State` beside it.
+
