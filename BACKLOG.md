@@ -55492,3 +55492,58 @@ name is the answer.
 `Phase1InitializationDiscard` past the end of the image. CLAUDE.md
 already warns that the offset is decimal - **the segment is too.**
 
+## It is stuck immediately after pci.sys, at PCI bus enumeration
+
+The two walks, sixty seconds apart, on the same live guest:
+
+    T0      36 modules, last three: msisadrv.sys, pci.sys
+    T0+60   36 modules, last three: msisadrv.sys, pci.sys
+
+**Identical count, identical last name.** By the prediction stated
+before the measurement, that is **stuck rather than slow**, and the
+name is the answer.
+
+`PsLoadedModuleList` receives an entry when a driver load *succeeds*,
+so `pci.sys` is the last one that finished. The guest is wedged on
+whatever `IopInitializeSystemDrivers` reaches next - and what comes
+next after the PCI bus driver is **plug-and-play enumerating the PCI
+bus and loading a function driver for each device it finds.** On this
+rig that includes the **passed-through NVMe**.
+
+### Three observations that were never connected now are
+
+- **MSI-X is never enabled on the passed-through NVMe** - established
+  earlier with a clean single-variable control, and previously filed as
+  a symptom with no mechanism.
+- **`smss.exe` waits on `WrPageOut`** - recorded and never explained.
+- **`MiPrefetchControlArea` fails and `MiWalkEntireImage` retries the
+  same page at 100 Hz for ever** - the loop found by disassembly above.
+
+All three are the same event seen from three sides: **the storage
+function driver never comes up, so a driver image's pages never arrive
+from disk, so the loader retries for ever.** None of them requires
+starved deferred calls or an unstarted storage stack, which is what the
+earlier chain needed and why it was retracted.
+
+### Thirty-six modules is very early, and there is a comparison in this file
+
+An earlier module walk this session listed `CLASSPNP.SYS`,
+`dump_storport.sys`, `cdrom.sys`, `tdx.sys`, `netbt.sys`, `afd.sys`,
+`vwififlt.sys`, `rdbss.sys` and more - networking and file-system
+drivers that load **much** later than `pci.sys`. That guest was far
+past this one.
+
+**Stated as a comparison and not as a control:** the two runs were
+different configurations, and this file has been burned by exactly that
+before. What it is good for is scale - 36 against a hundred-plus says
+this stall is early, not a boot nearly finished.
+
+### Where that points
+
+The next thing to establish is what this VMM does to PCI configuration
+space and to the passed-through device during enumeration. The UEFI
+loader deliberately **connects every controller** before chainloading,
+which is a documented and deliberate interference with firmware's own
+enumeration, and `hypervisor/src/hypervisor/pci.cpp` exists. Both are
+now in scope for the first time in this investigation.
+
