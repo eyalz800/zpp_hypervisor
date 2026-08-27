@@ -56527,3 +56527,58 @@ at a steady rate while no work completes. Worth testing whether VTL1 is
 being re-entered and immediately VINA'd back out before it can advance -
 that would be a livelock, and it would explain a fixed stopping point
 under a clock that never stops.
+
+## deliver_on_drop: measured, no effect, and it sharpened the finding
+
+The switch's own pre-registered criteria were used, one variable, same
+binary otherwise (`nested=1`, one processor, `drop=1` confirmed from the
+built ELF and not the cache).
+
+**Result: no effect on the stall.**
+
+                           code 0    ModifyVtlProtectionMask
+    baseline drop=0        21,169                     39,449
+    drop=1                 21,175                     39,449
+
+`0x2f` as a share of carried vectors went 1.108% -> 0.837%, so it did
+not raise the dispatch vector either. Recorded so it is not re-proposed:
+this is the **third** intervention aimed at the task-priority
+interaction, after `window_on_tpr` and the first `deliver_on_drop`, and
+the first that did no harm - the earlier two collapsed the clock. Doing
+no harm is not the same as helping.
+
+**But the null result is worth more than the intervention was.** The
+protection-call count is *identical to the digit* across two boots -
+39,449 both times - and the secure kernel's stall stack is the same
+call chain modulo relocation:
+
+    offset   baseline            drop=1              delta
+    +0x00    ...4554f701         ...152ff701         0x5CFDB0000
+    +0x10    ...454820a6         ...152320a6         0x5CFDB0000
+    +0x50    ...4547f924         ...1522f924         0x5CFDB0000
+    +0xb0    ...454a5dae         ...15255dae         0x5CFDB0000
+
+One delta for every stack slot, under different KASLR, so it is the same
+code stopping at the same place. (The call rip's module moves by a
+different delta, 0x5CDDB0000 - a second independently randomised module,
+which is what securekernel plus its own libraries looks like.)
+
+### What that rules out
+
+A deterministic stopping point to the digit is **not** a race, not a
+livelock and not a timing effect. Three boots stop at 21,168, 21,169 and
+21,175 secure requests and two of them at exactly 39,449 protection
+calls. That kills the reading this file has been carrying in various
+forms all along - that the guest is being starved or out-paced - and it
+kills it by measurement rather than by argument. A starved guest does
+not stop in the same instruction twice.
+
+So one specific secure-kernel operation is issued and never completes.
+
+### What would identify it
+
+The stall stack is four return addresses into securekernel and its
+libraries. Naming them needs that module's symbols, which this tree has
+never had - the guest PDB work so far has been `ntkrnlmp.pdb` only. The
+addresses are stable within a boot and the module bases are recoverable,
+so the remaining step is symbolisation, not more measurement.
