@@ -56322,3 +56322,103 @@ it does not establish that either run reached a login screen.
    never issued, **775** start in flight never completed, **778**
    failure above it. That names whether the GPU was enumerated at all.
 
+## The guest is IDLE, and the disk is gone. Measured 2026-08-27
+
+The first boot after the rig came back settled, with controls, what
+several sessions of inference could not. `nested=1`, one processor,
+`fb=1`, clean launch - 47 log lines, no unhandled exit, no entry
+failure, Hyper-V up (`guest vmxon`, VMCS shadowing) and Windows' kernel
+running at `0xfffff800c5a00000`.
+
+### Windows is idle, not starved and not wedged
+
+`where the guest was when an interrupt landed on it` reported **97.5% of
+917,686 samples at one address**, `ntoskrnl+0x6b3692`. Reading the
+instructions out of guest memory - walk Windows' page tables with the
+logged cr3, `xp` the physical - decodes them:
+
+    subq  $40, %rsp
+    movl  $2, %ecx
+    movq  %rcx, %cr8        <- drop to IRQL 2
+    sti                     <- enable interrupts
+    movq  ...
+    leaq  -128(%rbp), %rdx  <- 0x6b3692, where every interrupt lands
+    callq <target>
+    cli
+    retq
+
+`STI`'s interrupt shadow covers exactly one instruction, so the `lea` is
+the **first interruptible instruction** after interrupts are enabled -
+which is why the clock lands there and nowhere else. The call target
+reads `gs:32` (the PRCB), tests the DPC queue at `[rbx+0x30]` and spins
+on it with `pause`. That is the **idle scheduler looking for a runnable
+thread and finding none**.
+
+So the picture that guided four failed interventions - a guest saturated
+by its own clock - is wrong in the direction nobody tested. The guest is
+not short of time. `duty 0.754` says so from the other side, and the
+dump prints the words: *NOT starved: the guest has time it is not
+using*. Windows gets 8.0% of wall clock, Hyper-V 16.6%, and this VMM
+75.4%; Windows' share of non-VMM time is 32.6%. It is idle inside its
+own slice.
+
+### And the disk stopped answering, confirmed with controls
+
+Read narrow and repeated, with two neighbouring passed-through BARs in
+the same batch, while the VM was `running`:
+
+    NVMe        0x7011108000   ffffffff ffffffff
+    xhci        0x7011100000   01000040 08001040
+    control     0x701110c000   01009701 001c003c
+    framebuffer 0x7000000000   00000000          (a black pixel, valid)
+
+Minutes earlier the same device answered `CAP = 0x140103ff/0x30` and
+`CC = 0x00460001` - enabled. **The controller dropped off the bus
+mid-run.** The controls answering in the same batch is what makes this
+the device rather than the reader, which is the distinction the earlier
+attempt could not make and had to withdraw.
+
+That closes the loop with the paragraph above: a guest with no runnable
+thread, no new memory faulted in over four minutes
+(`shadow_ept_replayed` +0), and a boot spinner still animating, is a
+guest **waiting on I/O that can never complete**. That is why the login
+screen is never reached.
+
+### Two instrument bugs found doing it
+
+- **`CSTS` is at `+0x1c`, not `+0x18`.** `+0x18` is reserved and reads
+  zero, which is indistinguishable from `CSTS.RDY = 0`. Read that way,
+  the controller looked "enabled but never ready" and was about to be
+  reported as such. `rig-watch-nvme.sh` carried the wrong offset and
+  now reads the two registers separately.
+- **`lspci -vv` on the dead device hangs the host.** See below; it is
+  the more expensive of the two by a wide margin.
+
+### Never read host config space of an all-ones passed-through device
+
+One `sudo lspci -vv -s 02:00.0` against the NVMe in that state never
+returned, and the rig was unreachable within seconds - 100% packet loss,
+ssh closed, physical power cycle required. The config read blocks in the
+kernel on a device that will not complete the transaction and takes the
+machine with it.
+
+This is almost certainly the **same event** as the earlier host loss
+that was recorded as unexplained and that forced an NVMe observation to
+be withdrawn as a diagnosis. It was not bad luck in the timing; it was
+the config read. `rig-watch-nvme.sh` now says so at the top.
+
+When a passed-through device reads all-ones, **that is already the
+finding**. Confirm it with control BARs and stop. Ask *why* from inside
+the guest or from the guest-physical side with `xp`, never from host
+config space.
+
+### What this makes next
+
+The question is no longer "why is the guest stuck" but **"why does the
+NVMe drop off the bus while we are running"**, which is a different and
+much narrower question. Worth knowing before the next boot: whether it
+drops with a plain-KVM guest on the same launcher, since that separates
+"passthrough on this rig" from "this VMM". Note the launcher difference
+already recorded in CLAUDE.md - `boot.sh` and `boot-zpp.sh` are not a
+single-variable control until equalised.
+

@@ -31,6 +31,15 @@
 # Doorbells are deliberately not read: they are write-only, so a zero
 # says nothing about what was submitted, and that has been mistaken for
 # "no I/O was issued" before.
+# DO NOT diagnose an all-ones device by reading its HOST config space.
+# `sudo lspci -vv -s <dev>` or a hexdump of
+# /sys/bus/pci/devices/*/config on a vfio-bound device that has stopped
+# answering **hangs the whole machine** - measured 2026-08-27, the host
+# was unreachable within seconds and needed a physical power cycle. It
+# is also the most likely explanation for an earlier unexplained host
+# loss that forced an NVMe observation to be withdrawn. Reading the
+# guest-physical BAR with `xp`, as below, is safe; host config space is
+# not.
 set -u
 
 RIG=${ZPP_RIG:-192.168.1.199}
@@ -42,8 +51,15 @@ NVME=${ZPP_NVME_BAR:-0x7011108000}
 CTRL_A=${ZPP_CTRL_A:-0x7011100000}
 CTRL_B=${ZPP_CTRL_B:-0x701110c000}
 
-# CC is at +0x14 and CSTS at +0x18, so one two-word read covers both.
-CC_CSTS=$(printf '0x%x' $(( NVME + 0x14 )))
+# CC is at +0x14 and CSTS at +0x1c. **+0x18 is RESERVED** - reading a
+# two-word pair at +0x14 gets CC and the reserved dword, which is
+# legitimately zero, and a zero there reads exactly like CSTS.RDY=0 on a
+# controller that never came ready. That misreading was made here and
+# reported as "the controller is enabled but not ready" before the
+# register map was checked. Two separate narrow reads, at the two real
+# offsets.
+CC=$(printf '0x%x' $(( NVME + 0x14 )))
+CSTS=$(printf '0x%x' $(( NVME + 0x1c )))
 
 echo "polling $NVME (CC/CSTS at $CC_CSTS) every ${INTERVAL}s"
 echo "controls: $CTRL_A $CTRL_B - if these answer and the NVMe does not,"
@@ -61,14 +77,15 @@ while :; do
         exit 2
     fi
 
-    out=$(printf 'xp /2xw %s\nxp /2xw %s\nxp /2xw %s\n' \
-              "$CC_CSTS" "$CTRL_A" "$CTRL_B" \
+    out=$(printf 'xp /2xw %s\nxp /2xw %s\nxp /2xw %s\nxp /2xw %s\n' \
+              "$CC" "$CSTS" "$CTRL_A" "$CTRL_B" \
           | nc -w 8 "$RIG" "$PORT" 2>/dev/null \
           | tr -d '\r' | grep -oE '0x[0-9a-f]{8} 0x[0-9a-f]{8}')
 
     nvme=$(echo "$out" | sed -n 1p)
-    a=$(echo "$out" | sed -n 2p)
-    b=$(echo "$out" | sed -n 3p)
+    csts=$(echo "$out" | sed -n 2p)
+    a=$(echo "$out" | sed -n 3p)
+    b=$(echo "$out" | sed -n 4p)
 
     if [ -z "$nvme" ]; then
         echo "$now  no answer from the monitor (is another reader holding it?)"
@@ -90,10 +107,10 @@ while :; do
         fi
     else
         cc=$(echo "$nvme" | cut -d' ' -f1)
-        csts=$(echo "$nvme" | cut -d' ' -f2)
+        st=$(echo "$csts" | cut -d' ' -f1)
         en=$(( $(printf '%d' "$cc") & 1 ))
-        rdy=$(( $(printf '%d' "$csts") & 1 ))
-        echo "$now  CC $cc CSTS $csts  (EN=$en RDY=$rdy)"
+        rdy=$(( $(printf '%d' "$st") & 1 ))
+        echo "$now  CC $cc CSTS $st  (EN=$en RDY=$rdy)"
     fi
 
     sleep "$INTERVAL"
