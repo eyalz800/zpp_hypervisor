@@ -56211,3 +56211,46 @@ nothing and was sitting unused.
 That is the first thing to do on the next run, before any dump:
 **ask what is on the screen.**
 
+### The thread reading is a one-shot snapshot, and a tidy explanation for it is refuted
+
+Two things checked against the code and the guest binary, no rig
+needed.
+
+**`walk_guest_threads` is once-only, by design.** It walks
+`PsInitialSystemProcess`'s thread list and returns immediately once
+`guest_thread_list_count >= 2`; its own comment says "the walk stays
+bounded because it stops for good as soon as it succeeds". So
+`guest_thread_list` is a **snapshot taken once, early**, and cannot say
+anything about what is running later. Any reading of it as "the current
+thread" is wrong by construction.
+
+**And the tidy explanation for the contradiction is wrong.** I proposed
+that `Phase1Initialization` does not exit but becomes the zero-page
+thread, keeping its `StartAddress` for ever - which would have made
+"the only thread is Phase1Initialization" mean "the machine is idle",
+i.e. exactly what a login screen looks like. `MiZeroPageThread` exists
+at rva `0x691ac0`, so the hypothesis was checkable, and the
+disassembly refutes it: every call out of `Phase1Initialization` is
+
+    KeQueryPerformanceCounter, Phase1InitializationDiscard,
+    InbvSetProgressBarSubset, IoInitSystem,
+    Phase1InitializationIoReady, MmEnumerateSystemImages
+
+and nothing else. The function returns, so the thread terminates.
+**Recorded because it was a good hypothesis and it is dead**, and
+because the next person will think of it too.
+
+### What that leaves
+
+`win32k.sys` and `dxgkrnl.sys` are resident, so a session was created
+and phase 1 finished. The thread list says `Phase1Initialization`, and
+is a frozen early snapshot that cannot contradict that. **The two
+readings never disagreed** - one of them simply was not about the
+present.
+
+So there is no evidence left that the guest is stuck in phase 1, and
+some evidence that it got as far as starting the Win32 subsystem. What
+the guest is actually doing at the end of a `nested=1` run is
+**unmeasured**, and the cheapest instrument for it - asking what is on
+the screen - was never used in that configuration.
+
