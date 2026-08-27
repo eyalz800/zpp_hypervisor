@@ -56582,3 +56582,81 @@ libraries. Naming them needs that module's symbols, which this tree has
 never had - the guest PDB work so far has been `ntkrnlmp.pdb` only. The
 addresses are stable within a boot and the module bases are recoverable,
 so the remaining step is symbolisation, not more measurement.
+
+## Named at last: MakeGdtReadOnly's VTL1 call never completes
+
+Measured 2026-08-28 on a live guest, with `ntkrnlmp.pdb` pulled from the
+symbol server by the same route as `securekernel.pdb`. This is the first
+time the stall has a name rather than an address, and it reconciles
+every earlier measurement in this file.
+
+The second-level call stack, bottom up:
+
+    PspSystemThreadStartup -> KxStartSystemThread
+      Phase1Initialization+0x23
+        Phase1InitializationDiscard+0x95a
+          MakeGdtReadOnly+0x8b
+            KeWriteProtectProcessorState+0xc6
+              VslFinishStartSecureProcessor+0xc4
+                VslpLockPagesForTransfer+0x16d
+                  VslpLockMdlForTransfer+0x44
+                    VslpEnterIumSecureMode+0x3a8
+                      HvlSwitchToVsmVtl1+0xab
+                        KiDpcInterrupt+0x39f
+                          KiDpcInterruptBypass+0x12
+
+**Windows is write-protecting the GDT through VBS and its trust-level
+call never finishes.** It is interrupted, bypasses to the DPC path, and
+re-enters - for ever.
+
+### The guess this replaces
+
+`0x6b3692` was read here as an idle loop, from its `mov cr8,2 / sti /
+call / cli` shape and a callee that spins on `pause`. It is
+**`KiDpcInterruptBypass`**. The disassembly was right and the
+identification was wrong, and the difference matters: an idle loop means
+a guest with nothing to do, and this means a guest that cannot finish
+one specific operation. Every "the guest is idle" statement in this file
+before this entry is withdrawn.
+
+### What it reconciles
+
+Each of these was measured separately and read as its own puzzle:
+
+- VTL1 runs about 1,052 us and is VINA'd out on 9,155 of its returns,
+  against 21,161 clean ones.
+- Code-4 (VINA) secure-call re-entries climb without limit - 6,137 ->
+  9,981 in one window - while code-0, the real work, is frozen at
+  21,169.
+- 700,852 writes of `HV_ICR = 0x4002f`, the dispatch self-IPI, against
+  8,142 deliveries of `0x2f`. The guest sits at task priority class 2,
+  which masks a class-2 vector, and `KiDpcInterruptBypass` is precisely
+  the path Windows takes when the dispatch interrupt cannot be
+  delivered normally.
+- `vtl_protect_count` frozen at 39,449 with `r15 = 1`: the protection
+  loop **finished**; what follows it is where this dies.
+
+One mechanism produces all four.
+
+### Why the four clock interventions failed
+
+`ZPP_STRETCH_GUEST_TIMER`, `ZPP_DELIVER_SELF_IPI`, `ZPP_TICK_FLOOR` and
+`ZPP_TIME_DILATION` all changed *what the guest is told about time*.
+None of them changed **how long VTL1 gets to run before something takes
+the processor away**, which is the quantity that decides whether this
+operation completes. `deliver_on_drop`, measured today, is the fifth to
+miss for the same reason.
+
+The quantity to move is the uninterrupted VTL1 window, not the tick
+rate, and the two are only related through the interrupt that ends the
+window.
+
+### The next experiment, stated before running it
+
+If the operation needs a window it never gets, then withholding the
+clock *while VTL1 is running* should let it finish, and nothing else
+should need to change. `defer` is already a build switch and the
+per-return VINA census already measures the outcome, so the test is one
+variable with a pre-registered read: **code 0 must rise above 21,169**,
+and `vtl_protect_count` must leave 39,449. If code 0 does not move, the
+window is not the mechanism and this account is wrong too.
