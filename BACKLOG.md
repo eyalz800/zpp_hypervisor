@@ -54332,3 +54332,61 @@ rotation now has a **test with a measured negative control**:
 reintroducing `for sl in range(8)` fails it. That is the difference
 between a retraction that holds and one that gets re-quoted.
 
+## The walk finishes. The stall is after it
+
+The rate instrument answers on its first boot, and it is the shape it
+was built to detect:
+
+    tsc  48,290,467,149  pfn    416  code0  3,376  calls 21,092  (+416 pfn)
+    tsc  65,473,013,473  pfn  1,321  code0  5,776  calls 28,548  (+905 pfn)
+    tsc  82,657,118,145  pfn  2,052  code0  7,733  calls 35,882  (+731 pfn)
+    ...
+    tsc 372,630,200,629  pfn  7,207  code0 21,164  calls 86,156  (+0, +0, +46)
+    tsc 431,949,945,620  pfn  7,207  code0 21,164  calls 86,303  (+0, +0, +53)
+    tsc 529,099,445,053  pfn  7,207  code0 21,164  calls 86,548  (+0, +0, +50)
+
+**The page walk ran at about 750 frames an epoch, reached 7,207
+requests over 21,164 code-0 calls, and stopped.** For the last nine
+epochs - roughly 79 seconds at this rig's 2 GHz - **not one further
+frame and not one further code-0 call**, while trust-level calls keep
+arriving at about fifty an epoch.
+
+So the walk is **not** where the guest is stuck. It completed. Whatever
+does not finish happens after it, and it is still making trust-level
+calls of some other shape while it fails to.
+
+### The four predictions, and what each did
+
+Stated before the boot, which is the only reason they are worth
+anything:
+
+| prediction | outcome |
+|---|---|
+| `pfn` flat while `calls` climb | **held** - flat for nine epochs |
+| `0x01010002` under 50% of code-0 | **held** - 34.1%, behind `0x00f40002` at 48.1% |
+| step partition identity holds | **held** - 7,206 == 7,206 |
+| newest ring entry is not `0x11aac9` | **held** - it is `0x00030002` |
+| census misses nothing | **held** - 1 call below the kernel floor, 0 otherwise |
+
+The PFN filter was selecting **34%** of the traffic, so every span,
+density and consecutive figure quoted from it described a third of what
+the guest was doing.
+
+And one prediction from the analysis was **refuted**: backward steps
+were expected to be about zero, and there are **890**, with a longest
+run of 513 pages over 912 runs. The walk revisits. It is not one
+monotonic pass, and any reading that assumed a single sweep is wrong.
+
+### Where that leaves it
+
+The guest is making about fifty trust-level calls per epoch, for ever,
+after its page walk completed. The ring's newest entries are request
+shapes other than the PFN one - `0x00030002`, `0x0000000100000000`,
+`0x00d00002`, `0x00d30002` - and **the population census says
+`0x00f40002` is the most common request of all at 48.1%**, which no
+instrument in this tree has ever decoded.
+
+That is the next question, and it is a much better one than "which
+frame does it stop at": **what is the request the guest keeps making
+after the walk is done, and what do we answer?**
+
