@@ -56455,3 +56455,75 @@ that state. A refusal was added to `rig-boot.sh` on that reasoning and
 reverted the same hour; it had no evidence behind it and would only have
 blocked boots.
 
+## The secure kernel stops at request 21,169, and both boots agree
+
+Measured 2026-08-28, two independent boots, `nested=1`, one processor.
+This is a **functional** stall with a reproducible stopping point, and
+it is the first thing found here that is not a rate.
+
+The IUM secure-call block carries a request byte. Counted over a run:
+
+    dump                  code 0 (SkmiMapViewOfImage etc)   code 4 (VINA)
+    previous boot                          21,168                  6,713
+    this boot, earlier                     21,169                  6,137
+    this boot, later                       21,169                  9,981
+
+**Code 0 is frozen.** The secure kernel's real work - mapping images
+into VTL1 - stops at 21,169 requests and never advances again, while
+VINA notifications climb without limit in the same window. A *different
+boot* stopped at 21,168. Two runs agreeing to one request is not a
+timeout and not a race; it is the same operation failing the same way.
+
+Everything downstream is frozen with it, over a measured 120 s window:
+
+    vtl_protect_count         39,449 total, +0    protection-mask calls
+    shadow_ept_builds         32,862 total, +0    shadow EPT builds
+    shadow_ept_leaves_filled 333,587 total, +0    leaves installed
+    shadow_ept_replayed    1,792,062 total, +0    replayed violations
+
+and the secure-call block's own contents are frozen too - "the block's
+first quadword changed 14,811 times" is identical in both dumps of this
+boot.
+
+The requests were **not** a loop: 21,156 of 21,169 differed from the one
+before (99.9% distinct). So VTL1 worked through twenty-one thousand
+real, distinct operations and then stopped - and `r15` at the last
+protection call, the secure kernel's own loop counter, was **1**, so it
+had work left when it stopped.
+
+### What this is not
+
+Ruled out by measurement in the same session, each with a working
+instrument:
+
+- **Injections are not being dropped.** Staged against carried, per
+  vector: `0xd1` 736,621/736,697, `0x2f` 8,165/8,165, `0x40`
+  10,285/10,285. (The first run of that reconciliation said every
+  injection was dropped; that was the reader, not the VMM - see the
+  commit that fixed it.)
+- **The scheduler is alive.** `0x2f`, Windows' dispatch vector, went
+  4,542 -> 8,165 between two dumps.
+- **The SynIC message path works.** VTL0's sixteen SIMP slots are empty
+  in both samples; VTL1 slot 3 held `0x80000010`
+  (`HvMessageTypeTimerExpired`) and had consumed it two seconds later.
+- **We answer the VTL calls correctly.** `non-zero statuses 0 - never
+  failed`, `reps asked 71,449 reps done 71,493 - all completed`, and
+  the read-only frames we install agree with what eptp12 asked for.
+- **It is not the clock rate.** That framing produced four failed
+  interventions already; the stall has a fixed stopping point, which a
+  rate problem does not.
+
+### Where to look next
+
+The question is now narrow enough to name: **what is secure request
+21,170, and why is it never issued.** The block's parameters for the
+last code-0 request are readable at the recorded guest-physical address,
+and the secure kernel's own loop had work remaining, so the caller is
+waiting on something rather than having finished.
+
+VINA is the suspicious half of the pair: a third of all secure calls are
+now notifications that VTL0 has an interrupt pending, and they continue
+at a steady rate while no work completes. Worth testing whether VTL1 is
+being re-entered and immediately VINA'd back out before it can advance -
+that would be a livelock, and it would explain a fixed stopping point
+under a clock that never stops.
