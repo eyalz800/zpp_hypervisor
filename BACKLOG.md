@@ -56788,3 +56788,66 @@ vmcs01 needs the same treatment while a gap is outstanding, which means
 `arm_controller_poll`'s `running_l2` skip has to stop applying when
 `lazy_tick_microseconds` is set. Pre-registered read, unchanged:
 `exit_total` must keep climbing across a `--delta`.
+
+## The first-level timer breaks the freeze and the boot still does not move
+
+Arming `arm_controller_poll` while a gap is set - the fix the previous
+entry named - works, and proves the diagnosis was right:
+
+    counters that MOVED in the window (4 of 537)
+      handler_exits    132,673   1,079.45 /s
+      exit_total       132,662   1,079.36 /s
+
+`exit_total` was frozen at 595,451 for two minutes; it now climbs at
+exactly the 1 ms poll rate. **The no-exits freeze is gone.**
+
+And nothing else moved. `exit_trace_count` advanced by **6**, so every
+one of those 132,662 exits is the timer firing and returning; no
+second-level entries, no shadow EPT work, no secure calls. Hyper-V is
+interrupted a thousand times a second and goes straight back to
+spinning.
+
+**So it was never waiting for an exit. It is waiting for a thing, and
+the thing is the tick this switch swallowed.**
+
+### The switch's own note predicted exactly this, before it was run
+
+> KVM's equivalent - the lazy lost-ticks policy at `hyperv.c:812-830` -
+> drops a periodic expiry at the **source**, before the message is
+> committed... This drops at the **sink**: the level above has already
+> written its message and set the synthetic interrupt source, so it will
+> believe the interrupt was injected and will not re-stage it, and the
+> guest will never acknowledge a tick it never took.
+
+That is the observed behaviour exactly. The withhold happens in
+`build_vmcs02`, on the entry-interruption field the level above staged
+into vmcs12 - so Hyper-V has already committed the message and considers
+the interrupt delivered, and then waits for an acknowledgement from a
+guest that never received one. No timer can supply that; two were tried,
+on both VMCSs, and the second one did precisely what it was built to do
+and changed nothing.
+
+**Withholding at the sink cannot work, and this is now measured rather
+than predicted.** Neither timer was wasted: they were what turned "it
+freezes" into "it is waiting for an acknowledgement", which is a
+different and answerable statement.
+
+### What the gap is still worth
+
+It got the guest further than any build in this tree - past
+`MakeGdtReadOnly` and into `MiReloadBootLoadedDrivers`. **The mechanism
+is right and the implementation is in the wrong place.**
+
+### Next, and it is where KVM already is
+
+Withhold at the **source**: this VMM answers the synthetic timer itself
+(`stimer_given_arms`, `stimer_arm_count`), so the gap belongs in *when
+the arm is answered*, not in dropping an injection the level above has
+already committed. Delay the answer and Hyper-V never stages a message,
+never believes it delivered one, and never waits for an acknowledgement
+of it - which is the whole difference between this and
+`hyperv.c:812-830`.
+
+That also keeps the reference counter truthful, which is the property
+that made this family of intervention safe where the four time lies
+were not.

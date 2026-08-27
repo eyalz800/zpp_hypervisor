@@ -943,6 +943,29 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // interval this side chooses. That is a real cost - an exit the
     // guest would not otherwise have taken - so it is only armed
     // while there is a channel to feed.
+    // The lazy tick's wake-up for the **first** level.
+    //
+    // `build_vmcs02` arms this timer for the second-level guest, and
+    // that is only half of it. Measured 2026-08-28: with a gap set and
+    // no timer here, the machine froze with `exit_total` unchanged
+    // across two minutes, `info status` running, the vCPU thread
+    // burning 100% of a core in system time, and `RIP` identical over
+    // three samples at an address in the **first** level - the same
+    // page as the exit ring's `l1-rip`. Hyper-V was spinning in its own
+    // code, taking no exits, and the vmcs02 timer cannot fire there
+    // because that VMCS is not current while the first level runs.
+    //
+    // So the gap starves the level above as well as the guest, and the
+    // wake-up has to cover whichever level is running. This call is the
+    // existing one; it skips while `running_l2` is set, which is
+    // exactly right now that vmcs02 carries its own, and it checks the
+    // capability MSR before setting the control - arming one the outer
+    // hypervisor does not offer wedged this rig once already.
+    if constexpr ((0 != nested_vmx::lazy_tick_microseconds) &&
+                  !diag::policy_of(diag::sink::esp_blocks).present) {
+        arm_controller_poll(cpuid, true);
+    }
+
     if constexpr (diag::policy_of(diag::sink::esp_blocks).present) {
         arm_controller_poll(cpuid, diag::esp_block_sink::ready());
     }
