@@ -1234,5 +1234,179 @@ class EpochLengthIsMeasuredNotAssumed(unittest.TestCase):
             "span, so any rate it prints uses an assumed divisor")
 
 
+class ServiceZeroIsReEntriesNotFlushEntireTb(unittest.TestCase):
+    """A stuck secure call is counted once, and lands on service 0.
+
+    `VslpEnterIumSecureMode` re-enters VTL1 through `0038df53`, which
+    writes `movb $0x0,(%rbx)` and `movw %r8w,0x2(%rbx)` - call class 0
+    and service number **0** - before jumping back to the call site.
+    Every entry reason that does not return to the caller funnels into
+    it, including reason 4, which is not in the case list at all
+    (`0038e0d9 cmpb $0x5,%cl; jne 0038df53`).
+
+    Two consequences the existing census cannot show:
+
+    - a call that never returns is counted **once** by service number,
+      so "0x0003 VslFinishStartSecureProcessor, called exactly once" is
+      equally consistent with "returned immediately" and "has been
+      stuck since the moment it was issued";
+    - every re-entry is added to service `0x0000`, whose name in the
+      reader is `VslFlushEntireTb`.
+
+    The arithmetic below settles the second from numbers that were
+    **already measured**, with no new boot: the `code 0` word
+    population recorded 365 blocks at `0x00000000` - class 0, reason 0,
+    service 0 - and the reason histogram recorded 1,158 at reason 4,
+    and 365 + 1,158 is the whole of the 1,520 counted at service
+    `0x0000`. `VslFlushEntireTb` issues class **3**
+    (`0058a251 xorl %edx,%edx`, `0058a25b movb $0x3,%cl`), so its own
+    word would be `0x00000003` and it is nowhere in that population.
+    """
+
+    SERVICE_ZERO = 1520
+    REASON_FOUR = 1158
+    CLASS0_REASON0_WORD = 365
+
+    def test_re_entries_account_for_the_whole_of_service_zero(self):
+        accounted = self.CLASS0_REASON0_WORD + self.REASON_FOUR
+        self.assertLess(
+            abs(accounted - self.SERVICE_ZERO), 0.02 * self.SERVICE_ZERO,
+            "re-entries no longer account for service 0x0000 within 2%, "
+            "so the arithmetic this decode rests on has changed")
+
+    def test_naming_service_zero_flushentiretb_mislabels_nearly_all(self):
+        """NEGATIVE CONTROL - the size of the existing mislabel.
+
+        A check that cannot fail is not a check. This one measures how
+        much of the population the current name misattributes: if the
+        residue left for `VslFlushEntireTb` were large, naming it that
+        would be defensible and this control would have no power.
+        """
+        residue = self.SERVICE_ZERO - (self.CLASS0_REASON0_WORD
+                                       + self.REASON_FOUR)
+        self.assertLess(
+            abs(residue), 0.05 * self.SERVICE_ZERO,
+            "the residue left for VslFlushEntireTb is now large enough "
+            "that naming service 0x0000 after it is defensible, so this "
+            "control has lost its power")
+
+    def test_the_class_field_is_what_separates_them(self):
+        """The one field that tells the two populations apart.
+
+        `VslFlushEntireTb` passes class 3; a re-entry carries class 0.
+        Without the class the two are the same service number and no
+        amount of counting separates them - which is the
+        `census two fields, not one` rule applied to this census.
+        """
+        source = read(HEADER)
+        self.assertIn(
+            "vtl_class0_with_service", source,
+            "the header no longer carries the check that class 0 never "
+            "accompanies a service number, so the class-0 marker is "
+            "trusted without anything able to contradict it")
+        self.assertIn(
+            "0058a25b", source,
+            "the header no longer cites the instruction that shows "
+            "VslFlushEntireTb issuing call class 3, so 'class separates "
+            "them' is back to being asserted rather than looked up")
+
+    def test_reason_four_falls_off_the_end_of_the_dispatch(self):
+        source = read(HEADER)
+        for site in ("0038df01", "0038e0d9", "0038df53"):
+            self.assertIn(
+                site, source,
+                "the header no longer cites {} , so the claim that "
+                "reason 4 is unhandled and re-enters silently is not "
+                "checkable".format(site))
+
+    def test_the_collection_site_partitions_every_block(self):
+        source = read(os.path.join(
+            ROOT, "hypervisor", "src", "hypervisor", "nested_entry.cpp"))
+        for name in ("vtl_fresh_calls", "vtl_reentries"):
+            self.assertTrue(
+                re.search(re.escape(name) + r"\[cpu\]\s*\+= 1", source),
+                "nested_entry.cpp no longer increments {}, so the "
+                "reader's fresh + re-entry == blocks identity cannot "
+                "hold".format(name))
+
+    def test_the_ring_is_printed_newest_last_not_in_slot_order(self):
+        """NEGATIVE CONTROL - slot order against chronological order.
+
+        A circular ring printed in raw slot order has been read as a
+        sequence twice in this investigation. This asserts the two
+        orders genuinely differ for a wrapped ring, so the reader's
+        `range(rc - n, rc)` is doing work rather than agreeing with the
+        naive loop by accident.
+        """
+        source = read(HEADER)
+        slots = cxx_constant(source, "vtl_reentry_ring_slots")
+        count = 1158
+        chronological = [k % slots for k in range(count - slots, count)]
+        self.assertNotEqual(
+            chronological, list(range(slots)),
+            "slot order and chronological order agree for this ring, so "
+            "this control cannot catch the bug it exists for")
+        self.assertEqual(
+            sorted(chronological), list(range(slots)),
+            "the chronological walk no longer visits every slot exactly "
+            "once")
+        dump = read(DUMP_STATE)
+        self.assertIn(
+            "range(rc - n, rc)", dump,
+            "rig-dump-state.py no longer walks the re-entry ring from "
+            "its oldest slot, so it prints a circular buffer as though "
+            "it were a list")
+
+    def test_the_vtl1_duration_histogram_reaches_a_whole_second(self):
+        """A saturating top bucket answers every question with itself.
+
+        At 24 buckets everything from 2^23 ticks up - 4.2 ms at
+        1.992 GHz - was one column, and the round trip being chased
+        takes about a second (2^31 ticks). The histogram would have
+        reported "4.2 ms or more" and that is not an answer.
+        """
+        header = read(HEADER)
+        buckets = cxx_constant(header, "vtl1_duration_buckets")
+        ghz = 1.992e9
+        self.assertGreater(
+            (1 << (buckets - 1)) / ghz, 1.0,
+            "the top bucket saturates below one second, so the "
+            "one-per-second round trip cannot be distinguished from a "
+            "fast return")
+        dump = read(DUMP_STATE)
+        self.assertEqual(
+            buckets, int(re.search(
+                r"VTL1_DURATION_BUCKETS = (\d+)", dump).group(1)),
+            "rig-dump-state.py's stride disagrees with the header's "
+            "width, so the histogram is walked into its neighbour")
+
+    def test_a_stride_of_twenty_four_would_now_be_wrong(self):
+        """NEGATIVE CONTROL - measured, in words of overrun.
+
+        If the two widths ever agreed at 24 again this check would be
+        vacuous, so it asserts the width really did move and by how
+        much a stale stride would overrun.
+        """
+        buckets = cxx_constant(read(HEADER), "vtl1_duration_buckets")
+        self.assertGreater(
+            buckets, 24,
+            "the width is back at 24, so this control has no power")
+        overrun = 2 * (buckets - 24)
+        self.assertGreaterEqual(
+            overrun, 8,
+            "a stale stride of 24 would overrun by fewer than eight "
+            "words, which is small enough to look like plausible data")
+
+    def test_the_reader_charges_re_entries_to_a_call(self):
+        dump = read(DUMP_STATE)
+        for name in ("vtl_reentry_service", "vtl_reentry_by_reason",
+                     "vtl_reentry_block_same", "vtl_reentry_orphan"):
+            self.assertIn(
+                name, dump,
+                "rig-dump-state.py no longer reads {}, so a stuck call "
+                "is still invisible to every reader in this "
+                "tree".format(name))
+
+
 if __name__ == "__main__":
     unittest.main()

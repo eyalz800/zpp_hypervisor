@@ -167,6 +167,13 @@ VTL_SLOTS = ["rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
 VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12",
              "STIMER0 periodic arm"]
 
+# `vtl1_duration_buckets` in hypervisor.h.  Was 24, transcribed at two
+# sites, and 24 saturates at 2^23 ticks - 4.2 ms - so a one-second
+# trust-level round trip landed in the top column and read as "4.2 ms or
+# more".  Kept as one name here because the stride and the loop bound
+# have to move together: they did not, once, and that is `ecc4b70`.
+VTL1_DURATION_BUCKETS = 34
+
 
 def gdb_offsets(elf, members, optional=False, quiet=False):
     """Ask the ELF where each member lives inside the singleton."""
@@ -3905,6 +3912,14 @@ def main():
                "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
                "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
                "vtl_copy_back", "vtl_copy_skip",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_by_reason",
+               "vtl_reentry_reason_other", "vtl_reentry_orphan",
+               "vtl_reentry_owner", "vtl_reentry_owner_valid",
+               "vtl_reentry_service", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring",
+               "vtl_reentry_ring_count",
                "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
                "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
                "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
@@ -4170,6 +4185,14 @@ def main():
                "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
                "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
                "vtl_copy_back", "vtl_copy_skip",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_by_reason",
+               "vtl_reentry_reason_other", "vtl_reentry_orphan",
+               "vtl_reentry_owner", "vtl_reentry_owner_valid",
+               "vtl_reentry_service", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring",
+               "vtl_reentry_ring_count",
                "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
                "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
                "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
@@ -4378,7 +4401,8 @@ def main():
     monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
     monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
     monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
-    monitor.queue(instance + off["vtl1_duration"], scalar_cpus * 2 * 24)
+    monitor.queue(instance + off["vtl1_duration"],
+                  scalar_cpus * 2 * VTL1_DURATION_BUCKETS)
     monitor.queue(instance + off["vtl_call_request"], scalar_cpus * 256)
     monitor.queue(instance + off["vtl_block_changes"], scalar_cpus)
     monitor.queue(instance + off["vtl_code0_param_changes"], scalar_cpus)
@@ -4399,7 +4423,13 @@ def main():
                "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
                "vtl_code0_word_other", "vtl_call_block_below_floor",
                "vtl_call_block_untranslated",
-               "vtl_call_block_unreadable"):
+               "vtl_call_block_unreadable",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_reason_other",
+               "vtl_reentry_orphan", "vtl_reentry_owner",
+               "vtl_reentry_owner_valid", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring_count"):
         monitor.queue(instance + off[_n], scalar_cpus)
     # The widths here are the members' own, not `scalar_cpus`: a table
     # queued at the wrong width reads the next member and reports it
@@ -4409,6 +4439,10 @@ def main():
                   scalar_cpus * 0x120)
     monitor.queue(instance + off["vtl_service_class"], scalar_cpus * 4)
     monitor.queue(instance + off["vtl_service_reason"], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_reentry_service"],
+                  scalar_cpus * 0x120)
+    monitor.queue(instance + off["vtl_reentry_by_reason"], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_reentry_ring"], scalar_cpus * 16 * 6)
     for _n in ("l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
                "l2_hypercall_epoch_delta"):
         monitor.queue(instance + off[_n], scalar_cpus * 32)
@@ -5991,6 +6025,98 @@ def main():
                     print("    entry reason  " + "  ".join(
                         f"{i}={v:,}" for i, v in enumerate(rs) if v)
                         + (f"  other={ro:,}" if ro else ""))
+                # RE-ENTRIES, attributed to the call stuck in them.
+                # See hypervisor.h `vtl_reentry_service`: ntoskrnl's
+                # re-entry path at 0038df53 writes call class 0 and
+                # service number 0 into the block before re-issuing,
+                # so the census above counts a stuck call ONCE however
+                # long it stays stuck, and every re-entry is added to
+                # service 0x0000 beside the real VslFlushEntireTb.
+                fresh = read('vtl_fresh_calls', 0) or 0
+                rent = read('vtl_reentries', 0) or 0
+                if fresh or rent:
+                    # Recomputed here rather than reused: the service
+                    # total above is inside its own `if any(sc)`, and a
+                    # name that may or may not be bound is how a
+                    # reader reports a stale value from the run before.
+                    blocks = sum(read('vtl_service_calls', i) or 0
+                                 for i in range(0x120)) \
+                        + (read('vtl_service_other', 0) or 0)
+                    bad = read('vtl_class0_with_service', 0) or 0
+                    rr = [read('vtl_reentry_by_reason', i) or 0
+                          for i in range(8)]
+                    rro = read('vtl_reentry_reason_other', 0) or 0
+                    print(f"\n  fresh calls {fresh:,}   re-entries "
+                          f"{rent:,}   (partition "
+                          + ("OK" if (fresh + rent) == blocks
+                             else f"BROKEN vs {blocks:,} blocks - do not "
+                                  "use these numbers") + ")")
+                    # The disagreement check. The decode says a block
+                    # with class 0 cannot carry a service number; a
+                    # non-zero count here means class 0 does not mark a
+                    # re-entry and every figure below is wrong.
+                    print("    class-0 blocks carrying a service: "
+                          f"{bad:,}"
+                          + ("" if 0 == bad else
+                             "   <- READER WRONG, the class-0 marker "
+                             "does not separate re-entries"))
+                    if (sum(rr) + rro) != rent:
+                        print("    reason partition BROKEN - do not use")
+                    print("    re-entry by reason  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(rr) if v)
+                        + (f"  other={rro:,}" if rro else ""))
+                    same = read('vtl_reentry_block_same', 0) or 0
+                    moved = read('vtl_reentry_block_moved', 0) or 0
+                    # One stuck call re-enters through ONE block
+                    # address - the block is the caller's stack local.
+                    # Many calls that each retried once do not.
+                    print(f"    block address  same {same:,}  "
+                          f"moved {moved:,}  "
+                          f"last 0x{read('vtl_reentry_block', 0) or 0:x}")
+                    orphan = read('vtl_reentry_orphan', 0) or 0
+                    rs = [read('vtl_reentry_service', i) or 0
+                          for i in range(0x120)]
+                    if any(rs) or orphan:
+                        print("    re-entries CHARGED TO the call that "
+                              "issued them:")
+                        for v, n in sorted(enumerate(rs),
+                                           key=lambda p: -p[1]):
+                            if not n:
+                                continue
+                            print(f"      0x{v:04x}  {n:>10,}  "
+                                  f"{SK_SERVICE.get(v, '')}")
+                        so = read('vtl_reentry_service_other', 0) or 0
+                        if so:
+                            print(f"      (service >= 0x120) {so:,}")
+                        if orphan:
+                            print(f"      (no fresh call seen first) "
+                                  f"{orphan:,}")
+                    rc = read('vtl_reentry_ring_count', 0) or 0
+                    if rc:
+                        print(f"    the last re-entries ({rc:,} seen), "
+                              f"oldest first:")
+                        n = min(rc, 16)
+                        # Newest is at (count - 1) % 16, so start
+                        # `count - n` slots back. A ring printed in raw
+                        # slot order has already misled this
+                        # investigation twice.
+                        prev = None
+                        for k in range(rc - n, rc):
+                            row = [read('vtl_reentry_ring',
+                                        (k % 16) * 6 + c) or 0
+                                   for c in range(6)]
+                            gap = "" if prev is None else \
+                                f"  +{(row[0] - prev) / 2e9:8.3f}s"
+                            prev = row[0]
+                            w = row[1]
+                            print(f"      class {w & 0xff} reason "
+                                  f"{(w >> 8) & 0xff} service "
+                                  f"0x{(w >> 16) & 0xffff:04x} cont "
+                                  f"0x{(w >> 32) & 0xffffffff:08x}  "
+                                  f"+0x08 0x{row[2]:016x}  "
+                                  f"+0x10 0x{row[3]:016x}  block "
+                                  f"0x{row[4]:x}  owner "
+                                  f"0x{row[5]:x}{gap}")
                 # The IMAGE VALIDATION walk - service 0x0f4,
                 # `VslCopyProtectedPage`, called from `MiCopyPage`.
                 # `vtl_code0_*` above measures service 0x101,
@@ -6170,16 +6296,22 @@ def main():
                   "values above are meaningless")
         # How long VTL1 ran, split by the VINA flag. Aggregated over
         # every entry rather than read off one or two traces.
-        dur = [[read('vtl1_duration', (v * 24) + i) or 0
-                for i in range(24)] for v in range(2)]
+        # The width is `vtl1_duration_buckets` in hypervisor.h and is
+        # NOT 24 any more. A histogram walked with a stale stride reads
+        # its neighbour and prints it under this name.
+        nb = VTL1_DURATION_BUCKETS
+        dur = [[read('vtl1_duration', (v * nb) + i) or 0
+                for i in range(nb)] for v in range(2)]
         if sum(dur[0]) or sum(dur[1]):
             print("  how long VTL1 ran (us), by VINA flag at its return:")
             print("      bucket        us     VINA clear     VINA set")
-            for i in range(24):
+            for i in range(nb):
                 if not (dur[0][i] or dur[1][i]):
                     continue
                 print(f"      2^{i:<2d} {(1 << i) / 1.992e3:9,.1f}  "
-                      f"{dur[0][i]:12,d} {dur[1][i]:12,d}")
+                      f"{dur[0][i]:12,d} {dur[1][i]:12,d}"
+                      + ("   <- SATURATED: this bucket is 'at least'"
+                         if i == (nb - 1) else ""))
         print(f"  STATUS        = 0x{status:08x}"
               + ("  <- an NTSTATUS error" if signed < 0 else
                  "  (success or not an error)"))

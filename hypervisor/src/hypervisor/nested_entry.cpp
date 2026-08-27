@@ -10761,8 +10761,8 @@ hypervisor::on_l2_exit(std::size_t cpu,
                                     bucket = bucket + 1;
                                 }
 
-                                if (bucket >= 24) {
-                                    bucket = 23;
+                                if (bucket >= vtl1_duration_buckets) {
+                                    bucket = vtl1_duration_buckets - 1;
                                 }
 
                                 this->vtl1_duration[cpu][vina][bucket] += 1;
@@ -11159,6 +11159,112 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                                     this->vtl_copy_last_pfn[cpu] = pfn;
                                     this->vtl_copy_calls[cpu] += 1;
+                                }
+
+                                // Re-entries, attributed to the call
+                                // stuck in them. See
+                                // `vtl_reentry_service` for the
+                                // disassembly: `0038df53` writes call
+                                // class 0 and service number 0 into
+                                // the block before re-issuing, so a
+                                // stuck call is counted **once** by
+                                // the service census above however
+                                // long it stays stuck, and every
+                                // re-entry lands on service 0x0000
+                                // beside the real `VslFlushEntireTb`.
+                                if ((0 == klass) && (0 == service)) {
+                                    this->vtl_reentries[cpu] += 1;
+
+                                    if (reason < 8) {
+                                        this->vtl_reentry_by_reason
+                                            [cpu][reason] += 1;
+                                    } else {
+                                        this->vtl_reentry_reason_other
+                                            [cpu] += 1;
+                                    }
+
+                                    // Whose re-entry is it? The last
+                                    // fresh call on this processor -
+                                    // safe to latch because the loop
+                                    // runs at CR8 = 0xf and nothing
+                                    // else can run here to interleave.
+                                    if (0 !=
+                                        this->vtl_reentry_owner_valid
+                                            [cpu]) {
+                                        auto owner =
+                                            this->vtl_reentry_owner[cpu]
+                                            & 0xffff;
+
+                                        if (owner < vtl_service_slots) {
+                                            this->vtl_reentry_service
+                                                [cpu][owner] += 1;
+                                        } else {
+                                            this
+                                                ->vtl_reentry_service_other
+                                                    [cpu] += 1;
+                                        }
+                                    } else {
+                                        this->vtl_reentry_orphan[cpu]
+                                            += 1;
+                                    }
+
+                                    // One stuck call re-enters through
+                                    // one block address, because the
+                                    // block is the caller's stack
+                                    // local. Distinct calls move.
+                                    auto block =
+                                        this->vtl_call_block_physical
+                                            [cpu];
+
+                                    if (0 != this->vtl_reentry_block
+                                                 [cpu]) {
+                                        if (block ==
+                                            this->vtl_reentry_block
+                                                [cpu]) {
+                                            this->vtl_reentry_block_same
+                                                [cpu] += 1;
+                                        } else {
+                                            this->vtl_reentry_block_moved
+                                                [cpu] += 1;
+                                        }
+                                    }
+
+                                    this->vtl_reentry_block[cpu] = block;
+
+                                    // And what the re-entry carries.
+                                    // `block+0x08` is the argument on
+                                    // the way in and the NTSTATUS on
+                                    // the way back, so consecutive
+                                    // slots give both directions of
+                                    // one round trip.
+                                    auto slot =
+                                        this->vtl_reentry_ring_count[cpu]
+                                        % vtl_reentry_ring_slots;
+                                    auto & row =
+                                        this->vtl_reentry_ring[cpu][slot];
+
+                                    row[0] = arch::x86_64::rdtsc();
+                                    row[1] = word;
+                                    row[2] = this->vtl_call_block[cpu][1];
+                                    row[3] = this->vtl_call_block[cpu][2];
+                                    row[4] = block;
+                                    row[5] = this->vtl_reentry_owner[cpu];
+
+                                    this->vtl_reentry_ring_count[cpu] += 1;
+                                } else {
+                                    this->vtl_fresh_calls[cpu] += 1;
+                                    this->vtl_reentry_owner[cpu] =
+                                        (klass << 16) | service;
+                                    this->vtl_reentry_owner_valid[cpu] = 1;
+
+                                    // The decode says this cannot
+                                    // happen. If it does, class 0 does
+                                    // not mark a re-entry and every
+                                    // count above is wrong.
+                                    if (0 == klass) {
+                                        this->vtl_class0_with_service[cpu]
+                                            += 1;
+                                    }
                                 }
                             }
 

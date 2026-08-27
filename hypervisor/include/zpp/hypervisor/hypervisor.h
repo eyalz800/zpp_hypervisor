@@ -14081,8 +14081,28 @@ private:
      * Non-perturbing on purpose. `ZPP_STEP_VTL` answers a richer question
      * and is documented as moving the guest between regimes, so it cannot
      * be left on to gather a distribution.
+     *
+     * **Widened from 24 buckets to 34, because 24 could not see the
+     * thing this is now being asked.** The top bucket saturates, so at
+     * 24 everything from 2^23 ticks upward - 4.2 ms at this rig's
+     * 1.992 GHz - was counted in one column. The guest is now taking
+     * one trust-level round trip per second, and a one-second residence
+     * is 2^31 ticks: it would have landed in the saturated column and
+     * read as "4.2 ms or more", which is not an answer to "where does
+     * the second go". 34 buckets reach 2^33 ticks, about 4.3 s, so a
+     * one-second residence gets its own column and a longer stall is
+     * still visible as saturation rather than being confused with a
+     * fast return.
+     *
+     * `vtl1_duration_buckets` is the width, and the reader must use it
+     * rather than a copied 24 - a histogram walked with the wrong
+     * stride reads its neighbour and reports it under this name, which
+     * is the shape of the `ecc4b70` bug the layout tests exist for.
      */
-    std::uint64_t vtl1_duration[max_cpus][2][24]{};
+    static constexpr std::size_t vtl1_duration_buckets = 34;
+
+    std::uint64_t
+        vtl1_duration[max_cpus][2][vtl1_duration_buckets]{};
 
     /**
      * Every value the request byte has ever held, counted.
@@ -14355,6 +14375,130 @@ private:
     std::uint64_t vtl_copy_same[max_cpus]{};
     std::uint64_t vtl_copy_back[max_cpus]{};
     std::uint64_t vtl_copy_skip[max_cpus]{};
+
+    /**
+     * Re-entries, attributed to the secure call that is stuck in them.
+     *
+     * The service census beside this one cannot answer the question the
+     * guest is now asking, and the reason is in `ntoskrnl.exe`'s own
+     * dispatch. `VslpEnterIumSecureMode` reads the entry reason VTL1
+     * wrote and switches on it at `0038df01`:
+     *
+     *     0038df01  movzbl 0x1(%rbx), %eax   ; entry reason
+     *     0038df05  testb  %al, %al
+     *     0038df07  jns    0038df12          ; bit 7 clear
+     *     0038df09  int3                     ; bit 7 set: debug break
+     *     0038df0a  andb   $0x7f, 0x1(%rbx)
+     *     0038df12  cmpb   $0x1, %al
+     *     0038df14  je     0038df8f          ; 1 -> RETURN to the caller
+     *     0038df16  cmpb   $0x6, %al
+     *     0038df18  je     0038df77          ; 6 -> lower IRQL, RETURN
+     *     0038df2e  movzbl 0x1(%rbx), %ecx
+     *     0038df32  cmpb   $0x3, %cl
+     *     0038df35  jne    0038e009          ; 3 -> reverse service call
+     *     0038e009  testb  %cl, %cl
+     *     0038e00b  je     0038e0e2          ; 0 -> PsDispatchIumService
+     *     0038e011  cmpb   $0x2, %cl
+     *     0038e014  jne    0038e0d9          ; 2 -> gated reverse call
+     *     0038e0d9  cmpb   $0x5, %cl
+     *     0038e0dc  jne    0038df53          ; 5 -> PsDispatchIumService
+     *                                        ; ANYTHING ELSE -> 0038df53
+     *
+     * and `0038df53` is the re-entry path, which every non-returning
+     * reason funnels into:
+     *
+     *     0038df53  xorl   %r8d, %r8d
+     *     0038df5f  movb   $0x0, (%rbx)      ; call class  := 0
+     *     0038df62  movw   %r8w, 0x2(%rbx)   ; SERVICE NUM := 0
+     *     0038df72  jmp    0038de5d          ; issue the VTL call again
+     *
+     * **So a re-entry carries call class 0 and service number 0, and
+     * the service census counts a stuck call exactly once no matter how
+     * long it stays stuck.** That is why `0x0003
+     * VslFinishStartSecureProcessor` reads "called exactly once": one
+     * call and one number, whether it returned in a microsecond or
+     * never returned at all. Reason 4 is not in the case list above at
+     * all; it falls off the end of `0038e0d9` into the re-entry path
+     * with nothing done, which is a silent retry.
+     *
+     * Two further consequences, both of which this instrument tests:
+     *
+     * - **Service `0x0000` is not all `VslFlushEntireTb`.** That
+     *   function passes service 0 with call class *3*
+     *   (`0058a251 xorl %edx,%edx`, `0058a25b movb $0x3,%cl`), while a
+     *   re-entry passes service 0 with class *0*. The 1,520 counted at
+     *   `0x0000` is those two populations added together, and the
+     *   reason histogram's 1,158 at reason 4 is the lower bound on the
+     *   contamination.
+     * - The entry reason read here is read **on the way in**, so it is
+     *   what VTL1 left behind on its previous return. A fresh call
+     *   reads 0 because the caller memset the block, so `reason == 0`
+     *   conflates "first call" with "re-entry after reason 0". Class
+     *   separates them and nothing else does.
+     *
+     * Latching the owner is safe because a re-entry cannot interleave
+     * with another thread's fresh call: `VslpEnterIumSecureMode` raises
+     * CR8 to `0xf` on entry (`0038dd99 movb $0xf,%r13b`,
+     * `0038e19f/0038e1a4 mov $0xf -> %cr8`) and the re-entry path does
+     * not lower it, so the whole loop runs at HIGH_LEVEL on one
+     * processor with nothing else able to run there.
+     *
+     * `vtl_reentry_block_same` is the checkable identity. The request
+     * block is a **stack local of the caller** - `VslFlushEntireTb`
+     * builds it at `0058a253 leaq 0x20(%rsp),%r9` - so one stuck call
+     * re-enters through one unchanging physical address, while a
+     * healthy stream of distinct calls moves. "Same address 1,158
+     * times" and "1,158 different calls that each retried once" are
+     * opposite diagnoses and this is the one field that tells them
+     * apart.
+     *
+     * One thing that makes the sampling point load bearing.
+     * `HvlSwitchToVsmVtl1` does not hand VTL1 a pointer - it marshals
+     * the block into **registers** and writes it back afterwards:
+     *
+     *     006a7708  movq   (%rdx), %rbx        ; block+0x00 -> rbx
+     *     006a770b  movdqu 0x8(%rdx), %xmm10   ; block+0x08 upward
+     *     ...                                  ; the hypercall
+     *     006a774b  movq   0x8(%rsp), %rdx
+     *     006a7750  movq   %rbx, (%rdx)        ; and back again
+     *
+     * So the copy in memory is current at the `HvCallVtlCall` and
+     * **stale at the `HvCallVtlReturn`**, where the writeback has not
+     * happened yet. Everything here is sampled at the call for that
+     * reason, and a future reader tempted to sample the return would
+     * get the previous round trip's request and no error.
+     *
+     * It also fixes what `+0x08` means here: at a call it is the
+     * argument going in, and for a re-entry nothing has cleared it, so
+     * it is the previous round trip's result. Consecutive ring slots
+     * therefore give both directions of one trip.
+     *
+     * And `vtl_class0_with_service` is the disagreement check the
+     * `xp`-over-a-BAR lesson demands: it counts blocks with class 0 and
+     * a **non**-zero service, which the decode above says cannot
+     * happen. A non-zero value means class 0 does not mark a re-entry
+     * and every number in this block is wrong - loudly, rather than
+     * plausibly.
+     */
+    static constexpr std::size_t vtl_reentry_ring_slots = 16;
+    static constexpr std::size_t vtl_reentry_ring_width = 6;
+
+    std::uint64_t vtl_fresh_calls[max_cpus]{};
+    std::uint64_t vtl_reentries[max_cpus]{};
+    std::uint64_t vtl_class0_with_service[max_cpus]{};
+    std::uint64_t vtl_reentry_by_reason[max_cpus][8]{};
+    std::uint64_t vtl_reentry_reason_other[max_cpus]{};
+    std::uint64_t vtl_reentry_orphan[max_cpus]{};
+    std::uint64_t vtl_reentry_owner[max_cpus]{};
+    std::uint64_t vtl_reentry_owner_valid[max_cpus]{};
+    std::uint64_t vtl_reentry_service[max_cpus][vtl_service_slots]{};
+    std::uint64_t vtl_reentry_service_other[max_cpus]{};
+    std::uint64_t vtl_reentry_block[max_cpus]{};
+    std::uint64_t vtl_reentry_block_same[max_cpus]{};
+    std::uint64_t vtl_reentry_block_moved[max_cpus]{};
+    std::uint64_t vtl_reentry_ring[max_cpus][vtl_reentry_ring_slots]
+                                  [vtl_reentry_ring_width]{};
+    std::uint64_t vtl_reentry_ring_count[max_cpus]{};
 
     /**
      * The second-level hypercall census, **per processor, with an
