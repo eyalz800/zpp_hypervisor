@@ -6559,6 +6559,7 @@ def main():
                "vmcs_field_read_encoding", "vmcs_field_read_count",
                "vmcs_field_write_encoding", "vmcs_field_write_count",
                "vmcs_field_use_overflow",
+               "l2_entry_vector", "l2_entries_carrying_nothing",
                "external_interrupt_vector_counts",
                "l2_injected_vector", "l2_external_vector",
                "phase_cycles", "phase_calls",
@@ -9622,6 +9623,25 @@ def main():
     # the guest, and whether the guest then *vectored* is a question for
     # the guest's own state, not for these.
     for cpu in range(args.cpus):
+        # Resolution is checked BEFORE reading, because an unresolved
+        # member reads back as an empty dict and an empty dict renders
+        # as "carried 0" - which is exactly what a real drop looks
+        # like. That is not hypothetical: this reconciliation's first
+        # run reported all 266,419 injections staged and none carried,
+        # with `l2_entry_vector` simply absent from the offset table,
+        # and it was nearly reported as a finding. An instrument that
+        # cannot separate "I did not read it" from "it is zero" will
+        # state the most dramatic of the two.
+        missing = [m for m in ("l2_injected_vector", "l2_entry_vector")
+                   if m not in off]
+        if missing:
+            print(f"\ncpu {cpu} injection reconciliation: NOT AVAILABLE")
+            print(f"  {', '.join(missing)} did not resolve in this ELF, "
+                  f"so there is nothing to compare. This is an absence "
+                  f"of measurement, NOT a count of zero - do not read "
+                  f"it as injections being dropped.")
+            continue
+
         staged = monitor_vector_counts(monitor, instance, off, cpu,
                                        "l2_injected_vector")
         carried = monitor_vector_counts(monitor, instance, off, cpu,
