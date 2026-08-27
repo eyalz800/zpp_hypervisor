@@ -54130,3 +54130,61 @@ synthetic MSR census: one EOI, one timer re-arm and one deferred-call
 request per clock tick, 1.6 million times, at 4.3 second-level entries
 per tick, with the guest reaching boot-graphics code between ticks.
 
+## The guest is repeating identical work, and the two states are named
+
+The interrupted-context ring answers L1 on its first boot. Sixteen
+samples, taken across a boot of 713,480 second-level entries, and there
+are **exactly two states, with byte-identical registers in each**:
+
+    rip                          irql  rcx                 rsi/rdi
+    KiDpcInterruptBypass+0x12       2  0x0100001f80000000  rsi 0xfffff802b6410f80
+    hypercall page +0x1c            0  0x12 (HvCallVtlReturn)  rdi 0xfffff802b5837c7f
+
+Every sample of the first is register-for-register the same as every
+other sample of it, and likewise the second. The verdict line's "2
+distinct - moving" is counting the **two interleaved contexts**, not
+movement within either, and is wrong as printed - the reader wants to
+partition by rip before deciding. **This is a retry.**
+
+Symbolised against the real PDB:
+
+    ntoskrnl+0x6b3692  KiDpcInterruptBypass+0x12
+    ntoskrnl+0x3102a4  KiCallInterruptServiceRoutine+0x1b4
+    ntoskrnl+0x6ae2be  KiInterruptSubDispatchNoLockNoEtw+0x4e
+    ntoskrnl+0x3100e6  HalpHvTimerAcknowledgeInterrupt+0x46
+    rdi at the return  MiProbeLockFrame+0x41f
+
+**The guest alternates between returning from the secure kernel and
+dispatching a deferred call, for ever, with the same registers.** And
+`rdi` at the virtual-trust-level return points into `MiProbeLockFrame`,
+which is memory-manager page probing and locking - the same subsystem
+`MiWalkEntireImage` and `MiCopyPage` sit in.
+
+### What this settles
+
+- **L1 is confirmed: the walk retries rather than progresses.** A page
+  walk that advances would move `rsi`/`rdi` between samples seconds
+  apart. They do not move at all.
+- **`PreviousIrql` is real evidence, and it says both.** The deferred-
+  call context is at **2**, dispatch level, and the trust-level return
+  is at **0**, passive. So the guest *does* reach passive level - the
+  old "it never leaves the clock handler" reading stays retracted - and
+  it does so while making no progress.
+- **L2 is dead, for zero boots.** `impossible_decodes` and
+  `refused_instruction_count` both read **0** on the frozen guest.
+  Nothing was fabricated and no guest store was refused, so a
+  mis-emulated store into a page under validation is not the cause.
+- **L3 is confirmed.** The `quiet_rip` control is dominated by the
+  clock path, not by `KiDpcInterruptBypass+0x12`, so the earlier
+  "90.8% at one instruction" reading was the sampling bias its own
+  comment warned about, and it should not have been reported as a
+  finding.
+
+### Where that leaves it
+
+The loop is **VTL0 dispatching a deferred call, calling into VTL1, and
+VTL1 returning, with nothing changing**. That is the same boundary the
+`HvCallModifyVtlProtectionMask` shortfall recorded far above sits on -
+72,510 reps asked against 72,342 done, three short answers - and the
+first thing to check is whether those are the same event.
+
