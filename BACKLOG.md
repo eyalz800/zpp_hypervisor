@@ -56660,3 +56660,78 @@ per-return VINA census already measures the outcome, so the test is one
 variable with a pre-registered read: **code 0 must rise above 21,169**,
 and `vtl_protect_count` must leave 39,449. If code 0 does not move, the
 window is not the mechanism and this account is wrong too.
+
+## ZPP_LAZY_TICK=10000 moves the boot past the stall, then deadlocks
+
+The first intervention in this investigation that **advances the guest**.
+Measured 2026-08-28, one variable against the baseline (`lazy=10000`
+confirmed from the built ELF, `drop=0`, everything else unchanged).
+
+### It got past MakeGdtReadOnly
+
+Baseline stack, for three boots, ended in
+`Phase1InitializationDiscard -> MakeGdtReadOnly ->
+KeWriteProtectProcessorState -> VslFinishStartSecureProcessor -> ... ->
+HvlSwitchToVsmVtl1` with `KiDpcInterruptBypass` as the hot address.
+
+With the gap, the stack is somewhere else entirely:
+
+    MiInitializeSystemImageRegion / MiFreeKernelPadSections
+      MiInitializeLoadedModuleList+0x54
+        MiReloadBootLoadedDrivers+0x112
+          MiApplyImportOptimizationToBootDriver+0x118
+            MiMapKernelScp+0x287
+              VslMapKernelScpPages+0x57
+                VslpEnterIumSecureMode+0x28d
+                  HvlSwitchToVsmVtl1+0xab
+
+GDT write-protection is finished and the guest is **reloading boot
+drivers**. `leaves-filled` moved 333,587 -> 345,015 and `shadow-builds`
+32,862 -> 33,028 with it. This is the mechanism working.
+
+### Then it stops dead, and the reason is a deadlock in the mechanism
+
+`--delta 120`: **0 of 537 counters moved.** `exit_total` frozen at
+604,983 for two minutes. The last records show the guest *running* -
+`vmresume` into L2 - not halted, and then nothing.
+
+The switch's own note predicted a failure and named the wrong
+signature ("`hlt` at the first-level instruction pointer"). What
+actually happens is worse and simpler:
+
+**The owed tick is re-injected "on the first later entry". If the guest
+spins in L2 waiting for that tick, it never exits, so there is no later
+entry, so the tick is never delivered.** The tick waits for an exit,
+the exit waits for the tick. `delivered 4` over the whole run is the
+count that says so.
+
+This is *not* the "discarded tick" failure the keep-whole mechanism was
+written to fix - the tick is kept, correctly, and still never arrives.
+Keeping it whole was necessary and is not sufficient.
+
+### The fix, and it is small
+
+Withholding an interrupt must not also remove the only opportunity to
+deliver it. **Arm the VMX-preemption timer for the remainder of the gap
+whenever a tick is withheld**, so an exit is guaranteed at the moment
+the gap expires and the owed tick goes in there. Everything needed is
+already present: `vmx_preemption_timer_value` (0x482e),
+`activate_preemption_timer` (pin control bit 6), the
+`vmx_preemption_timer` exit reason, and a handler for it in
+`exit_dispatch.cpp`.
+
+Pre-registered read for that change, since this file now has a habit of
+them: `lazy_tick_delivered` must be of the order of the withheld count
+rather than 4, `exit_total` must keep climbing across a `--delta`, and
+the stack must move past `MiReloadBootLoadedDrivers`. If exits climb but
+the stack does not move, the gap is not the mechanism after all.
+
+### On the pre-registered criterion that said this failed
+
+The switch's success test was "`l2_injected_vector[0x2f]` climbing".
+`0x2f` went to **4**, and by that test this is a failure. It is not: the
+guest went further than any build in this tree. The criterion was a
+proxy for progress and progress itself was measurable all along - the
+stack, `leaves-filled`, the secure-request count. **Prefer the
+measurement of the thing over a proxy for it**, and when a proxy and the
+thing disagree, the proxy is what is wrong.
