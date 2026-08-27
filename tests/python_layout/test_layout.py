@@ -280,6 +280,90 @@ class Capacities(unittest.TestCase):
             "'same in every sample' verdict is drawn from the wrong "
             "window")
 
+    def test_interrupted_context_verdict_partitions_by_rip(self):
+        """The verdict, against the ring shape that actually occurs.
+
+        The defect this pins: the verdict took `len(set(...))` over every
+        row at once, so two interleaved contexts - each internally
+        byte-identical - came out as "2 distinct - moving" for every
+        register. That is the recorded boot in `BACKLOG.md` ("The guest
+        is repeating identical work"), sixteen samples over 713,480
+        second-level entries, and the reader printed the opposite of what
+        the data said.
+
+        Three cases, and the second is the negative control. Without it
+        this test passes against a function that says "a retry" about
+        everything, which is the same fail-open shape the rest of this
+        file exists for.
+        """
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "rig_dump_state", DUMP_STATE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        verdicts = module.interrupted_context_verdicts
+
+        def row(rip, value):
+            # occurred, rip, rsp, rcx, rdx, r8, rsi, rdi, irql, frame
+            return [1, rip, value, value, value, 0, value, value, 0,
+                    value]
+
+        # 1. The measured shape: two contexts, each frozen, alternating.
+        #    Every recorded field differs between the two contexts, so
+        #    the replaced verdict reports all six as "moving" here and
+        #    cannot pass this by accident - which it does when the two
+        #    contexts happen to agree on a field.
+        first, second = 0xfffff802b5cb3692, 0xfffff80200001000
+        frozen = []
+        for _ in range(8):
+            frozen.append(row(first, 0x0100001f80000000))
+            frozen.append(row(second, 0x12))
+        lines = verdicts(frozen)
+        self.assertEqual(
+            [], [line for line in lines if "moving" in line],
+            "two interleaved but individually frozen contexts must show "
+            "no movement - counting across both is the bug this "
+            "replaces:\n" + "\n".join(lines))
+        self.assertEqual(
+            2, sum("EVERY field identical" in line for line in lines),
+            "each frozen context must be verdicted a retry on its "
+            "own:\n" + "\n".join(lines))
+        self.assertTrue(
+            any("interleaved contexts" in line for line in lines),
+            "the number of contexts must be stated separately from "
+            "movement, or it gets read as movement again")
+
+        # 2. THE NEGATIVE CONTROL. One context whose registers genuinely
+        #    advance must NOT be called a retry, or the verdict is a
+        #    constant and says nothing about any guest.
+        walking = [row(first, 0x1000 + i) for i in range(8)]
+        lines = verdicts(walking)
+        self.assertEqual(
+            [], [line for line in lines if "a retry" in line],
+            "a context whose registers advance every sample was "
+            "reported as a retry:\n" + "\n".join(lines))
+        self.assertTrue(
+            all(("moving: rcx(8)" in line) and ("rsi(8)" in line)
+                for line in lines if str(first) or True),
+            "a moving context must name the fields that moved and how "
+            "many values they took:\n" + "\n".join(lines))
+
+        # 3. A single frozen context, which is the unambiguous case and
+        #    the one the old verdict got right - so it must not regress.
+        lines = verdicts(frozen[0::2])
+        self.assertEqual(
+            1, sum("EVERY field identical" in line for line in lines),
+            "one frozen context must still read as a retry:\n"
+            + "\n".join(lines))
+
+        # And the reader must actually call it rather than keep a second
+        # copy of the logic inline.
+        self.assertIn(
+            "interrupted_context_verdicts(rows", read(DUMP_STATE),
+            "the printer no longer calls the tested function, so this "
+            "test checks code the rig never runs")
+
     def test_phase_names_and_parents_cover_every_slot(self):
         """PHASE_NAMES and PHASE_PARENT, against `phase_count`.
 
@@ -690,7 +774,16 @@ class ApLivenessProbeReadings(unittest.TestCase):
     """
 
     MEMBERS = ["ap_probe_sent", "ap_wake_exit", "ap_wake_root",
-               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs",
+               # The last hypercall per processor. Same class, same
+               # failure: written by the VMM since it was added and in
+               # neither reader list, so the one reading that separates
+               # "no longer called" from "called once and never
+               # returned" did not exist. Both lists, or it reads as a
+               # plausible zero again.
+               "last_hypercall_code", "last_hypercall_rcx",
+               "last_hypercall_rdx", "last_hypercall_r8",
+               "last_hypercall_tsc", "last_hypercall_count"]
 
     @staticmethod
     def _list_named(source, name, terminator):
@@ -704,11 +797,20 @@ class ApLivenessProbeReadings(unittest.TestCase):
         return source[start:end]
 
     def test_header_declares_every_member(self):
+        # `volatile` is optional here and it is not decoration: the
+        # liveness probe's members are `volatile` because they are
+        # written from one path and read from another with nothing
+        # between them, and `last_hypercall_*` are not. What this test
+        # is for is the *shape* - a per-cpu array of quadwords, which is
+        # what both reader lists assume when they queue `scalar_cpus`
+        # words. A member that stopped being `[max_cpus]` would be read
+        # into its neighbour and print a plausible number, which is the
+        # failure this whole file exists for.
         source = read(HEADER)
         missing = [name for name in self.MEMBERS
                    if not re.search(
-                       r"volatile\s+std::uint64_t\s+" + re.escape(name)
-                       + r"\[max_cpus\]", source)]
+                       r"(?:volatile\s+)?std::uint64_t\s+"
+                       + re.escape(name) + r"\[max_cpus\]", source)]
         self.assertEqual(
             [], missing,
             "hypervisor.h no longer declares as a per-cpu array: "

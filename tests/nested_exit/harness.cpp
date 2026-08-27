@@ -23,6 +23,7 @@
 #include "zpp/hypervisor/hypervisor.h"
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <map>
 #include <print>
 #include <string>
@@ -6020,6 +6021,68 @@ static void test_injection_against_activity_state()
  * `vmcs02_physical` left at zero the shim keeps one region and every
  * case here would pass without testing anything.
  */
+// The guest-thread sampler's stride, which decides whether that
+// instrument can alias against the guest it is watching.
+//
+// This is a test of an *instrument*, and it is here because the
+// instrument produced a finding that a phase-locked sampler produces on
+// its own: sixteen samples over 713,480 second-level entries resolving
+// to two instruction pointers with byte-identical registers in each,
+// read as "the guest is retrying". The period is counted in second-level
+// entries, the guest makes second-level entries from a periodic loop,
+// and 4096 is a power of two - so every loop length that is also a power
+// of two is sampled at one fixed point of itself, for ever.
+//
+// The negative control is the second check. Without it this passes
+// against `return guest_thread_sample_period;`, which is exactly the
+// implementation the alias comes back with, and the output of an aliased
+// sampler looks identical to the output of a correct one.
+static void test_guest_thread_sample_stride()
+{
+    using hv = zpp::hypervisor::hypervisor;
+
+    constexpr auto period = hv::guest_thread_sample_period;
+
+    // 1. Bounded. A stride below the period costs more than the
+    //    declaration promises on the hottest path here; an unbounded one
+    //    would let a single unlucky time-stamp counter stop the sampler
+    //    for the rest of the boot.
+    bool bounded = true;
+    for (std::uint64_t i{}; i < 4096; ++i) {
+        auto entropy = (i * 0x9e3779b97f4a7c15ull) ^ (i << 32);
+        auto stride = hv::guest_thread_sample_stride(entropy);
+        if ((stride < period) || (stride >= (2 * period))) {
+            bounded = false;
+            break;
+        }
+    }
+    check(bounded,
+          "the guest-thread sample stride stays in [period, 2 * period)");
+
+    // 2. THE NEGATIVE CONTROL. A constant stride is the defect, and it
+    //    passes every other check in this function. Counted rather than
+    //    spot-checked, so a stride that varies in one bit and is
+    //    otherwise fixed does not pass either.
+    std::map<std::uint64_t, int> seen;
+    for (std::uint64_t i{}; i < period; ++i) {
+        seen[hv::guest_thread_sample_stride(i)] += 1;
+    }
+    check(seen.size() == period,
+          std::format("the stride takes all {} of its values over {} "
+                      "consecutive inputs - it took {}, and a constant "
+                      "stride takes 1",
+                      period, period, seen.size()));
+
+    // 3. And the mean is at or above the declared period, so this is
+    //    cheaper than the fixed stride it replaces rather than dearer.
+    std::uint64_t total{};
+    for (std::uint64_t i{}; i < 4096; ++i) {
+        total += hv::guest_thread_sample_stride(i);
+    }
+    check((total / 4096) >= period,
+          "the mean guest-thread sample stride is at least the period");
+}
+
 static void test_tsc_composition()
 {
     std::println("\nthe time-stamp counter composition across levels");
@@ -6306,6 +6369,7 @@ int main()
     test_the_measured_control_words();
     test_injection_against_activity_state();
     test_tsc_composition();
+    test_guest_thread_sample_stride();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
 

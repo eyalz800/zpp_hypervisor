@@ -5034,6 +5034,58 @@ private:
     static constexpr std::uint64_t guest_thread_sample_period = 4096;
     static constexpr std::size_t guest_thread_sample_capacity = 32;
 
+    /**
+     * How many second-level entries until the next sample.
+     *
+     * **A fixed period aliases against this guest, and the alias is
+     * indistinguishable from the finding it produces.** The period is
+     * counted in second-level entries and second-level entries are
+     * produced by the guest's own periodic clock loop, so a loop whose
+     * length divides the period is sampled at the same point in it every
+     * time - and reports the same instruction pointer and the same
+     * registers whether the work behind them is progressing or not.
+     * 4096 is a power of two, which is the worst case: every loop length
+     * that is also a power of two aliases exactly.
+     *
+     * That is not hypothetical here. Sixteen samples across 713,480
+     * second-level entries resolved to exactly two instruction pointers
+     * with byte-identical registers in every sample of each, and it was
+     * read as proof that the guest is retrying. A phase-locked sampler
+     * produces that reading from a guest that is making progress, and
+     * `BACKLOG.md` already records the same mistake twice - the three
+     * instruction traces that "all took the VINA branch" were 26% of
+     * entries sampled by a periodic arming, and twenty single samples of
+     * the request byte all read 4 for the same reason.
+     *
+     * So the stride carries the low bits of the time-stamp counter and
+     * lands somewhere in `[period, 2 * period)`. Consecutive samples are
+     * then separated by a number of entries the guest does not control,
+     * which is the whole property a fixed stride lacks. The mean
+     * interval goes *up*, from 4096 to about 6144, so this is cheaper
+     * than what it replaces rather than dearer, and the `rdtsc` is paid
+     * once per sample rather than per entry.
+     *
+     * **What it costs to get wrong in the other direction**: a stride
+     * that is constant again reintroduces the alias silently, since the
+     * output looks identical. `guest_thread_sample_stride` is therefore
+     * a function with its own test rather than an expression at the call
+     * site - `tests/nested_exit` asserts that two different entropy
+     * values give two different strides, which a constant cannot pass.
+     */
+    static constexpr std::uint64_t
+    guest_thread_sample_stride(std::uint64_t entropy)
+    {
+        static_assert(0 == (guest_thread_sample_period &
+                            (guest_thread_sample_period - 1)),
+                      "the mask below stands in for a division, and "
+                      "only does so for a power of two");
+
+        return guest_thread_sample_period +
+               (entropy & (guest_thread_sample_period - 1));
+    }
+
+    std::uint64_t guest_thread_sample_next[max_cpus]{};
+
     struct guest_thread_sample
     {
         std::uint64_t gs_base{};

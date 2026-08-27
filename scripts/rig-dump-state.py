@@ -3726,6 +3726,80 @@ def dump_ap_census(args, elf, instance):
               f"started_by_start_up_ipi {started}  launch_error {error}")
 
 
+def interrupted_context_verdicts(rows, kbase=0, ksize=0):
+    """Is each interrupted context retrying, or progressing?
+
+    **Partitioned by `rip` first, and that is the whole point.** The
+    version this replaces took `len(set(...))` over every row in the
+    ring at once, which counts *how many contexts are interleaved*, not
+    *movement within a context*. Measured, on the boot recorded in
+    `BACKLOG.md` under "The guest is repeating identical work": sixteen
+    samples, two instruction pointers, and every register byte-identical
+    in every sample of each - and it printed "2 distinct - moving" for
+    all four registers. The guest was retrying and the reader said it
+    was progressing, which is the opposite verdict on the only question
+    this table exists to answer.
+
+    An alternating pair of frozen states is exactly what a guest bouncing
+    between two halves of a retry loop looks like, so this is not an
+    unlikely input - it is the expected one.
+
+    `rsp` and `frame` are verdicted alongside the registers, and they are
+    the reason not to believe "SAME" too quickly.
+    `sample_interrupted_stack`
+    finds a trap frame by scanning up from the guest's stack pointer for
+    the first thing shaped like one, so a `frame` address that never
+    moves is equally consistent with a genuine retry at a fixed stack
+    depth and with the search re-finding one stale frame. A `frame` that
+    moves while the registers do not is a real retry; a `frame` that is
+    also frozen is a reading that needs a second instrument before it is
+    quoted.
+
+    Returns lines rather than printing them so the partitioning can be
+    tested without a rig.
+    """
+    columns = (("rcx", 3), ("rdx", 4), ("rsi", 6), ("rdi", 7),
+               ("rsp", 2), ("frame", 9))
+    lines = []
+    if not rows:
+        return lines
+
+    order = []
+    groups = {}
+    for f in rows:
+        rip = f[1]
+        if rip not in groups:
+            groups[rip] = []
+            order.append(rip)
+        groups[rip].append(f)
+
+    for rip in order:
+        group = groups[rip]
+        where = (f"ntoskrnl+0x{rip - kbase:x}"
+                 if kbase and kbase <= rip < kbase + ksize
+                 else f"0x{rip:x}")
+        frozen = []
+        moving = []
+        for label, k in columns:
+            distinct = len(set(f[k] for f in group))
+            (frozen if 1 == distinct else moving).append(
+                label if 1 == distinct else f"{label}({distinct})")
+        if moving:
+            verdict = "moving: " + ", ".join(moving)
+            if frozen:
+                verdict += "   same: " + ", ".join(frozen)
+        else:
+            verdict = "EVERY field identical - a retry"
+        lines.append(f"{where:<20} {len(group):>3} samples  {verdict}")
+
+    if 1 < len(order):
+        # Said explicitly, because the count of contexts is the number
+        # the old verdict was accidentally reporting.
+        lines.append(f"-> {len(order)} interleaved contexts, verdicted "
+                     f"separately; the count of contexts is NOT movement")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     # The archived copy first, because it is the binary the guest is
@@ -3959,7 +4033,12 @@ def main():
                # and they have to be read together - see the comment at
                # the printer and `nested_vmx::probe_aps`.
                "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
-               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs",
+               # See the note beside these in `scalars`: recorded since
+               # they were added, read by nothing until now.
+               "last_hypercall_code", "last_hypercall_rcx",
+               "last_hypercall_rdx", "last_hypercall_r8",
+               "last_hypercall_tsc", "last_hypercall_count"]
     off = gdb_offsets(args.elf, members)
     # The start-up and local-APIC state, which this reader has been
     # carrying offsets for and printing nowhere.
@@ -4123,7 +4202,20 @@ def main():
                # and not the other is either a KeyError or a silent
                # `None`. That mismatch has already cost a run.
                "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
-               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs"]
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs",
+               # The last hypercall each processor's second-level guest
+               # made, with its arguments and the time it was made.
+               # Written since the member was added and printed by
+               # nothing, which is why "is this hypercall still being
+               # issued" has only ever been answered from a cumulative
+               # census - and a cumulative census cannot tell "no longer
+               # called" from "called once and never returned". The
+               # member's own doc at `hypervisor.h:7765-7771` says
+               # exactly that, and a timestamp seconds old while exits
+               # continue is the second.
+               "last_hypercall_code", "last_hypercall_rcx",
+               "last_hypercall_rdx", "last_hypercall_r8",
+               "last_hypercall_tsc", "last_hypercall_count"]
     for name in scalars:
         monitor.queue(instance + off[name], scalar_cpus)
     # Two singles rather than per-processor rows. Queued separately so
@@ -4428,6 +4520,57 @@ def main():
               f"{read('events_deferred', cpu):-8d}  "
               f"0x{read('pending_event', cpu):-6x}  "
               f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # The last hypercall each second-level guest made, which is the one
+    # reading that separates the two ways a hypercall census freezes.
+    #
+    # **A cumulative census cannot tell "no longer called" from "called
+    # once and never returned."** Those are opposite failures - the
+    # first is a guest that moved on, the second is a guest suspended
+    # inside a call - and this file has argued both from the same frozen
+    # number. The member's own doc says so and nothing has ever printed
+    # it.
+    #
+    # `count` beside `tsc` is the second field, deliberately: a
+    # timestamp alone cannot say whether it is old because the call
+    # stopped or because the *recording* stopped, and the count moving
+    # while the timestamp does not is the second. Read both, per this
+    # tree's rule about single-field instruments.
+    #
+    # Zero everywhere is not evidence about the guest - it is what
+    # `vtltrc=0` produces, because the whole recognition block is behind
+    # `nested_vmx::trace_vtl`. Check the manifest before reading this
+    # table as a finding.
+    if "last_hypercall_code" in off:
+        HV_CALL = {0x0002: "HvCallFlushVirtualAddressSpace",
+                   0x0003: "HvCallFlushVirtualAddressList",
+                   0x0008: "HvCallSendSyntheticClusterIpi",
+                   0x000c: "HvCallModifyVtlProtectionMask",
+                   0x000d: "HvCallEnablePartitionVtl",
+                   0x000f: "HvCallEnableVpVtl",
+                   0x0011: "HvCallVtlCall", 0x0012: "HvCallVtlReturn"}
+        rows = [(cpu, read('last_hypercall_count', cpu) or 0)
+                for cpu in range(args.cpus)]
+        if any(count for _, count in rows):
+            print("\nlast hypercall from the second level, per processor")
+            for cpu, count in rows:
+                if not count:
+                    print(f"  cpu {cpu}: none recorded")
+                    continue
+                code = read('last_hypercall_code', cpu) or 0
+                print(f"  cpu {cpu}: 0x{code:04x} "
+                      f"{HV_CALL.get(code, ''):<30s} "
+                      f"seen {count:,}")
+                rcx = read('last_hypercall_rcx', cpu) or 0
+                rdx = read('last_hypercall_rdx', cpu) or 0
+                r8 = read('last_hypercall_r8', cpu) or 0
+                tsc = read('last_hypercall_tsc', cpu) or 0
+                print(f"         rcx 0x{rcx:016x}  rdx 0x{rdx:016x}"
+                      f"  r8 0x{r8:016x}")
+                print(f"         at tsc {tsc:,}   <- compare against a "
+                      f"SECOND dump: a tsc that does not move while "
+                      f"exits climb is a guest suspended inside this "
+                      f"call, not one that stopped calling")
 
     # And the three readings that say what a frozen row above *means*.
     #
@@ -4984,25 +5127,18 @@ def main():
                 rows.append(f)
             print("      rip                  irql  rcx"
                   "                rdx                rsi"
-                  "                rdi")
+                  "                rdi                rsp"
+                  "                frame")
             for f in rows:
-                _, rip, _rsp, rcx, rdx, _r8, rsi, rdi, irql, _fr = f
+                _, rip, rsp, rcx, rdx, _r8, rsi, rdi, irql, fr = f
                 where = (f"ntoskrnl+0x{rip - kbase:x}"
                          if kbase and kbase <= rip < kbase + ksize
                          else f"0x{rip:x}")
                 print(f"      {where:<20} {irql:>4}  0x{rcx:016x} "
-                      f"0x{rdx:016x} 0x{rsi:016x} 0x{rdi:016x}")
-            # The verdict, stated so it cannot be read the other way by
-            # accident. Distinct counts over the ring, per register.
-            for label, k in (("rcx", 3), ("rdx", 4), ("rsi", 6),
-                             ("rdi", 7)):
-                vals = [f[k] for f in rows]
-                d = len(set(vals))
-                if not vals:
-                    continue
-                verdict = ("SAME in every sample - a retry"
-                           if d == 1 else f"{d} distinct - moving")
-                print(f"      {label}: {verdict} over {len(vals)} samples")
+                      f"0x{rdx:016x} 0x{rsi:016x} 0x{rdi:016x} "
+                      f"0x{rsp:016x} 0x{fr:016x}")
+            for line in interrupted_context_verdicts(rows, kbase, ksize):
+                print(f"      {line}")
 
     # The call stacks, which say what the guest is *doing* rather than
     # where it is.

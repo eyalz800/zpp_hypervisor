@@ -8726,12 +8726,24 @@ void hypervisor::sample_guest_thread(std::size_t cpu)
         return;
     }
 
-    // Only one entry in every period, for the reason the declaration
-    // gives: four dependent reads through two levels of translation, on
-    // the hottest path here.
-    if (0 != (this->l2_entries[cpu] % guest_thread_sample_period)) {
+    // Only one entry in every period or so, for the reason the
+    // declaration gives: four dependent reads through two levels of
+    // translation, on the hottest path here.
+    //
+    // **Aperiodic, and `guest_thread_sample_next` says why at length.**
+    // The short version: the period is counted in second-level entries,
+    // the guest produces second-level entries from a periodic loop, and
+    // a fixed stride therefore samples the same point of that loop every
+    // time - which reads as "the guest is retrying" whether it is or
+    // not. One comparison here, and the time-stamp counter is read only
+    // on the entry that actually samples.
+    if (this->l2_entries[cpu] < this->guest_thread_sample_next[cpu]) {
         return;
     }
+
+    this->guest_thread_sample_next[cpu] =
+        this->l2_entries[cpu] +
+        guest_thread_sample_stride(arch::x86_64::rdtsc());
 
     // A 64-bit read of a guest linear address, through the guest's own
     // page tables and then the guest hypervisor's extended ones. Both
