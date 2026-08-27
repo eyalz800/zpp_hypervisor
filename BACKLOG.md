@@ -55057,3 +55057,76 @@ and this file has just spent a section on cumulative means being quoted
 as present state, so it wants re-taking as a delta before it is built
 on.
 
+## The synthetic message slot is occupied 88% of the time
+
+Read narrowly and repeated, per this file's own rule about device
+registers, at the SIMP page the dump already prints
+(`gpa 0x117a31000`, slot 3 at `+0x300`):
+
+    24 samples of `xp /2xw 0x117a31300`
+      0x80000010   21   88%    HVMSG_TIMER_EXPIRED, unconsumed
+      0x00000000    3   12%    HVMSG_NONE
+    header beside it: payload_size 0x18, message_flags 0x00
+
+**It clears, so it is not wedged** - and it is occupied the
+overwhelming majority of the time. `message_flags` bit 0
+(`MessagePending`) is **clear**, so the guest is not required to write
+end-of-message; it releases the slot by clearing the type word itself.
+
+Why that is worth a section: while `message_type != HVMSG_NONE`, a
+**one-shot** synthetic timer's expiry message cannot be delivered. KVM's
+`synic_deliver_msg` (`.references/kvm/hyperv.c:782-795`) sets
+`msg_pending`, returns `-EAGAIN`, and `kvm_hv_process_stimers:884` then
+declines to restart the timer. **And this guest runs one-shot about
+99.5% of the time** (see below). `hypervisor.h:4836` already describes
+this protocol and says in as many words that **nothing here has ever
+read that page**.
+
+**Caveat, and it is not small:** L1 here is real Hyper-V, not KVM's
+emulation. KVM cites TLFS 15.3.1 for the same handshake, but it is a
+reference implementation and not the thing running. What is measured is
+the occupancy; the consequence is inferred from the reference.
+
+### The guest is running one-shot, not periodic
+
+    2,439,806 COUNT writes / 13,458 periodic arms = 181 one-shot arms
+                                        between consecutive periodic ones
+    last COUNT  0x5eda29690 = 2,546 s of 100 ns units - an absolute
+                              expiry, not a 1.74 ms period
+    last CONFIG 0x30008 - periodic bit clear
+
+**This contradicts a comment in this tree.** `nested_entry.cpp:12106`
+says the guest "toggles the periodic bit every tick" and cites a ring
+that "caught 4096 slots of exactly that". The ring is
+`reference_sample_capacity = 32` (`hypervisor.h:4649`), and the reader
+printed the newest **8**. At ~2,000 events a second that is a **four
+millisecond** window. Every claim in this tree about the arming pattern
+came from four milliseconds.
+
+### Three more of my numbers were mislabelled
+
+- **`stimer_arm_count` is not arms.** It is a ring-slot allocator over
+  three populations: COUNT writes (`nested_entry.cpp:12046`), CONFIG
+  writes (same line, different tag) and **every injection of the clock
+  vector** (`:3307`). So "1,997/s" is COUNT + CONFIG + injections, and
+  "3.5 arms per tick" is 3.474 *events*, of which about one **is the
+  tick**. Decomposed: ~2.45 COUNT, ~0.03 CONFIG, ~1.00 injection.
+- **The "1.46x slow tick" divides by a hardcoded `1740.0`**
+  (`rig-dump-state.py:6242`), not by `stimer_asked_units /
+  stimer_asked_arms`. `dump_tick_account` does it properly, from
+  CPUID.15H, in the same dump, and was not quoted.
+- **`guest_state_writes_skipped` at 187,922/s is per field.**
+  5,864,324 / 127,601 = **45.958 of 46 fields skipped per entry**. The
+  optimisation is working exactly as designed, and my 645:1 ratio
+  omitted `guest_state_dirty_writes` - a third population - entirely.
+
+### And a free consistency check that now exists
+
+    (skipped + done + dirty) / 46
+        == l2_entries + nested_entry_refusals + l2_start_up_waits
+
+If that is not an integer multiple of 46, the entry loop runs somewhere
+nobody has found. On this run it gives 127,683 attempts against 127,601
+entries - **82 attempts that did not enter**, which
+`nested_entry.cpp:2813` predicts in words.
+

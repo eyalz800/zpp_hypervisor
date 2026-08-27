@@ -3999,8 +3999,23 @@ DELTA_PER_CPU_COUNTERS = [
     ("vtl_protect_count", "protection-mask calls"),
     ("vtl_protect_failures", "protection-mask failures"),
     ("last_hypercall_count", "second-level hypercalls"),
-    ("stimer_arm_count", "synthetic timer arms"),
+    # NOT "arms". `stimer_arm_count` is the *ring slot allocator* for
+    # `stimer_arm_value`/`_tsc`/`_kind`, and it is incremented from
+    # three places with three different tags: a STIMER0_COUNT write and
+    # a STIMER0_CONFIG write (`nested_entry.cpp:12046`, tags 1 and 2)
+    # and every injection of the clock vector into vmcs02
+    # (`nested_entry.cpp:3307`, tag 3). Three populations in one
+    # counter, so a rate taken from it divided by the tick rate is not
+    # arms per tick. The kind census beside the ring is what splits it.
+    ("stimer_arm_count", "STIMER0 writes + clock injections (NOT arms)"),
+    # The tick account, all four of them, because the cumulative
+    # section that forms the ratio cannot be read in a window and the
+    # ratio is the whole question. All are monotonic sums.
+    ("stimer_asked_arms", "periodic arms asked"),
+    ("stimer_asked_units", "periodic units asked (x100ns)"),
     ("stimer_given_arms", "synthetic timer arms answered"),
+    ("stimer_given_cycles", "cycles from arm to the answering vector"),
+    ("stimer_unanswered", "arms displaced before an answer"),
     ("guest_tick_floored", "guest ticks floored"),
     ("guest_timer_stretched", "guest timers stretched"),
     ("stall_withheld_total", "interrupts withheld"),
@@ -4107,7 +4122,8 @@ DELTA_REFUSALS = [
     ("event histograms not sampled here",
      "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
      "counts, vtl_service_calls, synthetic_msr_writes, "
-     "hypercall_code_counts",
+     "hypercall_code_counts, clock_gap_buckets, l2_injected_vector, "
+     "l2_synthetic_msr_writes, l2_msr_write_counts",
      "differenceable in principle and deliberately left out: every "
      "member added widens the read window, and the read window is this "
      "measurement's own error bar"),
@@ -4401,6 +4417,96 @@ def delta_report(before, after, entries, cycles, histograms, span,
                      "unusable, so no")
         lines.append("  occupancy is derived. A cycle count without a "
                      "span is not a fraction.")
+
+    # ------------------------------------------- the tick account,
+    #                                              inside this window
+    #
+    # The cumulative dump forms this ratio two ways and one of them is
+    # wrong: the line in the cumulative dump divided the given interval
+    # by a **hardcoded period literal** rather than by what the guest
+    # actually asked for, so it read "1.46x the 1.74 ms it asked for"
+    # whether or not that was the period in the population it averaged.
+    # Formed here from the four deltas instead, so both sides are the
+    # same window and neither is a constant.
+    #
+    # `asked` and `answered` disagreeing is the finding, not a caveat:
+    # the ratio assumes the clock vector is the answer to the arm, and
+    # that assumption is exactly what the two counts test.
+    by_name = {}
+    for key, _label, _a, _b, delta in rows:
+        by_name[key] = delta
+
+    tick_lines = []
+    for cpu in range(cpus):
+        asked_arms = by_name.get(("stimer_asked_arms", cpu))
+        asked_units = by_name.get(("stimer_asked_units", cpu))
+        given_arms = by_name.get(("stimer_given_arms", cpu))
+        given_cycles = by_name.get(("stimer_given_cycles", cpu))
+        missed = by_name.get(("stimer_unanswered", cpu))
+
+        if None in (asked_arms, asked_units, given_arms, given_cycles):
+            continue
+        if not (asked_arms or given_arms):
+            continue
+
+        tick_lines.append(f"  cpu {cpu}  asked {asked_arms:,} arms, "
+                          f"answered {given_arms:,}, displaced "
+                          f"{missed if missed is not None else '?'}")
+
+        if not asked_arms:
+            tick_lines.append("    no PERIODIC arm in this window - the "
+                              "guest armed one-shot deadlines only, so "
+                              "there is no period to be late against")
+            continue
+
+        per_asked = asked_units / asked_arms
+        tick_lines.append(f"    asked {per_asked:>12,.1f} x100ns per arm "
+                          f"({per_asked / 10_000.0:.3f} ms, "
+                          f"{10_000_000.0 / max(per_asked, 1):.1f} Hz)")
+
+        if not given_arms:
+            tick_lines.append("    given  -  NOT ONE ARM ANSWERED in this "
+                              "window. The ratio cannot be formed, and "
+                              "that is the finding.")
+            continue
+        if not hz:
+            tick_lines.append("    given  -  no usable frequency, so "
+                              "cycles cannot be converted")
+            continue
+
+        # `hz` is the span's own frequency - measured from the tick
+        # count in this window where that is usable, and only otherwise
+        # the constant. Deliberately not a frequency literal of its own:
+        # `DeltaSpanIsMeasuredNeverNominal` forbids one here, and the
+        # cumulative line this mirrors carries exactly that mistake.
+        per_given = (given_cycles / given_arms) * 10_000_000.0 / hz
+        tick_lines.append(f"    given {per_given:>12,.1f} x100ns per arm "
+                          f"({per_given / 10_000.0:.3f} ms, "
+                          f"{10_000_000.0 / max(per_given, 1):.1f} Hz) "
+                          f"at {hz / 1e9:.3f} GHz ({source})")
+
+        ratio = per_asked / max(per_given, 1e-9)
+        verdict = ("ok" if abs(ratio - 1.0) <= 0.05
+                   else (f"LATE by {1.0 / ratio:.3f}x" if ratio < 1.0
+                         else f"EARLY by {ratio:.3f}x"))
+        tick_lines.append(f"    ratio {ratio:>12.3f}x  {verdict}")
+
+        # The assumption, stated. A periodic timer fires repeatedly from
+        # one arm, so an arm the guest makes rarely is followed by the
+        # next repeat of a tick it did not cause - and that interval is
+        # a forward recurrence time, not a period. Answered far below
+        # asked is what says the pairing is measuring phase.
+        if given_arms < asked_arms * 0.9:
+            tick_lines.append("    -> answered is far below asked, so "
+                              "most arms were displaced: the vector is "
+                              "NOT the answer to the arm and the ratio "
+                              "above is not a period")
+
+    if tick_lines:
+        lines.append("")
+        lines.append("the tick account IN THIS WINDOW: asked against "
+                     "given")
+        lines.extend(tick_lines)
 
     for title, cpu, buckets, namer in histograms:
         hist_rows, hist_bad, _ = delta_rows(*buckets)
@@ -4745,7 +4851,12 @@ def main():
                # The synthetic timer's arm-to-fire interval. This decides
                # whether the guest's clock handler can finish inside its
                # own period, and nothing else in this reader shows it.
+               # `asked` beside `given`, because the ratio between them
+               # is the whole question and the line that formed it
+               # divided by a hardcoded 1,740 instead.
                "stimer_given_cycles", "stimer_given_arms",
+               "stimer_asked_units", "stimer_asked_arms",
+               "stimer_unanswered",
                "stimer_arm_count", "stimer_arm_value", "stimer_arm_tsc",
                "stimer_arm_kind",
                # Where the second-level guest's hot instruction lives, so
@@ -5319,7 +5430,8 @@ def main():
     # a section of its own because every read has to precede monitor.run().
     stimer_ring = 32
     for name in ("stimer_given_cycles", "stimer_given_arms",
-                 "stimer_arm_count"):
+                 "stimer_asked_units", "stimer_asked_arms",
+                 "stimer_unanswered", "stimer_arm_count"):
         if name in off:
             monitor.queue(instance + off[name], args.cpus)
     for name in ("stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind"):
@@ -6230,19 +6342,41 @@ def main():
             print(f"    read it with:  xp /16xb 0x{code_phys:x}")
 
     if "stimer_given_arms" in off:
-        print("\ncpu  stimer arm->fire, measured against the guest's own "
-              "1.74 ms constant")
+        # **The denominator is measured, not 1,740.** This line used to
+        # divide by a hardcoded `1740.0` and report "N.NNx the 1.74 ms
+        # it asked for" - which states a ratio against a period the
+        # population may not contain. `stimer_asked_arms` counts only
+        # arms made while STIMER0_CONFIG's periodic bit was set
+        # (`nested_entry.cpp:12135`), and the guest arms one-shot
+        # deadlines the rest of the time, so "what it asked for" is a
+        # question with an answer and must not be a literal.
+        #
+        # `arms` here is `stimer_given_arms` - arms *answered* - and it
+        # is printed beside `stimer_asked_arms` because the two
+        # disagreeing is the finding: a periodic timer fires repeatedly
+        # from one arm, so an interval from a rare re-arm to the next
+        # tick is a forward recurrence time and not a period.
+        print("\ncpu  stimer arm->fire, against what was actually asked")
         for cpu in range(args.cpus):
             arms = read("stimer_given_arms", cpu) or 0
             cycles = read("stimer_given_cycles", cpu) or 0
+            asked_arms = read("stimer_asked_arms", cpu) or 0
+            asked_units = read("stimer_asked_units", cpu) or 0
             if not arms:
                 continue
             per = cycles / arms
             micro = per / 1992.0
-            print(f"{cpu:3d}  {arms:,} arms, {per:,.0f} cycles "
+            if asked_arms:
+                asked_micro = (asked_units / asked_arms) / 10.0
+                against = (f"-> {micro / asked_micro:.2f}x the "
+                           f"{asked_micro / 1000.0:.3f} ms it asked for "
+                           f"over {asked_arms:,} periodic arms")
+            else:
+                against = ("-> NO PERIODIC ARM RECORDED, so there is no "
+                           "period this can be a ratio against")
+            print(f"{cpu:3d}  {arms:,} answered, {per:,.0f} cycles "
                   f"({micro:,.1f} us at 1.992 GHz), "
-                  f"{1e6 / micro if micro else 0:,.1f} Hz "
-                  f"-> {micro / 1740.0:.2f}x the 1.74 ms it asked for")
+                  f"{1e6 / micro if micro else 0:,.1f} Hz  {against}")
 
         # The ring, newest last, so an interval can be differenced by hand
         # rather than trusted from the average above. Kind 1 and kind 3
@@ -6254,8 +6388,37 @@ def main():
         ring_base = off.get("stimer_arm_value")
         if ring_base is not None:
             count = read("stimer_arm_count", 0) or 0
+
+            # **`stimer_arm_count` is not arms.** It is this ring's slot
+            # allocator, incremented from three places with three tags:
+            # a STIMER0_COUNT write and a STIMER0_CONFIG write
+            # (`nested_entry.cpp:12046`) and every injection of the
+            # clock vector (`nested_entry.cpp:3307`). Dividing its rate
+            # by the tick rate therefore mixes three populations and
+            # reports "N arms per tick" for a quantity that is not arms.
+            #
+            # Censused over the whole ring rather than the eight slots
+            # printed below, because eight slots at two thousand events
+            # a second is four milliseconds and every claim in this tree
+            # about the arm pattern came from that window.
+            kinds_seen = {}
+            for slot in range(max(0, count - stimer_ring), count):
+                i = slot % stimer_ring
+                k = words.get(instance + off["stimer_arm_kind"] + 8 * i)
+                if k:
+                    kinds_seen[k] = kinds_seen.get(k, 0) + 1
+            if kinds_seen:
+                n = sum(kinds_seen.values())
+                names = {1: "COUNT written", 2: "CONFIG written",
+                         3: "clock vector injected"}
+                split = ", ".join(
+                    f"{names.get(k, f'kind {k}')} {v} ({100.0 * v / n:.0f}%)"
+                    for k, v in sorted(kinds_seen.items()))
+                print(f"\ncpu 0 synthetic timer ring by kind, newest "
+                      f"{n} of {count:,} slots taken: {split}")
+
             print(f"\ncpu 0 last synthetic timer events "
-                  f"({count:,} total, newest last)")
+                  f"({count:,} slots taken - NOT arms, newest last)")
             for slot in range(max(0, count - 8), count):
                 i = slot % stimer_ring
                 value = words.get(instance + off["stimer_arm_value"] +
