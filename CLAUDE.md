@@ -941,9 +941,71 @@ a control-bit constant with `0x1050ae ^ 0x1010ae`, called it bit 18, and
 was believed for months. It is `0x4000` - bit 14. The wrong arithmetic
 **agreed with the mis-declared constant**, so it confirmed itself.
 
+**A top-N cut hides exactly the thing a census exists to find.** The
+hot-address map reads 2,048 rows and printed the top fourteen. Its
+fourteenth row stood at 52 samples, and *every* address inside the
+secure kernel - the whole trust-level livelock this investigation is
+about - lives at one to twenty-five. Fourteen rows was enough only
+because the one hot secure-kernel address happened to make the list;
+the other twenty-five did not, and their being frozen across two dumps
+was the measurement that ended a week of guessing. The printer now
+emits **every non-ntoskrnl row however cold**. When a census is
+truncated, ask what population the cut is hiding before quoting what
+survived it.
+
+**Read the whole manifest string, not a grep of it.** `novina=` was in
+`zpp switches:` all along; a `grep -oE` that matched a prefix cut the
+line short, the field was declared missing, and a duplicate was added
+to `build_switches.cpp` on that premise. `strings ... | grep 'zpp
+switches' | tr ' ' '\\n'` and look, or the manifest becomes the thing it
+exists to prevent.
+
 The rule underneath all of them: **ask whether a reading is *possible*
 before asking whether it is believable**, and prefer an instrument that
 can say "I failed" over one that can only say a number.
+
+### Naming a guest address costs one command, and settles arguments
+
+Six sessions argued about where the guest was stuck. The answer was in
+the state dump the whole time and needed two lookups:
+
+```sh
+# the bases are per boot - KASLR - and both are logged
+grep "second-level guest kernel image at" /tmp/zpp.log    # ntoskrnl
+grep "'securekernel.exe'"                 /tmp/zpp.log    # securekernel
+
+scripts/guest-securekernel-syms.py --pdb .references/hyperv/ntkrnlmp.pdb \
+    --base <kernel base> <address> ...
+```
+
+That turns the dump's own frame walk into the stack, and the hot-address
+map into instruction names. The two reads that mattered:
+
+- `Phase1Initialization -> ... -> VslpEnterIumSecureMode+0x3a8 ->
+  HvlSwitchToVsmVtl1+0xab`, the normal-mode stack, from **26 frames the
+  dump already printed as bare offsets**.
+- `SkpReturnFromNormalModeRaxSet+0x114`, eight bytes past a `sti`, the
+  one secure-kernel address in the census that moves.
+
+Disassembling either afterwards needs no rebuild and no debugger.
+`securekernel.bin`'s `.text` has `ra == va`, so an RVA is the file
+offset; guest code that is *not* on disk here is readable by walking the
+guest's own cr3 with the monitor's `xp`, two words at a time. `llvm-mc
+--disassemble` prints no addresses, so wrap the bytes -
+`llvm-objcopy -I binary -O elf64-x86-64` then
+`llvm-objdump -D --adjust-vma=<va> --section=.data` - and the branch
+targets resolve.
+
+Two traps, both of which produce plausible wrong answers:
+
+- `llvm-pdbutil dump --publics` prints `addr = SEGMENT:OFFSET` with the
+  **offset in decimal**, and the segment indexes the PE section table.
+  Both are already in `guest-securekernel-syms.py`; do not redo the
+  arithmetic by hand.
+- **A public symbol names the nearest start below, not the function.**
+  `ShvlpEnableVina`'s published offset disassembled into something that
+  was clearly not it. Check that the bytes look like a prologue before
+  reading meaning into them.
 
 ### KVM's own statistics are on the rig, and they are the cheapest instrument
 
