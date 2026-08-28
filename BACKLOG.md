@@ -60999,3 +60999,37 @@ removal is the large win.
 Next: let this run and watch whether the faster walk completes the
 secure phase and reaches driver init / user-mode before any watchdog
 window - the question that has been open all session.
+
+## The lazy-EPT fix advanced the frontier: past the secure stall, into driver init
+
+The `eagreplay=0` build got the guest **past the secure-processor-start
+phase that blocked the entire prior investigation** and into driver
+initialisation. Evidence, on the running build before it reset:
+- the call stack was normal scheduler/DPC activity - `KiExecuteDpc ->
+  KeWaitForGate -> KiCommitThreadWait -> KiSwapThread ->
+  KiCommitRescheduleContextEntry` - not the `VslFinishStartSecureProcessor
+  -> MakeGdtReadOnly` stack it had been stuck on;
+- minifilters were resident (`WdFilter.sys`, `Wof.sys`, `fileinfo.sys`),
+  which load well into driver init.
+
+Then it bugchecked **0x133 again, p1=1, p2=0x1e00** - the same DPC
+watchdog, but **later**, on a driver-init DISPATCH region rather than the
+secure walk. The ~1.8x-faster walk carried the boot through the region
+that used to trip it, and a different slow region trips it now. (The
+watchdog capture buffer is null - `DpcWatchdogProfileSingleDpcThreshold
+Ticks` is 0, profiling off - so the specific DPC is not recoverable from
+the triage block; the post-shutdown CPU context is Hyper-V's, not
+VTL0's, so its KPRCB is not reachable either.)
+
+**This is the pattern, and it is progress, not a wall:** each
+KVM-following fix moves the frontier forward, and a different slow
+DISPATCH region becomes the next limit. The eager-replay removal took the
+boot from wedged-at-secure-start to driver-init. The next KVM-divergence
+fixes - the `dirty_vmcs12` guest-state hoist (KVM `nested.c:2645`, diff
+ready in `.references/kvm-review/dirty-hoist.diff`) and keeping freed
+roots' child shadow pages the way KVM does - reduce the general per-exit
+and per-fault cost that the driver-init DPCs now run into. These are
+correctness-preserving fixes that match the reference implementation, the
+same category as the replay removal that just worked, not arbitrary
+micro-optimisation - which is the distinction that matters under the
+'follow KVM' direction.
