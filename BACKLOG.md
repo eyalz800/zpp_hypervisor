@@ -58144,3 +58144,46 @@ naturally begin and would have spent its time.
 `cs 0x0038` with a sub-4GB `rip` is not Windows' 64-bit kernel; the next
 step is identifying whose code that is, which the same L1 page-table
 walk used for `hvix64` can answer.
+
+### And the application processor is hung in THIS VMM's exit stub
+
+The "active - executing guest code" reading above was the probe's, and
+it is wrong. `info registers -a` on the live machine says:
+
+    CPU#1  RIP=00000000670fb920   RFL=00010002   CPL=0
+    module base 0x670ed000  ->  offset 0xe920
+    zpp::arch::x86_64::vm_exit_entry()   vm_exit_entry.cpp:17
+
+**Four samples, identical.** `cpu 1` exits frozen at 272 across
+repeated dumps. So the application processor is not running guest code
+and is not idle: it is wedged at the first instruction of **this VMM's
+own VM-exit entry stub**.
+
+`RFL=0x10002` has RF set - the resume flag, which the processor sets
+when an instruction is being retried after a fault.
+
+And nothing is recorded: `host exception: vector 0`, `unhandled exit:
+never`, `vm entry failure: never`. A hang with no diagnostic.
+
+### Which also explains the reset
+
+The instruction it sits on is `call
+zpp_x86_64_capture_context_into_stack` - a **push onto the host stack**.
+If the application processor's host `RSP` is wrong, that call faults;
+the fault handler needs the same stack; and the result is a triple
+fault, which is a machine reset. The guest reaches `paused (shutdown)`
+on every two-processor boot, and this is a mechanism that produces
+exactly that.
+
+**So the two-processor failure is a bug in this VMM, not in the guest
+and not in Hyper-V** - which makes it the only failure in this entire
+investigation that is directly fixable from here. Everything on the
+uniprocessor line ends in a design constraint above this layer; this
+ends in our own host state.
+
+First thing to check: the host `RSP` and host stack this VMM writes
+into **vmcs01 for an application processor**, against what it writes for
+the boot processor. Per-processor stacks are 512 KB in `.bss`, and the
+boot processor's path is the one every single-processor boot exercises -
+so an application processor's is the one that has never been
+exercised.
