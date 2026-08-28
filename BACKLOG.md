@@ -60952,3 +60952,50 @@ So the most promising thing on the board is simply that **this build is
 still running and still progressing after an hour**, and the right move
 is to let it run and watch for the secure phase completing and driver
 init / user-mode beginning, rather than resetting it to try a change.
+
+## The lazy shadow-EPT fix works: replay gone, HVCI walk ~1.8x faster
+
+`ZPP_EAGER_SHADOW_REPLAY=OFF` deployed (manifest `eagreplay=0`), booted
+`ZPP_CPUS=1`, full instrumentation on for a fair comparison against the
+eager-replay run.
+
+**The replay is eliminated:** `replayed-leaves = 0` where the eager
+build showed 2,193,023. Lazy faults now do that work on demand -
+`faulted-leaves` 471,395 - so total leaf installs dropped from ~2.5M
+(replay + faults) to ~471K, an ~80% reduction, exactly the KVM model
+(free the root, refault one GPA at a time, no eager repopulation).
+
+**And the HVCI walk is ~1.8x faster**, measured on the same instrumented
+configuration:
+
+    build           page requests/min   code-0/min
+    eager replay          62               160
+    lazy (fix)           113               268
+
+Removing the replay roughly doubled the walk rate on the exact operation
+that holds the secure kernel at DISPATCH and trips Windows' 120-second
+DPC watchdog. This is a correctness-preserving algorithm change that
+follows KVM's proven behaviour, not a per-exit micro-optimisation, and
+it is the first change this session that speeds the *specific* thing the
+watchdog measures.
+
+**Both agents converged on it.** The KVM review traced `handle_invept`
+freeing roots and faulting lazily with no replay counterpart; the
+Hyper-V decompile confirmed `HvCallModifyVtlProtectionMask` writes one
+EPT leaf per GPA, coalesces its INVEPTs at the VP flush point, and that
+the whole-context INVEPT is a superset of the true one-leaf change - so
+lazy repopulation of only the touched leaves is architecturally sound.
+It also confirmed there is no guest-advertisable capability that would
+make Hyper-V batch differently: the shadow-side change is the only
+lever, which is the one taken.
+
+**Residual, for later (not needed to beat the watchdog):** KVM keeps
+freed roots' child shadow pages in a global hash and re-links subtrees
+on re-fault; our `release_shadow_slot` frees the whole table pool, so
+even lazy re-faults rebuild subtrees KVM would keep. That is a further
+divergence to close if the walk is still too slow, but the replay
+removal is the large win.
+
+Next: let this run and watch whether the faster walk completes the
+secure phase and reaches driver init / user-mode before any watchdog
+window - the question that has been open all session.
