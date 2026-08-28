@@ -59157,3 +59157,52 @@ Those are the only two shapes, and this file has now measured both.
 Recorded so nobody spends another session on the self-IPI: **`0x2f` is
 not the vector, and the task-priority argument about it was sound but
 irrelevant.**
+
+## "Make the call fast enough" is impossible, so the re-issue must be normal
+
+The clock is asynchronous, so a call of duration `d` against tick period
+`T` is interrupted with probability about `d/T`. Phase 1 makes about
+**21,169** secure calls, and the phase only completes if the work
+finishes - so ask what it costs for all of them to run untouched:
+
+    d = 1052 us   P(all 21,169 clean) = 0
+    d =  100 us   P(all 21,169 clean) = 0
+    d =   10 us   P(all 21,169 clean) = 1.3e-53
+    d =    1 us   P(all 21,169 clean) = 5.3e-06
+
+**No achievable speed makes it work.** Even a one-microsecond call -
+three orders of magnitude below what this VMM could reach - still fails
+essentially always. So the "shape 1" remedy this file has been costing
+out at 20% of wall clock is not a remedy at all; it was arithmetic
+applied to one call when the phase needs twenty thousand.
+
+### Which inverts the conclusion
+
+If being interrupted cannot be avoided, then **on hardware these calls
+are interrupted too, and Windows copes**. So
+`VslpEnterIumSecureMode` re-issuing on secure-call state 4 is not a
+failure to handle it - **it is the correct handling**, and the absence
+of a `cmp` against 4 means the default path *is* the case for 4.
+
+The loop is therefore **normal**. What is abnormal is only that it never
+terminates.
+
+### So the defect is that the yield loses progress
+
+A re-issue that resumes where the call left off makes progress and the
+work finishes, however often it is interrupted. A re-issue that restarts
+the operation makes none, and loops for ever - which is exactly what is
+observed: `code 0` secure requests frozen at 21,169, the same request
+re-made about fifty-five times a second, and `vtl_protect_count` fixed
+at 39,450.
+
+**That is a much better-posed defect than anything this file has
+carried, and it is in this VMM's own domain** - state preserved across a
+trust-level switch is ours to get right, where the tick, the priority
+and the notification were all shown to be behaving correctly.
+
+What to check first: the earlier reading that the request block is
+byte-identical on every re-entry, including its **continuation word**.
+That was recorded as evidence of a stuck call; on this account it is the
+symptom to explain, because a resuming call should carry a *changing*
+continuation.
