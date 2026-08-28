@@ -3857,7 +3857,7 @@ bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
             }
 
             if (auto page = this->nested_virtual_apic_address[cpu];
-                0 != page) {
+                nested_vmx::census_exits && 0 != page) {
                 constexpr std::uint64_t virtual_task_priority = 0x80;
                 std::uint8_t vtpr{};
 
@@ -4224,8 +4224,18 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // The key to reading the guest's own kernel image from outside.
     // See `l2_exit_cr3`; vmcs02 is current here, so this is Windows'
     // page-table root and not the level above's.
-    if (cpu < max_cpus) {
-        this->l2_exit_cr3[cpu] = this->vmcs.guest_cr3();
+    //
+    // Behind `census_exits`: this is a diagnostic VMREAD on every exit,
+    // and the DPC watchdog is a real-cycles-at-DISPATCH wall, so a
+    // per-exit read that only feeds a member nobody reads on a fast
+    // boot is exactly the cost to shed. The KVM review measured the
+    // three hot-path samplers (this, `l2_vtpr_class_seen`,
+    // `int_window_vtpr`) as most of what turning instrumentation off
+    // already bought.
+    if constexpr (nested_vmx::census_exits) {
+        if (cpu < max_cpus) {
+            this->l2_exit_cr3[cpu] = this->vmcs.guest_cr3();
+        }
     }
 
     // Two histograms, sampled on every second-level exit, because the
@@ -4245,7 +4255,7 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // mode, and nothing in the tree has ever counted whether it does.
     // Ring 3 entries appearing at all is the difference between "slow"
     // and "never got there".
-    if (cpu < max_cpus) {
+    if (nested_vmx::census_exits && cpu < max_cpus) {
         auto selector = this->vmcs.guest_cs_selector();
         this->l2_cpl_seen[cpu][selector & 3] += 1;
 
@@ -4645,7 +4655,13 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     // a hundred - about 1% - and it samples each field at ten thousand
     // different moments over a boot instead of at a handful, which is
     // the difference between "stable when I looked" and "stable".
-    if (cpu < max_cpus) {
+    // The audit is a divergence check on the 37k-cycle host-load phase:
+    // `l1_host_audit_batch` VMREADs a call at the maintenance rate, all
+    // 52 during the 4,096-call warm-up. It is diagnostic, so it goes
+    // behind `census_exits` with the other hot-path samplers - the host
+    // elision it validates (`host_field_elidable`) is unaffected and
+    // stays live.
+    if (nested_vmx::census_exits && cpu < max_cpus) {
         if (auto recorded = this->l1_host_count[cpu]; 0 != recorded) {
             // A batch rather than a single slot, because the elision
             // below is live between one check of a slot and the next.
