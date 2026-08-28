@@ -58579,3 +58579,46 @@ necessarily chronological. If those two are the *latest*, the processor
 was started moments before the dump and simply had not entered a
 second-level guest yet, which is a different and much less alarming
 reading than "started long ago and never used".
+
+### Settled: those are the LAST two exits, so the reset follows the start-up
+
+The open question above is closed by reading the reader. It iterates
+`range(count - ring, count)` and prints `i`, the **absolute exit
+number**, not a slot - so with `count 102`, the `init` at `[100]` and
+the `sipi` at `[101]` are the **final two recorded exits** on that
+processor. The ring-ordering trap `CLAUDE.md` records twice does not
+apply here; this reader was already fixed.
+
+**So the application processor was started immediately before the dump,
+not long before it.** The reading that it had been "started and never
+used" is wrong. The sequence is:
+
+    ... parked in CpuDxe, polling ...
+    init  -> wait-for-SIPI
+    sipi  -> active at cs 0x0200, rip 0   (vector 0x2, = 0x2000)
+    [dump taken]
+    [guest resets: paused (shutdown)]
+
+`l2_entries` is 0 because the processor had not yet entered a
+second-level guest **at that instant** - which is unremarkable a
+handful of exits after a start-up, and is not evidence of a handover
+that never happens.
+
+### Which relocates the failure again, and this time to a narrow window
+
+The machine resets **shortly after the application processor is
+started**, not long after and not before. So the thing to explain is
+what happens between the processor reaching `0x2000` and the reset - a
+window of a few exits, on a processor whose entire recorded history is
+102 exits.
+
+That is the smallest search space this failure has been reduced to, and
+it is fully instrumented already: the same exit ring holds whatever the
+processor did next, and `--cpus 2` prints it. What is needed is a dump
+taken **after** the reset rather than before it, so those exits are in
+the ring - the current one was taken too early, which is why the ring
+ends at the start-up.
+
+**Recorded as a correction to the entry above it**, which offered "the
+handover never happens" as the headline. On this reading the handover
+was in progress when the picture was taken.
