@@ -784,6 +784,35 @@ stop. Read the evidence before calling it a crash, in this order:
    kernel image at ..., cr3 ...` gives both the kernel base and Windows'
    CR3, and `xp` reads each level.
 
+### A gdb breakpoint held for seconds trips Hyper-V's synthetic watchdog
+
+`hbreak` is safe; **stopping on it for long is not**. Hyper-V runs a
+synthetic watchdog over its virtual processors, and a processor that
+stops answering for a few seconds is exactly what it exists to catch.
+Sampling a breakpoint by hand - stop, read a member, stop again - holds
+the whole machine for tens of seconds and the guest bugchecks or resets
+underneath the debugger.
+
+Measured: a session that stopped on `on_l2_ept_fault` repeatedly for
+10-45 seconds a time ended with the guest in `paused (shutdown)` and a
+synthetic watchdog timeout on screen. The **control settles it** - the
+same build, same guest, seven minutes with nothing attached: `VM status:
+running`, 30 of 537 counters moving, no reset.
+
+So:
+
+- **Detach between samples**, or script the whole read as one
+  breakpoint hit and `continue` immediately. Do not leave the machine
+  stopped while thinking.
+- **A reset that appears while gdb is attached is the debugger's until
+  proven otherwise.** Run the no-gdb control before recording it as a
+  guest failure; this cost a bugcheck that was nearly written up as a
+  finding.
+- The corollary is worth having: **the watchdog is real and fires on a
+  multi-second stall.** Any genuine stall of that length in this VMM
+  would trip it too, so "the guest reset" and "a processor was slow for
+  seconds" are the same observation from two sides.
+
 ### Never single-step the guest through QEMU's gdbstub
 
 `stepi` on a guest thread under QEMU/KVM does not just fail, it **destroys what

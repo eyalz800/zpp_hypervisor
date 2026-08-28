@@ -58700,3 +58700,50 @@ The honest position is that the two-processor failure is **not
 characterised**. What is known is where it is not: not the start-up
 path, not the stacks, not the IDT, not the APIC mode, and not the
 INIT/SIPI emulation - five eliminations, each by measurement.
+
+## gdb proves the guest is sweeping memory, not idling - and one watchdog was mine
+
+First use of gdb this investigation, with hardware breakpoints only, and
+it produced facts the counters could not.
+
+**The guest is not idle.** A hardware breakpoint on `on_l2_ept_fault`
+fires continuously: **2,000 hits in under 45 seconds**, about 44 a
+second, every one a *write* fault (`qualification 0x182`).
+
+**And the faults sweep memory linearly.** Reading
+`exit_trace[...].guest_physical` at each stop, 501 faults apart:
+
+    0x222400000
+    0x260c00000     +0x3E800000
+    0x29f400000     +0x3E800000
+    0x2ddc00000     +0x3E800000
+    0x31c400000     +0x3E800000
+
+`0x3E800000 / 500 = 0x200000` exactly, so **every fault advances one
+2 MB page**, monotonically upward - from about 8.5 GB past 13 GB. Then
+the next sample read `0x55e00000`, so it **restarts low and climbs
+again**: a repeated whole-memory sweep.
+
+That is a much better description of the stuck state than "idle waiting
+for a timer message", and **no counter showed it**:
+`shadow_ept_leaves_filled` and `shadow_ept_replayed` both read `+0`
+across the same period, because a fault answered from the recall set
+fills no leaf and replays nothing.
+
+### The watchdog was the debugger's, and the control proves it
+
+The user reported a synthetic watchdog timeout during this session. It
+was **caused by the breakpoints**: sampling held the processor for
+10-45 seconds a time, and Hyper-V watchdogs a virtual processor that
+stops answering. The guest ended in `paused (shutdown)`.
+
+Control, same build and guest, seven minutes with nothing attached:
+`VM status: running`, 30 of 537 counters moving, no reset. So the
+timeout does not occur without gdb.
+
+**Recorded in `CLAUDE.md` as an operational rule**, because it will
+recur otherwise, and with the corollary that matters more than the
+mistake: the watchdog is real and fires on a multi-second stall, so
+"the guest reset" and "a processor was slow for seconds" may be the
+same observation from two sides - which is a candidate explanation for
+the two-processor resets that has never been tested.
