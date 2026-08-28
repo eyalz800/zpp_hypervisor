@@ -57098,3 +57098,47 @@ to check: `0x2f` carried must rise, the VINA flag must be observed
 *clear* at least sometimes, and `vtl_return_rbx` must stop repeating.
 Any intervention that does not move the first cannot be said to have
 tested the hypothesis at all - which is what happened three times.
+
+## Two instruments now agree on secure-call state 4, and the lever is exhausted
+
+`vtl_return_rbx` was built without reference to the earlier finding and
+reproduces it exactly. `intercept_self_ipi`'s comment records the state
+byte reading `4` on 25,659 consecutive returns, derived from a different
+member; the new census reads `rbx 0x0000000100000400` on every recent
+return, whose **byte 1 is `0x04`**. Two instruments, different code
+paths, same answer - which is the cross-check this tree usually has to
+go looking for and rarely gets for free.
+
+The dispatch is visible in the guest too, now that `ntkrnlmp.pdb` can be
+fetched: at `VslpEnterIumSecureMode+0x390` the state byte is in `r14b`
+and the code does `cmpb $1, %r14b`, with `movl %edx, 4(%rbx)` writing
+the continuation at block+0x04. Consistent with "there is a case for 1
+and none for 4", though the whole function has not been walked.
+
+### Why this line is closed rather than merely unfinished
+
+Both halves of the only lever on this side are recorded as tried:
+
+- **the delivery half** (`ZPP_DELIVER_SELF_IPI`) alone: one delivery,
+  2,005 correct holds, and the guest no better off, because the write
+  was still reflected;
+- **the withholding half** (`ZPP_INTERCEPT_SELF_IPI`): two boots, `l2_entries`
+  frozen at 38,974, `hlt` at the L1 instruction pointer, machine dead -
+  and `force_dispatch_once`, which withholds nothing, froze the same
+  way, so the shared cause is *injecting a vector the level above did
+  not stage*.
+
+And the priority refusals are **architecturally correct**: the virtual
+task priority was never once below `0x20` across 630,418 entries, and
+`0x2f` is class 2 under a strictly-greater rule (SDM 12.8.4). There is
+no misreporting here to fix.
+
+So the cycle cannot be broken by delivering `0x2f` - it is genuinely
+undeliverable - nor by withholding it, which stops the level above
+waking at all. **What is needed is knowledge of what Hyper-V waits on
+while the vector is pending, and that is above this VMM and not visible
+from it.** That was already the recorded conclusion; this session
+confirms the mechanism with a second instrument rather than moving past
+it.
+
+Boots were not spent re-running either refuted configuration.
