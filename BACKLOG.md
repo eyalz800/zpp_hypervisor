@@ -57197,3 +57197,51 @@ That is a performance number in service of a functional outcome, which
 is a distinction this file should have drawn earlier: nobody needs the
 VMM faster, but the call has to fit inside a tick, and there is no other
 way left to make it fit.
+
+## Where the 1,052 us actually goes, and it is not the window
+
+The previous entry set the target - the secure call must fit inside one
+1,743 us tick - and pointed at `map_window_at` as the thing to shorten,
+on the strength of 48,001,634 calls and 45.9 billion cycles. **The phase
+tree refutes that, and it was measured before the refactor rather than
+after.**
+
+    cpu 0 phase tree (420,088 handler cycles a round trip)
+      exit: dispatch            359,888   85.7%
+        reflect_l2_exit         154,307   36.7%
+          save_l2_state          40,933    9.7%
+          load_l1_host_state     38,110    9.1%
+          exit information       25,948    6.2%
+          copy_vmcs12_to_shadow  22,406    5.3%
+        on_l2_ept_fault           6,254    1.5%
+
+**`on_l2_ept_fault` is 1.5% of the handler**, at 0.18 calls a round
+trip. The whole extended-page-table path - the replays, the window
+re-pointing, the 45.9 billion cycles the header analyses at length - is
+one and a half percent of where the time goes. The refactor those notes
+recommend (a slot per walk level, an eviction policy for the recall set)
+would buy about one percent, and it touches a lock shared by every
+processor.
+
+**Not worth doing, and the measurement cost one dump rather than a
+session.** The header's own numbers are not wrong - 45.9 billion cycles
+is real - they are simply not a share of anything, which is the mistake
+this file has recorded in other forms: a large total that has never been
+divided by the run.
+
+### What the cost actually is
+
+`reflect_l2_exit` runs **2,006,008 times against 1,996,771 round
+trips** - so essentially every exit this VMM takes is reflected up to
+Hyper-V - at 154,307 cycles each. Its four children are the bulk:
+saving second-level state, loading the first level's host state, the
+exit-information fields, and copying vmcs12 into the shadow.
+
+So the lever on the 1,743 us deadline is **the number of exits reflected
+and what each reflection copies**, not memory virtualisation. Those
+four children are all VMCS field traffic, which is the one thing VMCS
+shadowing was supposed to remove and evidently has not removed from this
+path.
+
+Recorded as the next place to look, with no estimate attached, because
+the last estimate in this area was out by a factor of twenty-five.
