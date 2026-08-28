@@ -61238,3 +61238,46 @@ Every fix this session cleared the path to it: VINA unblocked the secure
 start, the lazy shadow-EPT and exit-info fixes cleared the watchdog into
 driver init, and driver init is where the boot first issues the device
 I/O that exposes this.
+
+## Feasibility of the posted-interrupt fix, and one nuance to resolve
+
+Examined our vmcs02 APIC setup for the fix. We **honour Hyper-V's TPR
+shadow** - `build_vmcs02` maps vmcs12's virtual-APIC page and sets the
+TPR-shadow primary control (`nested_entry.cpp:1531-1637`) - but we do
+**not** enable virtual-interrupt delivery
+(`secondary_virtual_interrupt_delivery` is defined but not set) and we
+mask posted interrupts. Per SDM 29.6, posted-interrupt *processing*
+merges the descriptor's PIR into the virtual-APIC IRR, and delivering
+that merged vector to the guest needs **virtual-interrupt delivery**
+(SDM 29.2.2). So enabling posted interrupts alone is not enough - the
+minimal fix likely also needs virtual-interrupt delivery in vmcs02
+(which the KVM review already flagged is blocked today by
+`guest_interrupt_status` not being saved back). That is the scope the
+agent's feasibility question is pinning down.
+
+**One nuance the injected-vector data raises, to resolve before coding:**
+the census "vectors injected into the second level" *includes* 0x50/0x51
+- and those are vectors **this VMM writes into vmcs02's
+entry-interruption field**, copied from what vmcs12 (Hyper-V) asked to
+inject. So Hyper-V *did* inject 0x50/0x51 through us 34 times, then
+stopped asking. That refines the question: is the loss
+
+  (a) Hyper-V's posted descriptor holding the vector with its ON bit set
+      and never draining (so Hyper-V stops asking us to inject), which is
+      the posted-interrupt story and needs the fix above; or
+  (b) upstream - Hyper-V never *receives* the physical device interrupt
+      to post/inject, because the physical NVMe MSI targets a vector that
+      does not reach Hyper-V through us?
+
+Both agents' converged picture favours (a) - Hyper-V's own posting logic
+is where the vector gets stuck when VTL0 is not current - but the read
+that settles it is Hyper-V's posted descriptor (VTL0+0xef8, ON bit) and
+its source descriptor (VTL0+0x80+(idx+7)*0x100, pending +0xf0, in-flight
++0xb0). Those need Hyper-V's per-VP base (VP+0x148), which is in
+Hyper-V's own address space - the next read to attempt, and the
+definitive confirmation before implementing the APICv/posted-interrupt
+machinery.
+
+The fix is identified and non-trivial; the agent is spec'ing the minimal
+correct form and I will confirm (a) by reading Hyper-V's descriptor
+before building it.
