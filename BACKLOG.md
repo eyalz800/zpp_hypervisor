@@ -58790,3 +58790,53 @@ The last one is from the decompilation and is the useful half: a wedged
 first level **points upstream at what should be injecting**, not at
 Hyper-V. That is the same conclusion the withheld-tick experiments
 reached from the other end, now confirmed in Hyper-V's own code.
+
+## The two failure modes are distinct, and only one is the baseline
+
+With the decompilation in hand these stop being one confused picture.
+
+**Baseline (`lazy=0`, everything off) - Windows is blocked, Hyper-V is
+fine.**
+
+- the phase-1 thread is blocked in `MakeGdtReadOnly`'s trust-level call;
+- Windows therefore idles, the idle thread is current, and
+  `KeZeroPages` sweeps free memory at one write fault per 2 MB page;
+- Hyper-V keeps running: `VM status: running`, 30 of 537 counters
+  moving, seven minutes unattended, no reset.
+
+**With a tick withheld - Hyper-V halts, and now we know on what.**
+
+- its virtual processor sits at `cli; cmp dword gs:[0x340],0; jg; sti;
+  hlt`, and `gs:[0x340]` is the **per-VP pending-event queue count**
+  (queue at `gs:[0x308]`, 4 bytes an entry);
+- two things increment it - the IDT interrupt stubs, and
+  `hv_vp_enqueue_event` at RVA 0x3a7870, which takes its vector from
+  **VMCS field 0x4404**, `VM_EXIT_INTERRUPTION_INFO`;
+- so with the count at zero and nothing delivering, it sleeps for ever.
+
+### Why Hyper-V normally wakes, and why that matters
+
+`external_interrupt_exiting` is set on vmcs01 **only** under
+`ZPP_VIRTUALIZE_APIC` (`hypervisor.cpp:6193`), and the handler says why:
+"the guest owns the controller and the interrupt never exits". In the
+default build physical interrupts reach the first level directly, so a
+halted Hyper-V wakes by itself - which is exactly what the seven-minute
+control shows.
+
+**So the halt is a property of the withhold experiments, not of the
+stall.** Every entry above that mixed the two - reading a wedge caused
+by withholding as evidence about the baseline - was comparing different
+machines.
+
+### What that leaves as the single open question
+
+**Why does `MakeGdtReadOnly`'s trust-level call never retire in the
+baseline**, where Hyper-V is healthy, interrupts flow, and the system is
+merely idle? Not the tick, which is only implicated when we withhold it;
+not Hyper-V's scheduler, which is running; and not the start-up path,
+which is a two-processor concern.
+
+That is a smaller and better-posed question than anything this file has
+carried, and the tools to answer it now exist: `securekernel` and
+`ntoskrnl` symbols, Hyper-V's function map, and a way to name any live
+instruction pointer from its low 21 bits without knowing a base.
