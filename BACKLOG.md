@@ -58373,3 +58373,37 @@ been examined is what happens to that start-up IPI **after** this VMM
 records it: whether the vector and the state handed over are what the
 guest asked for, which `apply_start_up` and `emulate_init_signal` own
 and which no two-processor nested boot has ever been checked against.
+
+### The start-up path ran clean, and the processor still ends in firmware
+
+Last read of this line, from the two-processor dump:
+
+    INIT seen 1   start-up seen 1   refused broadcast 0   refused logical 0
+    cpu 1  start-ups applied 2  inits emulated 1
+           started_by_start_up_ipi 1  launch_error 0
+           activity 0 (active)  queued-vector 0x0  hand-off 0x0
+
+So the guest sent one INIT and one start-up IPI, this VMM saw both,
+emulated the INIT, applied start-up twice - once for the launch and once
+for the guest's own IPI, which is what the two paths through
+`apply_start_up` produce - and reported **no launch error and no
+swallowed vector**. By its own accounting the path worked.
+
+And the processor is at `cs=0x0038 rip=0x7ef50775`, which is **not a
+start-up entry point**. A start-up IPI lands at `vector << 12` with a
+real-mode instruction pointer near zero; this is protected-mode firmware
+code, in the `MpInitLib` poll loop.
+
+So either the processor was started at the guest's vector and ran on
+into firmware, or it was never moved from where the firmware had it and
+the applied state went somewhere that did not take. **Nothing recorded
+here distinguishes those**, which is the gap: `apply_start_up` counts
+that it applied, and no counter says *what* it applied or where the
+processor went next.
+
+That is the instrument this line needs and does not have - the guest CS
+and RIP written by `apply_start_up`, recorded per processor, against the
+vector the start-up IPI carried. Everything else about the two-processor
+failure has now been read and eliminated: shared launch stack, shared
+start-up stack, unloaded IDT, APIC mode, and the start-up path's own
+error reporting. Five, each in one read.
