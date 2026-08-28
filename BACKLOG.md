@@ -59601,3 +59601,57 @@ byte index at RVA 0xf92ff and the dword table at 0xf9093 give
 0xfe -> index 0x84 -> body RVA 0x161fd by my arithmetic, but the same
 arithmetic gives 0xf4 -> 0x16c90 where the agent had 0x16c64, so one of
 us is off by one and the binary settles it, not the argument.
+
+### Correction: with VINA suppressed the guest does not freeze. It restarts
+
+The entry above says "the freeze is identical". The *walk counters* are
+identical; the machine's behaviour is not, and the difference is the
+whole result. Two dumps three minutes apart were byte-for-byte the same
+- block, both arguments, call count, and `exits 593,071` - which reads
+exactly like a wedged processor. It is not. `info status` says
+**`paused (shutdown)`**: the guest reset, `-no-reboot -no-shutdown`
+caught it, and every counter is frozen because the VM is stopped. That
+is the failure mode CLAUDE.md warns about and it was nearly written up
+as a hang.
+
+What actually happened, in order, from the last five exits on cpu 0:
+
+    [585250] vmresume       l2-rip 0xfffff8064b740003   hypercall page
+    [585251] ept-violation  HvlpReleaseHypercallPage+0x16   phys 0x10b010
+    [585252] ept-violation  ExFreePoolWithTag+0x3f3         phys 0x35a90a038
+    [585253] ept-violation  ExpInterlockedPopEntrySListFault phys 0x10c000
+    [585254] vmcall         hvix64, hypercall code 0x0076
+
+`HvlpReleaseHypercallPage` beside `ExFreePoolWithTag` is Windows
+**tearing down its own hypervisor connection**, and hypercall `0x76`
+(hvix64 handler RVA `0x2938a0`, input 0x10 bytes, no output - adjacent
+to `HvCallVtlReturn`'s `0x2934f0`) is the last thing the level above
+ever issues. This is an orderly shutdown, not a fault, and three
+independent instruments agree:
+
+- `KiBugCheckActive = 0` and all five words of `KiBugCheckData` zero,
+  read by walking Windows' own cr3 with the VM stopped. **Windows never
+  bugchecked.**
+- No write to any of `0x40000100`-`0x40000105` in the synthetic-MSR
+  census, so the level above filed no crash report either.
+- `unhandled exit: never`, `vm entry failure: never` in this VMM.
+
+And the timing says where it gave up. Of 21,174 VTL1 turns, 21,173
+complete in one to two milliseconds with the notification flag clear
+every time. **One turn lands in the 2^33 bucket - four seconds or more,
+and the bucket is saturated, so that is a lower bound.** That is the
+service-0xFE call. Then the teardown.
+
+So `ZPP_SUPPRESS_VINA=ON` is not a fix, and this is not evidence it is
+closer to a login screen - a guest that restarts has not booted. But it
+is a **different and far more diagnosable failure than the control's**:
+the control never reached a decision at all, and this one runs 21,173
+secure calls cleanly, spends four seconds in the 21,174th, and then
+deliberately gives up on VBS.
+
+One thing the control could not settle is now settled by this run.
+`SkpReturnFromNormalModeRaxSet+0x114` appears in the **quiet** census
+here - 1,062 samples on entries staging nothing, which injection cannot
+shape. So the secure kernel genuinely passes through that instruction on
+every resume; the control's 19,671 samples were not an artefact of
+injecting there.
