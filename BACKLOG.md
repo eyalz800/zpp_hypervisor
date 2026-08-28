@@ -58187,3 +58187,49 @@ the boot processor. Per-processor stacks are 512 KB in `.bss`, and the
 boot processor's path is the one every single-processor boot exercises -
 so an application processor's is the one that has never been
 exercised.
+
+### Two concrete suspects for it, both in the host-stack setup
+
+Read from the declarations, not inferred:
+
+    alignas(page_size) std::uint8_t start_up_stack[0x4000]{};
+    alignas(page_size) std::uint8_t stack[max_cpus][512 * 1024]{};
+
+**`start_up_stack` is one shared stack, not one per processor.** Every
+application processor is handed
+`std::end(this->start_up_stack)` as its stack top
+(`start_up.cpp:728`), and the boot processor's resume-from-sleep slot is
+handed the same address (`hypervisor.cpp:3994`). Its own comment already
+names two cases it does not cover - "the sender's bounded wait can
+expire while a slow target is still on this stack", and "a target whose
+`main` *fails* returns onto this frame".
+
+**And `available_stack_index` is a non-atomic read-modify-write.**
+
+    if (this->available_stack_index >= max_cpus) { ... }
+    auto & stack = this->stack[this->available_stack_index];
+    ...
+    ++this->available_stack_index;
+
+Two processors reaching that concurrently both read the same index, both
+take the same 512 KB stack, and both increment it. The VM-exit host
+`RSP` is derived from a local *on that stack* - `host_vm_launch_stack`
+in the launch frame, with `vmcs.host_rsp()` pointed into it - so two
+processors sharing an index share the memory every VM exit writes its
+captured guest context into.
+
+That is exactly a fault at `vm_exit_entry`'s first instruction, which is
+the push, with no diagnostic recorded because the fault handler needs
+the same stack.
+
+**Why it has never been seen before.** `CLAUDE.md` records that the
+Windows and Linux loaders launch processors strictly one at a time,
+which serialises this; and under UEFI `number_of_cpus()` returns 1 since
+`1c8bfdd`, so only the boot processor is launched there and the
+application processors are **adopted later, asynchronously, from the
+guest's own start-up IPIs**. That adoption path is the one case with no
+serialisation, and it is the only one this configuration uses.
+
+Neither suspect is proven. Both are cheap to test: give the start-up
+path a stack per processor, and make the index assignment atomic or
+derive it from the processor number instead of a counter.
