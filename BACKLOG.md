@@ -59788,3 +59788,51 @@ is ours - make Windows take `0x2f`, which it currently takes 14,894
 times in 4,477 s because it sits at `TPR >= 0x20` on 99.3% of entries
 and runs `KiDpcInterruptBypass` (`mov cr8,2; sti; KiRetireDpcList`)
 instead of vectoring.
+
+## WITHDRAWN: "ZPP_SUPPRESS_VINA regresses the boot"
+
+It does not, and the entry claiming it is wrong. I rebuilt the control
+(`novina=0`), deployed it and booted, and **the control does the same
+thing**:
+
+    control, fresh boot, novina=0
+      ring newest   0x00fe0002  arg 0xffffb08f6d4aa800  pfn 0x1222aa
+      last exits    HvlpReleaseHypercallPage -> ExFreePoolWithTag
+                    -> ExpInterlockedPopEntrySListFault -> vmcall 0x76
+      VM status     paused (shutdown)
+
+Byte for byte the same shape as the `novina=1` run: outstanding at
+`SkmmRegisterFailureLog`, hypercall page released, machine reset. So the
+teardown is **not** caused by the switch, the earlier stack comparison
+(`KeStartAllProcessors` against `MakeGdtReadOnly`) was comparing two
+boots that differ in something else, and every conclusion drawn from
+that comparison is void - including "the switch is harmful" and "the
+control gets furthest".
+
+**What actually differs is which boot it is, and I do not know why.**
+Three runs:
+
+    pre-existing guest, novina=0   74 min of guest clock, RUNNING,
+                                   outstanding on service 0x0003
+    fresh boot, novina=1           ~2 min, reset at 0xFE
+    fresh boot, novina=0           ~4 min, reset at 0xFE
+
+The pre-existing guest was started before this session. Both boots I
+started myself reset at 0xFE. The build is *not* the variable; something
+about the pre-existing guest is. Candidates, none tested: Windows'
+own record of the previous run being killed mid-Phase1 (this session
+has hard-killed the guest repeatedly), state written to the passed-
+through NVMe during those 74 minutes, or the reset simply being
+stochastic.
+
+**Nothing further should be built on any cross-build comparison until a
+second unchanged boot says whether the reset reproduces.** That run is
+one kill and one boot with no deploy, and it is the next thing done.
+
+The one finding that survives all of this, because it was measured
+within a single boot rather than across two, is the livelock itself:
+VTL1 resuming at `SkpReturnFromNormalModeRaxSet`, executing `sti` at
+`0xd9540`, and taking the notification at `0xd9548` before the branch at
+`0xd954b` - with `SkpReturnFromNormalModeRaxSet+0x114` present in both
+the injected and the *quiet* census, so it is where the guest is and not
+where injection puts it.
