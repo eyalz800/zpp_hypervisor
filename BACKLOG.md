@@ -60330,3 +60330,47 @@ on **cost**, and the exit mix says where: `vmresume` 43.7%, `wrmsr`
 nested reflection tax - every second-level exit costs a reflection *and*
 the `vmresume` that comes back - and the second is the synthetic clock
 loop's EOI, ICR and STIMER writes, each of which is itself reflected.
+
+## The DPC watchdog, researched and its config read live
+
+Online research first: the debugger-disables-the-watchdog behaviour is
+**Windows 7 only**. From Windows 8 on the DPC watchdog runs
+independently of whether a kernel debugger is attached, so
+`KdDebuggerEnabled` is not the lever it once was. The documented user
+fixes (`DpcWatchdogPeriod`, `DPCTimeout` registry values) are
+guest-image changes and are out of bounds - the rig's Windows install
+must not be modified.
+
+So the lever, if any, has to be hypervisor-reachable. Reversed from the
+live guest (ntoskrnl base `0xfffff80293200000`):
+
+    KeDpcWatchdogPeriodMs                        = 120000   120 s window
+    KeDpcTimeoutMs                               =  20000   single-DPC
+    KeDpcWatchdogProfileCumulativeDpcThresholdMs = 110000
+    KeDpcWatchdogProfileSingleDpcThresholdMs     =  18333
+    KiForceBugcheckForDpcWatchdog                = 0
+    KdDebuggerEnabled                            = 0
+    KdDebuggerNotPresent                         = 1
+
+`param1 = 1` is the **cumulative** form: over a 120-second window the
+guest exceeded its budget of time at DISPATCH_LEVEL or above. Not a
+single 20-second DPC - a sum. `KiDpcWatchdog` at `0x5c4480` clears bit
+0x15 of a per-PRCB flag; the accumulate-and-compare is in
+`KeAccumulateTicks` (`0x2a0a30`), called from the clock interrupt, and
+`KiDpcWatchdogCounterReset` (`0x2a1e40`) is what resets it when IRQL
+drops below DISPATCH.
+
+**The open question that decides the whole approach**, handed to the
+decompilation agent and being reversed here in parallel: is the
+watchdog counter advanced per *clock interrupt we deliver* or per
+*reference-time*? If per delivered tick, then the count tracks guest
+time and being slow in wall-clock does not by itself trip it - something
+in the guest genuinely sits at DISPATCH across many ticks, and the fix
+is to find that DPC. If per reference-time, our four-level slowness is
+measured directly as the guest's own DISPATCH time and the only lever is
+cost.
+
+`KeDpcWatchdogProfileGlobalTriageBlock` (`0xfc53c8`, which is exactly the
+`param3` of both bugchecks, `base + 0xfc53c8`) holds the captured
+offending stack. Reading it at the moment of bugcheck names the DPC that
+ran long, which is the difference between the two cases above.
