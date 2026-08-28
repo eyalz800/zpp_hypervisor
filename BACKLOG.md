@@ -61063,3 +61063,32 @@ Not at login yet, but the frontier has moved from a 20-day wedge at
 secure-processor start to driver init, and the rate of the operation
 that trips the watchdog has nearly tripled - both from following KVM,
 not from arbitrary tuning.
+
+## The combined build survives driver init past 45 minutes - furthest yet
+
+The `novina=1 + eagreplay=0 + exit-info-gated` build has now run **45+
+minutes into driver initialisation without a watchdog reset**, where the
+eager-replay-only build bugchecked in driver init at ~20-30 minutes. So
+the stacked KVM-following fixes did not just speed the secure phase -
+they carried the boot *through* the driver-init DISPATCH region that had
+been the new limit.
+
+State at 45 minutes: 3 kernel processes (System, Secure System,
+Registry), `duty 0.743` (idle ~26%), scheduler/DPC stack
+(`KiCommitThreadWait -> KeWaitForGate`). So it is deep in Phase 1 driver
+init, progressing, not hard-blocked - user-mode (`smss.exe`) has not
+launched yet, but nothing is wedged: the guest is idling a quarter of
+the time and scheduling threads the rest.
+
+This is the best state of the investigation: the boot is **past** every
+region that previously reset it and is grinding through driver init on
+the DISPATCH budget the fixes bought. Whether it reaches `smss` /
+`LogonUI` in practical time is the open question, now being watched by a
+low-frequency (10-minute) user-mode watcher that will record the moment
+`smss`/`csrss`/`winlogon` appear or the guest stops.
+
+The direction the user set - fix KVM divergences, do not tune
+arbitrarily - produced this: VINA suppression unblocked the secure
+start, the lazy shadow-EPT and exit-info fixes (both matching KVM)
+tripled the walk rate and cleared the driver-init trip, and the boot is
+now further than 20 days of prior work reached.
