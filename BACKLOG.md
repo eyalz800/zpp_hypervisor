@@ -59398,3 +59398,99 @@ catching an exit taken while the VTL1 extended-page-table pointer
 (`0x101b1501e`) is current - the exit ring records `rip` and its owner
 but not the pointer, so that distinction has to be added or the frame
 walked.
+
+## The livelock, read end to end from the running guest
+
+No rebuild, nothing perturbed, and it settles what the last several
+sessions inferred. Two symbolised reads out of one state dump.
+
+**The normal-mode stack.** `rig-dump-state.py`'s "what it interrupted"
+walk, 26 frames, resolved against `ntkrnlmp.pdb` at the kernel base this
+boot logged (`0xfffff805c6c00000`):
+
+    KiSystemStartup -> PspSystemThreadStartup -> Phase1Initialization
+      Phase1InitializationDiscard+0x95a
+        MakeGdtReadOnly+0x8b
+          KeWriteProtectProcessorState+0xc6
+            VslFinishStartSecureProcessor+0xc4
+              VslpLockPagesForTransfer+0x16d
+                VslpLockMdlForTransfer+0x44
+                  VslpEnterIumSecureMode+0x3a8
+                    HvlSwitchToVsmVtl1+0xab
+
+**The secure-mode instruction.** The "where the guest was when an
+interrupt landed on it" census holds exactly one address in
+securekernel's range - `0xfffff8055d01a548`, **15,723 samples**, which
+against base `0xfffff8055cf41000` is RVA `0xd9548` =
+`SkpReturnFromNormalModeRaxSet+0x114`. Disassembled from
+`securekernel.bin` (`.text` has `ra == va`, so RVA is the file offset):
+
+    d9527: movq 0x8(%r14),%rsi        ; r14 = gs:0, rsi = current thread
+    d952b: movq 0x80(%rsi),%rbp       ; its frame
+    d9532: movq %rbp,%rsp
+    d9535: btq  $0x9,0xd0(%rbp)       ; the thread's saved RFLAGS.IF
+    d953e: jae  0xd9541
+    d9540: sti                        ; <- interrupts re-enabled
+    d9541: movq 0x120(%rbp),%r15
+    d9548: cmpb $0x0,%bl              ; <- THE INTERRUPT LANDS HERE
+    d954b: je   0xd9559               ;    bl == 0: resume the thread
+    d9591: callq 0x137f0              ;    bl != 0: IumInvokeSecureService
+
+`0x137f0` is the range the decompilation agent identified as
+`IumInvokeSecureService`. So the interrupt arrives **eight bytes after
+the `sti`, one instruction inside the `sti` shadow's end, and before the
+branch that chooses between resuming and dispatching**. VTL1 executes no
+part of the secure service. Not "slowly", not "restarted" - *never
+entered*.
+
+**And the normal-mode side is correct.** `VslpEnterIumSecureMode`,
+disassembled live from guest memory at VTL0's cr3, dispatches on the
+state byte `[rbx+1]`: 1 and 6 return, 3 runs a secure service, 0 and 5
+call a helper, and **everything else - including 4, the state
+`ShvlVinaHandler` produces - falls through to `+0x1f3`**, which zeroes
+`[rbx+0]` and `[rbx+2]` and re-issues `HvlSwitchToVsmVtl1`. That is the
+same "resume, nothing new" call the answered-callback path makes, so the
+absence of a `cmp $4` is **not** a defect; the retry is correct. The
+loop is closed and each side is behaving as written.
+
+### What the counters then say about why
+
+    entries with a 0x2f (dispatch) request outstanding   10,377,612 / 10,940,632  94.9%
+    virtual task priority at second-level entry
+      0xd0 (clock)  49.7%   0x20 (dispatch)  24.7%
+      0xf0          24.5%   0x00              0.7%
+    distinct 0x2f requests 14,894, all 14,894 delivered
+    vectors ever injected into the second level: only three -
+      0xd1 2,584,256 | 0x40 17,443 | 0x2f 15,187
+
+`0x40` is injected 17,443 times against 15,723 interrupts landing at the
+`sti` above; nothing else is a candidate, and Windows uses no `0x40` in
+VTL0. **`0x40` is the VINA vector**, and Hyper-V asserts it on
+essentially every VTL1 entry.
+
+The condition it asserts on is a deliverable VTL0 interrupt, and VTL0
+has one outstanding on **94.9%** of entries: the dispatch self-IPI
+`0x2f`, asked 2,553,478 times and delivered 14,894, because the guest is
+at `TPR >= 0x20` on 99.3% of entries and `0x2f` is class 2.
+
+**Caveat, stated because the counters invite the wrong reading**: the
+ask/deliver/blocked model is *ours*, but the delivery decision is not.
+`wrmsr 0x40000071` is reflected to Hyper-V (the exit ring shows it
+handled at hvix64's rip), so Hyper-V owns VTL0's APIC state and chooses
+when `0x2f` enters vmcs12. Our counters describe a shadow of that, and
+must not be read as this VMM refusing a delivery.
+
+### What is still not known
+
+The 15,723 landings are 41% of the 38,259 VTL round trips this boot.
+Where the other 59% of VTL1 turns end is not measured - the census is a
+decaying hot map and shows fourteen rows, so other securekernel
+addresses may exist below the cut. **Do not report the mechanism as
+accounting for every turn until that is read.**
+
+The parked RIP of the secure thread was attempted and not obtained:
+`SkiInitialPrcbStorage+8` reads 0, so it is not the live PRCB, and
+`SkiBspThread+0x80` yields a frame whose `+0xd0` is `0x200` - bit 9 set,
+which agrees with the `btq $0x9` above, but bit 1 clear, which real
+RFLAGS never is. It is not the running thread's frame. The live gs base
+for VTL1 is the missing piece.
