@@ -58295,3 +58295,45 @@ step: shared launch stack, shared start-up stack, unloaded IDT. The
 useful residue is that the failure is *dynamic*, not configurational,
 which is where anyone picking this up should start - and `cpu 1`'s exit
 ring holds those 263 exits, which nothing has read yet.
+
+### And the AP's exit ring says what it is doing: polling APIC_BASE for ever
+
+Nothing had read `cpu 1`'s exit ring. It holds a two-instruction loop,
+repeated to the end of the ring:
+
+    rdmsr  cs=0x0038 rip=0x7ef50775  detail=0x1b  value=0xfee00800
+    cpuid  cs=0x0038 rip=0x7ef5fbd7  x3
+
+MSR `0x1b` is `IA32_APIC_BASE`. So the application processor is
+executing **guest** code in low memory - not this VMM's - and polling
+its own APIC base and CPUID, for ever.
+
+**The value it is given is inconsistent with the rest of the machine.**
+`0xfee00800` has the enable bit set and the BSP bit clear, which is
+right for an application processor, and **bit 10 - x2APIC enable -
+clear**. Meanwhile the boot processor writes `X2APIC_LVT_TIMER` (`0x832`)
+and `X2APIC_INIT_COUNT` (`0x838`), which exist only in x2APIC mode.
+
+**One processor is in x2APIC and the other is being told it is not**,
+and the one being told is the one spinning on that exact register.
+
+### Why this is a better lead than the three that were refuted
+
+Those were guesses about setup that the evidence then contradicted.
+This is the processor's own instruction stream saying what it is waiting
+for, and a value this VMM is in a position to be wrong about: `apic=1`
+and `apicoff=1` are in the manifest, so the local APIC is not simply
+passed through.
+
+Not proven - the value may be what the hardware genuinely reports for
+that processor, and the guest may be polling for something else entirely
+that happens to sit in the same loop. What makes it worth the next boot
+is that it is **checkable in one read**: whether this VMM emulates
+`rdmsr 0x1b` for an application processor, and if so what it puts in bit
+10.
+
+The exits also settle the earlier confusion: the application processor
+is running guest code, not stuck in `vm_exit_entry`. Sampling caught it
+in the stub because that is where a processor sits between an exit and
+its handler, and with a two-instruction guest loop generating exits,
+that is most of the time.
