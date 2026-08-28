@@ -60780,3 +60780,46 @@ display for real, or the framebuffer handoff being arranged so the
 guest-physical GPU aperture maps through to the host aperture the panel
 scans. Both are substantial and neither is the functional
 hypervisor bug this investigation was fixing.
+
+## Re-measured on the instrumented novina=1 build: progressing, idle, not halted
+
+Prompted by the standing insistence that this is functional and not
+performance, re-measured the current build (`novina=1, eagerept=1,
+shadowvmcs=1`, full instrumentation on, `ZPP_CPUS=1`) with two reads
+four minutes apart:
+
+    code-0 secure-manager calls   21,198 -> 21,866   (+668)
+    page requests                  7,210 ->  7,442   (+232)
+    duty                           0.778 / 0.756      idle ~24%
+    l2-activity                    active (not halted)
+    hlt exits                      none in the top reasons
+
+Three things settle, and one corrects an earlier claim in *this
+session*:
+
+- **The secure memory-manager walk is advancing**, past the old 7,207
+  ceiling, at ~58 page requests a minute. It is slow but not frozen -
+  this is the phase VINA suppression unblocked, and it is still moving.
+- **Hyper-V is active, not halted.** The "first level is halted waiting
+  for a withheld tick" deadlock recorded earlier in this file is
+  specific to the `ZPP_LAZY_TICK` experiments that held the tick; with
+  no tick held, `l2-activity` reads active and there are no `hlt` exits.
+  That whole repair direction does not apply to this configuration.
+- **My own "saturated by the clock" reading from earlier this session
+  is wrong.** `ntoskrnl+0x6b3692` at 85% is the *idle* scheduler, as an
+  earlier entry decoded instruction-by-instruction ("the idle scheduler
+  looking for a runnable thread and finding none"), and `duty 0.756`
+  says the guest has ~24% of its time unused. The guest is **not**
+  saturated; it is idle a quarter of the time and grinding slowly
+  through secure-manager work the rest. I chased release/-O2 cost
+  reduction on the saturation reading; the idle reading was already in
+  the file and I did not weight it.
+
+So the honest state of this configuration: the boot **progresses**
+through the VSM/secure-processor phase rather than wedging in it, and
+the guest is partly idle rather than clock-bound. What has never been
+confirmed is that it *completes* the phase and reaches user-mode within
+any practical time - the debug build's DPC watchdog resets it first, and
+the release build (no reset) has not been shown to reach `smss`. The
+question "slow-but-arrives" versus "asymptotes short of login" remains
+open, and it is the one that matters.
