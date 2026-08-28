@@ -58478,3 +58478,45 @@ two-processor failure are the ones that were measured: the processor is
 started at the guest's own vector `0x2` with correct state, it is
 active, it takes exits, it never enters a second-level guest, and the
 machine resets. Everything about *what it is running* is inference.
+
+### Settled by reading the module: it is OVMF's CpuDxe
+
+The one read named it outright. `MZ` sits at physical `0x7ef50000` -
+the application processor's instruction pointer is `0x775` into it -
+with a minimal DOS stub, `e_lfanew 0x80`, a valid PE header, and a debug
+directory whose CodeView record says:
+
+    UefiCpuPkg/CpuDxe/CpuDxe/DEBUG/CpuDxe.dll     (Build/OvmfX64)
+
+**It is firmware.** `CpuDxe` is EDK2's processor driver and the home of
+`MpInitLib`, which is where application processors are parked - the
+`WaitApWakeup` loop `CLAUDE.md` already describes.
+
+So the **first** reading of this was right and the correction was wrong.
+The correction argued from `cs=0x0038` looking like a protected-mode
+selector rather than firmware, and inferred Windows; the module header
+says otherwise. Two withdrawals on one question - firmware, then
+Windows, now firmware again - and only the last one is measured.
+
+The lesson is the one this tree keeps paying for: **an address range is
+not an identity.** `0x7ef5xxxx` was read as "looks like UEFI", then as
+"looks like early guest code", and both were guesses that a single PE
+header settled. The same technique had already named `securekernel` and
+`hvix64` in this session; it simply was not applied here until the third
+attempt.
+
+### What it means for the failure
+
+The application processor is parked in firmware's wait loop, and the
+log shows the guest's start-up IPI *was* applied to it - vector `0x2`,
+by `sipi exit`. Those two cannot both describe the same instant, so the
+question is now specific and answerable: **does the processor leave
+`CpuDxe` after that start-up is applied, and if not, what does the
+applied state actually do?**
+
+`apply_start_up` writes `cs 0x200`, base `0x2000`, `rip 0`. A processor
+sitting at `CpuDxe+0x775` afterwards has either never taken that state
+or has been sent back. The exit ring records instruction pointers, so a
+single trace across the moment the second start-up is applied
+distinguishes them - and nothing has yet looked at the ring with the
+log's ordering alongside it.
