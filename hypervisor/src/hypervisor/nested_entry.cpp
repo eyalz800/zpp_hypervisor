@@ -3289,6 +3289,45 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                 // tolerate.
                 auto capped = false;
 
+                // VTL1 still owes a message. See
+                // `nested_vmx::keep_tick_while_vtl1_owes`: an occupied
+                // synthetic-message slot stops the level above posting
+                // any more, so withholding here is the first step of a
+                // cycle that ends with everything halted. Read the
+                // secure kernel's own message page and pass the tick
+                // through if any slot is taken.
+                if constexpr (nested_vmx::keep_tick_while_vtl1_owes) {
+                    constexpr std::uint64_t simp_enabled = 1;
+                    constexpr std::uint64_t simp_page = ~0xfffull;
+                    constexpr std::size_t message_slots = 16;
+                    constexpr std::size_t message_stride = 256;
+
+                    auto simp = this->l2_simp_msr[cpu][1];
+
+                    if (0 != (simp & simp_enabled)) {
+                        auto page = simp & simp_page;
+
+                        for (std::size_t slot{}; slot < message_slots;
+                             ++slot) {
+                            std::uint32_t type{};
+
+                            if (!read_guest_physical(
+                                    page + (slot * message_stride),
+                                    std::as_writable_bytes(
+                                        std::span{&type, 1}))) {
+                                break;
+                            }
+
+                            if (0 != type) {
+                                capped = true;
+                                this->lazy_tick_vtl1_owed[cpu] =
+                                    this->lazy_tick_vtl1_owed[cpu] + 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 // Not yet in the window. See
                 // `nested_vmx::lazy_tick_after_protect`: the call that
                 // has to be protected is at the END of the protection

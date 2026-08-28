@@ -1722,6 +1722,41 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_KEEP_TICK_WHILE_VTL1_OWES
+#define ZPP_KEEP_TICK_WHILE_VTL1_OWES 0
+#endif
+
+/**
+ * Never withhold a clock tick while the secure kernel still has an
+ * unconsumed synthetic message.
+ *
+ * The deadlock a gap creates was traced to one object, by reading it:
+ *
+ *     VTL1 SIMP slot 3   healthy  0x80000010 -> 0          consumed
+ *                        wedged   0x80000010 -> 0x80000010 NOT consumed
+ *
+ * `0x80000010` is `HvMessageTypeTimerExpired`. A synthetic-interrupt
+ * slot is a one-message mailbox: the recipient clears the type and
+ * writes end-of-message, and the sender posts nothing further until it
+ * does. One unconsumed message therefore stops the timer stream at its
+ * source, which is why the level above ends with no work and halts at
+ * `sti; hlt`.
+ *
+ * The cycle: a withheld tick leaves VTL1 unscheduled, so slot 3 stays
+ * occupied, so no further message is posted, so nothing has work, so
+ * VTL1 is never scheduled.
+ *
+ * This refuses to take the first step. Before withholding, the secure
+ * kernel's own message page is read - its address is already recorded
+ * in `l2_simp_msr`, keyed by extended-page-table pointer - and if any
+ * slot is occupied the tick is passed through untouched.
+ *
+ * The read is on the withhold path only, which is rare: six to nine
+ * times in a whole boot.
+ */
+inline constexpr bool keep_tick_while_vtl1_owes =
+    (0 != ZPP_KEEP_TICK_WHILE_VTL1_OWES);
+
 #ifndef ZPP_POLL_ON_HALT
 #define ZPP_POLL_ON_HALT 0
 #endif

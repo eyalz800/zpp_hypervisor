@@ -57917,3 +57917,57 @@ VTL1 runs when VTL0 calls into it. So the question is why VTL0 stops
 calling - and VTL0 is Windows, whose state this tree can already read in
 full. That is a different and much better lit place to look than the
 first level's unpublished internals.
+
+## The guard proves the conflict a third time: the helpful hold IS the harmful hold
+
+`ZPP_KEEP_TICK_WHILE_VTL1_OWES` reads the secure kernel's message page
+before withholding and passes the tick through if any slot is occupied.
+It was aimed at the first step of the measured cycle.
+
+**It works, and it blocks everything.** `withheld` is zero - the
+lazy-tick section prints nothing at all - so no tick was ever held. The
+consequences follow exactly:
+
+    no wedge          30 of 537 counters, l2_entries 3,922/s
+    no progress       thread census back to Phase1Initialization
+                      code 0 at 21,174, vtl_protect_count 39,451
+
+Which is baseline, reached by a different route.
+
+### Why the guard is too strong, and why that is informative
+
+VTL1 has an outstanding message precisely while it is mid-work - which
+is precisely the window where withholding a tick is what carries the
+boot through. The guard therefore refuses at exactly the moments that
+matter.
+
+That is the **third independent confirmation** of one fact, from three
+unrelated directions:
+
+- **gap size**: 2,000 us and 10,000 us both help and both wedge;
+- **window position**: holds during the protection phase help and
+  wedge, holds before it do neither;
+- **message state**: holds while VTL1 owes a message are the helpful
+  ones, and refusing them removes the help.
+
+Three different selectors, and every one of them picks out the same
+set. **The withhold that carries Windows past `MakeGdtReadOnly` and the
+withhold that strands the secure kernel's message are the same
+withhold.** Not a tuning problem - the same event.
+
+### So the tick cannot be the lever, and that is now established rather than suspected
+
+Everything reachable from this side that changes *the tick* has been
+tried: withhold it (six ways), deliver it early, swallow it, delay its
+answer, cap the holds, window them, expire them, guard them, and revive
+the processor that halts when it is missing. The forward result is real
+and reproducible; it simply cannot be had without the wedge, because
+they are one event.
+
+What is left is not a tick intervention. It is the deadline itself:
+`MakeGdtReadOnly`'s trust-level call has to fit inside 1,743 us without
+the clock being touched, and the only quantity left that decides that is
+what this VMM spends inside the call - 75.4% of wall clock in the exit
+handler, 36.7% of it reflecting every exit to the level above through
+VMCS field copies. That is a different piece of work, with a number
+attached, and it is where this goes next.

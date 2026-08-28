@@ -170,6 +170,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+option(ZPP_KEEP_TICK_WHILE_VTL1_OWES
+    "Refuse to withhold a clock tick while the SECURE kernel still has an unconsumed synthetic message. Measured: in the wedged state VTL1's SIMP slot 3 holds HvMessageTypeTimerExpired unchanged across samples, where a healthy boot clears it - and a synthetic-interrupt slot is a one-message mailbox, so one unconsumed message stops the level above posting any more, which is why it ends with no work and halts. This guard reads that slot before withholding and passes the tick through when it is occupied. OFF by default. See BACKLOG.md."
+    OFF)
+
 option(ZPP_POLL_ON_HALT
     "Intercept HLT in the FIRST level so a halt becomes an exit and the existing handler turns it into a no-op, making the guest hypervisor poll instead of idling. Found by disassembling the wedge: Hyper-V is not spinning there, it is executing sti/hlt waiting for an interrupt, and the interrupt it waits for is the tick a gap is holding - so it takes no exits, no second-level entry happens, and the owed tick can never be given back. This is the only repair tried that changes WHERE a tick can be returned rather than WHEN it is withheld. OFF by default; it makes an idle first level spin. See BACKLOG.md."
     OFF)
@@ -441,6 +445,7 @@ ExternalProject_Add(hypervisor
         -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
         -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_POLL_ON_HALT=${ZPP_POLL_ON_HALT}
+        -DZPP_KEEP_TICK_WHILE_VTL1_OWES=${ZPP_KEEP_TICK_WHILE_VTL1_OWES}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
@@ -567,6 +572,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
         -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_POLL_ON_HALT=${ZPP_POLL_ON_HALT}
+        -DZPP_KEEP_TICK_WHILE_VTL1_OWES=${ZPP_KEEP_TICK_WHILE_VTL1_OWES}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}

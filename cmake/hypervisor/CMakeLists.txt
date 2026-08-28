@@ -24,6 +24,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
+option(ZPP_KEEP_TICK_WHILE_VTL1_OWES
+    "Do not withhold a clock tick while VTL1 has an unconsumed synthetic message."
+    OFF)
+
 option(ZPP_POLL_ON_HALT
     "Intercept HLT in the first level so a halt becomes an exit and the guest hypervisor polls instead of idling."
     OFF)
@@ -340,6 +344,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
     -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
     -DZPP_POLL_ON_HALT=$<BOOL:${ZPP_POLL_ON_HALT}>
+    -DZPP_KEEP_TICK_WHILE_VTL1_OWES=$<BOOL:${ZPP_KEEP_TICK_WHILE_VTL1_OWES}>
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>

@@ -14696,6 +14696,9 @@ private:
 
     /** Ticks passed through because the window had expired. */
     std::uint64_t lazy_tick_after_expiry[max_cpus]{};
+
+    /** Ticks passed through because VTL1 still owed a message. */
+    std::uint64_t lazy_tick_vtl1_owed[max_cpus]{};
     std::uint64_t vtl_reentry_by_reason[max_cpus][8]{};
     std::uint64_t vtl_reentry_reason_other[max_cpus]{};
     std::uint64_t vtl_reentry_orphan[max_cpus]{};
