@@ -58520,3 +58520,62 @@ or has been sent back. The exit ring records instruction pointers, so a
 single trace across the moment the second start-up is applied
 distinguishes them - and nothing has yet looked at the ring with the
 log's ordering alongside it.
+
+## INIT-SIPI-SIPI: it succeeds. The handover to Windows is what does not happen
+
+Asked directly, and the records answer it.
+
+**The application processor's own exit ring is the decisive evidence:**
+
+    [100] init   qual=0x0   wait-sipi   cs=0x0038 rip=0x7fb6b030
+    [101] sipi   qual=0x2   active      cs=0x0200 rip=0x0
+
+Textbook correct, every step. Before the INIT the processor is in
+`CpuDxe`; the INIT puts it in **wait-for-SIPI**; the SIPI carries vector
+`0x2`; and it comes out **active at `cs 0x0200`, `rip 0`** - exactly
+`vector << 8` for the selector and `vector << 12` = `0x2000` for the
+base, which is what `apply_start_up` writes and what KVM's
+`kvm_vcpu_deliver_sipi_vector` writes. The emulation, the activity-state
+transition and the vector conversion are all right.
+
+Supporting counters, none of them a failure: `INIT seen 1`,
+`start-up seen 1`, `refused broadcast 0`, `refused logical 0`,
+`launch_error 0`, `queued-vector 0x0` - nothing refused and nothing
+swallowed.
+
+### The two vectors are two senders, not a mismatch
+
+`0xc4687` decodes as vector `0x87`, delivery mode 6 (Start-Up),
+destination shorthand 3 (all-excluding-self) - a **broadcast** SIPI, and
+this VMM's own trampoline vector is `0x9c` (`hypervisor.cpp:4950`), so
+`0x87` is not ours either.
+
+But only **one** start-up IPI was decoded from an interrupt-command
+write, while the processor took a SIPI whose qualification was `0x2`.
+A SIPI exit with no corresponding command write is one this VMM did not
+decode off the register - it came from the level above's own virtual
+APIC. So `0x87` is the *physical* broadcast this VMM saw written, and
+`0x2` is what the guest hypervisor delivered to its virtual processor.
+Different senders, not a delivered vector disagreeing with a requested
+one.
+
+### So the answer to "does Hyper-V succeed but Windows fail"
+
+**Yes, in that shape.** Everything up to and including putting the
+processor at its start-up vector works: firmware starts it, this VMM
+adopts it, the guest hypervisor INITs and SIPIs it, and it lands at
+`0x2000` active. What never follows is `l2_entries` - **0** on that
+processor - so the guest hypervisor never runs a second-level guest on
+it, and Windows never gets it.
+
+The failure is therefore **after** start-up and **above** this VMM's
+INIT/SIPI path, which is the opposite end from where five theories in
+this file looked.
+
+**One thing left open honestly**: whether ring slots `[100]`/`[101]` are
+the newest exits or earlier ones. `cpu 1` reports 263 exits against a
+102-slot trace, so the ring has wrapped and slot order is not
+necessarily chronological. If those two are the *latest*, the processor
+was started moments before the dump and simply had not entered a
+second-level guest yet, which is a different and much less alarming
+reading than "started long ago and never used".
