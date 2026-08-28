@@ -59685,3 +59685,56 @@ Reaching the AP start path is not the same as getting past it.
 
 **So the control build is the one that gets furthest, and measurements
 belong on it.** Restoring `novina=0` before anything else.
+
+## Secure service 0xFE is SkmmRegisterFailureLog, and the dispatch index is service-1
+
+Decompiled from `securekernel.bin`, and it corrects arithmetic recorded
+two entries above. **The jump-table index is `service - 1`**, not
+`service`: the dispatcher does `uVar26 = uVar6 - 1` and then indexes the
+byte table with that. So `byte_table[0xFD] = 0x83`,
+`dword_table[0x83] = 0x16375`, and service **0xFE**'s body is at RVA
+**0x16375**, which disassembles to
+`mov rdx,[r14+0x10]; mov rcx,[r14+8]; call 0x62f28`. Indexing by
+`service` lands one group high on *every* service, which is why my
+0xf4 -> 0x16c90 disagreed with 0x16c64.
+
+`0x62f28` is **`SkmmRegisterFailureLog`**, and its two arguments are the
+two in the block: the caller virtual address (used only for its page
+offset) and the page frame. There is **no hypercall, no normal-mode
+callback and no semaphore in its body**, which matches the measurement -
+the four-second turn issued nothing.
+
+Its first unconditional callee, before any of the registration work, is
+**`SkmiClaimPhysicalPage(pfn 0x12ba88, 0x8001)`** at RVA `0x74d0`: a
+`LOCK cmpxchg` retry loop on the page-frame-database entry. On one
+processor the compare-exchange cannot fail, so the **only** loop that
+can run for ever is `if (entry & (1 << 60)) goto retry` - the
+transition-busy bit, stuck set.
+
+Falsifiable, in VTL1's address space:
+
+    PFN-DB entry for 0x12ba88   0xFFFFE0000095D440   bit 60 set ⇒ this is the spin
+    SkmiFailureLog              RVA 0x1420a8         0 ⇒ registration path also live
+    SkmiFailureLogLock          RVA 0x130518
+
+Two things this changes:
+
+- **The 7,207-page walk completed.** The 7,207 `0x101` requests, one per
+  frame, plus the `0xf4` and `0xf3` around them, all returned. 0xFE is a
+  separate post-walk one-shot. Every account that treated the walk's
+  stopping point as the failure - including `13713c5`'s - was reading a
+  finished phase as an interrupted one.
+- **The flagged frames are not 0xFE's.** `0x12ba88` is nowhere near
+  `0x11aac9`-`0x11aad4`; those belong to the `0x101` walk. The agent's
+  own reading, marked as inference and not traced, is that a stuck bit
+  60 is most economically a leftover from a transition that set the busy
+  bit and abandoned it - possibly during the walk over those frames.
+  **Nobody has traced what clears bit 60.** That is the next read, not a
+  conclusion.
+
+**Standing, stated because it is easy to lose:** all of this was
+observed on the `novina=1` build, which the entry above shows is a
+*regression* - it stalls in `KeStartAllProcessors`, earlier than the
+control, and restarts. Whether the control ever reaches 0xFE is
+unmeasured, because VINA masks the outstanding request there. Do not
+carry 0xFE into the control's account without measuring it there.
