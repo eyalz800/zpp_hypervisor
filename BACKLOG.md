@@ -60469,3 +60469,38 @@ hardware - with the one measurement to take first: a per-CPU counter for
 reasons 3/4 taken while `running_l2`, which does not exist yet and
 discriminates the three ways the AP path can be failing. Held for after
 the watchdog, since `ZPP_CPUS=1` sidesteps it.
+
+## The rig overrides the analysis: shadow VMCS is load-bearing here
+
+Tested `ZPP_NESTED_SHADOW_VMCS=OFF` on the rig and it is a **large
+regression**, which contradicts the KVM review's source reading and is
+the measurement that settles it.
+
+    exit reason        shadowvmcs=1        shadowvmcs=0
+    vmread             8,097  (0.0%)       6,848,474  (52.5%)
+    vmwrite              497  (0.0%)       3,737,313  (28.6%)
+    total exits        2,537,936           13,050,566
+
+With shadowing **on**, Hyper-V's VMREADs and VMWRITEs of its vmcs12 are
+served by the shadow region and do **not** exit. With it off they all
+trap - 6.8 million vmread exits and 3.7 million vmwrite exits, five times
+the total exit count. The ~13% we spend in `copy_shadow_to_vmcs12`
+maintaining the region **buys** the elimination of ten million exits. It
+is a good trade, not dead weight.
+
+**The review's premise is empirically false on this rig.** It argued -
+carefully, with a file:line - that KVM strips `SECONDARY_EXEC_SHADOW_VMCS`
+from its guest unconditionally at `nested.c:2428`, so hardware shadowing
+could not be helping us. The machine says otherwise: shadowing on keeps
+vmread at 0.0%, shadowing off makes it 52.5%. Either this KVM build does
+not strip the bit, or it honours our shadow bitmap through some other
+path, but the *effect* is not in question. **The rig is the authority
+over the source read**, which is the whole reason this project checks
+claims against the machine and not only against KVM's tree. Reverted to
+`shadowvmcs=1` immediately - the 45-minute run was on that build and it
+is the right baseline.
+
+Recorded as a first-class instance of the pattern: an agent's careful
+source analysis pointed one way, one single-variable rig run pointed the
+other, and the run wins. The finding that shadow VMCS costs 20% is true;
+the inference that the 20% was wasted was not.
