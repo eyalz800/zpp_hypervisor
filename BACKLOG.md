@@ -61092,3 +61092,53 @@ arbitrarily - produced this: VINA suppression unblocked the secure
 start, the lazy shadow-EPT and exit-info fixes (both matching KVM)
 tripled the walk rate and cleared the driver-init trip, and the boot is
 now further than 20 days of prior work reached.
+
+## THE FUNCTIONAL BLOCK, pinned: driver init stalls waiting for device interrupts that never arrive
+
+After the KVM-following fixes carried the boot past the secure phase and
+the watchdog into driver init, it **stalls** there - and this is a
+genuine functional stall, proven by two measurements 2.5 minutes apart
+on the running guest:
+
+    exits          11,679,485 -> 17,851,041   (+41,000/s - executing hard)
+    l2-entries      5,534,132 ->  8,615,181   (+20,500/s)
+    ModifyVtlProtectionMask   40,934 -> 40,934   FROZEN (secure phase done)
+    running threads           ONE, always the same
+
+The guest burns 41,000 exits a second in the idle clock/scheduler loop
+but makes **zero functional progress**: the secure protection calls are
+frozen, and the thread census over ~1,000 samples shows exactly **one
+runnable thread** - the DPC-dispatch thread parked in
+`KiExecuteDpc -> KeWaitForGate`, waiting on its gate. Every driver-init
+thread is blocked and none becomes runnable.
+
+**And only ONE external interrupt vector is ever delivered: 0xef, 24,259
+times, 100%.** That is the clock. **No device interrupt is ever
+delivered to the guest.** The DPC gate the one thread waits on is
+signalled by DPCs, DPCs are queued by ISRs, and the only ISR firing is
+the clock - so no device I/O completion ever queues a DPC to wake the
+blocked driver threads.
+
+**The mechanism, end to end:** Windows loads the boot-critical drivers
+`winload` preloaded, starts the storage stack, and issues I/O to read
+more from the disk. That I/O needs the NVMe's completion **interrupt** to
+signal done. The NVMe controller is alive and ready (`CC.EN=1`,
+`CSTS.RDY=1`, read narrow with an xhci control that also answers), but
+its completion interrupt never reaches Windows - so the I/O never
+completes, the driver threads block for ever, and the boot stalls in
+driver init while the idle loop spins.
+
+This is the block the prior investigation circled for weeks under
+"MSI-X never enabled on the passed-through NVMe", "smss waits on
+WrPageOut", "the guest is idle waiting on I/O" - all the same event:
+**device interrupts do not get delivered to the nested guest.** It is
+functional, not performance: no amount of speed helps a thread waiting on
+an interrupt that never comes. And it is now reachable to debug for the
+first time, because the VINA + shadow-EPT + exit-info fixes got the boot
+far enough to *issue* the device I/O that exposes it.
+
+The path that must work: passed-through NVMe raises MSI-X -> KVM (L0)
+injects it into our vCPU -> we take it as an external-interrupt exit ->
+we reflect it to Hyper-V -> Hyper-V delivers it to Windows' virtual
+APIC. Only 0xef traverses it, so device MSI-X is lost somewhere on that
+chain. That is the next thing to debug, and it is the functional block.
