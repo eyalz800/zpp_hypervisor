@@ -60244,3 +60244,41 @@ watchdog.
 has never been run against a configuration that makes progress - it is
 `eagerept=0` in every manifest recorded here. That is the next single
 variable, against the `novina=1, ZPP_CPUS=1` run as the baseline.
+
+## Eager EPT neighbours: the watchdog is beaten and the stall moves to service 0x23
+
+Single variable against the `novina=1, ZPP_CPUS=1` run.
+`ZPP_EAGER_EPT_NEIGHBOURS=ON`, verified `eagerept=1` in the manifest and
+on the ESP.
+
+**The exit mix changed as intended.** EPT violations fell from **54.9%
+of all exits to 9.8%** (325,787 of 593,071, against 247,915 of
+2,537,936). What is left is `vmresume` 43.7%, `wrmsr` 30.1%,
+`int-window` 10.1% - the reflection path and the clock loop, which is
+where the remaining cost lives.
+
+**And it survives the DPC watchdog.** The previous run bugchecked
+`0x133` at about eleven minutes; this one was still `running` at
+**twenty-two** and had not bugchecked.
+
+**The stall moved to a service never seen before in this
+investigation.** The walk went further - `0x101` requests reached 7,318
+and now name frames around `0x11f26e` rather than the `0x11aac9` every
+frozen boot ended on - and the outstanding request is now
+
+    +0x00 0x0000000000230002   +0x08 0   +0x10 0xaa0a53b46a9ad575
+
+**secure service `0x23`**, body RVA **0x1829d** by the corrected
+`service - 1` index, with what looks like a random or hashed 64-bit
+value as its second argument. It does not appear in the request
+population at all, so like `0x0003` before it, it is issued once and
+does not return.
+
+So the sequence of stalls this investigation has walked through is now:
+
+    service 0x0003   VINA livelock            fixed by novina=1
+    (walk resumes)   7,207 -> 7,318/7,414
+    bugcheck 0x133   DPC watchdog             beaten by eagerept=1
+    service 0x0023   outstanding, once, never returns   <- HERE
+
+Each one was invisible until the one before it was removed.
