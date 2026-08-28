@@ -170,6 +170,9 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+set(ZPP_LAZY_TICK_AFTER_PROTECT "0" CACHE STRING
+    "Withhold nothing until HvCallModifyVtlProtectionMask has been answered this many times. Zero withholds from the start, which keeps the earliest holds - measured useless, because they land early in boot and the call that must be protected is at the END of the protection sequence. That sequence is deterministic to the digit: 39,449 or 39,450 calls in every boot recorded here, so a threshold just below it is a precise trigger where a wall-clock delay is a guess. See BACKLOG.md.")
+
 set(ZPP_LAZY_TICK_MAX "0" CACHE STRING
     "The most ticks ZPP_LAZY_TICK will ever withhold, across the whole run. Zero means no limit, which is every run of it so far. The deadlock it prevents is entered ONCE, and eight withholds were measured carrying the boot past it, so one or two is the whole requirement - while the wedge that follows is a latency intolerance in the level above that grows with the number of holds. Checked at the withhold site, so unlike a timed window it cannot be starved by the wedge stopping second-level entries. See BACKLOG.md.")
 
@@ -432,6 +435,7 @@ ExternalProject_Add(hypervisor
         -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
         -DZPP_POLL_L1=${ZPP_POLL_L1}
         -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
+        -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
@@ -556,6 +560,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
         -DZPP_POLL_L1=${ZPP_POLL_L1}
         -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
+        -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}

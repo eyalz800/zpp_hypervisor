@@ -57649,3 +57649,55 @@ N seconds, then withhold. That keeps the late holds instead of the early
 ones, which is the half of the sequence that matters, and it is
 evaluated on second-level entry where entries are still happening -
 the defect that made the expiry untestable does not apply to a delay.
+
+## The furthest yet: past Phase1Initialization, into the idle thread
+
+`ZPP_LAZY_TICK=10000 ZPP_LAZY_TICK_AFTER_PROTECT=1` - withhold nothing
+until the protection sequence starts, then withhold across it.
+
+**Windows leaves phase 1.** The thread census, which has read the same
+thing in every run of this investigation, changed:
+
+    before   thread ... start ntoskrnl+0x6fb520   (Phase1Initialization)
+             -> 1 distinct thread, ONE THREAD, not scheduling
+
+    now      thread ... IDLE  start ntoskrnl+0x6ad0b0
+             state 2  wait 0/irql 2
+
+The **idle** thread is current. The phase-1 thread is no longer the
+running thread, `shadow_ept_leaves_filled` is 344,311 against a 333-334k
+baseline, and code-0 secure requests are 21,177 - the best figure
+recorded.
+
+### Why the window had to be this one, and the earlier attempt was backwards
+
+`AFTER_PROTECT=39000` put the holds at the **end** of the protection
+sequence and did nothing. That was the wrong end, for a reason visible
+in the symbolised stack all along: the protection calls **are**
+`MakeGdtReadOnly`'s own work -
+
+    MakeGdtReadOnly -> KeWriteProtectProcessorState
+      -> VslFinishStartSecureProcessor -> ... -> SkmiProtectPageRange
+
+so the 39,449 calls span the critical sequence rather than precede it.
+Triggering at 1 covers it; triggering at 39,000 covers only its tail.
+
+### And it still wedges
+
+4 of 537 counters moving, `l2_entries` frozen at 90,953. Seven holds
+were enough to carry the boot through and enough to stop the level
+above, which is the same conflict as before but now **located**: holds
+in the right window work, and the cost is per hold.
+
+That separates the two knobs for the first time. The window trigger
+decides *whether it helps*; the gap size decides *how much latency each
+hold costs*. Every previous run moved them together.
+
+### Next, and it is one variable
+
+A gap just over one tick period - 2,000 us against Windows' 1,743 us -
+with the same `AFTER_PROTECT=1` trigger. It is the smallest hold that
+can still keep a tick out of the call, so it is the cheapest version of
+the thing that works. `ZPP_LAZY_TICK=2500` wedged when applied from the
+start with no trigger, which is a different configuration: many more
+holds, spread across the whole boot.

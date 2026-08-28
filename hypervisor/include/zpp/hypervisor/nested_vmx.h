@@ -1722,6 +1722,34 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_LAZY_TICK_AFTER_PROTECT
+#define ZPP_LAZY_TICK_AFTER_PROTECT 0
+#endif
+
+/**
+ * Withhold nothing until the guest hypervisor has answered this many
+ * `HvCallModifyVtlProtectionMask` calls. Zero starts immediately.
+ *
+ * **Why a count of somebody else's calls is the right trigger.** The
+ * gap has to keep one tick out of one call, and four capped runs showed
+ * that a cap counted from the start keeps the **earliest** holds -
+ * which land early in boot, nowhere near the call that matters, and do
+ * nothing. Position is what matters and quantity cannot express it.
+ *
+ * Wall clock could express position but only as a guess. This is not a
+ * guess: the protection sequence is **deterministic to the digit** -
+ * 39,449 calls in three boots and 39,450 in four more - and the call
+ * that must be protected, `MakeGdtReadOnly`'s, is at the *end* of it.
+ * A threshold just below that total is therefore a precise trigger for
+ * "the critical window is about to open", derived from a quantity this
+ * VMM already counts for its own reasons.
+ *
+ * Pair it with `lazy_tick_max`, which is what keeps the latency the
+ * level above cannot tolerate down to the few holds that are free.
+ */
+inline constexpr std::uint64_t lazy_tick_after_protect =
+    ZPP_LAZY_TICK_AFTER_PROTECT;
+
 #ifndef ZPP_LAZY_TICK_MAX
 #define ZPP_LAZY_TICK_MAX 0
 #endif

@@ -162,6 +162,12 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         ' ', 'l', 'z', 'm', 'a', 'x', '=',
         digit(static_cast<unsigned>(nested_vmx::lazy_tick_max / 10)),
         digit(static_cast<unsigned>(nested_vmx::lazy_tick_max)),
+        ' ', 'a', 'f', 't', 'p', 'r', 'o', 't', '=',
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_after_protect / 10000)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_after_protect / 1000)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_after_protect / 100)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_after_protect / 10)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_after_protect)),
         // Seven digits, because the site that consumes this refuses any
         // value at or above 10,000,000 as an absolute deadline rather
         // than a period, so every legal setting fits and none can be

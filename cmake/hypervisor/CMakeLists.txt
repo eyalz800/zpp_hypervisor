@@ -24,6 +24,9 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
+set(ZPP_LAZY_TICK_AFTER_PROTECT "0" CACHE STRING
+    "Withhold nothing until the protection-mask call count reaches this; 0 withholds from the start.")
+
 set(ZPP_LAZY_TICK_MAX "0" CACHE STRING
     "Most ticks ZPP_LAZY_TICK will ever withhold across the whole run; 0 means no limit.")
 
@@ -331,6 +334,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
     -DZPP_POLL_L1=$<BOOL:${ZPP_POLL_L1}>
     -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
+    -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>

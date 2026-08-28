@@ -3289,6 +3289,17 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                 // tolerate.
                 auto capped = false;
 
+                // Not yet in the window. See
+                // `nested_vmx::lazy_tick_after_protect`: the call that
+                // has to be protected is at the END of the protection
+                // sequence, and that sequence is deterministic, so this
+                // is a precise trigger rather than a wall-clock guess.
+                if constexpr (0 != nested_vmx::lazy_tick_after_protect) {
+                    capped = capped ||
+                             (this->vtl_protect_count[cpu] <
+                              nested_vmx::lazy_tick_after_protect);
+                }
+
                 if constexpr (0 != nested_vmx::lazy_tick_max) {
                     capped = this->lazy_tick_withheld[cpu] >=
                              nested_vmx::lazy_tick_max;
