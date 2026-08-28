@@ -59206,3 +59206,50 @@ byte-identical on every re-entry, including its **continuation word**.
 That was recorded as evidence of a stuck call; on this account it is the
 symptom to explain, because a resuming call should carry a *changing*
 continuation.
+
+## RBX survives the trust-level switch, so the resume path is fed correctly
+
+Decompiling securekernel with its real symbols settled what the secure
+kernel needs, and `ZPP_VTL_CAPTURE` then measured whether it gets it.
+
+**What it needs** (`securekernel.md`): `ShvlVinaHandler` (0x942cc)
+writes state 4 as the ordinary "interrupted by VINA, re-enter me"
+signal, and `SkCallNormalMode` packs it into RBX as
+`(thread_id << 32) | 0x400`. On re-entry the dispatch loop calls
+`SkiSelectThread(RBX >> 32, ...)`, which re-selects the **parked thread
+by id** - **and takes the pool/new-thread branch if the high dword
+arrives as 0**, in which case the parked call never advances.
+
+**What it gets**:
+
+    HvCallVtlCall   0x11   rbx  first 0x100000400  latest 0x100000400
+    HvCallVtlReturn 0x12   rbx  first 0x100000400  latest 0x100000400
+
+`RBX >> 32 = 1` **on entry to VTL1**, not merely on the return. So the
+thread id survives the round trip and `SkiSelectThread` re-selects
+thread 1. **The suspect is eliminated: this VMM preserves the register
+the resume depends on.**
+
+That also means the secure kernel **is** resuming, not restarting - the
+agent's decompilation says so and the register says it is being fed
+correctly. So "progress is lost across the yield" is wrong as a
+statement about the *hand-over*.
+
+### And the frozen counter says where to look instead
+
+`vtl_protect_count` is fixed at **39,450** while 27,510 trust-level
+calls have happened. So the current turns are **not making protection
+calls at all** - the page-protection phase completed, and VTL1 is now
+occupied with something that never finishes.
+
+Every earlier entry that treats the stall as "the protection loop is
+stuck" is therefore looking at a phase that has already ended. The `r15
+= 1` reading - "the loop had work left" - was taken at the *last*
+protection call, which is the end of that phase rather than a hang
+inside it.
+
+**So the open question moves again, and narrows**: what is VTL1 doing
+across those 27,510 turns, now that it is no longer protecting pages?
+`securekernel.pdb` and `decompiled_sk/` make that answerable - the
+secure-call service number is in the request block this VMM already
+captures, and `securekernel.md` has the dispatch path.
