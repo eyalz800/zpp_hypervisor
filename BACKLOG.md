@@ -60118,3 +60118,46 @@ across all four levels - 60 samples came back 83% zpp, 17% hvix64 - but
 **zero landed in securekernel**, because VTL1's duty cycle is a few per
 cent. It is a fine instrument for "who is burning the processor" and
 useless for "where is VTL1 parked".
+
+### Neither thread is in a secure service. Service 3 is never dispatched
+
+`SkiThreadTable` (RVA `0x128b00`) points at a table whose entry **[1] is
+`0xfffff8036daa99a0`** - the same pointer the processor block holds at
+`gs+0x48`, and the thread id the earlier session read out of RBX
+(`0x100000400`, thread 1 in the high half). So thread 1 is found, and
+its frame is `[thread+0x80] = 0xffffce805f31bb70`.
+
+Scanning it for secure-kernel text:
+
+    SkiDeselectThread+0xb4
+    SkpPrepareForNormalCall+0x73   (twice)
+    ShvlVinaHandler+0x57
+    KiVinaInterrupt+0x2b2
+    SkpReturnFromNormalModeRaxSet+0x114
+
+**The VINA yield again, on the other thread too.** Between the two
+threads there is not one frame in `IumInvokeSecureService`, in
+`SkmmMapDataTransfer` or in `SkmiClaimPhysicalPage`. **Service 3 is never
+dispatched into anything.** The `pause`-spin candidate is dead - not
+because the analysis was wrong, but because execution never gets near it.
+
+That closes the loop with the request census: `code 0` is frozen at
+21,173 and **every current call is `code 4`**, the VINA notification. So
+at some moment VINA began firing on *every* turn, and from then on the
+secure kernel can only yield: `SkpReturnFromNormalModeRaxSet` resumes a
+thread that is parked in `ShvlVinaHandler`, which yields again, for ever.
+34,165 armed entries, one distinct resume address.
+
+**And that is exactly the `CF8` latch.** hvix64's gate at `0x2ead04` is
+priority-blind, `CF8` latches when an interrupt is posted to a preempted
+lower VTL, and the agent's exhaustive search of all nineteen `CF8`
+accesses found **no path that clears it**. One posting during one VTL1
+turn poisons every subsequent entry for the rest of the boot. VTL1 turns
+here are 1-2 ms against a 1.741 ms clock period, so the posting is
+near-certain; on real hardware the turn is microseconds.
+
+**So the experiment that has never actually been run is
+`ZPP_SUPPRESS_VINA=ON` together with `ZPP_CPUS=1`.** The earlier attempt
+had the switch on and eight processors, and died of the
+application-processor failure - which is now known to be unrelated. That
+run therefore tested nothing about VINA.
