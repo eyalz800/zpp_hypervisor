@@ -58840,3 +58840,53 @@ That is a smaller and better-posed question than anything this file has
 carried, and the tools to answer it now exist: `securekernel` and
 `ntoskrnl` symbols, Hyper-V's function map, and a way to name any live
 instruction pointer from its low 21 bits without knowing a base.
+
+## The "task priority pins 0x2f for ever" premise does not survive measurement
+
+The deadlock account this file has built rests on one claim: Windows
+sits at task priority class 2, `0x2f` is class 2, delivery needs
+strictly greater (SDM 12.8.4), so the vector can **never** be delivered
+and the cycle cannot break. It was supported by a figure quoted from
+`intercept_self_ipi`'s comment - "the virtual task priority never once
+below `0x20` across 630,418 second-level entries".
+
+A fresh dump of the baseline says otherwise **at the point that
+matters**:
+
+    task priority at the trust-level call:
+      class  0 (0x00)   4,823   17.9%   <- admits 0x2f
+      class  1 (0x10)   2,934   10.9%   <- admits 0x2f
+      class  2 (0x20)  19,027   70.7%
+
+**28.8% of trust-level calls are made below class 2**, where `0x2f` is
+deliverable. And it *is* delivered: `0x2f` injected **3,929** times in
+the same run.
+
+So "it can never be delivered" is false as stated. The two figures are
+not in direct contradiction - one counts *second-level entries* and the
+other counts *trust-level calls*, which are different populations - but
+the one that bears on the argument is this one, because the argument is
+about what the priority is **when the secure call is made**.
+
+### What that does to the account
+
+It removes the part that made the cycle look closed. If the priority
+admits `0x2f` on nearly three calls in ten, and thousands are delivered,
+then "the DPC can never run, so IRQL never drops, so the call never
+retires" is not a mechanism - it is a description of the majority case
+being mistaken for all cases.
+
+**What still stands, because it was measured directly**: the secure call
+does not retire; `ShvlVinaHandler` returns state 4 on every observed
+return; `VslpEnterIumSecureMode` re-issues an identical request about
+fifty-five times a second; and the boot does not progress. Those are
+observations, not inferences, and they are unaffected.
+
+**What does not stand**: the explanation joining them. Recorded as such
+rather than patched, because this file has already carried two accounts
+of this stall that were retired by measurement, and a third that is
+merely *plausible* is worth less than an honest gap.
+
+Note also `VINA at the CALL: set 0, clear 26,925` - the notification is
+**never** set going in. Whatever asserts it does so while VTL1 runs, not
+before, which is a constraint any replacement account has to fit.
