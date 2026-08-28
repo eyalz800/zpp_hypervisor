@@ -1722,6 +1722,32 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_LAZY_TICK_MAX
+#define ZPP_LAZY_TICK_MAX 0
+#endif
+
+/**
+ * The most ticks the gap will ever withhold, across the whole run.
+ * Zero is no limit, which is what every run of it has been.
+ *
+ * **Why a count and not a window.** Two facts, both measured:
+ *
+ * - the deadlock the gap prevents is entered **once**, and eight
+ *   withholds were enough to carry the boot past `MakeGdtReadOnly` -
+ *   so one is very close to the whole requirement;
+ * - the wedge that follows is **not** an undelivered tick. `owed` read
+ *   zero with re-delivered equal to withheld, so every held tick was
+ *   handed over and the level above still stopped. It cannot tolerate
+ *   the *latency*, and each additional hold is another dose of it.
+ *
+ * A timed window cannot express that and was tried twice: it is
+ * evaluated on second-level entry, and the wedge stops second-level
+ * entries, so it reported STILL OPEN at 45 seconds and again at 5. The
+ * count is tested at the withhold itself, which is reached exactly when
+ * it matters and cannot be starved.
+ */
+inline constexpr std::uint64_t lazy_tick_max = ZPP_LAZY_TICK_MAX;
+
 #ifndef ZPP_POLL_L1
 #define ZPP_POLL_L1 0
 #endif

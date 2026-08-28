@@ -57599,3 +57599,53 @@ over the moment that call retires rather than after a fixed period.
 Withholding by time - which is what this switch does at every value -
 cannot express that, because the quantity it keys on is not the one
 that matters.
+
+## Capping the withholds: alive every time, and never the right tick
+
+`ZPP_LAZY_TICK_MAX` bounds how many ticks are ever withheld, tested at
+the withhold itself so - unlike the timed window - it cannot be starved
+by the wedge stopping second-level entries. Four runs, one variable:
+
+    cap        withheld   alive   code 0    progress
+    1          1          yes     21,172    none
+    4          4          yes     21,177    none
+    6          6          yes     21,172    none
+    unlimited  8          NO      -         past MakeGdtReadOnly
+
+**The cap works as designed and does not help.** Every capped run stays
+alive - 30 of 537 counters at ~8,000 exits a second, against the 4 of
+537 that every uncapped gap run collapsed to - so the latency
+intolerance really is proportional to the number of holds, and a small
+number of them is free.
+
+And none of them makes progress. The stall is the baseline one, with
+`vtl_protect_count` at 39,450 and the thread census still reporting
+`1 distinct thread` starting at `Phase1Initialization`.
+
+### Why, and it is the useful conclusion
+
+A cap counted from the start keeps the **earliest** withholds. Those
+happen whenever two ticks first fall inside ten milliseconds of each
+other, which is early in boot and nowhere near `MakeGdtReadOnly`. The
+uncapped run withheld the critical tick only because it never stopped
+withholding, so its eighth hold happened to be the one that mattered.
+
+**Quantity is the wrong key. Position in time is the right one**, and
+the count cannot express it - a cap always keeps the wrong end of the
+sequence.
+
+Note also that one scheduler-looking stack at cap 4 -
+`KiSearchForNewThreadsForRescheduleContext`, `KiAddThreadToReadyQueue`,
+`CmKeyBodyRemapToVirtualForEnum` - was **not** evidence of progress. The
+thread census in the same dump still read one thread. It was a sample
+taken inside that one thread while it went looking for another to run,
+which is what the idle path does, and it would have been read as
+multi-threading by anyone comparing stacks alone.
+
+### The next thing, and it is a one-line change to this switch
+
+A **start** delay rather than an end one: withhold nothing for the first
+N seconds, then withhold. That keeps the late holds instead of the early
+ones, which is the half of the sequence that matters, and it is
+evaluated on second-level entry where entries are still happening -
+the defect that made the expiry untestable does not apply to a delay.

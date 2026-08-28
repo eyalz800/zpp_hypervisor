@@ -3282,7 +3282,19 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             if ((0 != (injection & interruption_valid)) &&
                 (clock_vector ==
                  (injection & interruption_vector_mask))) {
-                if (!elapsed) {
+                // The cap. See `nested_vmx::lazy_tick_max`: the
+                // deadlock is entered once, so one hold is close to
+                // the whole requirement, and every hold beyond it is
+                // latency the level above has been measured not to
+                // tolerate.
+                auto capped = false;
+
+                if constexpr (0 != nested_vmx::lazy_tick_max) {
+                    capped = this->lazy_tick_withheld[cpu] >=
+                             nested_vmx::lazy_tick_max;
+                }
+
+                if (!elapsed && !capped) {
                     // Held, not lost. A tick already owed is not
                     // replaced - one interrupt is owed, however many
                     // arrive while it is, which is what a level-

@@ -159,6 +159,9 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(static_cast<unsigned>(nested_vmx::lazy_tick_seconds)),
         ' ', 'p', 'o', 'l', 'l', 'l', '1', '=',
         digit(nested_vmx::poll_l1),
+        ' ', 'l', 'z', 'm', 'a', 'x', '=',
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_max / 10)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_max)),
         // Seven digits, because the site that consumes this refuses any
         // value at or above 10,000,000 as an absolute deadline rather
         // than a period, so every legal setting fits and none can be
