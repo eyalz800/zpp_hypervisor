@@ -1722,6 +1722,29 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_POLL_L1
+#define ZPP_POLL_L1 0
+#endif
+
+/**
+ * Keep this VMM's own millisecond timer armed on vmcs01 while the
+ * **first** level runs, independent of any gap.
+ *
+ * Added to break the freeze a withheld tick caused, and coupled to
+ * `lazy_tick_microseconds` because that was the only configuration
+ * that needed it. The coupling then produced a wrong attribution:
+ * every run that looked like evidence for the gap also had this on,
+ * and the gap itself was measured firing **nine times** in a whole
+ * run. Which of the two carries the boot past `MakeGdtReadOnly` is
+ * therefore unknown, and cannot be found while they move together.
+ *
+ * On its own it is cheap and boring: one exit per millisecond while
+ * the first level is executing, handled and returned from, with the
+ * capability checked before the control is set - arming one the outer
+ * hypervisor does not offer wedged this rig once.
+ */
+inline constexpr bool poll_l1 = (0 != ZPP_POLL_L1);
+
 inline constexpr std::uint64_t lazy_tick_seconds = ZPP_LAZY_TICK_SECONDS;
 
 inline constexpr bool hold_clock_in_vtl1 =

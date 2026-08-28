@@ -961,7 +961,8 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // exactly right now that vmcs02 carries its own, and it checks the
     // capability MSR before setting the control - arming one the outer
     // hypervisor does not offer wedged this rig once already.
-    if constexpr ((0 != nested_vmx::lazy_tick_microseconds) &&
+    if constexpr ((nested_vmx::poll_l1 ||
+                   (0 != nested_vmx::lazy_tick_microseconds)) &&
                   !diag::policy_of(diag::sink::esp_blocks).present) {
         arm_controller_poll(cpuid, true);
     }

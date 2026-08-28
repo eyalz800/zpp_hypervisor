@@ -24,6 +24,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
+option(ZPP_POLL_L1
+    "Arm the 1 ms preemption-timer poll on vmcs01 while the first level runs, independent of the lazy tick."
+    OFF)
+
 set(ZPP_LAZY_TICK_SECONDS "0" CACHE STRING
     "Seconds after the first withheld tick that ZPP_LAZY_TICK stays in force; 0 means for ever.")
 
@@ -322,6 +326,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_DELIVER_SELF_IPI=$<BOOL:${ZPP_DELIVER_SELF_IPI}>
     -DZPP_HOLD_CLOCK_IN_VTL1=$<BOOL:${ZPP_HOLD_CLOCK_IN_VTL1}>
     -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
+    -DZPP_POLL_L1=$<BOOL:${ZPP_POLL_L1}>
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>

@@ -170,6 +170,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+option(ZPP_POLL_L1
+    "Arm this VMM's own 1 ms VMX-preemption timer on vmcs01 while the FIRST level runs, independent of ZPP_LAZY_TICK. It was originally coupled to the gap because it was added to break the gap's freeze, and that coupling caused a wrong attribution: every run that appeared to show the gap moving the boot forward also had this poll on, while the gap itself fired nine times. OFF by default. See BACKLOG.md."
+    OFF)
+
 set(ZPP_LAZY_TICK_SECONDS "0" CACHE STRING
     "How many seconds after the first withheld tick ZPP_LAZY_TICK stays in force. Zero means for ever, which is what wedged the machine at both 10,000 and 2,500 microseconds. The deadlock is entered ONCE, early, in MakeGdtReadOnly; a gap that expires carries that call past its deadline and then stops withholding, so the owed tick drains and the level above stops waiting on an acknowledgement. See BACKLOG.md.")
 
@@ -423,6 +427,7 @@ ExternalProject_Add(hypervisor
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
         -DZPP_HOLD_CLOCK_IN_VTL1=${ZPP_HOLD_CLOCK_IN_VTL1}
         -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
+        -DZPP_POLL_L1=${ZPP_POLL_L1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
@@ -545,6 +550,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
         -DZPP_HOLD_CLOCK_IN_VTL1=${ZPP_HOLD_CLOCK_IN_VTL1}
         -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
+        -DZPP_POLL_L1=${ZPP_POLL_L1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}

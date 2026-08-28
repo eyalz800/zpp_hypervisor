@@ -57504,3 +57504,48 @@ reconciliation retired "all injections are dropped", the return census
 retired "the answer is lost", and this one retired "the gap works".
 **In each case the claim was made before the instrument existed and
 survived only because nothing could check it.**
+
+## Confound resolved: the gap is the cause, and nine withholds is the point
+
+`ZPP_POLL_L1` separates the two variables that were moving together.
+Run alone - `lazy=00000 polll1=1`, one variable against baseline - the
+poll does **nothing**:
+
+    Phase1InitializationDiscard+0x95a
+      MakeGdtReadOnly+0x8b
+        KeWriteProtectProcessorState+0xc6
+
+The baseline stall, exactly, with `vtl_protect_count` at 39,450.
+
+So the withdrawal two entries above was right to question the
+attribution and wrong about which way it went: **the gap is the cause.**
+The poll is inert.
+
+### Nine withholds is not a problem for that. It is the evidence for it
+
+The objection was that nine withholds cannot explain the progress. They
+can, and only under one model: **the deadlock is entered once.** One
+trust-level call outliving one 1,743 us tick pins the task priority for
+ever. To prevent it you do not need to suppress the clock - you need to
+keep one particular tick out of one particular call.
+
+Nine withholds, one of which was the one that mattered.
+
+That is now the best-supported claim in this investigation, because it
+is the only account that predicts all four observations together: the
+progress under the gap, its absence under the poll, the determinism of
+the stall, and the *smallness* of the intervention that avoids it.
+
+### What it makes the next experiment
+
+The expiring run reported `window STILL OPEN` at 45 seconds, so the
+guest wedged **before** the window closed. That is the case where a
+shorter window is the thing to try - the reading the verdict print was
+added to make, working as intended on its first outing.
+
+The wedge is a withheld tick whose acknowledgement the level above is
+waiting for. If the window closes shortly after the critical call
+retires, the owed tick drains, the level above is answered, and the gap
+is out of the way before it can do harm. The critical call happens
+early - `MakeGdtReadOnly` is in phase 1 - so the window wants to be
+seconds, not tens of seconds.
