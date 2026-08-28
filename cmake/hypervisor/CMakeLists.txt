@@ -24,6 +24,9 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
+set(ZPP_LAZY_TICK_SECONDS "0" CACHE STRING
+    "Seconds after the first withheld tick that ZPP_LAZY_TICK stays in force; 0 means for ever.")
+
 option(ZPP_HOLD_CLOCK_IN_VTL1
     "Hold the clock interrupt while the secure kernel (VTL1) is current and deliver it on the first entry after VTL0 resumes. Bounded by one trust-level turn rather than a fixed gap."
     OFF)
@@ -318,6 +321,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PUBLISH_REFERENCE_TSC=$<BOOL:${ZPP_PUBLISH_REFERENCE_TSC}>
     -DZPP_DELIVER_SELF_IPI=$<BOOL:${ZPP_DELIVER_SELF_IPI}>
     -DZPP_HOLD_CLOCK_IN_VTL1=$<BOOL:${ZPP_HOLD_CLOCK_IN_VTL1}>
+    -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>

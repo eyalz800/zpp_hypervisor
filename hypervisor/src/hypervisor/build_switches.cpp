@@ -150,6 +150,13 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(static_cast<unsigned>(
             nested_vmx::lazy_tick_microseconds / 10)),
         digit(static_cast<unsigned>(nested_vmx::lazy_tick_microseconds)),
+        // How long that gap stays in force. Zero is for ever, which is
+        // what wedged the machine; a bounded window is the only shape
+        // of it that has not been tried.
+        ' ', 'l', 'a', 'z', 'y', 's', 'e', 'c', '=',
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_seconds / 100)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_seconds / 10)),
+        digit(static_cast<unsigned>(nested_vmx::lazy_tick_seconds)),
         // Seven digits, because the site that consumes this refuses any
         // value at or above 10,000,000 as an absolute deadline rather
         // than a period, so every legal setting fits and none can be

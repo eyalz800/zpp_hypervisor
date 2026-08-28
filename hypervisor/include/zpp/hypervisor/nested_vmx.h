@@ -1690,6 +1690,40 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * not bounded by a turn after all and this is the seventh member of the
  * family.
  */
+#ifndef ZPP_LAZY_TICK_SECONDS
+#define ZPP_LAZY_TICK_SECONDS 0
+#endif
+
+/**
+ * How long `lazy_tick_microseconds` stays in force, in seconds. Zero
+ * is for ever, which is what every run of it so far has been.
+ *
+ * **Why an expiry is the whole idea.** The gap is the only
+ * intervention in this investigation that moved the boot forward: it
+ * carried the guest past `MakeGdtReadOnly` and into
+ * `MiReloadBootLoadedDrivers`, further than any other build. It then
+ * wedged, and the wedge is well understood - the level above has
+ * committed a message it believes was delivered and waits for an
+ * acknowledgement the guest never gives, which no timer can supply
+ * and which does not scale with the gap (10,000 us and 2,500 us froze
+ * identically).
+ *
+ * But the deadlock the gap *prevents* is entered **once**. One
+ * trust-level call that outlives one 1,743 us tick pins the task
+ * priority at class 2 for ever. So the gap is needed for exactly as
+ * long as it takes that call to retire, and is harmful from then on.
+ *
+ * On expiry the withholding stops and any owed tick is delivered by
+ * the path that already exists, so the level above waits at most one
+ * more entry for its acknowledgement rather than for ever.
+ *
+ * Measured from the **first withheld tick** rather than from launch,
+ * so it does not have to guess how long the firmware and boot manager
+ * take - nothing is withheld until the guest is taking clock
+ * interrupts, and the clock is what the window is measured against.
+ */
+inline constexpr std::uint64_t lazy_tick_seconds = ZPP_LAZY_TICK_SECONDS;
+
 inline constexpr bool hold_clock_in_vtl1 =
     (0 != ZPP_HOLD_CLOCK_IN_VTL1);
 

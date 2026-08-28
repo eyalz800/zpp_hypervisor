@@ -14682,6 +14682,20 @@ private:
 
     /** The held injection, kept whole exactly as staged. */
     std::uint64_t vtl1_clock_owed[max_cpus]{};
+
+    /**
+     * When the lazy tick first withheld anything, per processor.
+     *
+     * The expiry in `nested_vmx::lazy_tick_seconds` is measured from
+     * here rather than from launch, so it does not have to guess how
+     * long the firmware and the boot manager take: nothing is withheld
+     * until the guest is actually taking clock interrupts, which is
+     * also the only period the window is meaningful in.
+     */
+    std::uint64_t lazy_tick_first_tsc[max_cpus]{};
+
+    /** Ticks passed through because the window had expired. */
+    std::uint64_t lazy_tick_after_expiry[max_cpus]{};
     std::uint64_t vtl_reentry_by_reason[max_cpus][8]{};
     std::uint64_t vtl_reentry_reason_other[max_cpus]{};
     std::uint64_t vtl_reentry_orphan[max_cpus]{};

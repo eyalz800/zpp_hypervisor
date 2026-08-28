@@ -57404,3 +57404,50 @@ swallow had fired and had to infer it from the freeze point matching.
 An intervention whose own counter is unreadable is one that cannot
 distinguish "did nothing" from "did the wrong thing" - which is exactly
 the trap `hold_clock_in_vtl1` fell into one entry above.
+
+## An expiring gap reproduces the progress and still wedges
+
+`ZPP_LAZY_TICK=10000` with `ZPP_LAZY_TICK_SECONDS=45` - the gap stops
+being applied 45 seconds after the first withheld tick, so the owed tick
+drains and the level above stops waiting on an acknowledgement.
+
+**The gap works and the progress reproduces.** `0xd1` injected 5,062
+times against a baseline of ~734,000, and the stack is past
+`MakeGdtReadOnly` entirely:
+
+    MiTradeBootImagePage+0x204
+      MiCopyPage+0x346
+        VslCopyProtectedPage+0x83
+          VslpEnterIumSecureMode+0x3a8
+            HvlSwitchToVsmVtl1+0xab
+
+Boot-image page trading, the same forward region the first gap reached.
+Two runs now agree that the gap carries the boot past the
+`MakeGdtReadOnly` deadlock, which makes that the most reproducible
+positive result in this investigation.
+
+**And it still wedges.** 4 of 537 counters moving, all of them this
+VMM's own 1 ms poll, `vtl_protect_count` at 39,450.
+
+### What is not known, and the instrument is the reason
+
+Whether the expiry **fired** is unknown. `lazy_tick_withheld`,
+`lazy_tick_first_tsc` and `lazy_tick_after_expiry` resolve in the ELF
+but print nothing in delta mode, so the run cannot say whether it
+froze before 45 seconds or after the window closed. Those are opposite
+diagnoses: the first says try a shorter window, the second says the
+window is not the mechanism.
+
+**This is the third time in this session an intervention could not
+report whether it ran** - after `deliver_on_drop`'s reconciliation and
+`hold_clock_in_vtl1`. The members are added to the reader's offset
+list; what is missing is a print for them, and that is the next edit,
+before another boot rather than after it.
+
+### Where that leaves the gap
+
+It is the only thing that moves the boot, it moves it reproducibly, and
+the wedge that follows is understood but not yet separated from it. A
+shorter window is the obvious next value, and it is only worth spending
+a boot on once the counters print - otherwise the result is another
+number that cannot say whether it tested anything.

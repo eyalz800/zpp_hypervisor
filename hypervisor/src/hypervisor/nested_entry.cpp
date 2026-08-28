@@ -3246,7 +3246,38 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         if (cpu < max_cpus) {
             auto now = arch::x86_64::rdtsc();
             auto last = this->lazy_tick_last_tsc[cpu];
-            auto elapsed = (0 == last) || ((now - last) >= gap);
+
+            // The window, and it is the whole difference from every
+            // previous run of this switch. See
+            // `nested_vmx::lazy_tick_seconds`: the deadlock the gap
+            // prevents is entered ONCE, so the gap is needed only
+            // until the call that would miss its deadline has retired,
+            // and is harmful from then on - it is what leaves the
+            // level above waiting for an acknowledgement for ever.
+            //
+            // Expired means "behave as if the gap were zero": nothing
+            // is withheld, and anything already owed is delivered by
+            // the path below, which is reached because `elapsed` is
+            // forced true here.
+            auto expired = false;
+
+            if constexpr (0 != nested_vmx::lazy_tick_seconds) {
+                constexpr std::uint64_t ticks_per_second =
+                    nested_vmx::ticks_per_microsecond * 1000ull * 1000ull;
+                constexpr std::uint64_t window =
+                    nested_vmx::lazy_tick_seconds * ticks_per_second;
+
+                auto first = this->lazy_tick_first_tsc[cpu];
+
+                if ((0 != first) && ((now - first) >= window)) {
+                    expired = true;
+                    this->lazy_tick_after_expiry[cpu] =
+                        this->lazy_tick_after_expiry[cpu] + 1;
+                }
+            }
+
+            auto elapsed =
+                expired || (0 == last) || ((now - last) >= gap);
 
             if ((0 != (injection & interruption_valid)) &&
                 (clock_vector ==
@@ -3258,6 +3289,12 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     // triggered periodic timer means.
                     if (0 == this->lazy_tick_owed[cpu]) {
                         this->lazy_tick_owed[cpu] = injection;
+                    }
+
+                    // The window starts at the first withhold, not at
+                    // launch. See `lazy_tick_first_tsc`.
+                    if (0 == this->lazy_tick_first_tsc[cpu]) {
+                        this->lazy_tick_first_tsc[cpu] = now;
                     }
 
                     injection &= ~interruption_valid;
