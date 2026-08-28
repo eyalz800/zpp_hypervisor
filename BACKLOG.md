@@ -59001,3 +59001,54 @@ verified first-hand**: that `VslpEnterIumSecureMode` "has no case for
 4". That came from a comment in this tree, not from disassembly, and
 `ntkrnlmp.pdb` is now available - so the dispatch on the returned state
 byte can be read directly out of the guest and settled.
+
+## Verified first-hand: `VslpEnterIumSecureMode` really has no case for state 4
+
+This tree has asserted that for a long time on the strength of a comment.
+Now it is disassembled, from the running guest, with `ntkrnlmp.pdb`
+resolving the function and `pmemsave` pulling its bytes.
+
+Every immediate comparison in the whole function:
+
+    cmpb $0  x4      cmpb $3  x2
+    cmpb $1  x4      cmpb $5  x1
+    cmpb $2  x4      cmpb $6  x1
+                     cmpb $15 x1
+
+**No comparison against 4, anywhere.** So a returned state of 4 matches
+no case, falls through, and the request is re-issued unchanged - which is
+precisely the byte-identical re-entry measured at about fifty-five a
+second.
+
+### Which finally joins the two halves
+
+- VINA is asserted **correctly**, by the priority-checking gate, on
+  about a fifth of trust-level calls (21.4% against a 28.8% ceiling).
+- VTL1 answers a legitimate notification by yielding and returning
+  state 4.
+- Windows **cannot handle state 4** and re-issues.
+
+Nothing here is malfunctioning in isolation. The notification is right,
+the yield is right, and the re-issue is what the code says to do with an
+unhandled state.
+
+### And it sharpens the deadline statement, which was nearly right
+
+The account this file has carried is "the call must retire inside one
+1,743 us tick". That is close but not the mechanism. The real condition
+is narrower:
+
+**No interrupt may become *deliverable* to VTL0 while the call is in
+flight.** If one does, VINA fires - correctly - VTL1 yields with state
+4, and Windows cannot proceed. On hardware the call presumably completes
+before any interrupt becomes deliverable; under this VMM it does not.
+
+That explains why withholding a tick worked, why it worked with only
+eight or nine withholds, and why the window mattered rather than the
+count: it removed the *deliverable* interrupt from the one call that had
+to complete uninterrupted.
+
+**It also explains why the priority measurement looked contradictory.**
+The 28.8% of calls made below class 2 are exactly the calls at risk -
+those are the ones where a pending `0x2f` becomes deliverable mid-call.
+The 70.7% at class 2 are safe from `0x2f` and were never the problem.
