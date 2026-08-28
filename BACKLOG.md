@@ -59902,3 +59902,71 @@ that the sixteen-slot list also dropped. **A census with no overflow
 counter cannot report its own incompleteness** - the rule is already in
 CLAUDE.md and this is a fresh instance of it inside this tree's own
 tooling.
+
+## Hypercall 0x0076 is HvCallAddLogicalProcessor, and ZPP_CPUS=1 separates two failures
+
+Two results arrived together and each confirms the other.
+
+**Decompiled**: `0x0076` is **`HvCallAddLogicalProcessor`**. The sixteen
+bytes I read off the input page decode as `LpIndex = 1`, `ApicId = 1`,
+`ProximityDomainInfo{Id = 0, Flags = 0x80000001}` - the **second
+logical processor**. The page-frame run after them is residue from the
+preceding `HvCallDepositMemory` (0x48, a rep call), not input: the
+handler's input size is 0x10 and it reads only the first three fields.
+That is the documented order - deposit pages, then add the processor -
+so there is no contradiction.
+
+The handler allocates a processor structure and sends **INIT-SIPI-SIPI
+through xAPIC MMIO** (`ICR = 0xC500`, `0x8500`, `0x600|vector` twice,
+writing `[APIC+0x310]` then `[APIC+0x300]`) with rdtsc-calibrated
+stalls. It has a ~4 second bounded wait and **two unbounded spins**
+(`while state == 2`, `while state == 3`).
+
+**And it contains no reset, shutdown, triple-fault or bugcheck path** -
+searched across the handler and all 63 reachable callees. So hvix64 is
+not killing the machine; it succeeds at what it was asked, and the
+INIT/SIPI at a second processor goes somewhere this stack does not
+survive.
+
+**Measured**, and it is the cleanest experiment of the session:
+
+    ZPP_CPUS=1   ran 9+ minutes, VM status running, still running
+    default (8)  four boots, four resets, 90 s to 4 minutes
+
+and the single-processor boot reproduces the 74-minute guest exactly -
+`0xFE` completes, the `0x101` walk names frames `0x11aac9`/`0x11aaca`,
+the ring's newest entry is `0x00030002` with both arguments zero, and
+the last hypercall is `HvCallVtlReturn`. That is the VINA livelock, and
+it is now reproducible on demand rather than inherited from a boot
+somebody else started.
+
+### So there are two failures, not one, and they were being conflated
+
+- **`ZPP_CPUS=1`**: Windows never adds a second logical processor. The
+  guest survives indefinitely and livelocks in the VINA loop with secure
+  service `0x0003` outstanding. This is the failure every measurement in
+  this tree has been describing.
+- **default (8 processors)**: Windows calls `HvCallAddLogicalProcessor`
+  for LP1, hvix64 sends INIT-SIPI-SIPI, and the machine dies. The
+  32-slot census proves the difference is real and not timing - the
+  surviving boot never issues `0x0048` or `0x0076` at all, while every
+  dying one issues both.
+
+**Consequence for everything above.** Every multi-processor measurement
+in this session, including the whole `ZPP_SUPPRESS_VINA` comparison, was
+taken on a machine that was about to die of application-processor
+start-up. **Use `ZPP_CPUS=1` for any measurement of the trust-level
+livelock**, and treat the AP failure as a separate investigation with
+its own instrument - this VMM already keeps a start-up-IPI census
+(`ipi_init_seen`, `watched_apic_page`) that nothing has yet read for
+this failure.
+
+Two artefact corrections from the same work, both the agent's own:
+`hypercall_table.csv`'s `priv_flags` column was a parse bug that glued
+the output size to the flags, so entry 0x76 is input 0x10, **output
+0x38**, flags 0x3f - and Windows passing an output page is therefore
+correct and required. And `0x769b` in the hypercall census **is not a
+hypercall**: the table has 306 entries with a maximum code of 0x131, and
+`9b 76` is exactly what two adjacent one-byte records read as a single
+`u16` produce. Both `0x9b` and `0x76` are real codes in the same census,
+so that is a reader packing bug in this tree, not a guest call.
