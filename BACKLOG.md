@@ -61142,3 +61142,44 @@ injects it into our vCPU -> we take it as an external-interrupt exit ->
 we reflect it to Hyper-V -> Hyper-V delivers it to Windows' virtual
 APIC. Only 0xef traverses it, so device MSI-X is lost somewhere on that
 chain. That is the next thing to debug, and it is the functional block.
+
+## The NVMe admin queue works; the stall is I/O-queue-specific
+
+Read the NVMe admin queues from guest RAM (the working `readva` reader,
+after the raw `nc` echo confused an earlier attempt). ASQ `0x7df51000`,
+ACQ `0x7df52000`, both in guest RAM below 2 GB (the memory map confirms
+RAM `0x100000`-`0x7fffffff`).
+
+    admin CQ entry0   cid 24  phase 1  status 0 (success)  sqhd 1
+    admin CQ entry1   cid 25  phase 1  status 0 (success)  sqhd 0
+    admin SQ          opcode 0x82, cid 24 and 25
+
+**The admin queue is fully functional**: the controller consumes
+submissions (sqhd advancing), completes them successfully, and **DMAs
+the completions into guest RAM** where Windows reads them. So through the
+whole nesting - Windows-GPA -> Hyper-V EPT -> our shadow EPT ->
+QEMU-GPA -> IOMMU -> host - basic DMA, doorbell forwarding and completion
+posting all work. This **rules out** a general DMA or doorbell failure,
+and it rules out our diag doorbell-watch (diag=0, the watch is not armed
+- the setup returns early at `hypervisor.cpp:1472`).
+
+**The memory map is the other half.** `info mtree` shows the NVMe
+(`02:00.0`) BAR 0 mmap'd (passed straight through) only at
+`0x701110a110`-`0x701110bfff`; the register and doorbell region
+`0x7011108000`-`0x701110a10f` (CC/CSTS at +0x14/+0x1c, doorbells at
++0x1000) is **VFIO-trapped and emulated**. So Windows' doorbell writes
+take the trap-and-forward path through QEMU/VFIO - and the working admin
+queue proves that path functions for the admin doorbell.
+
+**So the stall is specific to the I/O queues**, which the storage stack
+creates at new guest-physical addresses with per-queue doorbells and the
+MSI-X vectors 0x50/0x51 that fired 34 times and stopped. The admin queue
+working narrows the KVM-review agent's three candidates: not a general
+DMA failure (#2 general), not a general doorbell failure, not our watch.
+What is left is an I/O-queue-specific version - the I/O CQ-head doorbell
+for queue 1 not reaching the controller, or the I/O queue's specific GPA
+mapping differing from the admin queue's. Finding and reading the I/O CQ
+(phase bits: full-unacked -> doorbell lost, empty -> not submitted) is
+the decisive next read; its address is in the CREATE_IO_CQ command that
+has scrolled out of the 2-entry admin SQ, so it must come from stornvme's
+device extension or a scan.
