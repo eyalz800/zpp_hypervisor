@@ -59524,3 +59524,80 @@ does not exist. Correct that entry's caveat rather than trusting it.
 The same difference confirms it from the normal-mode side: the
 protection census's `pfn 7,207` and `code0 21,174` are frozen while
 `calls` grows at ~12/s, which is the retry loop and nothing else.
+
+## ZPP_SUPPRESS_VINA, run again with the census that can see securekernel
+
+`13713c5` retired this switch on 2026-08-22 with "VINA is not the
+blocker". That was right, and it is now confirmed by an instrument that
+run did not have - the hot map printed fourteen rows and every
+secure-kernel address in it lives below the cut, so the earlier run
+could not see *where* VTL1 went when it was not notified. It can now.
+
+Single variable, verified in the binary's own manifest (`novina=1`) and
+on the ESP before boot:
+
+    VINA set at the VTL return          0        (control: 20,863)
+    SkpReturnFromNormalModeRaxSet+0x114 absent   (control: 19,671, climbing)
+    request bytes                       code 0 = 21,173, 100.0%, no code 4
+
+The suppression is **total**. And the freeze is identical:
+
+                        novina=1        novina=0
+    code-0 requests       21,173          21,174
+    page requests          7,207           7,207
+    boot age             4 minutes      44 minutes
+
+The secure memory manager stops at the same request either way, and it
+gets there in four minutes. So VINA is a symptom. The decompilation
+agent's account of *why* it fires - hvix64 `0x2ead04`,
+`if (*(int*)(VTL0+0xCF8) != 0) attention = 1`, priority-blind, with no
+store of zero found and `AutoReset` re-arming it each return - explains
+the 100% cleanly and is worth keeping, but it explains a symptom.
+
+**It also refutes the account this session was building.** VTL0 sits at
+TPR class 2 on 99.3% of entries, and hvix64's *other* gate
+(`0x2fd17c`) requires a strictly-greater class, so a TPR-timing
+explanation would suppress VINA 99% of the time rather than fire it.
+The measurement that would have distinguished them was proposed and not
+needed once the switch answered.
+
+Secondary, and settled twice: `ShvlpEnableVina` at RVA **0x94660**
+programs `HvRegisterVsmVinaControl` (0xd0005) with **0x740** - vector
+0x40, Enabled, AutoReset, AutoEoi. So `0x40` is VINA, which the tree
+already assumed in `nested_entry.cpp`'s `notification_vector` and had
+never checked against securekernel.
+
+### What VINA was masking: secure service 0xFE
+
+With the notification gone the live secure-call block shows the
+outstanding request instead of the yield. Block at guest-virtual
+`0xfffff8064d2bc280`, guest-physical `0x850e280`:
+
+    +0x00  0x0000000000fe0002     service number is the u16 at +2 -> 0xFE
+    +0x08  0xffffb582334880b0     a VTL0 kernel virtual address
+    +0x10  0x000000000012ba88     a page frame
+
+It is the newest ring entry and the live block, so it is **the
+outstanding call**. The two before it are service `0x101` naming frames
+`0x11aac9` and `0x11aaca` - the same neighbourhood `13713c5` flagged as
+`0x11aad0`-`0x11aad4` beside the note that "the four frames immediately
+below them were measured earlier as read-only in the composed extended
+page tables while our own tables grant write", and never followed up.
+That is now two independent measurements, six days apart, naming the
+same dozen physical frames.
+
+And 0xFE is **rare**. Over all 21,173 calls the request-word population
+is `0xf4` 48.0%, `0x101` 34.0% (one per page frame - this is the walk),
+`0xf3` 13.9%, then `0xd3`, `0xdb`, `0xe1`, `0xe4`, `0xd4`, `0x100`,
+`0xfb` in the tens and singles. **`0x00fe0002` does not appear in it at
+all.** The boot issues three services tens of thousands of times, issues
+0xFE once, and stops.
+
+So the question is no longer "why is VTL1 interrupted". It is **what
+secure service 0xFE waits on**, and whether it is the completion step of
+the 7,207-page walk or something that runs beside it. Handed to the
+decompilation agent with the dispatch-table disagreement stated: the
+byte index at RVA 0xf92ff and the dword table at 0xf9093 give
+0xfe -> index 0x84 -> body RVA 0x161fd by my arithmetic, but the same
+arithmetic gives 0xf4 -> 0x16c90 where the agent had 0x16c64, so one of
+us is off by one and the binary settles it, not the argument.
