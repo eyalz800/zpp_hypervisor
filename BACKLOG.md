@@ -57549,3 +57549,53 @@ retires, the owed tick drains, the level above is answered, and the gap
 is out of the way before it can do harm. The critical call happens
 early - `MakeGdtReadOnly` is in phase 1 - so the window wants to be
 seconds, not tens of seconds.
+
+## The gap knob has no setting that both helps and does not wedge
+
+With the verdict print working, a 5 second window says:
+
+    withheld 8   re-delivered 8   not yet interruptible 28
+    owed now 0x0
+    window STILL OPEN at this sample
+
+Three conclusions, and together they close this lever.
+
+**The wedge is not an undelivered tick.** `owed` is zero and
+re-delivered equals withheld: every tick that was held was handed over.
+So the account this file has carried - that the level above waits for
+an acknowledgement of a tick that never arrives - is **wrong**. Merely
+*delaying* eight ticks by ten milliseconds wedges it. What it cannot
+tolerate is the latency, not the loss.
+
+**A timed expiry cannot rescue it.** The window is evaluated in
+`build_vmcs02`, which runs on second-level entry, and the wedge stops
+second-level entries. So the expiry is never reached: it reported STILL
+OPEN at 45 seconds and again at 5. Any expiry measured in wall clock
+has the same defect, because the thing it is racing removes the clock
+that would fire it.
+
+**And the useful range is empty as far as it has been probed.** The gap
+must exceed about 1,743 us to keep a tick out of the critical call at
+all, and 2,500 us already wedges - measured, identically to 10,000 us,
+at 1,079 exits a second with 4 of 537 counters moving. So the knob is
+squeezed between too small to help and large enough to wedge, and no
+value tested is in between.
+
+### What is nevertheless established, and it is the useful part
+
+- **The gap is the cause of the progress**, not the poll:
+  `ZPP_POLL_L1` alone reproduces the baseline stall exactly.
+- **Eight or nine withholds are enough** to carry the boot past
+  `MakeGdtReadOnly`, which is only explicable if the deadlock is
+  entered once - and that is now the best-supported model here.
+- **The wedge is a latency intolerance in the level above**, not a
+  lost message. That is a different and more specific defect than
+  anything previously recorded, and it is what any future attempt has
+  to work around.
+
+The shape of an intervention that could still work follows from those
+three: hold **one** tick, across **one** identified call, and hand it
+over the moment that call retires rather than after a fixed period.
+Withholding by time - which is what this switch does at every value -
+cannot express that, because the quantity it keys on is not the one
+that matters.
