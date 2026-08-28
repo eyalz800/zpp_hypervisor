@@ -60007,3 +60007,57 @@ The refutation was in the same dump, three sections away.
 both arguments zero, never returning, while `pfn` stays at 7,207 and
 `code0` at 21,173 and the call count grows at 21-27/s - the resume loop.
 Everything else completed.
+
+## Two members recorded for months and never read, and the trap in reading them
+
+`exit_dispatch.cpp`'s `l1_vmcall_*` census and `nested_entry.cpp`'s
+`vtl1_resume_rip` ring were both being written on every relevant exit
+and **nothing in `scripts/` had ever read either**. Both are now in
+`rig-dump-state.py`.
+
+### The resume ring answers the question the request byte cannot
+
+The outstanding request says *what* is being asked. Only this says
+whether the answer is getting anywhere:
+
+    cpu 0 where VTL1 RESUMED, newest first
+      34,165 armed entries, last 64 shown, 1 distinct
+      0xfffff803672b0035  x64
+
+**One address across the whole window**, and it is the hypercall page
+(`base + 0x35`), not secure-kernel text - the return point inside
+`ShvlpVtlReturn`. So the secure kernel restarts from the same place
+every time and the outstanding service is not progressing. Printed
+**newest first, computed from the counter**, because CLAUDE.md records
+the same reader printing a ring in slot order and producing the same
+false lead twice five days apart.
+
+### And reading them nearly produced two more fictions
+
+**`read()` returns `None` for anything the bulk prefetch did not
+fetch, and `None or 0` is `0`.** A member that merely *resolves* from
+the ELF therefore prints as "never happened". Both new blocks did
+exactly this on their first run: the resume ring printed nothing at all,
+and the hypercall census printed **"the guest hypervisor never issued a
+vmcall to this VMM"** - a claim it had fetched no bytes to support. With
+the addresses queued explicitly the counter reads 4,270,350.
+
+**Then the corrected reading was mislabelled, which is worse.** That
+4,270,350 is *not* hypercalls. Thirteen instructions share the counter -
+`vmxon`, `vmxoff`, `vmclear`, `vmptrld`, `vmptrst`, `vmread`, `vmwrite`,
+`vmlaunch`, `vmresume`, `invept`, `invvpid`, `vmfunc`, `vmcall` - and
+`vmresume` alone is most of it. Only the *code list* is VMCALL-specific,
+because RCX is a hypercall code for VMCALL alone; `exit_dispatch.cpp`'s
+own comment says so and says filling the census from the others is what
+it was written to avoid.
+
+The code list is **empty**. So "the guest hypervisor made no hypercall
+of this VMM" is true after all - but it is true because a
+VMCALL-specific field is empty, not because a shared counter read zero,
+and the first version of this block would have printed the right answer
+for the wrong reason and then printed a wrong one the moment the fetch
+was fixed. The reader now says which is which.
+
+Same family as the `[l1-rip]` tag, the sixteen-slot hypercall list and
+the `interrupted_rip` census, all found today: **a number is not a
+measurement until you know which population it counts.**

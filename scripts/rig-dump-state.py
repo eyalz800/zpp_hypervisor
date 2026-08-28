@@ -6461,6 +6461,11 @@ def main():
                "l1_vmcall_count", "l1_vmcall_rcx", "l1_vmcall_rdx",
                "l1_vmcall_rax", "l1_vmcall_rip", "l1_vmcall_codes",
                "l1_vmcall_code_counts", "l1_vmcall_code_other",
+               # Where VTL1 resumes on each armed entry. Also recorded
+               # and never read: it is the only thing that says whether
+               # an outstanding secure service is progressing or
+               # restarting.
+               "vtl1_resume_rip", "vtl1_resume_count",
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
@@ -9328,17 +9333,37 @@ def main():
     # the list below is incomplete and must say so rather than read as
     # exhaustive.
     if 'l1_vmcall_count' in off:
+        # Queued explicitly. `read()` returns None for anything the bulk
+        # prefetch did not fetch, and None reads as "zero" through
+        # `or 0` - so a member that is merely *resolvable* prints as
+        # "never happened". That is how this block first reported "the
+        # guest hypervisor never issued a vmcall", which is a claim it
+        # had fetched no bytes to support.
+        for _n in ('l1_vmcall_count', 'l1_vmcall_rcx', 'l1_vmcall_rdx',
+                   'l1_vmcall_rax', 'l1_vmcall_rip',
+                   'l1_vmcall_code_other'):
+            monitor.queue(instance + off[_n], args.cpus)
+        words.update(monitor.run())
         rows = []
         for cpu in range(args.cpus):
             total = read('l1_vmcall_count', cpu) or 0
             if total:
                 rows.append((cpu, total))
         if not rows:
-            print("\nhypercalls from the level above: none - the guest "
-                  "hypervisor never issued a vmcall to this VMM")
+            print("\nVMX-instruction exits from the level above: none")
         for cpu, total in rows:
-            print(f"\ncpu {cpu} hypercalls from the LEVEL ABOVE "
-                  f"(the guest hypervisor): {total:,}")
+            # **Not hypercalls.** Thirteen instructions share this
+            # counter - vmxon/vmxoff/vmclear/vmptrld/vmptrst/vmread/
+            # vmwrite/vmlaunch/vmresume/invept/invvpid/vmfunc/vmcall -
+            # and vmresume alone is most of it. Only the code list below
+            # is VMCALL-specific, because only for VMCALL is RCX a
+            # hypercall code; for VMREAD it is a field encoding and for
+            # VMPTRLD an operand address, and censusing those as call
+            # codes is what the comment in exit_dispatch.cpp warns about.
+            # So an EMPTY code list is the meaningful reading: the guest
+            # hypervisor issued no VMCALL at all.
+            print(f"\ncpu {cpu} VMX-instruction exits from the LEVEL "
+                  f"ABOVE (all thirteen instructions): {total:,}")
             print(f"  last one: rip 0x{read('l1_vmcall_rip', cpu):x} "
                   f"rcx 0x{read('l1_vmcall_rcx', cpu):x} "
                   f"rdx 0x{read('l1_vmcall_rdx', cpu):x} "
@@ -9359,9 +9384,55 @@ def main():
             if other:
                 print(f"    beyond 16 distinct codes: {other:,}"
                       "   <- the list above is NOT complete")
+            elif not any(c for c, _ in seen):
+                print("    no VMCALL from the level above - the count "
+                      "above is other VMX instructions, and the guest "
+                      "hypervisor made no hypercall of this VMM")
             else:
                 print("    (16 slots, none overflowed - the list is "
-                      "every code this processor was asked for)")
+                      "every VMCALL code this processor was asked for)")
+
+    # Where the secure kernel resumes on each entry armed for it. The
+    # outstanding request says WHAT is being asked; only this says
+    # whether the answer is getting anywhere.
+    #
+    # **Newest first**, computed from the counter, because this ring is
+    # circular and CLAUDE.md records the same reader printing slots 0..7
+    # in order and producing the same false lead twice five days apart.
+    if 'vtl1_resume_rip' in off:
+        CAP = 64
+        monitor.queue(instance + off['vtl1_resume_count'], args.cpus)
+        words.update(monitor.run())
+        for cpu in range(args.cpus):
+            count = read('vtl1_resume_count', cpu)
+            if count is None:
+                print(f"\ncpu {cpu} VTL1 resume ring: NOT READ - the "
+                      "counter was never fetched, which is not the same "
+                      "as zero")
+                continue
+            if not count:
+                continue
+            base = instance + off['vtl1_resume_rip'] + cpu * CAP * 8
+            for i in range(CAP):
+                monitor.queue(base + 8 * i, 1)
+            got = monitor.run()
+            live = min(count, CAP)
+            rips = [got.get(base + 8 * ((count - 1 - k) % CAP), 0)
+                    for k in range(live)]
+            distinct = len(set(rips))
+            print(f"\ncpu {cpu} where VTL1 RESUMED, newest first "
+                  f"({count:,} armed entries, last {live} shown, "
+                  f"{distinct} distinct)")
+            for r in rips[:16]:
+                print(f"    0x{r:016x}")
+            if distinct == 1:
+                print("    -> ONE address across the whole window: the "
+                      "secure kernel restarts from the same place every "
+                      "time and the outstanding service is NOT "
+                      "progressing")
+            else:
+                print(f"    -> {distinct} distinct addresses: the resume "
+                      "point moves, so something is advancing")
 
     # What this VMM saw of the guest's own interrupt command register,
     # and what it did about each start-up sequence.
