@@ -57751,3 +57751,66 @@ which is above this VMM and not visible from it, the same wall the
 The forward result stands on its own and is worth keeping: **Windows can
 be carried past `MakeGdtReadOnly` from here.** What cannot be done from
 here is to survive having done it.
+
+## The wedge, at instruction level: Hyper-V is halted, not spinning
+
+The blocker recorded twice in this file - "what the level above waits on
+is above this VMM and not visible from it" - **is false, and it was
+always false.** Hyper-V is our guest. Its memory is readable and its
+image is a PE like any other.
+
+Walking L1's own address space (`CR3` from `info registers` while
+wedged, `0x101ab7000`) and scanning down from its instruction pointer
+found `MZ` at **`0xfffff832f4000000`**, 934 pages below. Its debug
+directory names **`hvix64.pdb`**, GUID `D9AF716B...`. Microsoft does not
+publish that PDB - the download returns zero bytes - so it cannot be
+symbolised, and `guest-securekernel-syms.py` refused to guess rather
+than inventing a name.
+
+Symbols were not needed. The instructions at the wedge address say it
+outright:
+
+    cli
+    cmpl  $0, %gs:832        ; a work count in its own processor block
+    jg    <has work>
+    sti
+    hlt                      ; <-- HALTED
+    jmp   <back>
+
+**It is halted, waiting for an interrupt.** Not spinning.
+
+### What that corrects, and what it explains
+
+An earlier entry read `100%` of a core in system time and concluded the
+processor was spinning in Hyper-V's own code. The instruction is `hlt`.
+Whatever that CPU figure was measuring, it was not this loop executing.
+
+And it explains the wedge completely, including why every repair failed:
+
+- **A halted processor takes no VM exits**, so `exit_total` freezes -
+  which is exactly the signature, 0 of 537 counters with the totals
+  intact.
+- **The owed tick is re-delivered in `build_vmcs02`**, which runs on a
+  *second-level entry*. While the first level is halted there are no
+  second-level entries, so the re-delivery can never run.
+- **The interrupt it is halted waiting for is the tick being held.**
+  The wake-up and the withheld thing are the same object, which is the
+  cycle in its most literal form.
+
+The preemption-timer work did produce exits - 1,079 a second - and could
+not help, for the reason now visible: those exits return to a halted
+first level, and nothing in the delivery path runs outside a
+second-level entry.
+
+### The repair this implies, and it is small
+
+Deliver an owed tick when the **first level halts**, not only on the
+next second-level entry. The activity state is already in the VMCS and
+already censused here (`guest_activity_state`, and the `activity`
+column in the processor table), so the condition is available; what is
+missing is a delivery path that does not require entering the second
+level.
+
+That is a different edit from anything tried: all six previous attempts
+changed *when a tick is withheld*. This changes *where it can be given
+back*.
