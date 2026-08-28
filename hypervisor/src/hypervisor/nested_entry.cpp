@@ -5493,12 +5493,45 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // instruction that never ran.
         shadow.write(field::guest_linear_address,
                      vmcs.read(field::guest_linear_address));
-        shadow.write(field::guest_physical_address,
-                     vmcs.read(field::guest_physical_address));
+
+        // SDM 27.2.1: `guest_physical_address` receives an address only
+        // for an EPT violation, an EPT misconfiguration or an
+        // SPP-related event; "For all other VM exits, the field is
+        // undefined." KVM writes it only in `nested_ept_inject_page_fault`
+        // (nested.c:460) and never on the normal exit path
+        // (`sync_vmcs02_to_vmcs12`), so a non-EPT reflection that copied
+        // hardware's value would hand the guest hypervisor a stale
+        // address unrelated to the exit. Write it only where it means
+        // something; leave vmcs12's field untouched otherwise, which is
+        // what the architecture and KVM both do. Also drops one VMREAD
+        // on the ~90% of exits (with eager EPT) that are not EPT faults.
+        switch (reason.basic()) {
+        case basic_reason::ept_violation:
+        case basic_reason::ept_misconfiguration:
+            shadow.write(field::guest_physical_address,
+                         vmcs.read(field::guest_physical_address));
+            break;
+        default:
+            break;
+        }
+
+        auto interruption_information =
+            vmcs.read(field::vm_exit_interruption_information);
         shadow.write(field::vm_exit_interruption_information,
-                     vmcs.read(field::vm_exit_interruption_information));
-        shadow.write(field::vm_exit_interruption_error_code,
-                     vmcs.read(field::vm_exit_interruption_error_code));
+                     interruption_information);
+
+        // SDM 27.2.2: the error code is defined only when the
+        // interruption-information field's valid bit (31) and
+        // error-code-valid bit (11) are both set; "For other VM exits,
+        // the value of this field is undefined." Read it only then - the
+        // bits are already in hand.
+        constexpr std::uint64_t valid_bit = 1ull << 31;
+        constexpr std::uint64_t error_code_valid = 1ull << 11;
+        if ((valid_bit | error_code_valid) ==
+            (interruption_information & (valid_bit | error_code_valid))) {
+            shadow.write(field::vm_exit_interruption_error_code,
+                         vmcs.read(field::vm_exit_interruption_error_code));
+        }
         // Only where the SDM defines it. See
         // `nested_vmx::honest_exit_length`: measured at 3,193
         // reflections in one boot carrying a non-zero length for a
@@ -5527,10 +5560,23 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // account. The rule that a double or triple fault is never
         // reported as occurring during delivery is the processor's to
         // apply, and it applied it.
+        auto idt_vectoring_information =
+            vmcs.read(field::idt_vectoring_information_field);
         shadow.write(field::idt_vectoring_information_field,
-                     vmcs.read(field::idt_vectoring_information_field));
-        shadow.write(field::idt_vectoring_error_code,
-                     vmcs.read(field::idt_vectoring_error_code));
+                     idt_vectoring_information);
+
+        // SDM 27.2.4: the IDT-vectoring error code is defined only when
+        // that field's valid bit (31) and error-code-valid bit (11) are
+        // both set; undefined otherwise. Same gate as the exit
+        // interruption error code above, on the word already read.
+        constexpr std::uint64_t idt_valid_bit = 1ull << 31;
+        constexpr std::uint64_t idt_error_code_valid = 1ull << 11;
+        if ((idt_valid_bit | idt_error_code_valid) ==
+            (idt_vectoring_information &
+             (idt_valid_bit | idt_error_code_valid))) {
+            shadow.write(field::idt_vectoring_error_code,
+                         vmcs.read(field::idt_vectoring_error_code));
+        }
 
         // SDM 30.2: the valid bit of the VM-entry interruption-information
         // field is cleared on every VM exit. Emulated rather than read
