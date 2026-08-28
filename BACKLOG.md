@@ -59836,3 +59836,69 @@ VTL1 resuming at `SkpReturnFromNormalModeRaxSet`, executing `sti` at
 `0xd954b` - with `SkpReturnFromNormalModeRaxSet+0x114` present in both
 the injected and the *quiet* census, so it is where the guest is and not
 where injection puts it.
+
+## The guest resets on every boot, and the last thing it does is hypercall 0x0076
+
+Four fresh boots, four resets, ninety seconds to four minutes, on both
+`novina=0` and `novina=1`. The 74-minute guest measured at the start of
+this session has not been reproduced once. **Every cross-build
+comparison in the entries above is therefore comparing two boots that
+differ in something other than the build**, and the claims drawn from
+them are void; only within-boot measurements survive.
+
+Three instruments say the reset is orderly rather than a fault:
+`KiBugCheckActive` 0 and all five `KiBugCheckData` words 0, read by
+walking Windows' own cr3 with the VM stopped; no write to any
+crash-report MSR; and no unhandled exit or entry failure in this VMM.
+
+**The last event of every one of them is hypercall `0x0076`, issued
+once.** From the second level, slow form:
+
+    rcx 0x76   rdx 0x10b000 (input page)   r8 0x10c000 (output page)
+
+and the exit ring's final four entries are an EPT violation at
+`HvlpReleaseHypercallPage+0x16` (phys 0x10b010), one at
+`ExFreePoolWithTag+0x3f3`, one at phys 0x10c000, then the `vmcall`.
+Nothing follows it.
+
+Both pages read from the monitor with the VM stopped:
+
+    0x10b000  0x0000000100000001  0x8000000100000000
+    0x10b010  0x000000000010b000  0x0000000000139402
+    0x10b020  0x0000000000139403  0x0000000000139404
+    0x10b030  0x0000000000139405  0x0000000000139406
+    0x10c000  0xfffff7c6c0008000  0x0000000000000000   stale - never written
+
+A two-quadword header and a contiguous run of guest page frames, and an
+output page the hypervisor never filled in. The VTL0 stack beside it is
+`KeStartAllProcessors -> HvlStartBootLogicalProcessors -> HvlpDepositPages
+-> HvlpAcquireHypercallPage -> HvcallInitiateHypercall`.
+
+### Two instrument defects found on the way, both of the documented kind
+
+**The `[l1-rip]` tag in the exit ring is a display heuristic, not
+evidence.** That final `vmcall` is tagged `[l1-rip]` with hvix64's own
+instruction pointer, and I read it as "Hyper-V made a hypercall of us
+and we refused it with HV_STATUS_INVALID_HYPERCALL_CODE" - which would
+have been the "answered part of an interface" failure this tree records
+everywhere. It is wrong. `exit_dispatch.cpp` has kept an
+`l1_vmcall_count` for months and **it reads zero on every processor**:
+the guest hypervisor has never issued a `vmcall` to this VMM. A
+purpose-built counter beat a formatting tag, which is the same lesson as
+the RDX census that reported 99.8% repetition of a sentinel.
+
+That census had never been read out by anything. `rig-dump-state.py`
+now prints it, and prints `beyond 16 distinct codes` beside it so it
+cannot be read as exhaustive when it is not.
+
+**And the second-level hypercall list I first read was truncated
+without saying so.** `l2_hypercall_codes` has sixteen slots, all sixteen
+were occupied, and `0x0076` is not among them - so the code that ends
+every boot was invisible in the list a reader naturally consults. The
+32-slot per-processor census beside it *does* carry an overflow counter,
+reported `beyond 32 distinct codes 0 <- census complete`, and shows
+`0x0076 total 1` along with `0x0048`, `0x0052`, `0x006f` and `0x009b`
+that the sixteen-slot list also dropped. **A census with no overflow
+counter cannot report its own incompleteness** - the rule is already in
+CLAUDE.md and this is a fresh instance of it inside this tree's own
+tooling.

@@ -6455,6 +6455,12 @@ def main():
                "running_l2", "events_requeued", "events_deferred",
                "pending_event", "unhandled_exit", "ap_fault",
                "vm_entry_failure",
+               # Recorded by exit_dispatch.cpp since the nesting work and
+               # never read out. The exit ring of four consecutive resets
+               # ends on one of these.
+               "l1_vmcall_count", "l1_vmcall_rcx", "l1_vmcall_rdx",
+               "l1_vmcall_rax", "l1_vmcall_rip", "l1_vmcall_codes",
+               "l1_vmcall_code_counts", "l1_vmcall_code_other",
                "exit_reason_counts",
                "shadow_ept_builds", "shadow_ept_cache_hits",
                "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
@@ -9305,6 +9311,57 @@ def main():
               f"ar 0x{read('vm_entry_failure', 13):x}")
     elif read('vm_entry_failure', 1) is not None:
         print("vm entry failure: never - no entry was refused")
+
+    # Hypercalls the GUEST HYPERVISOR made of us, which is a different
+    # population from the 91,976 the second level makes and was recorded
+    # by `exit_dispatch.cpp` for months without anything reading it.
+    #
+    # It matters because of what the answer is. Every one of these is
+    # refused with HV_STATUS_INVALID_HYPERCALL_CODE, and the exit ring
+    # of four consecutive resets ends on exactly one of them - a single
+    # `vmcall` at hvix64's own rip, code 0x0076, immediately before the
+    # machine resets. Against 91,975 second-level vmcalls tagged L2 in
+    # the same ring, that one is not noise.
+    #
+    # `codes`/`counts` are parallel arrays of 16 slots; a code past the
+    # sixteenth distinct one lands in `other`, so a non-zero `other` means
+    # the list below is incomplete and must say so rather than read as
+    # exhaustive.
+    if 'l1_vmcall_count' in off:
+        rows = []
+        for cpu in range(args.cpus):
+            total = read('l1_vmcall_count', cpu) or 0
+            if total:
+                rows.append((cpu, total))
+        if not rows:
+            print("\nhypercalls from the level above: none - the guest "
+                  "hypervisor never issued a vmcall to this VMM")
+        for cpu, total in rows:
+            print(f"\ncpu {cpu} hypercalls from the LEVEL ABOVE "
+                  f"(the guest hypervisor): {total:,}")
+            print(f"  last one: rip 0x{read('l1_vmcall_rip', cpu):x} "
+                  f"rcx 0x{read('l1_vmcall_rcx', cpu):x} "
+                  f"rdx 0x{read('l1_vmcall_rdx', cpu):x} "
+                  f"rax 0x{read('l1_vmcall_rax', cpu):x}")
+            base = instance + off['l1_vmcall_codes'] + cpu * 16 * 8
+            cbase = instance + off['l1_vmcall_code_counts'] + cpu * 16 * 8
+            for i in range(16):
+                monitor.queue(base + 8 * i, 1)
+                monitor.queue(cbase + 8 * i, 1)
+            got = monitor.run()
+            seen = [(got.get(cbase + 8 * i, 0), got.get(base + 8 * i, 0))
+                    for i in range(16)]
+            for count, code in sorted(seen, reverse=True):
+                if count:
+                    print(f"    code 0x{code:04x}  {count:>8,}"
+                          "   answered HV_STATUS_INVALID_HYPERCALL_CODE")
+            other = read('l1_vmcall_code_other', cpu) or 0
+            if other:
+                print(f"    beyond 16 distinct codes: {other:,}"
+                      "   <- the list above is NOT complete")
+            else:
+                print("    (16 slots, none overflowed - the list is "
+                      "every code this processor was asked for)")
 
     # What this VMM saw of the guest's own interrupt command register,
     # and what it did about each start-up sequence.
