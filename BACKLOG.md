@@ -58444,3 +58444,37 @@ register - so what it is waiting for is a guest-side condition, and the
 guest is Windows, whose state this tree can read completely. Every other
 possibility - our stacks, our IDT, our APIC mode, our start-up path -
 has now been read and eliminated.
+
+### Whose code the application processor is running is NOT settled
+
+Two entries above called it firmware's `MpInitLib` loop. The next
+withdrew that and called it Windows' own bring-up. **Neither was
+measured, and the second was reasoning, not evidence.** Recorded as
+unsettled rather than asserted a third time.
+
+What is actually known about it:
+
+    rdmsr  cs=0x0038  rip=0x7ef50775   detail=0x1b
+    cpuid  cs=0x0038  rip=0x7ef5fbd7
+
+The two instruction pointers are **0xf462 apart**, so this is *not* a
+two-instruction loop - it is two call sites in different functions,
+reached alternately by something larger. The earlier description of it
+as a tight `rdmsr`/`cpuid` spin was wrong about its shape as well as its
+owner.
+
+`0x7ef5xxxx` is equally consistent with a UEFI DXE region and with early
+guest code, and the CS base was never read, so even the linear address
+is assumed rather than known.
+
+**One read settles it**, and it is the same technique already used twice
+in this session: walk the guest's page tables from the logged
+`cr3 0x1ae002`, scan down from `0x7ef50000` for `MZ`, and take the PE
+debug directory. That names the module outright instead of inferring it
+from the address range.
+
+Until that is done, the only defensible statements about the
+two-processor failure are the ones that were measured: the processor is
+started at the guest's own vector `0x2` with correct state, it is
+active, it takes exits, it never enters a second-level guest, and the
+machine resets. Everything about *what it is running* is inference.
