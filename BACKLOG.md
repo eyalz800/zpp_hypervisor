@@ -57864,3 +57864,56 @@ interruption field, which this VMM has never done and which
 `force_dispatch_once` is a cautionary precedent for. That is a real
 design decision rather than another knob, and it is where this should
 stop until it is taken deliberately.
+
+## The stuck resource, named: an unconsumed timer message in VTL1
+
+The loose end that blocked the injection idea is closed, and by a read
+rather than a guess.
+
+    VTL1 SIMP slot 3        healthy   0x80000010 -> 0x00000000  consumed
+                            wedged    0x80000010 -> 0x80000010  NOT consumed
+
+`0x80000010` is `HvMessageTypeTimerExpired`. In a healthy boot the
+secure kernel consumes it between two samples two seconds apart. In the
+wedged boot it is **the same value in both samples**: the message is
+sitting in the slot and nobody has taken it.
+
+A synthetic interrupt controller slot is a one-message mailbox - the
+recipient clears the type and writes end-of-message, and the sender
+posts nothing more until it does. So one unconsumed message stops the
+timer stream at its source.
+
+### Which closes the cycle with nothing left inferred
+
+    tick withheld
+      -> VTL1 is not scheduled and does not consume its timer message
+        -> the level above cannot post the next one
+          -> it has no work
+            -> it halts at sti/hlt
+              -> nothing runs, so the message stays unconsumed
+
+Every arrow is now measured: the withhold count, the unconsumed slot,
+the halted instruction, the frozen exit count, and the poll on
+`gs:832` finding nothing.
+
+### And it explains the observation that refuted the earlier account
+
+`withheld 6, re-delivered 6, owed 0` was read here as evidence *against*
+the message-pairing story, since every tick was handed back. It is not.
+The ticks were returned **to VTL0**, which is where the injection is
+staged. The message that is stuck belongs to **VTL1**, a different trust
+level with a different SIMP page, and returning VTL0's interrupt does
+nothing for it. The two are separate objects and were being counted as
+one.
+
+That also retires the injection idea in its guessed form. The thing that
+needs to happen is not "wake the level above with some vector"; it is
+"let VTL1 run once more so it consumes slot 3". Which vector Hyper-V
+waits on stops mattering.
+
+### What this makes checkable next
+
+VTL1 runs when VTL0 calls into it. So the question is why VTL0 stops
+calling - and VTL0 is Windows, whose state this tree can already read in
+full. That is a different and much better lit place to look than the
+first level's unpublished internals.
