@@ -60282,3 +60282,51 @@ So the sequence of stalls this investigation has walked through is now:
     service 0x0023   outstanding, once, never returns   <- HERE
 
 Each one was invisible until the one before it was removed.
+
+## 155 modules. Windows now loads its whole driver set
+
+The `novina=1, eagerept=1, ZPP_CPUS=1` run got the guest through driver
+initialisation. `scripts/guest-modules.py` against kernel base
+`0xfffff806b9a00000`:
+
+    modules loaded: 155
+
+against **36** in every boot this investigation has ever recorded, and
+the list is the real one - `Ntfs.sys`, `tcpip.sys`, `ndis.sys`,
+`NETIO.SYS`, `disk.sys`, `nvmedisk.sys`, `CLASSPNP.SYS`, `volsnap.sys`,
+`volume.sys`, `fvevol.sys`, `WdFilter.sys`, `mup.sys`, `ksecpkg.sys`,
+`fwpkclnt.sys`, `Wof.sys`, `fileinfo.sys`. The storage stack, the
+network stack and the filter manager are all resident.
+
+And Windows is **scheduling**, not spinning. The sampled stack is
+
+    PspSystemThreadStartup -> KxStartSystemThread -> KiDpcWatchdog
+      -> KiExecuteDpc -> KeWaitForGate+0xee -> KiCommitThreadWait+0x39d
+        -> KiSwapThread+0x795 -> KiCommitRescheduleContextEntry+0x561
+
+an ordinary system thread waiting on a gate with the scheduler swapping
+threads - not the `Phase1Initialization -> MakeGdtReadOnly` VTL-call
+chain this investigation has been staring at since it began.
+
+**Service `0x23` is not a stall.** The decompilation names it
+`VslExchangeEntropy` - the VTL0/VTL1 entropy exchange, called once,
+straight-line, with no loop, lock, wait object or normal-mode callback
+inside securekernel. `block+0x10` is a **64-byte in/out entropy
+buffer**, so the `0xaa0a53b46a9ad575` I reported as a suspicious
+argument is simply random data, and `block+0x08` is never read by that
+case at all - its being zero carries no information. Everything that
+could block lives in `cng.sys`, which is not in the dump. The frozen
+`pfn`/`code0` counters are frozen because the **page walk finished**,
+not because anything is stuck.
+
+**The remaining failure is the DPC watchdog, and only that.**
+Bugcheck `0x133` again, `param1 = 1` again - cumulative time at
+DISPATCH_LEVEL. Eager EPT moved it from eleven minutes to past
+twenty-two but does not beat it.
+
+So the boot is no longer blocked on anything functional. It is blocked
+on **cost**, and the exit mix says where: `vmresume` 43.7%, `wrmsr`
+30.1%, `int-window` 10.1%, `ept-violation` 9.8%. The first is the
+nested reflection tax - every second-level exit costs a reflection *and*
+the `vmresume` that comes back - and the second is the synthetic clock
+loop's EOI, ICR and STIMER writes, each of which is itself reflected.
