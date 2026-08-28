@@ -60374,3 +60374,61 @@ cost.
 `param3` of both bugchecks, `base + 0xfc53c8`) holds the captured
 offending stack. Reading it at the moment of bugcheck names the DPC that
 ran long, which is the difference between the two cases above.
+
+## Turning off per-exit instrumentation triples survival, and two agent passes land
+
+**The fast build.** With `ZPP_CENSUS_EXITS`, `ZPP_COUNT_DROPS`,
+`ZPP_TRACE_VTL`, `ZPP_VTL_CAPTURE` and `ZPP_PROBE_APS` all OFF (on top of
+`novina=1, eagerept=1, ZPP_CPUS=1`), the guest ran **past thirty-five
+minutes without bugchecking**, against eleven for the first progressing
+run and twenty-two with eager EPT alone. The phase tree had measured
+instrumentation at ~10% of the 381,747 cycles per round trip
+(`record_exit` 19,390, `entry census` 8,316, `reflect: exit ring`
+7,970), and removing it bought exactly the headroom that arithmetic
+predicts. **This is the first lever that is pure cost and changes how
+far the boot gets.**
+
+**Where the boot actually is**: 155 drivers loaded - the real storage,
+network and filter stack - but only **three processes** (System, Secure
+System, Registry). So Windows is at the end of kernel driver
+initialisation, before `smss.exe`; the heavy DPC phase is driver init,
+and user mode has not started. Further than this investigation has ever
+been, and still a long way from a login screen.
+
+**KVM review, first pass** (`.references/kvm-review/notes.md`). Nine
+divergences from KVM's nested implementation, ranked. The two most
+dangerous are **confirmed latent on this boot**, which is itself the
+useful result:
+
+- NMI reflection: we take any NMI at L0 and write it into vmcs02 without
+  consulting vmcs12's pin controls, though Hyper-V sets NMI-exiting
+  (`pin 0x1e`, bit 3). Counter `guest_nmis_reinjected` reads **0**, so it
+  is not firing here.
+- Held-event loss across an L0-handled exit: `pending_event_lost` reads
+  **0** on every cpu. Not firing.
+- The one that matters for the *other* failure: reasons 3/4 (INIT/SIPI)
+  taken while `running_l2` are reflected to Hyper-V with no L0
+  arbitration, bypassing `emulate_init_signal`. That is exactly the
+  eight-processor `HvCallAddLogicalProcessor` path, and there is no
+  `running_l2`-qualified counter for it yet - the review's concrete
+  suggestion is to add one before the next multiprocessor boot.
+- Cleared as matching KVM/SDM, checked line by line: the MSR-bitmap
+  merge, the I/O-bitmap merge, CR-access reflection, page-fault
+  reflection (ours is *more* faithful than KVM's), control validation
+  against the narrowed capability MSRs, TSC offset/multiplier,
+  `load_l1_host_state`, and the virtual-APIC page validation. That
+  narrows where a functional bug can still hide.
+
+**Hyper-V decompilation, first full pass**: all 5,182 hvix64 functions
+decompiled to `.references/hyperv/decompiled_hv/` with an RVA index, the
+root VMLAUNCH loop (`0x3a8000`) and exit dispatcher (`0x35e1b0`)
+identified, `hypercall_table.csv` parse bugs fixed and validated across
+all 306 entries, and a 48,896-symbol `ntkrnlmp_symbols.csv` verified
+against six known RVAs. For the watchdog it needs the ntoskrnl **binary**
+- the tree has only the PDB - and located the counter as KPRCB fields:
+`DpcWatchdogCount` at KPRCB+0x83AC, limit at KPRCB+0x83A8. It flagged
+`KiAccumulateTicksFromCycles` (RVA 0x3cd5e0) as evidence the watchdog is
+**cycle-derived**, which if true means delivering fewer clock interrupts
+does not move it - the count tracks the cycle counter, not tick
+delivery. That points back at raw exit cost as the only lever, which is
+what the fast-build result independently shows.
