@@ -58024,3 +58024,57 @@ touched.
 **Recorded as reopened, not as solved.** The route was closed on a
 number that assumed its own conclusion, and it should not stay closed
 for that reason.
+
+## The VMCLEAR question, answered - and the trim is 2% against 27% needed
+
+Checked in the SDM rather than guessed, as the previous entry asked.
+
+SDM 27.10 (`.references/sdm.txt:200438`): *"In VMX root operation, both
+types of VMCSs can be accessed with the VMREAD and VMWRITE
+instructions."* And 27.11.1: `VMCLEAR` is required before modifying the
+**shadow-VMCS indicator**, and to migrate a VMCS between logical
+processors. **Neither applies to publishing fields.** So the `VMCLEAR`
+in `copy_vmcs12_to_shadow` is probably removable, and possibly a
+`VMPTRLD` with it.
+
+**And it does not matter, which is the finding.** Those two are 3,949
+and 5,204 cycles of a 420,088-cycle round trip. The whole available trim
+is about **2%**, against the **27%** the deadline needs.
+
+That is the second time in this investigation a large absolute number
+has turned out to be a small share - after `map_window_at`'s 45.9
+billion cycles, which is 1.5% of the handler. Both were found by
+dividing by the run before optimising, and both would have been days of
+work for nothing.
+
+### What the phase tree says the 27% would actually have to come from
+
+    save_l2_state         9.7%
+    load_l1_host_state    9.1%
+    exit information      6.2%
+    copy_vmcs12_to_shadow 5.3%   (of which ~2% is removable)
+
+Reaching 27% means removing nearly all of `reflect_l2_exit`, and those
+first three are the VMCS traffic that *constitutes* reflecting an exit
+to the level above. They are not overhead around the work; they are the
+work.
+
+**So the speed route needs a structural change - reflecting fewer exits,
+or reflecting them without copying this much state - not a trim.** That
+is a different and much larger piece of work than the previous entry
+implied when it reopened the route, and it should be stated at that size
+before anyone starts it.
+
+### Where this leaves the investigation, honestly
+
+- The tick is not the lever: three independent selectors show the
+  helpful withhold and the harmful withhold are the same event.
+- The deadline is the lever, needs about 20% of wall clock, and the
+  cheap trims total about 2%.
+- The remaining 25% is inherent to how this VMM reflects exits, so
+  closing it is a design change to the nested-entry path rather than an
+  optimisation of it.
+
+That is a real answer to "what would it take", arrived at by
+measurement, and it is the first time this file has been able to state
+one.
