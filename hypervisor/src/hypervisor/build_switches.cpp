@@ -172,6 +172,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::poll_on_halt),
         ' ', 'v', 't', 'l', '1', 'o', 'w', 'e', '=',
         digit(nested_vmx::keep_tick_while_vtl1_owes),
+        ' ', 'i', 'p', 'i', 'v', 't', 'l', '1', '=',
+        digit(nested_vmx::hold_self_ipi_in_vtl1),
         // Seven digits, because the site that consumes this refuses any
         // value at or above 10,000,000 as an absolute deadline rather
         // than a period, so every legal setting fits and none can be

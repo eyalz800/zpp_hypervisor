@@ -170,6 +170,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+option(ZPP_HOLD_SELF_IPI_IN_VTL1
+    "Swallow a self-directed, currently-undeliverable interrupt-command write ONLY while the secure kernel (VTL1) is running, and let it through everywhere else. Derived from a verified mechanism rather than guessed: VINA is asserted correctly by Hyper-V's priority-checking gate, VTL1 yields with secure-call state 4, and ntoskrnl's VslpEnterIumSecureMode - disassembled from the live guest - has no case for 4 (it compares 0,1,2,3,5,6,15 and nothing else), so it re-issues for ever. The condition to preserve is therefore that no interrupt become deliverable to VTL0 while a trust-level call is in flight. Safe to drop because the guest re-requests this vector constantly - 700,852 times against 8,142 deliveries in one run. OFF by default. See BACKLOG.md."
+    OFF)
+
 option(ZPP_KEEP_TICK_WHILE_VTL1_OWES
     "Refuse to withhold a clock tick while the SECURE kernel still has an unconsumed synthetic message. Measured: in the wedged state VTL1's SIMP slot 3 holds HvMessageTypeTimerExpired unchanged across samples, where a healthy boot clears it - and a synthetic-interrupt slot is a one-message mailbox, so one unconsumed message stops the level above posting any more, which is why it ends with no work and halts. This guard reads that slot before withholding and passes the tick through when it is occupied. OFF by default. See BACKLOG.md."
     OFF)
@@ -446,6 +450,7 @@ ExternalProject_Add(hypervisor
         -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_POLL_ON_HALT=${ZPP_POLL_ON_HALT}
         -DZPP_KEEP_TICK_WHILE_VTL1_OWES=${ZPP_KEEP_TICK_WHILE_VTL1_OWES}
+        -DZPP_HOLD_SELF_IPI_IN_VTL1=${ZPP_HOLD_SELF_IPI_IN_VTL1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
@@ -573,6 +578,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
         -DZPP_POLL_ON_HALT=${ZPP_POLL_ON_HALT}
         -DZPP_KEEP_TICK_WHILE_VTL1_OWES=${ZPP_KEEP_TICK_WHILE_VTL1_OWES}
+        -DZPP_HOLD_SELF_IPI_IN_VTL1=${ZPP_HOLD_SELF_IPI_IN_VTL1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}

@@ -59052,3 +59052,56 @@ to complete uninterrupted.
 The 28.8% of calls made below class 2 are exactly the calls at risk -
 those are the ones where a pending `0x2f` becomes deliverable mid-call.
 The 70.7% at class 2 are safe from `0x2f` and were never the problem.
+
+## ZPP_HOLD_SELF_IPI_IN_VTL1 cannot fire, and that is the third of a pattern
+
+Built from the verified mechanism, wired through all four edits
+(`ipivtl1=1` read from the binary), booted. `l2_self_ipi_swallowed` is
+**zero**: it never fired, so nothing was tested.
+
+**The reason is structural and should have been foreseen.** The swallow
+is gated on `in_vtl1`, which is set at `HvCallVtlCall` and cleared at
+`HvCallVtlReturn`. The interrupt-command write it wants to suppress is
+made by **VTL0** - which is not executing while VTL1 runs. The gate and
+the event are mutually exclusive by construction.
+
+VTL0 requests the interrupt *before* it calls into VTL1. What has to be
+suppressed during the call is the interrupt's **pending state**, which
+lives in the level above's virtual APIC and is not ours to touch.
+
+### The pattern, now three deep, worth naming
+
+    hold_clock_in_vtl1         gated on VTL1 running; nothing is
+                               injected while VTL1 runs -> never fired
+    keep_tick_while_vtl1_owes  gated on VTL1 owing a message; that is
+                               exactly when withholding helps -> blocked
+                               only the useful holds
+    hold_self_ipi_in_vtl1      gated on VTL1 running; the write it
+                               suppresses is made by VTL0 -> never fired
+
+Each was derived from a correct observation and then attached to a
+condition that cannot coincide with the thing it acts on. **The check
+that would have caught all three costs nothing: before building, ask
+which execution context raises the event and which context the gate is
+true in, and confirm they are the same one.**
+
+Two of the three were only caught because their own counter read zero.
+That is the value of making every intervention count its own firings -
+without it, all three would have been recorded as refutations of the
+hypothesis rather than as switches that never ran.
+
+### Where this leaves the verified mechanism
+
+The mechanism stands - it was established by disassembly and
+measurement, not by these switches:
+
+- VINA asserts correctly, by the priority-checking gate;
+- VTL1 yields with secure-call state 4;
+- `VslpEnterIumSecureMode` has no case for 4 and re-issues for ever.
+
+What has no implementation from this side is the remedy. Preventing an
+interrupt from becoming **deliverable** during a trust-level call means
+reaching into the level above's pending state, and this VMM has no
+handle on it. The one lever that did work - withholding the tick - works
+because it stops the interrupt existing at all, and its cost is the
+level above losing its wake condition.

@@ -1722,6 +1722,59 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_HOLD_SELF_IPI_IN_VTL1
+#define ZPP_HOLD_SELF_IPI_IN_VTL1 0
+#endif
+
+/**
+ * Swallow a self-directed, undeliverable interrupt-command write **only
+ * while the secure kernel is running**.
+ *
+ * ### The mechanism this is derived from, verified three ways
+ *
+ * - Hyper-V asserts its notification **correctly**: the gate that fires
+ *   is the one that reads the task-priority register and requires
+ *   `tpr < pending_class`. Measured 21.4% of trust-level calls against
+ *   a 28.8% ceiling - far below the ~100% the priority-blind gate would
+ *   give.
+ * - VTL1 answers that notification by yielding, returning secure-call
+ *   state **4**.
+ * - `ntoskrnl`'s `VslpEnterIumSecureMode`, disassembled from the live
+ *   guest, **has no case for 4** - it compares against 0, 1, 2, 3, 5, 6
+ *   and 15 and nothing else - so it falls through and re-issues the
+ *   identical request, about fifty-five times a second, for ever.
+ *
+ * So nothing is malfunctioning in isolation. The condition that has to
+ * hold is narrower than "the call must fit in a tick", which is what
+ * this file assumed for a long time:
+ *
+ * **No interrupt may become deliverable to the normal world while a
+ * trust-level call is in flight.**
+ *
+ * ### Why this is not `intercept_self_ipi`, which froze the machine
+ *
+ * That swallowed *every* undeliverable self-directed command, anywhere,
+ * and the level above stopped: it uses the pending interrupt as its own
+ * wake condition. This swallows only while `in_vtl1` is set - one
+ * trust-level turn, about a millisecond - and lets every other write
+ * through untouched, so the wake condition survives outside the window.
+ *
+ * **Dropping it is safe, and that is measured**: the guest re-requests
+ * this vector constantly - 700,852 writes against 8,142 deliveries in a
+ * single run - so a request swallowed during the call is re-made as
+ * soon as the normal world resumes.
+ *
+ * ### What would say it worked
+ *
+ * Secure requests past **21,177**, `vtl_protect_count` leaving 39,450,
+ * `vtl_return_rbx` no longer repeating `0x...0400`, and the thread
+ * census showing something other than `Phase1Initialization`. If the
+ * machine instead freezes with `exit_total` flat, the wake condition is
+ * not bounded by a turn after all.
+ */
+inline constexpr bool hold_self_ipi_in_vtl1 =
+    (0 != ZPP_HOLD_SELF_IPI_IN_VTL1);
+
 #ifndef ZPP_KEEP_TICK_WHILE_VTL1_OWES
 #define ZPP_KEEP_TICK_WHILE_VTL1_OWES 0
 #endif

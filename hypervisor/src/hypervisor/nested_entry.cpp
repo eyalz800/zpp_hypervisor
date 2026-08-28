@@ -12364,6 +12364,37 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // interrupt, and it will receive it at the first entry
                 // its own priority admits. Resuming without advancing
                 // would re-execute the same `wrmsr` for ever.
+                // The same swallow, scoped to a trust-level call.
+                // See `nested_vmx::hold_self_ipi_in_vtl1`: the condition
+                // to preserve is that no interrupt become deliverable to
+                // the normal world while a call is in flight, because
+                // the notification that follows is answered with a
+                // secure-call state `ntoskrnl` has no case for - which
+                // is disassembled, not assumed.
+                //
+                // Unlike `intercept_self_ipi` this holds only while
+                // `in_vtl1` is set, so everywhere else the level above
+                // keeps the pending interrupt it uses as its own wake
+                // condition. Taking that away globally is what froze the
+                // machine when that switch was tried.
+                if constexpr (nested_vmx::hold_self_ipi_in_vtl1) {
+                    constexpr std::uint64_t priority_class = 4;
+
+                    auto vector = command & 0xff;
+
+                    auto admitted =
+                        (vector >> priority_class) >
+                        (std::uint64_t{vtpr} >> priority_class);
+
+                    if ((cpu < max_cpus) && to_self && (0 != vtpr) &&
+                        !admitted && (0 != this->in_vtl1[cpu])) {
+                        this->l2_self_ipi_swallowed[cpu] =
+                            this->l2_self_ipi_swallowed[cpu] + 1;
+                        advance_rip = true;
+                        return l2_exit_outcome::handled;
+                    }
+                }
+
                 if constexpr (nested_vmx::intercept_self_ipi) {
                     constexpr std::uint64_t priority_class = 4;
 
