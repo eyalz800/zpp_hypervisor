@@ -59970,3 +59970,40 @@ hypercall**: the table has 306 entries with a maximum code of 0x131, and
 `9b 76` is exactly what two adjacent one-byte records read as a single
 `u16` produce. Both `0x9b` and `0x76` are real codes in the same census,
 so that is a reader packing bug in this tree, not a guest call.
+
+### WITHDRAWN: "VTL1 executes no part of any secure service"
+
+It does. Measured on the stable one-processor guest:
+
+    every request byte ever seen (30,558 calls)
+      code 0   21,173   69.3%   secure memory manager work - COMPLETED
+      code 4    9,385   30.7%   VINA notification
+    VINA flag at the return   set 9,397   clear 21,165
+    VINA flag at the call     set 0, clear 30,562   (always clear at entry)
+
+**VINA fires on about a third of turns and the secure kernel copes.**
+Twenty-one thousand secure calls completed under exactly these
+conditions. So VINA is survivable, it is not the blocker, and the
+`SkpReturnFromNormalModeRaxSet+0x114` account - true as far as it goes -
+described a third of turns and was generalised to all of them.
+
+**How the error was made, because it is the session's own recurring
+lesson turned on itself.** `interrupted_rip` samples **only entries that
+stage an event**, and on this guest the staged events are precisely the
+VINA notifications. So a census of "where the guest was when an
+interrupt landed" is by construction a census of VINA arrivals, and
+reading it as "where VTL1 is" answers a question it cannot be asked.
+Its own header says so - "a hot address in `interrupted_rip` alone is
+ambiguous" - and the control it names, `quiet_rip`, was read and *did*
+show the same address at 1,062 samples, which I took as confirmation.
+It confirms the guest passes through that instruction. It does not
+confirm the guest is stuck there.
+
+The `--delta`-style discipline would have caught it in one line: 21,173
+completed calls is not compatible with "no secure service ever runs".
+The refutation was in the same dump, three sections away.
+
+**What the failure actually is**: service `0x0003`, issued once with
+both arguments zero, never returning, while `pfn` stays at 7,207 and
+`code0` at 21,173 and the call count grows at 21-27/s - the resume loop.
+Everything else completed.
