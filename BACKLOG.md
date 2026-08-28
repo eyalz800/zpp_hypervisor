@@ -60504,3 +60504,83 @@ Recorded as a first-class instance of the pattern: an agent's careful
 source analysis pointed one way, one single-variable rig run pointed the
 other, and the run wins. The finding that shadow VMCS costs 20% is true;
 the inference that the 20% was wasted was not.
+
+## The watchdog is ONE unbroken DISPATCH region, not global slowness
+
+The decompilation agent settled the decisive question from the ntoskrnl
+binary. `KeAccumulateTicks`, per clock tick:
+
+    if (interrupted_irql < DISPATCH_LEVEL) {   // < 2
+        KiDpcWatchdogCounterReset(prcb);       // prcb->DpcWatchdogCount = 0
+        prcb->DpcWatchdogSequenceNumber++;
+    } else {
+        prcb->DpcWatchdogCount++;              // +0x83AC += 1
+    }
+
+The two arms are mutually exclusive per tick, so `DpcWatchdogCount` is
+**by construction a count of consecutive clock ticks observed at IRQL >=
+DISPATCH_LEVEL**, zeroed by the first tick that lands below it.
+`KiDpcWatchdogCounterReset` has four callers total, all here. **A
+sliding-window sum across IRQL drops is structurally impossible.**
+Microsoft's "cumulative" label means cumulative *within one unbroken
+run*, not across the boot.
+
+So the failure is not "we are globally too slow." It is **one DISPATCH
+region that runs longer, in real cycles, than the threshold's worth of
+clock ticks** - `param2 = 0x1e00 = 7680` ticks. Steady-state per-exit
+cost matters only insofar as it stretches that one region past the
+limit. This is a far more surgical target than "make everything faster."
+
+**And the offending region is nameable from a live guest.** The capture
+stacks are at `KPRCB+0x8EA8` (base), `+0x8EB0` (write pointer), record
+format `u16 frames, u16 seq, u32 tick, u64[n] return addresses, u64 link`,
+decoded from `KiDpcWatchdogCaptureStack`. Symbolising the return
+addresses against the loaded-driver bases names the DPC. Records exist
+before the bugcheck (capture triggers as the count climbs), gated on
+`DpcWatchdogProfileSingleDpcThresholdTicks` (`+0x8740`) being non-zero.
+The single-DPC variant (param1=0) uses a different pair, `DpcTimeCount`
+at `+0x865C` vs `DpcTimeLimitTicks` at `+0x8660`.
+
+## Shadow VMCS reconciled: KVM emulates the feature it strips
+
+The KVM review retracted its own claim correctly. KVM *does* strip
+`SECONDARY_EXEC_SHADOW_VMCS` at `nested.c:2428` - but the comment on that
+line reads "VMCS shadowing for L2 is **emulated** for now." KVM strips
+the hardware bit and reimplements the whole feature in software, keyed on
+**our** shadow bit and **our** VMREAD/VMWRITE bitmaps:
+`nested_vmx_exit_handled_vmcs_access` (`:6289`) reads our bitmap and
+returns false - do not reflect - for a shadowed field;
+`handle_vmread`/`handle_vmwrite` (`:5515`, `:5621`) then serve it from
+`get_shadow_vmcs12`, our region cached at our transition boundaries.
+Clearing our bit makes every VMREAD/VMWRITE reflect to us, which is the
+10.5M-exit regression the rig showed. **The machine and the source now
+agree.** There is no more shadowing headroom - the residue that still
+reaches us is 8,594 of 2,537,936 exits, 0.34%, and the field-list trim
+already took that win.
+
+## The correctness-preserving cost plan, from the review
+
+1. **Hoist the 46-iteration guest-state loops behind a dirty boolean.**
+   KVM gates its whole cold-field block on `dirty_vmcs12`
+   (`nested.c:2645`), set at three sites and **never on a VM exit**, so a
+   steady stream of exits touching only shadowed fields runs *zero*
+   iterations. We defer 44/46 fields but still run the loop 46 times each
+   in `save_l2_state` and `build_vmcs02`, with a `guest_state_deferrable`
+   call and a counter increment per iteration. Our `guest_state_dirty`
+   mask already tracks exactly what the loop would find, so hoisting is
+   mechanical and correctness-preserving, and it hits the 41k and 50k
+   phases.
+2. **Gate the three hot-path samplers** - `l2_vtpr_class_seen` and the
+   TPR-threshold arithmetic in `save_l2_state` (a guest-memory read every
+   exit), `int_window_vtpr` (a guest-memory read on one exit in ten), and
+   the `l1_host_audit` VMREAD batch in `load_l1_host_state`. None is
+   needed for correctness; all three are inside the two dominant phases,
+   and they are most of what turning instrumentation off already removed.
+3. **Coalesce the four shadow copies per round trip to one**, behind a
+   `need_vmcs12_to_shadow_sync`-style flag, per KVM.
+4. **Do not touch** `merge_nested_bitmaps` (KVM's alternative costs more
+   exits), the shadow field lists (0.34% ceiling), or
+   `load_l1_host_state`'s elision (already ahead of KVM).
+
+Held standing item: `guest_interrupt_status` is written into vmcs02 and
+never saved back, which will break `ZPP_NESTED_VID=ON` silently.
