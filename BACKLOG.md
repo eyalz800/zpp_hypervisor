@@ -58953,3 +58953,51 @@ page, or a `VTL` address recovered some other way.
   to `+0xCF8` appears among the 18 instructions using that displacement,
   but the consume path takes its *address* (`LEA RDX,[RAX+0xcf8]`), so
   it is likely cleared through a register-held pointer.
+
+## The rates say gate (b), not gate (a): VINA is behaving correctly
+
+The two gates predict different rates, and both numbers are already
+measured on the baseline, so the read of `VTL0 + 0xCF8` is not needed to
+choose between them.
+
+    VINA set at the return        5,759 of 26,924   21.4%
+    task priority below class 2   7,757 of 26,914   28.8%
+      (class 0: 4,823 + class 1: 2,934, at the trust-level call)
+
+Gate (a) has **no priority term**, so it would assert on essentially
+every call - near 100%. Gate (b) can only assert when the vector is
+deliverable, so 28.8% is its **ceiling**.
+
+**Observed 21.4% is under gate (b)'s ceiling and nowhere near gate
+(a)'s.** So on the baseline the notification is coming from the
+priority-checking gate, and it is correct: VTL1 yields only when the
+lower trust level genuinely has an interrupt it can take.
+
+### Which withdraws the structural reading, and says where it came from
+
+The "structural" branch rested on the notification firing **1.0032 times
+per `HvCallVtlCall`** - essentially always. That figure is real but it
+was measured under `intercept_self_ipi`, the swallow experiment, which
+is a different configuration and one that froze the machine. Carrying it
+into the baseline was the error.
+
+So: **VINA is not the fault.** It asserts about a fifth of the time, for
+deliverable vectors, which is what it is for.
+
+### What that leaves, and it is now quite narrow
+
+Everything on the hypervisor side of this stall now measures as correct:
+Hyper-V is running, interrupts reach it, the notification is asserted
+correctly and cleared correctly, `0x2f` is delivered thousands of times,
+the task priority does drop below class 2 on nearly three calls in ten,
+and the start-up path is right.
+
+And the secure call still does not retire: `ShvlVinaHandler` returns
+state 4, `VslpEnterIumSecureMode` re-issues a byte-identical request
+about fifty-five times a second, for ever.
+
+**The next thing to check is therefore the claim that has never been
+verified first-hand**: that `VslpEnterIumSecureMode` "has no case for
+4". That came from a comment in this tree, not from disassembly, and
+`ntkrnlmp.pdb` is now available - so the dispatch on the returned state
+byte can be read directly out of the guest and settled.
