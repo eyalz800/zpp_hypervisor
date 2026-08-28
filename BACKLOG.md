@@ -60432,3 +60432,40 @@ against six known RVAs. For the watchdog it needs the ntoskrnl **binary**
 does not move it - the count tracks the cycle counter, not tick
 delivery. That points back at raw exit cost as the only lever, which is
 what the fast-build result independently shows.
+
+## Shadow VMCS is dead weight under KVM - turning it off is a free 20% of the exit
+
+The KVM review's sharpest cost finding, and it is structural rather than
+a tuning choice. KVM strips `SECONDARY_EXEC_SHADOW_VMCS` from its guest
+**unconditionally** - `prepare_vmcs02_early`, `nested.c:2428`, with no
+capability or module-parameter test - and we are KVM's guest. So the
+shadow region we maintain on every second-level exit is one **nothing
+can ever read through hardware**: the guest hypervisor's VMREADs and
+VMWRITEs trap regardless. The tree already measured the maintenance at
+`copy_shadow_to_vmcs12` **13.3% of VMM time** on this live boot plus the
+forward copy, ~20% together.
+
+Confirmed against the running fast build: `copy_shadow_to_vmcs12`
+8,305,295 calls at 13.3%. Every one is wasted.
+
+`ZPP_NESTED_SHADOW_VMCS=OFF` is therefore strictly less work with
+identical semantics - the tree's own stand-down path
+(`note_shadowing_ineffective`) proves standing down is always safe
+because it reverts to exiting for every field, which is what the guest
+hypervisor already experiences. Built with it off (`shadowvmcs=0` in the
+manifest), 25/25 host tests pass, deployed and booted single-processor.
+This is the second pure-cost lever, stacked on turning instrumentation
+off, and both exist to buy DPC-watchdog headroom.
+
+The review also spec'd the deferred-copy optimisation KVM uses
+(`need_vmcs12_to_shadow_sync`, one copy per round trip instead of four)
+but it is moot if shadowing is off entirely, so it is held as the
+fallback for a machine where shadowing actually works.
+
+And it delivered the full nested INIT/SIPI spec for the eight-processor
+failure - latch INIT/SIPI in software, arbitrate on the entry path above
+every other event, synthesise reason 3/4 exits rather than forwarding to
+hardware - with the one measurement to take first: a per-CPU counter for
+reasons 3/4 taken while `running_l2`, which does not exist yet and
+discriminates the three ways the AP path can be failing. Held for after
+the watchdog, since `ZPP_CPUS=1` sidesteps it.
