@@ -57701,3 +57701,53 @@ can still keep a tick out of the call, so it is the cheapest version of
 the thing that works. `ZPP_LAZY_TICK=2500` wedged when applied from the
 start with no trigger, which is a different configuration: many more
 holds, spread across the whole boot.
+
+## The conflict is fundamental: the tick must be held exactly when the level above cannot bear it
+
+`ZPP_LAZY_TICK=2000` with `AFTER_PROTECT=1` - the smallest gap that can
+still keep a tick out of a 1,743 us call - reproduces both halves:
+
+    withheld 6   re-delivered 6   owed 0
+    thread ... IDLE  start ntoskrnl+0x6ad0b0     <- past phase 1
+    4 of 537 counters moving                     <- and wedged
+
+**Two runs now agree** that withholding across the protection phase
+carries Windows out of `Phase1Initialization`: the idle thread is
+current in both, where every other configuration in this investigation
+had the phase-1 thread. That is the most reproducible forward result
+here.
+
+### And the last variable is isolated
+
+    six holds, capped from the START      -> ALIVE, no progress
+    six holds, during the PROTECTION phase -> progress, WEDGED
+
+Same count. Same gap. The difference is **when**. So the wedge is not
+proportional to the number of holds after all - an earlier entry said it
+was, on the strength of the capped runs staying alive, and that was
+reading the count when the variable was the position.
+
+**The level above tolerates a delayed tick while it is idle and does not
+while it is servicing trust-level calls.** That is the sharpest
+statement this investigation has produced about the wedge, and it is
+also why the lever cannot be threaded: the only window where withholding
+*helps* is the window where it *harms*, and they are the same window
+because both effects come from the same trust-level work.
+
+Latency is not the knob either. 10,000 us and 2,000 us wedge alike, and
+2,000 us is barely over one tick period - there is no smaller hold that
+still keeps a tick out of the call.
+
+### What is left, and it is not on this side
+
+Every combination of the three knobs has now been run: gap size, hold
+count, and window position. The two requirements are satisfied by
+disjoint settings of the same control. Something that keeps the level
+above serviced *while* a tick is held would break the tie, and that
+needs to know what it is doing with the tick during a trust-level call -
+which is above this VMM and not visible from it, the same wall the
+`0x2f` analysis reached from the other direction.
+
+The forward result stands on its own and is worth keeping: **Windows can
+be carried past `MakeGdtReadOnly` from here.** What cannot be done from
+here is to survive having done it.
