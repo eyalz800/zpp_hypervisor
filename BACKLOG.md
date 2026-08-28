@@ -60908,3 +60908,47 @@ per-exit micro-optimisation and **without** touching the guest, and it
 fixes a real structural inefficiency (a whole-context rebuild for a
 one-page change). It is the next thing to try if the constraint is
 "unblock the boot".
+
+## The instrumented novina=1 build survives 60+ minutes and keeps progressing
+
+`bccap` polled `info status` every 60s for 60 iterations and never saw a
+bugcheck: the guest ran **over an hour without the DPC watchdog
+firing**, the longest surviving debug run of the investigation. And it
+progressed the whole time - `HvCallModifyVtlProtectionMask` 41,351 ->
+41,923, code-0 secure calls 22,961 -> 23,978, page requests 7,897 ->
+8,182.
+
+**The page walk did not asymptote - it moved on.** Code-0 grew +1,017
+while page requests grew only +285, so the PFN-filtered page-protection
+walk slowed because the secure kernel finished that sub-phase and moved
+to other code-0 work (image maps that are not the linear PFN walk). It
+is progressing through *different* secure-manager operations, not stuck
+on the same one.
+
+**And the eager-replay storm is not exploding.** Over the same 45-minute
+window shadow-builds grew only +576 (34,402 -> 34,978) and replayed
+leaves +34,848 (2,193,023 -> 2,227,871). What grew enormously is
+`shadow_ept_pointer_for` cache *hits*, +19.3 million - i.e. the shadow
+root is being looked up 6,700 times a second and almost always found,
+which is the cheap path. So the per-call replay cost is roughly constant,
+not O(N) growing; the earlier O(N-squared) hypothesis for the
+deceleration is **not** supported by the counts.
+
+**Two things this reframes:**
+- The debug watchdog is not an inevitable wall for this configuration -
+  this build survived it for over an hour. Whether earlier builds
+  bugchecked at 11-45 minutes because of a different config (some
+  carried `lazy_tick`) or because the trip is a stochastic 120-second
+  DISPATCH region that this build's timing happens to break up is not
+  settled, but "debug always resets before login" is now false.
+- The shadow-EPT question the user directed toward KVM is still worth
+  answering - KVM's `handle_invept` frees roots and **faults lazily**
+  where we eagerly replay - but it is a smaller lever than the ~374us
+  rebuild figure suggested, because the replay count is nearly flat. The
+  dominant cost is elsewhere (the reflect/build phases on every one of
+  ~6,700 entries a second).
+
+So the most promising thing on the board is simply that **this build is
+still running and still progressing after an hour**, and the right move
+is to let it run and watch for the secure phase completing and driver
+init / user-mode beginning, rather than resetting it to try a change.
