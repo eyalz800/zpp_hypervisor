@@ -60061,3 +60061,60 @@ was fixed. The reader now says which is which.
 Same family as the `[l1-rip]` tag, the sixteen-slot hypercall list and
 the `interrupted_rip` census, all found today: **a number is not a
 measurement until you know which population it counts.**
+
+## VTL1's own stack, read live: it is the VINA yield, not a secure service
+
+Four reads on the stable one-processor guest, securekernel base
+`0xfffff8036d981000`, VTL1 cr3 `0x8800002`.
+
+**The globals the agent asked for**, and three of the four discriminate:
+
+    SkiProcessorStartupLock   0x12fd44 = 0    free - the xchg was never reached
+    SkiNumberReadyProcessors  0x142138 = 0    the map has NOT completed
+    ShvlpFlags                0x128698 = 0x7  confirmed on THIS boot
+    SkeNumberProcessors       0x142070 = 1
+
+`SkiNumberReadyProcessors == 0` settles the "maybe VTL0 never sees the
+completion" branch: it is incremented *after* the map, so **VTL1
+genuinely has not finished**, and this is not a propagation bug in this
+VMM. A free start-up lock says execution never reached the `xchg` at
+`0x164b5`, which is downstream of `SkmmMapDataTransfer` - so the block
+is upstream of it, exactly where the agent placed it.
+
+**The parked stack.** `gs+0x28` is the current-thread pointer
+(`SkiBspThread`, RVA `0x121f80`) - *not* `gs+0x08`, which reads zero.
+`[thread+0x80]` is the frame, and scanning it for secure-kernel text:
+
+    SkpReturnFromNormalMode+0x0
+      SkiSelectThread+0x2bf
+        SkpPrepareForNormalCall+0x73
+          SkiLockThreadEntry+0x6c
+            SkiDeselectThread+0xb4
+              KiVinaInterrupt+0x2b2
+                ShvlpFlushPartialListTb+0xa6
+                  ShvlVinaHandler+0x67
+
+**Eight frames, and not one of them is in a secure service.** Nothing in
+`SkmiClaimPhysicalPage` (`0x74d0`-`0x7871`), nothing in
+`SkmmMapDataTransfer`, nothing in `IumInvokeSecureService`. So the
+`pause`-spin candidate is not where this thread is, and the thread the
+processor block points at is the **scheduler context, parked in the
+VINA yield**.
+
+That is consistent with the resume ring - 34,165 armed entries, one
+distinct address, the hypercall page - and it suggests the reading to
+test next: **service 3 may never be dispatched into a thread at all.**
+`SkpReturnFromNormalModeRaxSet` calls `IumInvokeSecureService` only when
+`bl != 0`; when `bl == 0` it takes the resume path instead. If the
+thread it resumes is this one, parked in the yield, the loop re-enters
+the yield for ever and the outstanding service is never started. The
+earlier session's `RBX = 0x100000400` - thread id 1 in the high half -
+says a thread 1 exists and is being named; where *its* stack is has not
+been read.
+
+**A sampler that did not work, recorded so it is not retried.** The QEMU
+monitor's `info registers` does report the running instruction pointer
+across all four levels - 60 samples came back 83% zpp, 17% hvix64 - but
+**zero landed in securekernel**, because VTL1's duty cycle is a few per
+cent. It is a fine instrument for "who is burning the processor" and
+useless for "where is VTL1 parked".
