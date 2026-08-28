@@ -59738,3 +59738,53 @@ observed on the `novina=1` build, which the entry above shows is a
 control, and restarts. Whether the control ever reaches 0xFE is
 unmeasured, because VINA masks the outstanding request there. Do not
 carry 0xFE into the control's account without measuring it there.
+
+### The control passes 0xFE. The outstanding call is service 0x0003
+
+The entry above's caveat was right to insist on measuring 0xFE in the
+control, and the two rings end in different places:
+
+    control (novina=0), newest last
+      0x01010002  frame 0x11aac9
+      0x01010002  frame 0x11aaca
+      0x00fe0002  arg 0xffff830bea490420  pfn 0x12ee90   COMPLETES
+      0x00030002  args 0, 0                              NEWEST, outstanding
+
+    novina=1, newest last
+      0x01010002  frame 0x11aac9
+      0x01010002  frame 0x11aaca
+      0x00fe0002  arg 0xffffb582334880b0  pfn 0x12ba88   NEVER completes
+
+So `SkmmRegisterFailureLog` succeeds in the control and dies in the
+switch build. **The `SkmiClaimPhysicalPage` / stuck-bit-60 account
+therefore describes damage `ZPP_SUPPRESS_VINA` caused, not the failure
+being chased**, and nothing should be built on it. That is the second
+time in this session a confident chain has turned out to describe the
+instrument rather than the machine.
+
+The real outstanding call is **service `0x0003`, both arguments zero,
+issued once**. It is not in the request population at all, and it agrees
+with the VTL0 stack, which ends in `VslFinishStartSecureProcessor`.
+
+Also corrected: the `service - 1` index reproduces the *agent's original*
+numbers exactly - 3 -> 0x16438, 0xf4 -> 0x16c64, 0x101 -> 0x17439,
+0xd9 -> 0x16f16 - so the mapping was right the first time and only my
+arithmetic was wrong. The earlier "service 3's body is inert on this
+config" analysis stands on the correct body.
+
+And it does not matter, which is the point. Service 3 **never starts**:
+VTL1 resumes at `SkpReturnFromNormalModeRaxSet`, executes the `sti` at
+RVA `0xd9540`, and the interrupt lands at `0xd9548` - three bytes before
+the `cmpb $0,%bl` at `0xd954b` that chooses between resuming a thread
+and calling `IumInvokeSecureService`. The body is never reached. The
+entry is the failure.
+
+**So everything now rests on one question**, put to the decompilation
+agent: what clears `VTL0+0xCF8`, the priority-blind latch hvix64's
+`0x2ead04` tests to assert VINA? "No store of 0 found" is not "nothing
+clears it", and the difference decides whether this is fixable from
+here. If it is cleared when VTL0 *consumes* the posted vector, the fix
+is ours - make Windows take `0x2f`, which it currently takes 14,894
+times in 4,477 s because it sits at `TPR >= 0x20` on 99.3% of entries
+and runs `KiDpcInterruptBypass` (`mov cr8,2; sti; KiRetireDpcList`)
+instead of vectoring.
