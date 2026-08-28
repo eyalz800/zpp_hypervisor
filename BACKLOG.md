@@ -58115,3 +58115,32 @@ zero second-level entries is a bring-up failure with a clear signature,
 and this tree has instrumentation for exactly that path -
 `ap_probe_rip`, `apentry`/`apfault` switches, the start-up IPI census -
 none of which has been read for a nested two-processor boot.
+
+### The two-processor AP: it starts, it runs, and it is never given work
+
+Read with the instrumentation this tree already had and had never
+pointed at a nested two-processor boot:
+
+    INIT seen 1   start-up seen 1   refused broadcast 0
+    cpu 1  virtualized 1  by-guest-sipi 1  launched 1  activity 0
+    cpu 1  probes-sent 80  wake-exit 80  cs:rip 0x0038:0x7fb6b030
+             <- active - executing guest code
+
+**The application processor is not stuck.** The guest sent one INIT and
+one start-up, this VMM virtualized and launched it, its activity state
+is active rather than wait-for-SIPI, and eighty NMI probes got eighty
+wakes - it is executing.
+
+And `l2-entries` is **0**. It runs *first-level* code and Hyper-V never
+schedules a second-level guest on it. So the failure is not start-up: it
+is an application processor that comes up correctly and is then never
+given anything to run, after which the guest resets.
+
+That is a much narrower statement than "two processors do not work", and
+it rules out the whole start-up path - the trampoline, the INIT/SIPI
+emulation, the hand-over - which is where an AP investigation would
+naturally begin and would have spent its time.
+
+`cs 0x0038` with a sub-4GB `rip` is not Windows' 64-bit kernel; the next
+step is identifying whose code that is, which the same L1 page-table
+walk used for `hvix64` can answer.
