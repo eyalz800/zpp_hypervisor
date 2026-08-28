@@ -59343,3 +59343,58 @@ through the 25 KB `IumInvokeSecureService` switch was **not decoded**.
 That undecoded switch is now the thing to decode - the request block
 this VMM already captures carries the service number, so the live value
 plus that switch names what VTL1 is actually running.
+
+## Five reads, five falsifications - and service 0x0003's body is inert here
+
+The dispatch is now decoded rather than inferred: `IumInvokeSecureService`
+reads the service number as a u16 at block offset 2 and dispatches
+through a two-level table (byte index at RVA 0xf92ff, dword offsets at
+0xf9093), giving **service 0x0003 -> RVA 0x16438**
+(`VslFinishStartSecureProcessor`), 0xf4 -> 0x16c64, 0x101 -> 0x17439,
+0xd9 -> 0x16f16. The earlier `SkeStartProcessor` link was to service
+**2**, the *Start* - not 3.
+
+**And service 3's body cannot be the spin on this machine.** Two gates
+close it: `ShvlpFlags = 0x7` has bit 2 set, so its
+`(ShvlpFlags>>2 & 1)==0` gate is false and its only hypercall-bearing
+loop is never entered; and the `SkiProtectProcessorStructure` /
+`SkpgVerifyPage` branch needs an index `< SkeNumberProcessors`, which is
+**1**, so it is unreachable. What remains is a map, an increment and two
+lock writes - no millisecond in it.
+
+The three falsifiable candidates that came with it are all dead, read
+live at securekernel's base for this boot:
+
+    SkpgExtentChecksActiveCount   0        PatchGuard not verifying
+    SkpgVerificationLock          0        not held
+    SkmiAssertionTimestamp   0x50f6        EVEN - inner seqlock not stuck
+    SkiMirrorOwner                0        inactive
+    SkiUnrestrictedThreadCount    0        not negative - preamble spin off
+
+So PatchGuard's page verification, the shared preamble spin and the
+seqlock are all excluded. **A common callee across the four re-entered
+services was also checked to three levels and does not exist** - the
+only shared code is the `IumInvokeSecureService` preamble.
+
+### What this costs, and the one measurement that would end it
+
+The census names the **outstanding call**, not the parked instruction
+pointer. RBX's low byte is 0 on entry, so thread 1 takes the *resume*
+path rather than re-dispatch - it is parked mid-execution somewhere in
+service 3's call tree, and the service number cannot say where.
+
+The parked RIP would say. It is **not** available from the switch
+capture: the `HvCallVtlReturn` record holds
+`rip 0xfffff80554470032`, which is *below* securekernel's base
+(`0xfffff8055cf41000`) - it is the hypercall page where `ShvlpVtlReturn`
+executes its `vmcall`, not secure-kernel text. The parked address lives
+on the interrupt trap frame `KiVinaInterrupt` builds on thread 1's
+kernel stack.
+
+`sk_functions.csv` (2,904 rows of `rva_start,rva_end,name`) turns any
+VTL1 RIP into a name, so **one sample of the parked instruction pointer
+ends this search**. Getting it means reading thread 1's trap frame, or
+catching an exit taken while the VTL1 extended-page-table pointer
+(`0x101b1501e`) is current - the exit ring records `rip` and its owner
+but not the pointer, so that distinction has to be added or the frame
+walked.
