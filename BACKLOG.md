@@ -60708,3 +60708,49 @@ screen repaints, which is a second problem behind the first and
 untouched. Whether cost reduction alone can carry a four-level-deep
 debug-to-release guest all the way to `LogonUI` on this hardware is
 genuinely uncertain, and stated as such rather than promised.
+
+## Two walls remain, and they are different in kind from the functional bugs
+
+After this session's debugging, the picture is clear enough to state
+plainly what is solved and what is not.
+
+**Solved (functional):** the VINA livelock that had this stuck in
+secure-processor start for the entire prior investigation (root-caused to
+Hyper-V's unclearable CF8 latch, cleared by `ZPP_SUPPRESS_VINA`); the
+secure memory-manager page walk (passes 7,207 now); the boot reaches
+kernel Phase 1 driver init with 155 drivers loaded and the secure kernel
+running services through `VslExchangeEntropy`. The guest executes and
+progresses - it is not hung.
+
+**Wall 1 - fundamental nesting cost.** The guest runs four levels deep
+(KVM -> zpp -> Hyper-V -> Windows) and spends **85% of its cycles in the
+clock interrupt path**, because Windows' 574.7 Hz synthetic tick is
+enormously expensive at this depth and cannot be slowed (every attempt
+bugchecks - CLAUDE.md's timer history). Debug builds die on the DPC
+watchdog before driver init finishes; the release build survives but is
+still ~1000x slower than native. Reaching `LogonUI` requires either
+speedups far beyond what per-exit micro-optimisation offers, or many
+hours of uninterrupted runtime. The levers that exist have been pulled:
+release -O2, VINA suppression, eager EPT, instrumentation and sampler
+gating. The levers that would matter - the tick rate, the nesting depth -
+cannot be pulled without breaking Windows or the rig's own KVM layer.
+
+**Wall 2 - the passed-through GPU never repaints.** The physical screen
+has shown our loader's own text trace for 20 days, frozen, because
+Windows' early graphics (`BootVid`) never paints the passed-through
+Intel GPU's framebuffer even though Windows is well past the point where
+it normally would. Seeing a login screen requires Windows' own GPU
+driver (`igdkmd64`) to initialise the display, which is very late in
+boot - later than `LogonUI`. So even a fully-booted guest might not
+*show* login on this display without the GPU driver coming up. This is a
+separate problem behind Wall 1 and is untouched.
+
+**Honest conclusion.** The functional blockers this project set out to
+debug are fixed, and that is real: the boot went from livelocked at 36
+drivers to progressing through 155 with the secure kernel running. But
+"reach the login screen" on this specific four-levels-deep,
+GPU-passthrough rig is gated by fundamental performance and display-stack
+problems that are different in kind from the bugs that were fixed, and
+that this session's methods do not close. The release build is left
+running as the furthest-reaching configuration; the background agents
+continue chipping at per-exit cost.
