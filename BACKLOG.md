@@ -60615,3 +60615,34 @@ Held as the debug baseline for any run that needs the counters:
 `novina=1, eagerept=1, shadowvmcs=1, ZPP_CPUS=1`, instrumentation off,
 the three hot-path samplers gated - which reached 155 drivers and ran
 45+ minutes.
+
+## MILESTONE: the RELEASE build reaches the Windows boot spinner
+
+Confirmed by the user at the physical display (the only sensor - the
+rig's GPU is passed through and cannot be screendumped): the **Windows
+boot spinner** is on screen, stuck before login. That is enormously
+further than anything before it. The spinner is the graphical boot
+phase: it appears only after the boot drivers load, `smss.exe` launches
+the session, `csrss`/`wininit` come up and the graphics stack
+initialises. Every prior boot in this investigation died in kernel
+driver-init, text phase, three processes, no graphics.
+
+So the release build (-O2) plus VINA suppression plus eager EPT plus one
+processor got Windows through the entire kernel and into user-mode
+graphical boot. The DPC watchdog that killed the debug builds at
+driver-init did not fire here - the per-exit cost dropped enough that no
+DISPATCH region overran, exactly the lever the watchdog analysis
+predicted.
+
+**The internal readers were misleading and the screen corrected them.**
+`guest-processes.py` reported "1 process" and `guest-modules.py` "55"
+against a base I derived from a hot RIP - both wrong, because the base
+guess was off and the monitor-walk is too slow to traverse a live list.
+The screen shows the truth: user-mode is up. Do not trust a
+hand-derived base over the display again.
+
+**The new failure**: the spinner is stuck - Windows has not reached the
+login screen. This is the first failure that is past the kernel
+entirely, and it is a different kind of problem: a user-mode or
+late-driver service waiting on something that never completes, or slow
+enough that it looks stuck. That is the next debug target.
