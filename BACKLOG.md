@@ -61183,3 +61183,58 @@ mapping differing from the admin queue's. Finding and reading the I/O CQ
 the decisive next read; its address is in the CREATE_IO_CQ command that
 has scrolled out of the 2-entry admin SQ, so it must come from stornvme's
 device extension or a scan.
+
+## BREAKTHROUGH: the block is posted-interrupt delivery of VTL0-bound device interrupts
+
+Both agents converged on the same mechanism, from opposite ends, and it
+is the functional block that stalls the boot in driver init.
+
+**Hyper-V delivers device interrupts to Windows VTL0 via posted
+interrupts** (Hyper-V decompile): device-interrupt hypercalls 0x7c-0x7f
+program a per-VP source descriptor with the guest vector (0x50/0x51);
+`hv_inject_intr_to_apic` (RVA 0x213610) either ORs the vector into VTL0's
+live vAPIC IRR **if VTL0 is current**, or - **if VTL0 is not current** -
+sets it in a **posted-interrupt descriptor (VTL0+0xef8) and sets the ON
+bit**, to be drained on the next VTL0 entry. Hyper-V also writes the
+hardware **POSTED_INTR_DESC_ADDR** VMCS field (`hv_write_posted_intr_desc
+_addr`, RVA 0x35465c).
+
+**We mask posted interrupts out of vmcs02** (KVM review + confirmed):
+`nested_entry.cpp:1800`,
+`pin02 = (pin01|pin12) & ~(... | pin_posted_interrupts | ...)`. The
+masking is bundled with the preemption-timer and external-interrupt
+masks as a "we do not implement this" simplification.
+
+**The mechanism of the stall:** a device interrupt for VTL0 that arrives
+while VTL0 is the current context is delivered (this is the first ~34,
+during controller init). One that arrives while **VTL1 is running or
+this VMM is handling an exit** must be *posted* and drained on VTL0
+entry - and because we do not emulate nested posted-interrupt
+processing, it is posted-but-never-drained, i.e. **lost**. The clock
+(0xd1) survives because it comes via the SynIC timer path, not posting.
+So: burst of device interrupts while VTL0 happens to be current, then
+silence once the timing shifts - exactly the 34-then-stop signature,
+with the clock still firing.
+
+This is the cleanest single explanation of every fact: NVMe alive
+(CC.EN=1/RDY=1), admin queue working (delivered while VTL0 current),
+device vectors 0x50/0x51 firing then stopping, only 0xef reflected to us
+(KVM injects the device vector directly, per the KVM agent), and the
+boot stalling on disk I/O whose completions never wake the driver
+threads.
+
+**It is functional, it is ours, and it is a KVM-following fix** - KVM
+implements nested posted interrupts (`vmx_deliver_nested_posted_interrupt`,
+`nested.posted_intr_nv`); we mask them out. The fix is to stop masking
+and emulate the nested posted-interrupt path: honour vmcs12's
+posted-interrupt pin bit, descriptor address (translated), and
+notification vector, and process the descriptor (PIR -> vIRR merge, ON
+bit) on entry - the exact shape KVM already has. Spec'd to both agents
+before implementing, because posted interrupts and the VTL interaction
+are subtle and a wrong version loses or storms interrupts.
+
+**This is the closest the investigation has come to the fixable block.**
+Every fix this session cleared the path to it: VINA unblocked the secure
+start, the lazy shadow-EPT and exit-info fixes cleared the watchdog into
+driver init, and driver init is where the boot first issues the device
+I/O that exposes this.
