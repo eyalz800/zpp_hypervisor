@@ -58747,3 +58747,46 @@ mistake: the watchdog is real and fires on a multi-second stall, so
 "the guest reset" and "a processor was slow for seconds" may be the
 same observation from two sides - which is a candidate explanation for
 the two-processor resets that has never been tested.
+
+### The sweep is `KeZeroPages` - it is idle work, and my reading of it was backwards
+
+The faulting instruction pointer carries `rip_owner = 1`, which is
+**`[l2-rip]`** - the second-level guest. So the sweep is **Windows**,
+not Hyper-V, and the decompilation agent was pointed at the wrong binary
+by my own briefing.
+
+Naming it needed no module base. Windows' kernel is 2 MB aligned, so the
+low 21 bits of a live instruction pointer are the low 21 bits of its
+RVA. For `0xfffff8029b2b4820` that is `0xb4820`, and against a
+`0x1450000` image the candidates resolve through `ntkrnlmp.pdb` to:
+
+    0x6b4820  ->  KeZeroPages+0x10
+
+**It is Windows zeroing free pages.** One write fault per 2 MB page,
+ascending, restarting at the bottom - which is exactly what the
+zero-page thread does, and it runs at the lowest priority *when the
+system has nothing else to do*.
+
+**So the entry above is wrong where it says "the guest is not idle".**
+The sweep is not evidence against idleness; it is what idleness looks
+like from underneath. Corrected here rather than left standing.
+
+### And with that the whole picture is finally coherent
+
+Every measurement now fits one account, with nothing left contradicting
+another:
+
+- the phase-1 thread is blocked in `MakeGdtReadOnly`'s trust-level call;
+- so Windows has nothing to run, and the **idle thread is current** -
+  which the thread census said and which was doubted here;
+- so the **zero-page thread** sweeps free memory, 2 MB per write fault,
+  for ever;
+- `shadow_ept_leaves_filled` and `shadow_ept_replayed` read `+0` because
+  those faults are answered from the recall set;
+- and Hyper-V's own virtual processor halts at `gs:[0x340] == 0` - its
+  pending-event count - because nothing is delivering it an interrupt.
+
+The last one is from the decompilation and is the useful half: a wedged
+first level **points upstream at what should be injecting**, not at
+Hyper-V. That is the same conclusion the withheld-tick experiments
+reached from the other end, now confirmed in Hyper-V's own code.
