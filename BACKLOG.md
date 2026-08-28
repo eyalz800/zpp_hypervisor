@@ -58078,3 +58078,40 @@ before anyone starts it.
 That is a real answer to "what would it take", arrived at by
 measurement, and it is the first time this file has been able to state
 one.
+
+## Two processors: untried under nested=1, and it resets before the deadlock
+
+The deadlock is inherently uniprocessor - a thread pinned at IRQL 2
+waiting for a trust-level call while the deferred procedure that would
+release it cannot run on that same processor. On real hardware VBS does
+not deadlock here, and a second processor is the obvious reason. **Every
+run in this investigation was `ZPP_CPUS=1`**, so this was never tested.
+
+Tested now, twice, on the clean baseline:
+
+    VM status: paused (shutdown)      both boots
+    cpu 0   606,556 exits   105,029 l2-entries
+    cpu 1       266 exits         0 l2-entries
+
+**The guest resets**, and it resets on the second boot too - so it is
+not the one-time topology change `CLAUDE.md` records for a processor
+count change. And the application processor takes a couple of hundred
+exits inside this VMM and **never enters the second level at all**:
+Hyper-V never runs anything on it.
+
+So the two-processor configuration does not reach the deadlock; it fails
+earlier and differently. That is a **separate unsolved problem**, not a
+fix for this one, and conflating them would waste a session.
+
+One thing worth keeping from it: the thread census sampled before the
+reset shows **two distinct threads** - the idle thread and
+`Phase1Initialization` at IRQL 1 - which never occurs on one processor.
+So Windows does get far enough to schedule, which is consistent with the
+uniprocessor deadlock being a genuine artifact of having one processor
+rather than something Windows would hit anywhere.
+
+**Where to start if this line is taken up**: `cpu 1` with 266 exits and
+zero second-level entries is a bring-up failure with a clear signature,
+and this tree has instrumentation for exactly that path -
+`ap_probe_rip`, `apentry`/`apfault` switches, the start-up IPI census -
+none of which has been read for a nested two-processor boot.
