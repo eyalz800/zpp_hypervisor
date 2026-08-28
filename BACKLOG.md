@@ -60860,3 +60860,51 @@ the boot to be fast enough to beat the watchdog (optimisation), or long
 enough uninterrupted runtime that a slow boot completes (release, or a
 build the watchdog does not reset). The progression itself is no longer
 in question.
+
+## The watchdog culprit is the HVCI protection walk, and it is work not a wait
+
+Traced functionally on the instrumented novina=1 build, per the standing
+directive to find the block rather than optimise:
+
+- **`HvCallModifyVtlProtectionMask`: 41,351 calls, 73,611 reps asked,
+  73,655 done, 0 short, 0 failed.** This is Windows protecting ~73,000
+  kernel pages for hypervisor-enforced code integrity during
+  `VslFinishStartSecureProcessor`. The reps are not truncated - Windows
+  batches where it can and uses reps=1 where each page's mask differs -
+  so we are not forcing extra calls. The work is genuine and Windows'.
+- **The walk PROGRESSES** (page requests 7,210 -> 7,442 -> 7,897 across
+  three reads), and the guest is at DISPATCH doing this work, not
+  spinning on a device. So the 120-second unbroken-DISPATCH region the
+  watchdog trips on is **work, not a wait** - which means it is our
+  slowness, not a device interrupt we are failing to deliver. The NVMe
+  is alive (CC.EN=1, CSTS.RDY=1), Hyper-V is active not halted, and the
+  secure calls all complete. Nothing is functionally stuck.
+
+**Where our cost in that walk actually goes, and it is structural:** each
+`ModifyVtlProtectionMask` makes Hyper-V change a VTL EPT entry and
+`INVEPT`. We shadow that EPT, and on the INVEPT we **discard the shadow
+context and replay it** - 17,202 INVEPTs drove 34,402 shadow-EPT
+rebuilds and **2,193,023 replayed leaves** plus 323,805 faulted leaves,
+at ~374 us a rebuild. That replay storm is the bulk of the per-call
+cost, and it is O(context) per protection change even though each
+change touches one page.
+
+**The one structural lever that is not micro-optimisation:** we
+**observe** every `ModifyVtlProtectionMask` - its GPA and new mask are
+in the hypercall registers we already census (`vtl_protect_rdx`, the
+mask). So instead of discarding the whole shadow context on the
+following INVEPT and replaying 64 leaves, we could apply the *observed*
+protection change to the one shadow leaf it names. That is O(1) per
+change against O(context), and it is a correctness-preserving algorithm
+change, not a per-exit speed hack. It is also **different from the
+`refresh_shadow_on_invept` that deadlocked**: that read Hyper-V's tables
+*before* the change and missed it; applying the observed hypercall
+argument applies the change itself, after the fact, which is sound.
+
+Whether this crosses the "do not optimise" line is a judgement call -
+it makes the walk faster - but it is the only path found that could get
+the HVCI walk under the 120-second watchdog window **without** a
+per-exit micro-optimisation and **without** touching the guest, and it
+fixes a real structural inefficiency (a whole-context rebuild for a
+one-page change). It is the next thing to try if the constraint is
+"unblock the boot".
