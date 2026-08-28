@@ -59299,3 +59299,47 @@ have never been compared at the same point.
 reading a per-VP flag or processor mask. That is a securekernel
 question, and `securekernel.pdb` plus `decompiled_sk/` can answer it -
 it is with the decompilation now.
+
+## The VP-start rendezvous is refuted by three live reads
+
+The decompilation offered a precise and very plausible account: the
+secure side of `VslFinishStartSecureProcessor` dispatches into
+`SkeStartProcessor`, which sets `SkiStartVpActive` to the target VP
+index, calls `HvCallStartVirtualProcessor`, and then spins
+`do { pause; } while (SkiStartVpActive != 0)` at RVA 0x8710b - cleared
+only by `SkeInitializeProcessor` running **on the newly started VP**. On
+a guest whose second processor never enters VTL1 that spins for ever,
+and it fits every measured symptom: after page-protection, hypercall
+free, ~1 ms turns, never completes.
+
+It also came with its own confirmation test, which is the right way to
+offer a hypothesis. **The test says no.**
+
+Addresses verified against the PDB rather than taken on trust - section
+9 is at VA `0x10C000`, so `SkiStartVpActive` at offset `0x23d48` really
+is RVA `0x12FD48`, and `SkeStartProcessor` at section 1 offset `0x85dac`
+is RVA `0x86DAC`, putting the spin `0x35F` into it. Read live against
+securekernel's base for this boot (`0xfffff8055cf41000`):
+
+    SkiStartVpActive      0            no VP start outstanding
+    SkeNumberProcessors   1
+    SkeActiveProcessors   {Count=1, Size=0x20, Bitmap=1}
+
+**One processor, active, and nothing pending.** So the secure kernel is
+not waiting for a second virtual processor, and the millisecond of
+hypercall-free computation per turn is something else.
+
+### What that costs and what it buys
+
+It costs the most complete account this investigation has produced. It
+buys the elimination of an entire class - "the stall is a
+multi-processor rendezvous on a single-processor guest" - which was
+attractive enough that it would otherwise have absorbed a lot of effort,
+and which explains why the two-processor experiments felt relevant.
+
+The agent's own scope note is where this landed: the `SkeStartProcessor`
+linkage was taken **from the call graph**, and the secure-service number
+through the 25 KB `IumInvokeSecureService` switch was **not decoded**.
+That undecoded switch is now the thing to decode - the request block
+this VMM already captures carries the service number, so the live value
+plus that switch names what VTL1 is actually running.
