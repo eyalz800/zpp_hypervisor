@@ -58233,3 +58233,37 @@ serialisation, and it is the only one this configuration uses.
 Neither suspect is proven. Both are cheap to test: give the start-up
 path a stack per processor, and make the index assignment atomic or
 derive it from the processor number instead of a counter.
+
+### Both suspects fixed, and neither was the cause
+
+The atomic claim and the per-processor start-up stack are in. Rebuilt,
+deployed, booted two processors:
+
+    VM status: paused (shutdown)          unchanged
+    cpu 1  263 exits  0 l2-entries        unchanged
+    cpu 1  rip offset 0xe920, RFL 0x10002 unchanged - vm_exit_entry
+
+**The same instruction, the same resume flag, the same reset.** Neither
+suspect was the cause, and the hypothesis that produced them - two
+processors sharing a stack - is refuted for this failure.
+
+The changes are kept because they are correct on their own terms: a
+read-modify-write on shared state that decides which 512 KB stack a
+processor gets should not be three separate steps, and a start-up stack
+handed to every processor should not be one array. They were latent
+whether or not they cause this.
+
+**What the refutation buys.** The fault at `vm_exit_entry`'s first
+instruction is not stack *sharing*. That leaves the stack being wrong in
+some other way - unmapped in the host page table on that processor,
+or the wrong address entirely - or the fault not being a stack fault at
+all. `RFL` having RF set says an instruction is being retried after a
+fault; what fault is still unknown, and the host exception record is
+empty, which means the fault is not reaching this VMM's own handler.
+
+**That last part is the thread to pull.** A fault this VMM does not
+record is either happening before the IDT is usable on that processor,
+or the IDT it is using is not the one this VMM built. The host IDT is
+built by `initialize_host_idt` and loaded by `main`, both boot-processor
+only - which `CLAUDE.md` states plainly - so what an *adopted*
+application processor is running with has never been checked.

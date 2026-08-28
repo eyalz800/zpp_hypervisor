@@ -10004,7 +10004,7 @@ private:
      * target is still on this stack, and a target whose `main` *fails*
      * returns onto this frame to log and halt.
      */
-    alignas(page_size) std::uint8_t start_up_stack[0x4000]{};
+    alignas(page_size) std::uint8_t start_up_stack[max_cpus][0x4000]{};
 
     /**
      * The error each processor's launch failed with, or zero.

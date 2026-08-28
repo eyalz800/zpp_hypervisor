@@ -725,8 +725,17 @@ bool hypervisor::start_application_processor(std::size_t slot,
         arch::x86_64::ap_start_up_stage::not_started);
 
     area.argument = slot;
-    area.stack_top =
-        reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
+
+    // Per processor. This was one shared stack handed to every
+    // application processor and to the boot processor's
+    // resume-from-sleep slot, and its own comment named two cases it
+    // did not cover - a slow target still on it when the sender's
+    // bounded wait expires, and a target whose `main` fails returning
+    // onto that frame. Neither is bounded when the processors are
+    // adopted from the guest's own start-up IPIs rather than launched
+    // one at a time by a loader.
+    area.stack_top = reinterpret_cast<std::uint64_t>(
+        std::end(this->start_up_stack[(slot < max_cpus) ? slot : 0]));
 
     // The vector is the trampoline page's page number, which is the whole
     // reason that page had to be below one megabyte.

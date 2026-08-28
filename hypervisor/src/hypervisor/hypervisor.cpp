@@ -3991,8 +3991,11 @@ std::expected<void, zpp::error> hypervisor::arm_resume_from_sleep()
     area.entry =
         reinterpret_cast<std::uint64_t>(zpp_resume_from_sleep_main);
     area.argument = 0;
-    area.stack_top =
-        reinterpret_cast<std::uint64_t>(std::end(this->start_up_stack));
+
+    // Slot zero's own stack, matching `area.argument` above - the stack
+    // is per processor now, and this path is the boot processor's.
+    area.stack_top = reinterpret_cast<std::uint64_t>(
+        std::end(this->start_up_stack[0]));
 
     // And the table, last: until this write the platform still resumes
     // into the guest, which is the outcome every failure above leaves in
@@ -7791,7 +7794,31 @@ void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
     // Every other per-processor array in this class is already indexed
     // under a `< max_cpus` test. This one was not, and it is the one
     // that writes half a megabyte.
-    if (this->available_stack_index >= max_cpus) {
+    // Claimed atomically, because the reserve and the increment used to
+    // be separate steps on shared state.
+    //
+    // The Windows and Linux loaders launch processors strictly one at a
+    // time, which serialised this; under UEFI `number_of_cpus()` returns
+    // 1 since `1c8bfdd`, so only the boot processor comes through here
+    // at launch and the application processors are **adopted later, from
+    // the guest's own start-up IPIs** - which is the one path with no
+    // serialisation, and the only one a nested two-processor boot uses.
+    //
+    // Two processors reading the same index take the same 512 KB stack,
+    // and `host_vm_launch_stack` - the local this VMM points
+    // `host_rsp` at - lives on it. Sharing it means every VM exit on
+    // both processors captures its guest context into the same memory,
+    // which is a fault on the first push in `vm_exit_entry` and no
+    // diagnostic, because the fault handler needs that stack too.
+    auto claimed = __atomic_fetch_add(
+        &this->available_stack_index, 1, __ATOMIC_SEQ_CST);
+
+    if (claimed >= max_cpus) {
+        // Put it back, so a refused launch does not exhaust the pool for
+        // processors that could still have used it.
+        __atomic_fetch_sub(
+            &this->available_stack_index, 1, __ATOMIC_SEQ_CST);
+
         caller_context.rax = zpp::error{error::too_many_processors}.code();
         arch::x86_64::restore_context(&caller_context);
         return;
@@ -7799,7 +7826,7 @@ void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
 
     // A stack inside the module, because main switches onto the host
     // page table, which does not map the caller's.
-    auto & stack = this->stack[this->available_stack_index];
+    auto & stack = this->stack[claimed];
 
     // The context is copied onto it for the same reason: main reads it
     // after the switch, by when the original is unreachable.
@@ -7825,7 +7852,7 @@ void hypervisor::launch_on_cpu(arch::x86_64::context & caller_context)
     launch_context.rsi =
         reinterpret_cast<std::uint64_t>(copied_caller_context);
 
-    ++this->available_stack_index;
+    // The index was claimed above; nothing to increment here.
 
     arch::x86_64::restore_context(&launch_context);
 }
