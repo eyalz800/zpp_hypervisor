@@ -59253,3 +59253,49 @@ across those 27,510 turns, now that it is no longer protecting pages?
 `securekernel.pdb` and `decompiled_sk/` make that answerable - the
 secure-call service number is in the request block this VMM already
 captures, and `securekernel.md` has the dispatch path.
+
+## VTL1 burns a millisecond a turn and asks for nothing
+
+Three measurements together, and they are sharper than anything the
+protection-loop framing produced:
+
+    HvCallModifyVtlProtectionMask   39,452   FROZEN
+    HvCallVtlCall                   27,137
+    HvCallVtlReturn                 27,137
+    (no other hypercall from the second level is advancing)
+
+    VTL1 turn duration              ~526 us / ~1,052 us / ~2,105 us
+    VINA at the call                set 0, clear 26,925
+
+So: the page-protection phase has **completed**; the secure kernel is
+entered, **runs for about a millisecond of pure computation issuing no
+hypercall at all**, and returns state 4 when the clock interrupts it -
+27,000 times over.
+
+It is not yielding immediately (VINA is clear at the call, and the turns
+are milliseconds not microseconds), and it is not asking this VMM or the
+hypervisor for anything. It is **spinning inside its own code**.
+
+### Which retires the last of the protection-loop framing
+
+Everything in this file that treats `SkmiProtectPageRange` as the stuck
+work is looking at a phase that finished at 39,452 calls. The stall is
+in whatever `VslFinishStartSecureProcessor`'s secure side does **after**
+that.
+
+### The hypothesis worth testing first
+
+`VslFinishStartSecureProcessor` is per-processor secure bring-up, and
+this guest runs **one** processor (`ZPP_CPUS=1`). A rendezvous, a
+processor-mask barrier, or a wait for another virtual processor to reach
+a point would spin exactly like this: a millisecond of polling, no
+hypercall, no completion, for ever.
+
+It is also consistent with the two-processor attempts failing earlier
+and differently - those never reached this phase, so the two failures
+have never been compared at the same point.
+
+**What would confirm it**: a poll loop in the secure side of that path
+reading a per-VP flag or processor mask. That is a securekernel
+question, and `securekernel.pdb` plus `decompiled_sk/` can answer it -
+it is with the decompilation now.
