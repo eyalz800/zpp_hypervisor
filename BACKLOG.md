@@ -60584,3 +60584,34 @@ already took that win.
 
 Held standing item: `guest_interrupt_status` is written into vmcs02 and
 never saved back, which will break `ZPP_NESTED_VID=ON` silently.
+
+## The biggest untried lever: a RELEASE build (-O2 vs debug's -O0)
+
+Every boot in this entire investigation has run a **debug** hypervisor -
+`-O0`, the CMake default. The DPC watchdog is proven to be a pure
+real-cycles-at-DISPATCH wall with no hypervisor cheat, and `-O0 -> -O2`
+on a hot VM-exit interpreter is routinely a 2-5x per-exit speedup - which
+is exactly the kind of headroom the watchdog needs and nothing else has
+offered. This was overlooked for the whole investigation.
+
+Built `cmake --preset release` with the boot switches
+(`ZPP_SUPPRESS_VINA=ON`, `ZPP_EAGER_EPT_NEIGHBOURS=ON`,
+`ZPP_NESTED_SHADOW_VMCS=ON`, `ZPP_NESTED_VMX=ON` - all plain forwards,
+honoured in Release). Manifest verified `nested=1 shadowvmcs=1
+eagerept=1 novina=1 diag=0`. `deploy-to-rig.sh
+out/release/x86_64/zpp_loader.efi` passed `check-bootable.sh` and
+deployed. Booted single-processor, module base `0x670d0000`, running.
+
+**Cost of the choice, and it is real**: Release carries no `-g`, so the
+tree's own instruments are unreadable - `rig-dump-state.py` resolves
+member offsets from DWARF and there is none. `guest-modules.py` /
+`guest-processes.py` still work (they read Windows' structures at fixed
+RVAs), and VM status and the physical screen still work. So a release run
+is measured by **survival time and boot progress**, not by the internal
+counters - which is the right trade when the internal counters are
+themselves a measured ~10% of the cost being reduced.
+
+Held as the debug baseline for any run that needs the counters:
+`novina=1, eagerept=1, shadowvmcs=1, ZPP_CPUS=1`, instrumentation off,
+the three hot-path samplers gated - which reached 155 drivers and ran
+45+ minutes.
