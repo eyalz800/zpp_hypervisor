@@ -59655,3 +59655,33 @@ here - 1,062 samples on entries staging nothing, which injection cannot
 shape. So the secure kernel genuinely passes through that instruction on
 every resume; the control's 19,671 samples were not an artefact of
 injecting there.
+
+### And it is a REGRESSION, not a different presentation of the same stall
+
+The stack at the reset settles it, and it is not the control's stack:
+
+    Phase1Initialization -> Phase1InitializationDiscard+0x924
+      KeStartAllProcessors+0x175
+        HvlStartBootLogicalProcessors+0x23c
+          HvlpDepositPages+0x194 and +0x254
+            HvlpAcquireHypercallPage+0x4d
+              HvcallInitiateHypercall+0x68
+                MmAllocatePartitionNodePagesForMdlEx+0x10e
+          HvlpSetupSchedulerAssist+0x109
+
+`KeStartAllProcessors` is the call at `Phase1InitializationDiscard+0x924`
+and `MakeGdtReadOnly` - where the control sits - is the one at `+0x95a`.
+**`+0x924` comes first**, so `ZPP_SUPPRESS_VINA=ON` leaves the boot in an
+*earlier* phase than leaving it off, and then Windows releases the
+hypercall page and restarts. The switch is harmful, not merely
+ineffective.
+
+It also explains the one encouraging number in `13713c5` - "three
+application processors show about 350 second-level entries where every
+previous build had 17". They are further into application-processor
+start-up because that is where this build now stops, and cpu 1's exit
+ring here ends in `init` (wait-for-SIPI) followed by `sipi qual=0x2`.
+Reaching the AP start path is not the same as getting past it.
+
+**So the control build is the one that gets furthest, and measurements
+belong on it.** Restoring `novina=0` before anything else.
