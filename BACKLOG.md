@@ -60646,3 +60646,65 @@ login screen. This is the first failure that is past the kernel
 entirely, and it is a different kind of problem: a user-mode or
 late-driver service waiting on something that never completes, or slow
 enough that it looks stuck. That is the next debug target.
+
+## Ground truth on progress: the guest works, slowly, and never reaches user-mode
+
+Measured on the readable debug build (`novina=1, eagerept=1,
+shadowvmcs=1, census=0, ZPP_CPUS=1`), two dumps 180 s apart:
+
+    l2-entries   6,091,406 -> 6,903,758   ~4,500/s
+    exits       12,823,805 -> 14,492,812  ~9,270/s
+    interrupted census      KiDpcInterruptBypass 85.6% -> 85.4%, UNCHANGED
+
+So the guest is **executing hard** - 4,500 VTL round trips a second, not
+halted - and **85% of its time is in the clock/DPC interrupt path**
+(`KiDpcInterruptBypass+0x12`), a distribution that does not shift across
+three minutes. That is the four-levels-deep per-tick cost: Windows'
+574.7 Hz synthetic clock, each tick astronomically expensive through
+KVM -> zpp -> Hyper-V -> Windows, leaves ~15% of cycles for actual
+forward progress.
+
+**It is not a livelock.** Earlier instrumented runs this session proved
+the underlying work advances: the secure-manager page walk moved
+7,207 -> 7,414, the boot reached secure service 0x23 (`VslExchangeEntropy`,
+a post-driver-init step) and 155 drivers loaded. The guest progresses;
+it is just ~1000x too slow, and on the debug build the DPC watchdog
+fires before driver init completes.
+
+**What the process walker says, and its limit.** `guest-processes.py`
+consistently reports only `System` (plus `Secure System`, `Registry`
+early) - user-mode (`smss.exe`) is never confirmed to launch. But the
+walker is a slow monitor-driven list traversal that races the live list
+(module counts came back 27, 41, 55, 155 on repeated reads of one boot),
+so its low process count is weak evidence. The reliable facts are the
+hypervisor counters above and the earlier instrumented milestones.
+
+**The screen is not a sensor.** The rig's passed-through GPU shows our
+loader's own `ZPP_TRACE ... chainloading bootmgfw.efi` trace, frozen,
+because Windows never reaches the point of initialising its display
+driver to repaint the framebuffer. It has looked identical for 20 days
+regardless of internal progress. A photograph of it says nothing about
+how far Windows got - a lesson that cost a wrong "we reached the login
+spinner" claim this session.
+
+## Honest assessment of the remaining distance
+
+The blocker is now singular and understood: **raw per-exit cost at four
+levels of nesting.** The DPC watchdog is its proximate symptom (pure
+consecutive-DISPATCH cycles, no hypervisor cheat, proven from decompiled
+ntoskrnl). Levers applied, in order of impact: release build (-O2, the
+largest, removes the watchdog death in 30+ min where debug died at 11);
+VINA suppression (unblocked the secure-processor phase entirely); eager
+EPT (54.9% -> 9.8% EPT-violation exits); instrumentation and hot-path
+samplers off. Levers that cannot be pulled: the 574.7 Hz tick (Windows
+bugchecks if it is moved), the nesting depth (the rig runs us under
+KVM), the guest image (must not be modified).
+
+The realistic path to a login screen from here is continued per-exit
+cost reduction - the KVM review's dirty-boolean hoist and copy
+coalescing are the next correctness-preserving items - plus, separately,
+the passed-through GPU's display driver actually initialising so the
+screen repaints, which is a second problem behind the first and
+untouched. Whether cost reduction alone can carry a four-level-deep
+debug-to-release guest all the way to `LogonUI` on this hardware is
+genuinely uncertain, and stated as such rather than promised.
