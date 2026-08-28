@@ -59105,3 +59105,55 @@ reaching into the level above's pending state, and this VMM has no
 handle on it. The one lever that did work - withholding the tick - works
 because it stops the interrupt existing at all, and its cost is the
 level above losing its wake condition.
+
+## It was never `0x2f`. The interrupt that breaks the call is the clock
+
+One line of arithmetic, and most of this file's narrative about the
+self-IPI turns out to have been chasing the wrong vector.
+
+    vector 0x2f   priority class  2   deliverable at TPR class 2?  no
+    vector 0x40   priority class  4   deliverable at TPR class 2?  YES
+    vector 0xd1   priority class 13   deliverable at TPR class 2?  YES
+
+Delivery requires the vector's class **strictly greater** than the task
+priority class (SDM 12.8.4). Windows sits at class 2. So:
+
+- **`0x2f` is correctly blocked** - and VINA's priority-checking gate
+  will therefore never fire for it. All the effort spent on "the
+  dispatch interrupt is pending and undeliverable, so the cycle cannot
+  break" was aimed at a vector that cannot cause the yield.
+- **`0xd1`, the clock, is class 13 and always deliverable** at any
+  interrupt request level Windows plausibly holds. It is **99.4% of
+  everything injected** - 359,084 of 361,278 in the current run.
+
+**So the interrupt that fires VINA during a trust-level call is the
+clock.** Not the self-IPI, which is blocked; not `0x40` either, which is
+deliverable but rare.
+
+### Which explains, at last, why only one intervention ever worked
+
+Withholding the tick is the only thing that has ever moved this boot
+past `MakeGdtReadOnly`, and it worked with eight or nine withholds. That
+was never about giving VTL1 "more time" - **it removed the one interrupt
+that can lawfully interrupt the call.**
+
+It also explains the rate. The trust-level call runs about 1,052 us and
+the clock arrives on about the same period, so roughly half of calls
+should be hit; the notification is measured firing on 21.4% of them,
+which is the same order and lands under the 28.8% priority ceiling.
+
+### And it makes the requirement exact
+
+The call cannot complete while any clock tick lands in it, because the
+clock is always deliverable at Windows' priority and Windows cannot
+handle the state the resulting yield returns. Either:
+
+- the call must complete inside one tick period, which is what the
+  duration numbers say it *nearly* does; or
+- the tick must not arrive during it, which is what withholding did and
+  what cost the level above its wake condition.
+
+Those are the only two shapes, and this file has now measured both.
+Recorded so nobody spends another session on the self-IPI: **`0x2f` is
+not the vector, and the task-priority argument about it was sound but
+irrelevant.**
