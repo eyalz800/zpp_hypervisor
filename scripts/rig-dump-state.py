@@ -9665,6 +9665,49 @@ def main():
                 print(f"  0x{vector:02x}  {value:>10}  "
                       f"{100.0 * value / total:5.1f}%")
 
+    # The lazy tick's own account, and specifically whether its window
+    # was still open when the guest stopped.
+    #
+    # Three interventions in one session could not report whether they
+    # had run - the injection reconciliation read an unresolved member
+    # and called it a drop, `hold_clock_in_vtl1` never fired, and the
+    # expiring gap could not say whether it expired. The first two are
+    # fixed; this is the third. "Froze before the window closed" and
+    # "froze after it closed" are opposite diagnoses - one says try a
+    # shorter window, the other says the window is not the mechanism -
+    # and only `lazy_tick_after_expiry` separates them.
+    for cpu in range(args.cpus):
+        if "lazy_tick_withheld" not in off:
+            break
+        withheld = read("lazy_tick_withheld", cpu) or 0
+        first = read("lazy_tick_first_tsc", cpu) or 0
+        expired = (read("lazy_tick_after_expiry", cpu) or 0
+                   if "lazy_tick_after_expiry" in off else 0)
+        owed = read("lazy_tick_owed", cpu) or 0
+        again = (read("lazy_tick_redelivered", cpu) or 0
+                 if "lazy_tick_redelivered" in off else 0)
+        not_yet = (read("lazy_tick_not_yet", cpu) or 0
+                   if "lazy_tick_not_yet" in off else 0)
+        if not (withheld or first or expired):
+            continue
+        print(f"\ncpu {cpu} lazy tick")
+        print(f"  withheld {withheld:,}   re-delivered {again:,}   "
+              f"not yet interruptible {not_yet:,}")
+        print(f"  owed now 0x{owed:x}")
+        if 0 == withheld:
+            print("  *** THE GAP NEVER FIRED - nothing was withheld, so "
+                  "this boot tested nothing about it")
+        elif expired:
+            print(f"  window CLOSED: {expired:,} ticks passed through "
+                  f"after expiry")
+            print("     so the guest ran on with the gap no longer "
+                  "applied, and a shorter window would not change that")
+        else:
+            print("  window STILL OPEN at this sample - the gap was in "
+                  "force the whole run")
+            print("     so if the guest is wedged, it wedged with the "
+                  "gap applied and a SHORTER window is the thing to try")
+
     # Staged against carried, which is the functional question the two
     # censuses exist to answer and neither answers alone. A vector the
     # level above asked to inject and that the entry did not carry was

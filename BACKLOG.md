@@ -57451,3 +57451,56 @@ the wedge that follows is understood but not yet separated from it. A
 shorter window is the obvious next value, and it is only worth spending
 a boot on once the counters print - otherwise the result is another
 number that cannot say whether it tested anything.
+
+## Withdrawn: "the gap moves the boot forward" is confounded
+
+The instrument added for exactly this purpose immediately retired the
+claim it was built to check, which is the best possible outcome and the
+least comfortable one.
+
+    cpu 0 lazy tick
+      withheld 9   re-delivered 9   not yet interruptible 28
+      window STILL OPEN at this sample
+
+**Nine.** Across a whole run. The gap barely operated, and two things
+that were attributed to it are not its:
+
+- **The fall in `0xd1` from ~734,000 to 5,062 is not the gap.** Nine
+  withholds cannot account for it. The guest simply did far less work
+  before wedging, and a cumulative count divided by nothing was read as
+  an effect. That is the same error this file records elsewhere as a
+  total quoted as a rate.
+- **And the forward progress past `MakeGdtReadOnly` may not be the gap
+  either**, because `arm_controller_poll` was changed in the same
+  session to arm a 1 ms timer on vmcs01 **whenever
+  `lazy_tick_microseconds` is non-zero**. Every run called "the gap
+  works" therefore had *two* variables moved: the withholding, which
+  barely happened, and a periodic first-level exit, which happened
+  about a thousand times a second.
+
+So the most reproducible positive result in this investigation is
+**confounded**, and the honest statement is: something in the
+`lazy_tick != 0` configuration carries the boot past `MakeGdtReadOnly`,
+and it is more likely the poll than the gap, because the gap fired nine
+times.
+
+### The isolation attempt, and why it failed
+
+`ZPP_LAZY_TICK=1` was meant to separate them at zero code cost - a one
+microsecond gap withholds nothing while still arming the poll. It does
+not work: 13,834,854 exits and **one** second-level entry, the guest
+never entering nested execution at all. An exit storm rather than an
+isolation, so it says nothing about either variable.
+
+The clean separation needs the poll behind its own switch rather than
+riding on `lazy_tick`, which is a small edit and is the next one - the
+two were coupled by convenience when the poll was added to break the
+freeze, and that convenience has now cost a wrong attribution.
+
+### The lesson, which this session has now paid for three times
+
+Every instrument added here has retired a claim: the injection
+reconciliation retired "all injections are dropped", the return census
+retired "the answer is lost", and this one retired "the gap works".
+**In each case the claim was made before the instrument existed and
+survived only because nothing could check it.**
