@@ -57814,3 +57814,53 @@ level.
 That is a different edit from anything tried: all six previous attempts
 changed *when a tick is withheld*. This changes *where it can be given
 back*.
+
+## The halt intercept confirms the diagnosis and does not repair it
+
+`ZPP_POLL_ON_HALT` with the gap in its window: the halt becomes an exit
+and the existing no-op handler makes the first level poll.
+
+**It works as designed.** Exits go from 1,079 a second - our own timer,
+the signature of a dead machine - to **30,220 a second**. The first
+level is running again, which confirms the disassembly: it really was
+sitting in `sti; hlt`, and intercepting the halt really does revive it.
+
+**And the boot does not advance.** `l2_entries` frozen at 90,991,
+`vtl_protect_count` at 39,450, `shadow_ept_leaves_filled` at 337,848,
+all `+0`.
+
+### Which closes the loop, in the least convenient way
+
+The first level now polls `cmpl $0, %gs:832`, finds no work, and polls
+again. **It has nothing to do because the thing that would give it work
+is the tick being withheld**, and the tick is given back only on a
+second-level entry, which it will not make until it has work.
+
+So the cycle survives the repair:
+
+    withheld tick -> first level has no work -> no second-level entry
+      -> no give-back -> withheld tick
+
+Reviving the processor was necessary and is not sufficient. The give-back
+has to happen somewhere the first level reaches **while idle**, and every
+path this VMM has for returning an injection runs inside
+`build_vmcs02`.
+
+### What is now known with certainty, and it is a lot
+
+- The stall is `MakeGdtReadOnly`'s trust-level call missing a 1,743 us
+  deadline, once, and latching.
+- Withholding a tick across the protection phase carries Windows past
+  it - the idle thread becomes current, twice, reproducibly.
+- Doing so leaves the first level with no wake condition; it halts at a
+  known instruction, and intercepting the halt revives the processor
+  without giving it work.
+- Both requirements are served by the same object - the pending tick -
+  which is why no setting of gap, cap or window satisfies both.
+
+The remaining move is a give-back that does not require a second-level
+entry: injecting the owed vector into the **first** level's own entry
+interruption field, which this VMM has never done and which
+`force_dispatch_once` is a cautionary precedent for. That is a real
+design decision rather than another knob, and it is where this should
+stop until it is taken deliberately.

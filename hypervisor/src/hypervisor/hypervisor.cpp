@@ -6307,6 +6307,17 @@ void hypervisor::setup_vmcs(std::size_t cpu,
     // why this is one switch with the suite rather than a default.
     constexpr bool trap_the_quiet_instructions = ZPP_GUEST_TESTS;
 
+    // The halt intercept on its own. See `nested_vmx::poll_on_halt`:
+    // the first level halting with a tick owed is the wedge, and the
+    // give-back only runs on a second-level entry a halted processor
+    // never makes. This is the one bit of the set above that is worth
+    // having outside the test build.
+    auto halt_poll_control =
+        nested_vmx::poll_on_halt
+            ? arch::x86_64::vmx::vm_execution_controls::primary::
+                  hlt_exiting
+            : std::uint64_t{};
+
     auto quiet_primary_controls =
         trap_the_quiet_instructions
             ? (arch::x86_64::vmx::vm_execution_controls::primary::
@@ -6345,6 +6356,7 @@ void hypervisor::setup_vmcs(std::size_t cpu,
                 arch::x86_64::vmx::vm_execution_controls::primary::
                     enable_io_bitmaps |
                 monitor_controls | quiet_primary_controls |
+                    halt_poll_control |
                 dilation_controls));
 
     // The host runs in 64-bit mode after an exit, and DR7 and

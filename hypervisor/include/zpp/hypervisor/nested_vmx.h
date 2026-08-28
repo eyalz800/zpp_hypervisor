@@ -1722,6 +1722,44 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * take - nothing is withheld until the guest is taking clock
  * interrupts, and the clock is what the window is measured against.
  */
+#ifndef ZPP_POLL_ON_HALT
+#define ZPP_POLL_ON_HALT 0
+#endif
+
+/**
+ * Intercept `HLT` in the **first** level, so a halt becomes an exit.
+ *
+ * Found by disassembling the wedge rather than by reasoning about it.
+ * At the address the first level sits at when a gap has been applied:
+ *
+ *     cli
+ *     cmpl  $0, %gs:832
+ *     jg    <has work>
+ *     sti
+ *     hlt
+ *
+ * **It is halted, not spinning**, and the interrupt it is halted
+ * waiting for is the tick being withheld. A halted processor takes no
+ * VM exits, so no second-level entry happens, and the owed tick is
+ * given back only in `build_vmcs02` - which runs on a second-level
+ * entry. The wake-up and the withheld object are the same thing.
+ *
+ * With this on, the halt exits instead, and the existing
+ * `basic_reason::hlt` case is already a no-op - "so the guest polls
+ * instead of idling" - so the first level keeps running and reaches a
+ * second-level entry, where the tick it is owed is delivered.
+ *
+ * **This is the only repair attempted that changes *where* a tick can
+ * be returned rather than *when* it is withheld.** Six before it moved
+ * the gap, its cap, or its window; all of them left the give-back on a
+ * path a halted processor cannot reach.
+ *
+ * Off by default: an idle first level spins instead of halting, which
+ * costs real time on a machine that is doing nothing. Only worth
+ * carrying while a gap is in force.
+ */
+inline constexpr bool poll_on_halt = (0 != ZPP_POLL_ON_HALT);
+
 #ifndef ZPP_LAZY_TICK_AFTER_PROTECT
 #define ZPP_LAZY_TICK_AFTER_PROTECT 0
 #endif

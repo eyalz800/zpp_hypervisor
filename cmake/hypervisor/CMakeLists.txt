@@ -24,6 +24,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC. Off only makes sense with one processor."
     ON)
 
+option(ZPP_POLL_ON_HALT
+    "Intercept HLT in the first level so a halt becomes an exit and the guest hypervisor polls instead of idling."
+    OFF)
+
 set(ZPP_LAZY_TICK_AFTER_PROTECT "0" CACHE STRING
     "Withhold nothing until the protection-mask call count reaches this; 0 withholds from the start.")
 
@@ -335,6 +339,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_POLL_L1=$<BOOL:${ZPP_POLL_L1}>
     -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
     -DZPP_LAZY_TICK_AFTER_PROTECT=${ZPP_LAZY_TICK_AFTER_PROTECT}
+    -DZPP_POLL_ON_HALT=$<BOOL:${ZPP_POLL_ON_HALT}>
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>
