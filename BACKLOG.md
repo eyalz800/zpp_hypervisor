@@ -57971,3 +57971,56 @@ what this VMM spends inside the call - 75.4% of wall clock in the exit
 handler, 36.7% of it reflecting every exit to the level above through
 VMCS field copies. That is a different piece of work, with a number
 attached, and it is where this goes next.
+
+## Correction: the deadline needs about 20%, not 5x. The earlier figure was circular
+
+Two entries above closed the speed route with "guaranteeing the deadline
+by speed alone would need the worst case down about five fold". That
+number came from the tail of the VTL1 duration histogram, 8,422 us
+against a 1,743 us tick.
+
+**The tail is not independent of the thing it is being used to argue
+about.** In that bucket 24 of 25 samples have VINA **set** - they are
+turns that were *interrupted*, and a turn that takes a VINA takes longer
+because of it. Using them to size the deadline assumes the interruption
+that the deadline is supposed to prevent. The entry even noted the
+correlation and then reasoned past it.
+
+The quantity that matters is the **uninterrupted** turn: 526 us and
+1,052-2,105 us, against 1,743 us. That straddles the deadline, which is
+exactly why the failure is deterministic yet flips under a small
+perturbation - and it means the requirement is **about twenty percent**,
+not five hundred.
+
+### Which makes the arithmetic worth writing down
+
+    handler share of wall            75.4%
+    reflect_l2_exit share of handler 36.7%   (154,307 cycles, ~1.00/round trip)
+      save_l2_state                   9.7%   (40,933)
+      load_l1_host_state              9.1%   (38,110)
+      exit information                6.2%   (25,948)
+      copy_vmcs12_to_shadow           5.3%   (22,406)
+
+A 20% cut in wall time needs about 27% off the handler, and
+`reflect_l2_exit`'s four children are 30.3% of it. So the target is not
+comfortably reachable by trimming one of them, and is not obviously out
+of reach either - which is a different statement from "five fold" and
+points at a different decision.
+
+`copy_vmcs12_to_shadow` is the most suspicious of the four for its size:
+22,406 cycles to publish exit information, spent almost entirely on
+**four VMCS pointer operations** - `VMPTRST`, `VMPTRLD` of the shadow,
+the field writes, `VMCLEAR`, `VMPTRLD` back - of which only the field
+writes are the work. 13,739 of those cycles are the pointer juggling.
+
+Whether that dance is required is a VMX question this file should not
+guess at: a shadow VMCS is accessed by software through `VMPTRLD` and
+`VMREAD`/`VMWRITE`, and its memory format is explicitly not
+architectural, so writing it directly is not available. Whether the
+`VMCLEAR` is needed on every publication, or only when the link pointer
+changes, is the specific thing to check in the SDM before any of it is
+touched.
+
+**Recorded as reopened, not as solved.** The route was closed on a
+number that assumed its own conclusion, and it should not stay closed
+for that reason.
