@@ -57142,3 +57142,58 @@ confirms the mechanism with a second instrument rather than moving past
 it.
 
 Boots were not spent re-running either refuted configuration.
+
+## The two readings are one story: entering the deadlock, and being in it
+
+This file has argued itself into a contradiction and it is resolvable.
+"VTL1 needs an uninterrupted window" and "it is a retry loop that time
+cannot fix" were treated as competing. **They describe different phases
+of the same failure**, and both are right about their own phase.
+
+    phase 1, ENTERING it   the secure call must finish inside one tick.
+                           Windows' period is 1,743 us; VTL1's work sits
+                           in the 1,052-2,105 us bucket. It straddles
+                           the deadline.
+
+    phase 2, INSIDE it     one VINA is taken, so a DPC is now pending
+                           and IRQL is pinned at 2. The vector is
+                           undeliverable, VINA re-asserts on every
+                           entry, and the 18 ms retry loop is stable.
+                           No amount of time exits it, because the
+                           thing blocking it is the pending vector, not
+                           the clock.
+
+Everything measured fits this and nothing contradicts it:
+
+- **It explains why `ZPP_LAZY_TICK` worked.** A 10 ms gap lets the call
+  finish before the *first* tick, so phase 1 never completes and phase 2
+  is never entered. It did not "grant VTL1 a window" in the steady
+  state - it prevented the state.
+- **It explains the determinism.** The same fixed workload against the
+  same fixed deadline crosses it at the same place, which is why three
+  boots stop at 39,449 protection calls and ~21,17x secure requests.
+- **It explains why every steady-state intervention failed.** Six of
+  them - four time lies, `deliver_on_drop`, both preemption timers -
+  were aimed at phase 2, where the clock is not what is blocking.
+- **And it explains why the retry loop is 18 ms apart rather than 1 ms.**
+  Nothing is racing a deadline in phase 2. That interval was the clue
+  that the time-budget reading could not be the whole story, and it is
+  also the clue that it is not *none* of it.
+
+### What it makes the target, and it is a number
+
+VTL1's `MakeGdtReadOnly` work must complete inside **1,743 us**, once.
+It currently takes 1,052-2,105 us, so it is marginal rather than far
+off - which is exactly the shape of a failure that reproduces to the
+digit yet flips under a small perturbation.
+
+This is a wall-clock target, and it is reached from the other side than
+every attempt so far: not by moving the deadline, which is unavailable
+without wedging the level above, but by shortening the work. **`duty
+0.754` says 75.4% of wall clock is spent in this VMM's exit handler**,
+so most of that 1,052-2,105 us is not the secure kernel's own work.
+
+That is a performance number in service of a functional outcome, which
+is a distinction this file should have drawn earlier: nobody needs the
+VMM faster, but the call has to fit inside a tick, and there is no other
+way left to make it fit.
