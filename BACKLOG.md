@@ -60206,3 +60206,41 @@ stop the notification being *deserved* - either by keeping VTL1 turns
 shorter than the 1.741 ms clock period so nothing is posted to a
 preempted VTL0, or by finding what a real machine does that retires the
 latch.
+
+### And the reset is bugcheck 0x133, DPC_WATCHDOG_VIOLATION
+
+Read from the stopped guest by walking Windows' own cr3, kernel base
+`0xfffff80182a00000`:
+
+    KiBugCheckActive   0x100000003
+    stop code          0x00000133      DPC_WATCHDOG_VIOLATION
+    param1             0x1             cumulative time at DISPATCH_LEVEL or above
+    param2             0x1e00          the watchdog period
+    param3             0xfffff801839c53c8
+    param4             0
+
+So `HV_X64_MSR_RESET` was the *consequence*: Windows bugchecked and asked
+the partition to reset. And unlike every previous boot in this
+investigation, `KiBugCheckData` is **not** zero - the earlier all-zero
+reads were correct and meant Windows genuinely had not bugchecked; this
+one did.
+
+**This is the first failure in this tree that is honestly a speed
+problem**, and it is worth being precise about why that is different
+from the performance framing that was set aside earlier. Before, the
+boot was livelocked and no amount of speed would have helped. Now the
+work runs, and the only thing stopping it is that Windows' own watchdog
+measures cumulative time at DISPATCH_LEVEL and we exceed it. `param1 =
+1` names exactly that.
+
+The arithmetic says the same thing independently: the walk advanced 6 to
+9 pages per twenty-second window, and the span it is covering is 35,230
+pages with 7,414 done. At that rate it does not finish, watchdog or no
+watchdog.
+
+**Where the time goes, from the same dumps**: EPT violations are
+**54.9%** of all exits (325,787 of 593,071), and every one is answered
+`installed`. `ZPP_EAGER_EPT_NEIGHBOURS` exists for precisely this and
+has never been run against a configuration that makes progress - it is
+`eagerept=0` in every manifest recorded here. That is the next single
+variable, against the `novina=1, ZPP_CPUS=1` run as the baseline.
