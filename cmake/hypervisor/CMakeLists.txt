@@ -69,6 +69,10 @@ option(ZPP_EAGER_EPT_NEIGHBOURS
     "Install neighbouring pages on an EPT fault. See the root CMakeLists."
     OFF)
 
+option(ZPP_EAGER_SHADOW_REPLAY
+    "Restore eager shadow-EPT replay after INVEPT (default off = lazy, like KVM). See the root CMakeLists."
+    OFF)
+
 option(ZPP_PUBLISH_REFERENCE_TSC
     "Fill in the reference TSC page the guest hypervisor leaves invalid, with a scale computed from CPUID.15H where that enumerates and fitted over a long baseline where it does not. See the root CMakeLists."
     OFF)
@@ -353,6 +357,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_INTERCEPT_SELF_IPI=$<BOOL:${ZPP_INTERCEPT_SELF_IPI}>
     -DZPP_FORCE_DISPATCH_ONCE=$<BOOL:${ZPP_FORCE_DISPATCH_ONCE}>
     -DZPP_EAGER_EPT_NEIGHBOURS=$<BOOL:${ZPP_EAGER_EPT_NEIGHBOURS}>
+    -DZPP_EAGER_SHADOW_REPLAY=$<BOOL:${ZPP_EAGER_SHADOW_REPLAY}>
     -DZPP_INTERCEPT_APIC=$<BOOL:${ZPP_INTERCEPT_APIC}>
     -DZPP_DISARM_APIC_WATCH=$<BOOL:${ZPP_DISARM_APIC_WATCH}>
     -DZPP_LAZY_TICK=${ZPP_LAZY_TICK}

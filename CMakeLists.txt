@@ -211,6 +211,10 @@ option(ZPP_FORCE_DISPATCH_ONCE
     "DIAGNOSTIC, ONE BOOT ONLY. Deliver the deferred-call vector 0x2f ONCE, ever, in deliberate violation of the architectural masking rule (SDM 12.8.4: strictly greater priority class), and only when the sampled virtual task priority is exactly 0x20. The stall is a three-link cycle and two links are closed by measurement: withholding the request halts the level above, and round-trip speed cannot reach a level-triggered notification. This tests the third - one delivery drains the deferred call, the vector stops being pending, the notification deasserts and the priority drops. Armed only after reading DpcRoutineActive=0, queue depth 1, and 0x2f>>4=2 out of the guest. The reflection is NOT withheld. OFF by default and it stays off whatever the outcome - it is an experiment, not a fix. See BACKLOG.md."
     OFF)
 
+option(ZPP_EAGER_SHADOW_REPLAY
+    "Restore eager shadow-EPT replay after INVEPT (default off = lazy, like KVM)."
+    OFF)
+
 option(ZPP_EAGER_EPT_NEIGHBOURS
     "On an extended-page-table fault, also install the pages around the one that faulted, bounded to an aligned window. Measured on a verified build: ept-violation is 16.31 per trust-level round trip and 61.1% of all exits at 18.0 VMCS accesses each - 30% of all accesses - and one leaf is installed per fault. Sound because only mappings the guest already permits are installed, composed identically, and any change obliges an INVEPT which discards the root. Sized before building: taking faults to 4 is about 302 us of 3,450, under 9%, against the ~50% needed - it cannot reach the goal and is not expected to. OFF by default. See BACKLOG.md."
     OFF)
@@ -454,6 +458,7 @@ ExternalProject_Add(hypervisor
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
+        -DZPP_EAGER_SHADOW_REPLAY=${ZPP_EAGER_SHADOW_REPLAY}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_DISARM_APIC_WATCH=${ZPP_DISARM_APIC_WATCH}
         -DZPP_LAZY_TICK=${ZPP_LAZY_TICK}
@@ -582,6 +587,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
+        -DZPP_EAGER_SHADOW_REPLAY=${ZPP_EAGER_SHADOW_REPLAY}
         -DZPP_INTERCEPT_APIC=${ZPP_INTERCEPT_APIC}
         -DZPP_DISARM_APIC_WATCH=${ZPP_DISARM_APIC_WATCH}
         -DZPP_LAZY_TICK=${ZPP_LAZY_TICK}

@@ -772,7 +772,8 @@ hypervisor::shadow_ept_pointer_for(std::size_t cpu, std::uint64_t eptp12)
     // a guest hypervisor changing one page's trust-level protection
     // issues INVEPT, that discards the root, and the very next entry
     // wants it back. See `shadow_ept_recall`.
-    if (root == this->shadow_ept_recall_root[cpu][chosen]) {
+    if (nested_vmx::eager_shadow_replay &&
+        (root == this->shadow_ept_recall_root[cpu][chosen])) {
         replay_shadow_recall(cpu, chosen, root);
     } else {
         this->shadow_ept_recall_root[cpu][chosen] = root;

@@ -79,6 +79,10 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::force_dispatch_once),
         ' ', 'e', 'a', 'g', 'e', 'r', 'e', 'p', 't', '=',
         digit(nested_vmx::eager_ept_neighbours),
+        // Off is the fix: lazy shadow-EPT repopulation like KVM, no
+        // eager replay of the recall set after a single-context INVEPT.
+        ' ', 'e', 'a', 'g', 'r', 'e', 'p', 'l', 'a', 'y', '=',
+        digit(nested_vmx::eager_shadow_replay),
         ' ', 'd', 'e', 'f', 'e', 'r', '=',
         digit(nested_vmx::defer_guest_state),
         ' ', 's', 'h', 'a', 'd', 'o', 'w', 'g', 's', '=',

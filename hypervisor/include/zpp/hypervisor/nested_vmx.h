@@ -660,6 +660,47 @@ inline constexpr bool eager_ept_neighbours =
  */
 inline constexpr std::uint64_t eager_ept_window = 8;
 
+/**
+ * On a shadow-EPT rebuild after a single-context INVEPT, put back the
+ * leaves the discarded root last faulted on (`replay_shadow_recall`).
+ *
+ * **Off matches KVM and is the fix for the HVCI-walk DPC watchdog.**
+ * KVM's `handle_invept` frees the nested-EPT root (`kvm_mmu_free_roots`,
+ * mmu.c:3618) and repopulates it **purely lazily** - one GPA per L2
+ * fault through `FNAME(page_fault)` - with no counterpart to
+ * `replay_shadow_recall` anywhere. Our eager replay walks EPT12 and
+ * composes all ~64 recalled leaves on every one of tens of thousands of
+ * rebuilds (measured 2.19M leaf walks at ~374us each) during Windows'
+ * `VslFinishStartSecureProcessor`, which protects ~73,000 kernel pages
+ * for HVCI. That walk is a **linear sweep**: after protecting pages
+ * `[n, n+64)` it moves to `[n+64, ...)` and never revisits, so the
+ * recall set is exactly the pages L2 has just finished with and will not
+ * touch again - every replayed leaf is repopulated only to sit unused
+ * until evicted. The secure kernel holds DISPATCH across the sweep, and
+ * that replay cost is what pushes one unbroken DISPATCH region past
+ * Windows' 120-second DPC-watchdog window (bugcheck 0x133).
+ *
+ * Turning replay off cannot deadlock the way `refresh_shadow_on_invept`
+ * did: that ran *at the INVEPT* against tables mid-change and left an
+ * entry present that no fault then corrected; this strictly does
+ * **less** - every leaf it would have installed is instead installed by
+ * the fault that needs it, which the base path already does
+ * (`nested_ept.cpp` "Nothing is composed here ... which is what KVM
+ * does"), and `replay_shadow_recall`'s own note: "Anything not
+ * composable now is skipped and left to fault, which is the behaviour
+ * without this." So the lazy path is a superset and no guest-visible
+ * state changes.
+ *
+ * Default off. `ZPP_EAGER_SHADOW_REPLAY=ON` restores the old behaviour
+ * for an A/B control.
+ */
+inline constexpr bool eager_shadow_replay =
+#if defined(ZPP_EAGER_SHADOW_REPLAY) && ZPP_EAGER_SHADOW_REPLAY
+    true;
+#else
+    false;
+#endif
+
 inline constexpr bool force_dispatch_once =
 #if defined(ZPP_FORCE_DISPATCH_ONCE) && ZPP_FORCE_DISPATCH_ONCE
     true;
