@@ -58267,3 +58267,31 @@ or the IDT it is using is not the one this VMM built. The host IDT is
 built by `initialize_host_idt` and loaded by `main`, both boot-processor
 only - which `CLAUDE.md` states plainly - so what an *adopted*
 application processor is running with has never been checked.
+
+### The IDT theory is refuted too, and the failure is not a setup error
+
+`load_host_idt()` has exactly one call site, and it is inside
+`vm_launch` (`hypervisor.cpp:6665`, call at 7247) - not in `main` alone.
+`start_up_on_this_processor` reaches it through
+`launch_on_cpu` -> `launch_on_cpu_private_stack` -> `vm_launch`, so an
+adopted application processor **does** load the host IDT. The comment
+there describes this exact symptom - "every exception would fault again
+while being delivered and escalate to a triple fault, taking the machine
+down with no diagnosis" - which is what made it worth checking, and it
+is not what is happening.
+
+**And the arithmetic settles it independently.** `cpu 1` records **263
+exits**. A VM exit only happens from a launched guest, and every one of
+them went through `vm_exit_entry` on that processor's host stack. So the
+stack was good, the IDT was good, and the exit path worked two hundred
+and sixty-three times before it stopped.
+
+That rules out the whole class this line has been chasing: **it is not a
+per-processor setup error.** Something changes at around the two hundred
+and sixty-fourth exit.
+
+Three theories tried on this failure and three refuted, each in one
+step: shared launch stack, shared start-up stack, unloaded IDT. The
+useful residue is that the failure is *dynamic*, not configurational,
+which is where anyone picking this up should start - and `cpu 1`'s exit
+ring holds those 263 exits, which nothing has read yet.
