@@ -58890,3 +58890,66 @@ merely *plausible* is worth less than an honest gap.
 Note also `VINA at the CALL: set 0, clear 26,925` - the notification is
 **never** set going in. Whatever asserts it does so while VTL1 runs, not
 before, which is a constraint any replacement account has to fit.
+
+## VINA has two gates, and only one of them checks task priority
+
+From decompiling hvix64 (artefacts in `.references/hyperv/vina.md`).
+
+    gate (a)  VTL_lower + 0xCF8 != 0        sticky "pending entry reason"
+              set when an interrupt is REQUESTED for a lower VTL while a
+              higher VTL runs.            **no priority term at all**
+
+    gate (b)  0x2ee57c -> 0x2f8c44 -> 0x2fd17c/0x2fd468
+              the real deliverability test: takes the pending vector's
+              class (>>4), requires the in-service class strictly below
+              it, reads task-priority register 0x41004 and requires
+              tpr < pending_class.        **checks priority correctly**
+
+Gate (b) is exactly SDM 12.8.4, so a class-2 vector under class-2
+priority is correctly judged undeliverable and (b) does not fire for it.
+Gate (a)'s write path - `FUN_0x2f9240` setting `CF8=1`, `FUN_0x2fd328`
+setting `CF8=2` with the vector at `+0xCFC` - is guarded only by "a
+higher VTL is currently running".
+
+**So the notification firing on essentially every trust-level call, while
+the vector it names cannot be delivered, is gate (a) - and that makes
+the loop structural rather than a mistake in what this VMM reports.**
+
+Supporting detail, all decompiled: the VINA register is id `0xd0005` at
+`VTL+0x760` (`[7:0]` vector, bit 8 Enabled, bit 9 AutoReset, bit 10
+AutoEoi); assertion happens in `FUN_0x2eaba0`, which walks the enabled
+VTL mask at `VP+0x1b0` and injects the VINA vector into the higher VTL's
+own APIC; and `VinaAsserted` is **bit 0 of the VP assist page's
+`VtlControl`**, `[[VTL+0x38]+0xc]`, which `HvCallVtlReturn` clears only
+when `(vina & 0x300) == 0x300`.
+
+That last point is a discriminator worth keeping: **while `VinaAsserted`
+is set, VINA will not re-inject**, so a stuck latch would *suppress* the
+notification rather than storm it. Our own census - set on 10,007
+returns, clear on 21,161, and **never set at the call** - shows it being
+re-asserted fresh each time, not stuck.
+
+### The one read that would settle it
+
+`VTL0 + 0xCF8`. Non-zero, and especially **2 with `0x2f` at `+0xCFC`**,
+means gate (a) and a structural loop. Zero while the notification still
+asserts means gate (b) judged it deliverable, which points back at what
+this VMM reports - and in that case the register to dump is **`0x41004`**,
+not `0x40004`, because `0x41004` is what the test compares.
+
+**What blocks that read**: the address of Hyper-V's VTL structure. We
+track the VP assist page and can reach `VtlControl`, but `VTL` itself is
+one dereference the other way (`[VTL+0x38]` *points to* the assist
+page), so it needs either a memory search for a pointer to the assist
+page, or a `VTL` address recovered some other way.
+
+### Honest scope from the agent, worth preserving
+
+- **`ShvlVinaHandler` is not in this binary** and was not guessed at:
+  hvix64 contains no `Shvl`, `securekernel` or `Vina` strings. Secure
+  call state 4 is produced entirely securekernel-side, and we have not
+  dumped that module.
+- **"Gate (a) is never cleared" is unproven either way.** No store of 0
+  to `+0xCF8` appears among the 18 instructions using that displacement,
+  but the consume path takes its *address* (`LEA RDX,[RAX+0xcf8]`), so
+  it is likely cleared through a register-held pointer.
