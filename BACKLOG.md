@@ -61033,3 +61033,33 @@ correctness-preserving fixes that match the reference implementation, the
 same category as the replay removal that just worked, not arbitrary
 micro-optimisation - which is the distinction that matters under the
 'follow KVM' direction.
+
+## The KVM-following fixes stack: HVCI walk now 2.7x baseline
+
+Two correctness-preserving fixes that each match KVM's proven behaviour,
+measured on the same instrumented `novina=1, ZPP_CPUS=1` configuration:
+
+    build                            page requests / min
+    baseline (eager replay)                 62
+    + lazy shadow-EPT (eagreplay=0)        113
+    + exit-info gating                     166
+
+The exit-info fix (writing only the SDM-defined exit-information fields,
+like KVM) stacked cleanly on the lazy shadow-EPT fix for a further ~1.5x,
+2.7x over baseline in total. The measured window for the combined build:
+code-0 18,916 -> 22,299 (+483/min) and page requests 6,497 -> 7,661
+(+166/min) over ~7 minutes, with `replayed-leaves = 0` confirming the
+eager replay stays off.
+
+This is the working method under the "look at what KVM does" direction:
+each place our code diverges from KVM's nested algorithm is a
+correctness-preserving fix, and they compound. The secure phase now
+completes fast enough that the boot reaches driver init, and the same
+class of fix - the child-shadow-page keep and the broadest per-exit
+divergence, both handed to the KVM-review agent as plain-text diffs -
+targets the driver-init watchdog trip that is the current frontier.
+
+Not at login yet, but the frontier has moved from a 20-day wedge at
+secure-processor start to driver init, and the rate of the operation
+that trips the watchdog has nearly tripled - both from following KVM,
+not from arbitrary tuning.
