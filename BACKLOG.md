@@ -58660,3 +58660,43 @@ ring's own bound). This tree has a rule for exactly this - an instrument
 that cannot report its own failure - and this is a case of it: a trace
 that silently stops looks identical to a processor that silently
 stopped.
+
+### The counter disagreement is by design, and it withdraws the triple-fault reading
+
+`record_exit` is not called once per exit. It has **five** call sites in
+`exit_dispatch.cpp`, in particular handler paths - including the
+unhandled and stop paths - so `exit_trace_count` counts only exits that
+reach one of those, while `exit_total` counts every exit.
+
+**So the 267 against 102 gap is expected, not an instrument that
+stopped.** The worry in the entry above was unfounded, and the
+conclusion drawn beside it has to go with it.
+
+"Nothing was recorded after the start-up" therefore means **no exit of a
+traced kind followed** - not that the processor took no exits. The
+inference from it - that an application processor which must read CPUID
+and MSRs took none at all, so it faulted immediately and triple-faulted
+into the reset - **is not supported**. The processor may have continued
+running perfectly well; its ordinary exits are simply not in this ring.
+
+### What that leaves, accurately
+
+For the two-processor configuration, what is measured:
+
+- the application processor is INITed and started correctly, landing
+  active at `cs 0x0200`, `rip 0` for vector `0x2`;
+- no refusal, no swallowed vector, no launch error, no host exception,
+  no unhandled exit, no entry failure;
+- `l2_entries` 0 **at the instant of the dump**, a handful of traced
+  exits after the start-up;
+- the machine resets.
+
+What is **not** measured, and was claimed at various points in this
+file: that the handover never happens, that the processor is hung, that
+it triple-faults, that it is stuck in our exit stub, and that it is
+running Windows code. Each was withdrawn on a later read.
+
+The honest position is that the two-processor failure is **not
+characterised**. What is known is where it is not: not the start-up
+path, not the stacks, not the IDT, not the APIC mode, and not the
+INIT/SIPI emulation - five eliminations, each by measurement.
