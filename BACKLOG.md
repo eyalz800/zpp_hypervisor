@@ -57245,3 +57245,58 @@ path.
 
 Recorded as the next place to look, with no estimate attached, because
 the last estimate in this area was out by a factor of twenty-five.
+
+## Correction: the deadline is missed by the tail, not by the mean
+
+The target set two entries ago - shorten the handler until the secure
+call fits inside a 1,743 us tick - implied an arithmetic that does not
+hold. It took the modal bucket, 1,052-2,105 us, and inferred that
+something like a fifth off the handler would clear the deadline.
+
+The distribution says otherwise:
+
+    how long VTL1 ran (us), by VINA flag at its return
+      2^20     526.4     5,496 clear        0 set
+      2^21   1,052.8    11,238 clear    4,167 set
+      2^22   2,105.6     4,427 clear      987 set
+      2^23   4,211.1         3 clear        3 set
+      2^24   8,422.3         1 clear       24 set
+
+**The tail reaches the 8,422 us bucket - about five times the tick.** A
+twenty percent reduction moves the mode and does nothing for that, and
+**one crossing is all it takes**: a single VTL1 call that outlives the
+tick takes one VINA, and from that instant the DPC is pending, IRQL is
+pinned and the retry loop is stable for ever. There is no recovery from
+a single miss, so the quantity that matters is the **maximum**, not the
+mean.
+
+That kills "make the handler ~20% faster" as a plan. To guarantee the
+deadline by speed alone the worst case would have to come down by about
+5x, which no amount of shaving VMCS field traffic will deliver.
+
+Note also that the long buckets are overwhelmingly **VINA set** - 24 of
+25 in the 8,422 us bucket - which is consistent with the tail being
+calls that were interrupted rather than calls that were inherently
+long, and possibly circular: a call that takes a VINA takes longer
+*because* of it.
+
+### What this leaves
+
+Three things, and none of them is a speedup:
+
+- **Prevent the first miss rather than every miss.** The deadlock is
+  entered once, early, in `MakeGdtReadOnly`. A gap that applies only
+  until that call retires - rather than for the whole boot, which is
+  what wedged Hyper-V - would need a trigger this VMM can see, and it
+  can: `VslFinishStartSecureProcessor` is identifiable from the
+  secure-call block.
+- **Break the cycle in phase 2**, which needs to know what Hyper-V
+  waits on while `0x2f` is pending. Above this VMM and not visible from
+  it, as recorded.
+- **Accept that VBS on this path needs the tick relationship it has on
+  hardware**, and that a VMM which cannot deliver `0x2f` under a pinned
+  TPR cannot provide it.
+
+The first is the only one with a lever on this side, and it is narrower
+than anything tried: not "slow the clock", but "do not let this
+particular call be interrupted".
