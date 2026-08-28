@@ -7979,12 +7979,29 @@ def main():
                 continue
             print(f"\ncpu 0 where the guest was {_what} "
                   f"({tot:,} samples, {len(rows)} distinct)")
-            for h, r in sorted(rows, reverse=True)[:14]:
-                rel = ""
+            def _label(r):
                 if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
-                    rel = f"  ntoskrnl+0x{r - kbase0:x}"
+                    return f"  ntoskrnl+0x{r - kbase0:x}"
+                return ""
+
+            ordered = sorted(rows, reverse=True)
+            for h, r in ordered[:14]:
                 print(f"  0x{r:016x}  {h:>10}  "
-                      f"{100.0 * h / (tot or 1):5.1f}%{rel}")
+                      f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
+            # Everything NOT in ntoskrnl, however cold. The secure
+            # kernel and the hypercall page are where the trust-level
+            # livelock lives, and they are three orders of magnitude
+            # below the clock path - a top-N cut hides exactly the
+            # rows this census exists to show. `SkpReturnFromNormalMode
+            # RaxSet+0x114` was found only because it happened to make
+            # the fourteen; the rest of VTL1 did not.
+            rest = [(h, r) for h, r in ordered[14:] if not _label(r)]
+            if rest:
+                print(f"  ... and every non-ntoskrnl row below the cut "
+                      f"({len(rest)} of {len(ordered) - 14} remaining):")
+                for h, r in rest:
+                    print(f"  0x{r:016x}  {h:>10}  "
+                          f"{100.0 * h / (tot or 1):5.1f}%")
             if lost:
                 print(f"  contention: {lost:,} colliding samples decayed a "
                       f"resident entry (a rate, not lost hot addresses)")

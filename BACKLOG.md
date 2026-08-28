@@ -59494,3 +59494,33 @@ The parked RIP of the secure thread was attempted and not obtained:
 which agrees with the `btq $0x9` above, but bit 1 clear, which real
 RFLAGS never is. It is not the running thread's frame. The live gs base
 for VTL1 is the missing piece.
+
+### The 41% was the census's top-N cut, not the guest. It is 99.3%
+
+`rig-dump-state.py` read 2,048 hot-map rows and printed fourteen, and
+the fourteenth row was at 52 samples - three orders of magnitude above
+everything in securekernel except the one address. The tool now prints
+**every non-ntoskrnl row however cold**, because the trust-level
+livelock lives exactly there and a top-N cut hides it:
+`SkpReturnFromNormalModeRaxSet+0x114` was found only by happening to
+make the fourteen.
+
+With the cut removed, and differenced across two dumps minutes apart:
+
+    SkpReturnFromNormalModeRaxSet+0x114   15,723 -> 19,671   (+3,948)
+    every other securekernel address       ~130   -> ~130     (frozen)
+
+The frozen tail is the *record of the phase that finished*, and it reads
+as one - `SkmiProtectPageRange`, `SkmiProtectPlaceholderPages`,
+`SkeCopyPage`, `SkmmCopyProtectedPage`, `SkmiClaimPhysicalPage`,
+`IumInvokeSecureService` at +0xec, +0x19f, +0x403, +0x19c2, +0x3474,
++0x3c49, +0x3d1f, +0x63d0, +0x64aa - twenty-five distinct addresses,
+one to twenty-five samples each, none of them moving.
+
+So in the current phase **VTL1 has not executed a single instruction of
+secure code**, and the 59% that was "not measured" in the entry above
+does not exist. Correct that entry's caveat rather than trusting it.
+
+The same difference confirms it from the normal-mode side: the
+protection census's `pfn 7,207` and `code0 21,174` are frozen while
+`calls` grows at ~12/s, which is the retry loop and nothing else.
