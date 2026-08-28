@@ -60161,3 +60161,48 @@ near-certain; on real hardware the turn is microseconds.
 had the switch on and eight processors, and died of the
 application-processor failure - which is now known to be unrelated. That
 run therefore tested nothing about VINA.
+
+## ZPP_SUPPRESS_VINA with ONE processor breaks the 7,207 ceiling
+
+The experiment that had never been run. Every previous test of this
+switch was on eight processors and died of the application-processor
+failure, which is unrelated, so none of them tested VINA at all.
+
+    config                 page requests            ending
+    novina=0, 1 vCPU       frozen at 7,207          livelocks indefinitely
+    novina=1, 1 vCPU       7,207 -> 7,281 -> 7,414  HV_X64_MSR_RESET, ~11 min
+    either,   8 vCPU       -                        dies of AP start-up
+
+**The walk moves.** `pfn` had frozen at exactly 7,207 in every boot this
+investigation has ever recorded. With the notification suppressed it
+reached **7,414** and was still advancing when sampled - `+6 pfn, +16
+code0` in one window and `+9, +24` in the next - and the ring's newest
+requests name fresh frames (`0x11f249`, `0x11f24a`) instead of the
+`0x11aac9`/`0x11aaca` that every frozen boot ends on. The request-byte
+census is **100.0% code 0 across 21,805 calls, not one code 4**.
+
+So the causal chain holds end to end: the VINA notification is what
+stops the walk, hvix64 asserts it from a latch nothing clears, and
+removing the notification lets the secure kernel work.
+
+**And the ending changed, which is the other half of the result.** The
+last three exits are
+
+    wrmsr  0x40000003 = 1     HV_X64_MSR_RESET
+    vmoff                     Hyper-V leaves VMX operation
+    cr-access qual=0x4        CR4.VMXE cleared
+
+`0x40000003` is written **exactly once, and only in this run** - neither
+control ever wrote it at all. So this is an explicit, orderly partition
+reset requested from inside, not the silent teardown the eight-processor
+boots end in. Something decided to reboot after eleven minutes of
+genuine progress, and *that* is now the failure to chase - a much later
+and much better-posed one than the livelock.
+
+**Standing caveat, unchanged and important**: the switch is a deliberate
+lie to the guest, as its own comment in `nested_entry.cpp` says. It
+proves the mechanism; it is not a fix, because the honest version is to
+stop the notification being *deserved* - either by keeping VTL1 turns
+shorter than the 1.741 ms clock period so nothing is posted to a
+preempted VTL0, or by finding what a real machine does that retires the
+latch.
