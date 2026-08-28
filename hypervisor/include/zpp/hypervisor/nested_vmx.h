@@ -1638,6 +1638,61 @@ inline constexpr std::uint64_t ticks_per_microsecond = 1992;
  * run on, so a unit is 32 ticks - the same derivation
  * `profile_timer_value` records.
  */
+#ifndef ZPP_HOLD_CLOCK_IN_VTL1
+#define ZPP_HOLD_CLOCK_IN_VTL1 0
+#endif
+
+/**
+ * Hold the clock interrupt while the **secure kernel** is running, and
+ * deliver it as soon as the normal world resumes.
+ *
+ * ### The one thing it is aimed at
+ *
+ * The stall is a single missed deadline that latches.
+ * `MakeGdtReadOnly` makes a trust-level call that must retire inside
+ * one of Windows' 1,743 us ticks. **One crossing is permanent**: the
+ * call takes a VINA, a deferred procedure is queued, `0x2f` is now
+ * pending, and its class-2 priority is masked by a task priority pinned
+ * at class 2 - which cannot fall, because the thread is waiting for
+ * that very call. From then on the notification re-asserts on every
+ * entry and the secure call is re-issued about fifty-five times a
+ * second for ever.
+ *
+ * So this does not slow anything down. It removes the interruption from
+ * **one turn**.
+ *
+ * ### Why this is not `ZPP_LAZY_TICK`, which wedged the machine twice
+ *
+ * That withheld every tick arriving inside a fixed gap, anywhere. The
+ * level above had already committed its message and considered the
+ * interrupt delivered, then waited for an acknowledgement from a guest
+ * that never took one - and at 10,000 us and at 2,500 us alike the
+ * machine froze with `exit_total` unchanged for two minutes, which is
+ * how a wait for an event rather than for time behaves.
+ *
+ * Here the hold is bounded by a trust-level turn, measured at about a
+ * millisecond, and ends at the *next entry to VTL0* rather than after a
+ * fixed interval. The acknowledgement the level above is waiting for is
+ * therefore late by one turn, not by a gap it never gets to the end of.
+ *
+ * The tick is kept whole and re-staged exactly as `lazy_tick_owed`
+ * does - vector, type and valid bit as the level above wrote them -
+ * because destroying a staged event has already been shown here to stop
+ * the synthetic timer dead.
+ *
+ * ### What would say it worked, written before the boot
+ *
+ * `vtl1_clock_delivered` of the order of `vtl1_clock_withheld` rather
+ * than a handful; secure requests past **21,177**, which is the
+ * furthest any build has reached; `vtl_protect_count` leaving 39,449;
+ * and `vtl_return_rbx` no longer repeating `0x...0400`. If the machine
+ * freezes with `exit_total` flat instead, the acknowledgement wait is
+ * not bounded by a turn after all and this is the seventh member of the
+ * family.
+ */
+inline constexpr bool hold_clock_in_vtl1 =
+    (0 != ZPP_HOLD_CLOCK_IN_VTL1);
+
 inline constexpr std::uint64_t lazy_tick_timer_value =
     (lazy_tick_microseconds * ticks_per_microsecond) / 32;
 

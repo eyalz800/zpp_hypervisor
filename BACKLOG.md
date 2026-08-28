@@ -57300,3 +57300,58 @@ Three things, and none of them is a speedup:
 The first is the only one with a lever on this side, and it is narrower
 than anything tried: not "slow the clock", but "do not let this
 particular call be interrupted".
+
+## ZPP_HOLD_CLOCK_IN_VTL1: a no-op by construction, and the dump said so
+
+Built, wired through all four edits (`vtl1clk=1` read from the binary),
+booted, one variable. Two results, and the second matters more.
+
+**It does not wedge the machine.** 30 of 537 counters moving at 8,140
+exits a second, against `ZPP_LAZY_TICK`'s 0 of 537. So the design
+hypothesis behind it - that a hold bounded by *one trust-level turn*
+leaves the level above its wake condition, where a fixed gap does not -
+is sound, and that distinction is now measured rather than argued.
+
+**And it never fired.** `vtl1_clock_withheld` is zero. Nothing was held,
+so nothing was tested: secure requests 21,171, protection calls 39,450
+against 39,449, the same stall stack. This is **an untested hypothesis,
+not a refuted one** - the distinction this file insisted on for
+`deliver_on_drop` and which applies to my own switch just as hard.
+
+### Why it could never fire, from data already in the dump
+
+    what the entry running VTL1 carried (31,151 entries):
+      no event   31,151   100.0%   <- nothing injected
+
+**No clock is ever injected while VTL1 runs**, so there was never an
+injection to withhold. That line had already been read in this
+investigation and its consequence not drawn.
+
+The model behind the switch was wrong: VTL1 is not interrupted by a
+vector delivered into it. **VINA is a flag Hyper-V asserts and the
+secure kernel polls** - `ShvlVinaHandler` runs *because the secure
+kernel checked*, not because anything was injected. Withholding an
+injection cannot affect a poll.
+
+### What that rules out, and it is the last lever on this side
+
+"Do not let this particular call be interrupted" cannot be implemented
+by controlling injections, because injections are not what interrupts
+it. The interruption is a flag set by the level above, in memory this
+VMM does not own, read by code this VMM does not run. **There is no
+mechanism here to suppress it.**
+
+Together with the earlier findings - `0x2f` genuinely undeliverable
+under a pinned task priority, withholding it wedges the level above,
+and speed cannot close a tail five times the deadline - that exhausts
+the interventions available from this position.
+
+The switch is kept, off, because the *bounded-hold* result is worth
+having: it is the only design in this family that did not freeze the
+machine, and if a future mechanism needs to hold something across a
+trust-level turn, this is the shape that works.
+
+`in_vtl1` is also kept and is correct - the call/return pair moves it,
+and the return census beside it recorded 26,791 returns from the same
+site - so a later intervention needing to know which trust level is
+current has it for free.

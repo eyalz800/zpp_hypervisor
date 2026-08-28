@@ -170,6 +170,10 @@ option(ZPP_INTERCEPT_APIC
     "Watch the guest's local APIC - the page in xAPIC mode, the interrupt command MSR in x2APIC mode. Off only makes sense with one processor, since the watch is what stops a start-up IPI handing a processor over unvirtualized."
     ON)
 
+option(ZPP_HOLD_CLOCK_IN_VTL1
+    "Withhold the clock interrupt from the second-level guest only while the SECURE kernel (VTL1) is the current trust level, and deliver it on the first entry after VTL0 resumes. Not a gap: the hold lasts one trust-level turn, about a millisecond, so the level above never waits longer than that for the acknowledgement it expects - which is what wedged ZPP_LAZY_TICK at both 10,000 and 2,500 microseconds. Aimed at the single missed deadline that latches: MakeGdtReadOnly's secure call must retire inside one 1,743 us tick, and one crossing pins IRQL at 2 for ever. OFF by default. See BACKLOG.md."
+    OFF)
+
 option(ZPP_DELIVER_SELF_IPI
     "Deliver a second-level guest's self-directed interrupt when the guest hypervisor does not. Measured: the guest asks for vector 0x2f on every clock cycle and the level above delivers it six times, while arming a TPR-below-threshold notification that fires 33 times in 3.6 million exits. Delivered only when the guest's own virtual task priority permits, and only when the level above staged nothing itself. OFF by default."
     OFF)
@@ -414,6 +418,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
+        -DZPP_HOLD_CLOCK_IN_VTL1=${ZPP_HOLD_CLOCK_IN_VTL1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}
@@ -534,6 +539,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_SHADOW_VMCS=${ZPP_NESTED_SHADOW_VMCS}
         -DZPP_PUBLISH_REFERENCE_TSC=${ZPP_PUBLISH_REFERENCE_TSC}
         -DZPP_DELIVER_SELF_IPI=${ZPP_DELIVER_SELF_IPI}
+        -DZPP_HOLD_CLOCK_IN_VTL1=${ZPP_HOLD_CLOCK_IN_VTL1}
         -DZPP_INTERCEPT_SELF_IPI=${ZPP_INTERCEPT_SELF_IPI}
         -DZPP_FORCE_DISPATCH_ONCE=${ZPP_FORCE_DISPATCH_ONCE}
         -DZPP_EAGER_EPT_NEIGHBOURS=${ZPP_EAGER_EPT_NEIGHBOURS}

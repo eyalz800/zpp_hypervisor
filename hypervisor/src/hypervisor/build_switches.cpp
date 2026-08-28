@@ -71,6 +71,8 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::publish_reference_tsc),
         ' ', 's', 'e', 'l', 'f', 'i', 'p', 'i', '=',
         digit(nested_vmx::deliver_self_ipi),
+        ' ', 'v', 't', 'l', '1', 'c', 'l', 'k', '=',
+        digit(nested_vmx::hold_clock_in_vtl1),
         ' ', 's', 'w', 'a', 'l', 'l', 'o', 'w', '=',
         digit(nested_vmx::intercept_self_ipi),
         ' ', 'f', 'o', 'r', 'c', 'e', 'd', 'p', 'c', '=',

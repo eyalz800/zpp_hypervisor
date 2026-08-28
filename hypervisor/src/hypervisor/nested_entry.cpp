@@ -3325,6 +3325,73 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     }
 
+    // Hold the clock across ONE trust-level turn. See
+    // `nested_vmx::hold_clock_in_vtl1`: the stall is a single missed
+    // deadline that latches, so what has to be protected is the turn
+    // `MakeGdtReadOnly` makes - not the tick rate, which six earlier
+    // interventions moved to no effect and two of them fatally.
+    //
+    // The hold ends at the next entry with VTL0 current, so the level
+    // above waits one turn - about a millisecond - for the
+    // acknowledgement it expects, rather than a fixed gap it never
+    // reaches the end of. That is the whole difference from
+    // `ZPP_LAZY_TICK`, which froze the machine at 10,000 us and at
+    // 2,500 us alike.
+    if constexpr (nested_vmx::hold_clock_in_vtl1) {
+        constexpr std::uint64_t vtl1_clock_vector = 0xd1;
+
+        if (cpu < max_cpus) {
+            auto staged = (0 != (injection & interruption_valid));
+            auto is_clock =
+                staged && (vtl1_clock_vector ==
+                           (injection & interruption_vector_mask));
+
+            if (is_clock && (0 != this->in_vtl1[cpu])) {
+                // Kept whole - vector, type and valid bit as the level
+                // above wrote them. Destroying a staged event has
+                // already been shown here to stop the synthetic timer
+                // dead, and one tick owed is one tick, however many
+                // arrive while it is owed.
+                if (0 == this->vtl1_clock_owed[cpu]) {
+                    this->vtl1_clock_owed[cpu] = injection;
+                }
+
+                injection &= ~interruption_valid;
+                this->vtl1_clock_withheld[cpu] =
+                    this->vtl1_clock_withheld[cpu] + 1;
+            } else if ((0 == this->in_vtl1[cpu]) &&
+                       (0 != this->vtl1_clock_owed[cpu]) && !staged) {
+                // The same interruptibility test the lazy tick's
+                // re-delivery makes, and for the same measured reason:
+                // SDM 27.2.1.3 does not list RFLAGS.IF among the checks
+                // on an injected external interrupt, so putting one in
+                // while the guest has them disabled delivers it into a
+                // critical section and nothing faults.
+                constexpr std::uint64_t rflags_interrupt_enable = 1ull
+                                                                  << 9;
+                constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+                constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+                auto blocking =
+                    shadow.read(field::guest_interruptibility_state);
+
+                auto interruptible =
+                    (0 != (shadow.read(field::guest_rflags) &
+                           rflags_interrupt_enable)) &&
+                    (0 == (blocking &
+                           (blocking_by_sti | blocking_by_mov_ss)));
+
+                if (interruptible) {
+                    injection = this->vtl1_clock_owed[cpu];
+
+                    this->vtl1_clock_owed[cpu] = 0;
+                    this->vtl1_clock_delivered[cpu] =
+                        this->vtl1_clock_delivered[cpu] + 1;
+                }
+            }
+        }
+    }
+
     vmcs.write(field::vm_entry_interruption_information_field, injection);
 
     if (0 != (injection & interruption_valid)) {
@@ -10318,6 +10385,21 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // to death and says the same question is asked 3,778
             // times; nothing yet watches the reply, and the two
             // readings it separates want opposite fixes.
+            // Which trust level is current. The call/return pair is
+            // already decoded here for the re-entry census, so this is
+            // a store on a path that was being walked anyway. See
+            // `in_vtl1`.
+            if (cpu < max_cpus) {
+                constexpr std::uint64_t vtl_call_code = 0x11;
+                constexpr std::uint64_t vtl_back_code = 0x12;
+
+                if (vtl_call_code == code) {
+                    this->in_vtl1[cpu] = 1;
+                } else if (vtl_back_code == code) {
+                    this->in_vtl1[cpu] = 0;
+                }
+            }
+
             if (constexpr std::uint64_t vtl_return_code = 0x12;
                 (vtl_return_code == code) && (cpu < max_cpus)) {
                 auto slot = this->vtl_return_count[cpu] %

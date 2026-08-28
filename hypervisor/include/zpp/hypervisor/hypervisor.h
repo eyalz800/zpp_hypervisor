@@ -14657,6 +14657,31 @@ private:
     std::uint64_t vtl_return_count[max_cpus]{};
     std::uint64_t vtl_return_distinct[max_cpus]{};
     std::uint64_t vtl_return_previous[max_cpus]{};
+
+    /**
+     * Whether the **secure kernel** is the current trust level.
+     *
+     * Set at `HvCallVtlCall` and cleared at `HvCallVtlReturn`, which is
+     * the only pair that moves it - the two are already observed here
+     * for the re-entry census, so this costs a store on a path that
+     * was being decoded anyway.
+     *
+     * Used by `nested_vmx::hold_clock_in_vtl1` to hold the clock for
+     * exactly one trust-level turn. It is deliberately *not* derived
+     * from the extended-page-table pointer: the pointer identifies
+     * which address space is current, and a turn is what needs
+     * bounding.
+     */
+    std::uint64_t in_vtl1[max_cpus]{};
+
+    /** Ticks held because the secure kernel was running. */
+    std::uint64_t vtl1_clock_withheld[max_cpus]{};
+
+    /** Held ticks put back on the first entry after VTL0 resumed. */
+    std::uint64_t vtl1_clock_delivered[max_cpus]{};
+
+    /** The held injection, kept whole exactly as staged. */
+    std::uint64_t vtl1_clock_owed[max_cpus]{};
     std::uint64_t vtl_reentry_by_reason[max_cpus][8]{};
     std::uint64_t vtl_reentry_reason_other[max_cpus]{};
     std::uint64_t vtl_reentry_orphan[max_cpus]{};
