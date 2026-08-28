@@ -60754,3 +60754,29 @@ problems that are different in kind from the bugs that were fixed, and
 that this session's methods do not close. The release build is left
 running as the furthest-reaching configuration; the background agents
 continue chipping at per-exit cost.
+
+## Wall 2 confirmed concretely: the GPU framebuffer is a BAR the guest sees elsewhere
+
+The loader logs `framebuffer base 0x7000000000`, size `0x7e9000`,
+1920x1080. Reading that physical address with the monitor's `xp` returns
+**nothing** - which, per CLAUDE.md, is the signature of a passed-through
+device BAR, not RAM. So the framebuffer the loader painted its trace into
+is the passed-through Intel GPU's aperture, written **before the
+hypervisor launched**, while the loader had direct firmware access to it.
+
+Windows boots as a guest *after* that, and its view of the GPU BAR is a
+guest-physical address assigned by the guest's own OVMF - not
+necessarily `0x7000000000`, and behind this VMM's EPT. So Windows'
+`BootVid` writes its logo to *its* framebuffer address, which is not the
+host-physical aperture the loader wrote and the physical panel scans
+out. That is why the screen has been frozen on the loader's text for 20
+days regardless of how far Windows gets: the two are writing to different
+addresses for the same device.
+
+This is a concrete lead rather than a fix. Making login *visible* on this
+rig would require the guest's framebuffer writes to reach the physical
+GPU scanout - either the guest's GPU driver (`igdkmd64`) initialising the
+display for real, or the framebuffer handoff being arranged so the
+guest-physical GPU aperture maps through to the host aperture the panel
+scans. Both are substantial and neither is the functional
+hypervisor bug this investigation was fixing.
