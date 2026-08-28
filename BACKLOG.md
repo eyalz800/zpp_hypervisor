@@ -57355,3 +57355,52 @@ trust-level turn, this is the shape that works.
 and the return census beside it recorded 26,791 returns from the same
 site - so a later intervention needing to know which trust level is
 current has it for free.
+
+## Swallowing the self-IPI is the harm, with the delivery path off
+
+The last untried combination, and it settles a question this file had
+left open with two boots pointing opposite ways.
+
+`intercept_self_ipi` and `deliver_self_ipi` are independent constants -
+the intercept path only swallows (`return l2_exit_outcome::handled`,
+`advance_rip = true`, nothing injected) and the delivery path is
+elsewhere. The note above reasoned that the swallow freeze and the
+`force_dispatch_once` freeze shared *the delivery path injecting a
+vector the level above did not stage*, since `force_dispatch_once`
+withholds nothing, and concluded "the harm is probably not the
+withholding either".
+
+**Run with `swallow=1 selfipi=0 forcedpc=0`, verified from the binary,
+it freezes anyway.**
+
+    exit_total   183,275, +0 across the window
+    l2_entries    35,359, +0
+    counters moving: 0 of 537
+
+The recorded `swallow=1` freeze was `l2_entries 38,974 then frozen`.
+35,359 is the same place, so the mechanism fired and reproduced with
+**nothing being injected at all**.
+
+So the hypothesis is refuted and the original reading was right: **the
+level above uses the pending interrupt as its own wake condition.**
+Withhold the write and it has nothing left to wait on, and it stops -
+whether or not anything is delivered in its place.
+
+That also explains why `force_dispatch_once` froze: not the shared
+injection, but that both interfere with the same wake condition. One
+boot has now separated the two explanations that one boot each could
+not.
+
+### The consequence for the stall
+
+The pending `0x2f` is doing two jobs at once: it keeps VINA asserted,
+which is what stops the secure call retiring, **and** it is what keeps
+Hyper-V running at all. Those cannot be separated from this position -
+removing it to fix the first kills the second, in three boots now.
+
+`l2_self_ipi_swallowed` and `l2_self_ipi_reflected` are added to the
+state reader, because this run could not confirm from the dump that the
+swallow had fired and had to infer it from the freeze point matching.
+An intervention whose own counter is unreadable is one that cannot
+distinguish "did nothing" from "did the wrong thing" - which is exactly
+the trap `hold_clock_in_vtl1` fell into one entry above.
