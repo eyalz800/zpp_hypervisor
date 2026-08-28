@@ -58337,3 +58337,39 @@ is running guest code, not stuck in `vm_exit_entry`. Sampling caught it
 in the stub because that is where a processor sits between an exit and
 its handler, and with a two-instruction guest loop generating exits,
 that is most of the time.
+
+### Weakened by the next read: the value is hardware's, and the loop is firmware's
+
+Checked before acting on it, and it does not survive intact.
+
+**This VMM does not emulate `rdmsr 0x1b`.** Only the *write* path is
+intercepted, in `exit_dispatch.cpp`, and only so the two interceptions
+can be re-derived after a mode change - the shape of KVM's
+`kvm_lapic_set_base`. The read passes through, so `0xfee00800` is what
+the hardware reports for that processor, not a value invented here.
+
+And `cs=0x0038` with a `rip` around `0x7ef5xxxx` is firmware, not
+Windows. An application processor parked in **EDK2's `MpInitLib` wait
+loop** - which `CLAUDE.md` already describes, in the note about
+`WaitApWakeup` - polling with `rdmsr`/`cpuid`, in xAPIC mode, is
+exactly what that looks like and is entirely normal there.
+
+So "we tell the application processor the wrong APIC mode" is withdrawn.
+Nothing is being told anything: the processor is where the firmware left
+it.
+
+**The question that survives is better posed than any of the four before
+it**: the application processor is parked in firmware, and **Windows
+never claims it**. `by-guest-sipi 1` says the guest did send a start-up
+IPI and this VMM saw it, and `launched 1` says the processor was brought
+into VMX operation - yet `l2-entries` is 0, so the guest hypervisor
+never ran a second-level guest on it.
+
+That is the gap: between a start-up IPI the guest sent and a
+second-level guest that never runs. Four theories have now been tried on
+this failure - shared launch stack, shared start-up stack, unloaded IDT,
+wrong APIC mode - and all four refuted, each by one read. What has not
+been examined is what happens to that start-up IPI **after** this VMM
+records it: whether the vector and the state handed over are what the
+guest asked for, which `apply_start_up` and `emulate_init_signal` own
+and which no two-processor nested boot has ever been checked against.
