@@ -58622,3 +58622,41 @@ ends at the start-up.
 **Recorded as a correction to the entry above it**, which offered "the
 handover never happens" as the headline. On this reading the handover
 was in progress when the picture was taken.
+
+### After the start-up, nothing is recorded - and one counter disagreement bounds that
+
+The dump was taken with the guest already stopped (`paused (shutdown)`,
+memory intact), so its rings are final. Reconciling the ring size:
+`start = count - ring` yields 70 with `count 102`, so the ring holds
+**32** entries and prints exits 70-101 - confirming the `init` at
+`[100]` and the `sipi` at `[101]` are the **newest** two.
+
+So on that processor the last recorded events are the INIT and the
+start-up, with **nothing after them**, and nothing recorded anywhere
+else either: `host exception: vector 0`, `unhandled exit: never`,
+`vm entry failure: never`.
+
+**The caveat, stated rather than buried**: `cpu 1` reports **267 exits**
+against an `exit_trace_count` of **102**. One hundred and sixty-five
+exits are not in the trace, and why is not known. Until that is
+explained, "nothing happened after the start-up" is a statement about
+the *trace*, not about the processor. It could equally be a trace that
+stopped recording.
+
+That distinction matters because the two readings are opposite:
+
+- if the trace is complete, the processor took **no exit at all** after
+  reaching `0x2000` and the machine reset - which for start-up code
+  that must read CPUID and MSRs points at an immediate fault the
+  processor could not report, i.e. a triple fault;
+- if the trace stopped, the processor may have run on normally and the
+  reset came from somewhere else entirely.
+
+**The first thing to check is therefore the trace itself**, not the
+guest: why `exit_trace_count` and `exits` disagree by 165 on an
+application processor when they agree on the boot processor
+(`599,856` against `606,556` is a much smaller gap, and that one is the
+ring's own bound). This tree has a rule for exactly this - an instrument
+that cannot report its own failure - and this is a case of it: a trace
+that silently stops looks identical to a processor that silently
+stopped.
