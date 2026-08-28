@@ -58407,3 +58407,40 @@ vector the start-up IPI carried. Everything else about the two-processor
 failure has now been read and eliminated: shared launch stack, shared
 start-up stack, unloaded IDT, APIC mode, and the start-up path's own
 error reporting. Five, each in one read.
+
+### The start-up path is correct, verified from the log - and it clears the last theory
+
+The instrument the previous entry asked for already existed:
+`start_up.cpp:584` logs every application, and `:158-216` dumps the
+guest state it wrote. From a two-processor boot:
+
+    [ 37] start-up applied on cpu 0x2 vector 0x87 by launch first-launch 0x1
+    [ 43] ... cs 0x8700 base 0x87000 limit 0xffff ar 0x9b
+    [ 39] ... rip 0x0 rsp 0x0 rflags 0x2
+    [100] init  qual=0x0  wait-sipi  cs=0x0038 rip=0x7fb6b030
+    [195] start-up applied on cpu 0x2 vector 0x2 by sipi exit application 0x2
+
+The sequence is exactly what it should be. This VMM launches the
+application processor at its own trampoline vector `0x87`, and the state
+it writes is right - `cs 0x8700`, base `0x87000`, `rip 0`. The guest
+then sends INIT, the processor goes to wait-for-SIPI, and **the guest's
+own start-up IPI, carrying vector `0x2`, is applied**. `CLAUDE.md`
+already records that `0x2` is the guest's vector and not this VMM's.
+
+**So the application processor is started, at the vector Windows asked
+for.** The start-up path is not the fault, and that is the fifth theory
+on this failure to be eliminated by a read.
+
+It also corrects the previous entry: `cs=0x0038` is a protected-mode
+selector reached after a real-mode stub - **Windows' own application
+processor code**, not firmware. The `MpInitLib` reading was wrong, and
+so was the `rdmsr`/`cpuid` loop being firmware's; it is Windows'
+application processor spinning in its own bring-up, polling
+`IA32_APIC_BASE`.
+
+**Which is a much better place to be stuck.** The processor is started,
+running the guest's own code, at the guest's own vector, polling a
+register - so what it is waiting for is a guest-side condition, and the
+guest is Windows, whose state this tree can read completely. Every other
+possibility - our stacks, our IDT, our APIC mode, our start-up path -
+has now been read and eliminated.
