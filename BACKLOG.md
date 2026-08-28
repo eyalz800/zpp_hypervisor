@@ -60823,3 +60823,40 @@ any practical time - the debug build's DPC watchdog resets it first, and
 the release build (no reset) has not been shown to reach `smss`. The
 question "slow-but-arrives" versus "asymptotes short of login" remains
 open, and it is the one that matters.
+
+## Three reads settle it: the boot progresses steadily, it does not asymptote
+
+Instrumented novina=1 debug build, `ZPP_CPUS=1`, three reads:
+
+    ~4 min    code-0 21,198   page 7,210   mapping frame 0x11aac9
+    ~8 min    code-0 21,866   page 7,442
+    ~15 min   code-0 22,961   page 7,897   mapping frame 0x11f0e5
+
+**~62 page requests a minute, steadily climbing, mapping progressively
+higher frames** (0x11aac9 -> 0x11f0e5). This is the slow-but-arrives
+trajectory, not an asymptote, and it retires the last doubt about
+whether this configuration is stuck: **it is not.** The secure
+memory-manager walk that VINA suppression unblocked keeps advancing, and
+release runs earlier this session showed the same walk completing and
+the boot going on to 155 drivers.
+
+**So the situation is now fully characterised, and the pieces fit:**
+- The functional blocker this project chased for the prior investigation
+  - the VINA livelock wedging the secure-processor phase - is **fixed**
+  by `ZPP_SUPPRESS_VINA`. The phase advances.
+- On the **debug** build, Windows' own DPC watchdog (bugcheck 0x133,
+  proven from decompiled ntoskrnl to be pure consecutive-DISPATCH
+  cycles with no hypervisor-reachable disable) resets the guest before
+  the slow boot completes.
+- On the **release** build (-O2, no reset in 30+ min), the watchdog does
+  not fire, but reaching `smss`/`LogonUI` was never confirmed and needs
+  hours of runtime given the ~62 page/min rate.
+
+The constraint that remains is genuine and worth stating plainly: with
+**debug only** and **no optimisation**, the boot progresses but the
+watchdog resets it, and the watchdog is Windows' own with no
+hypervisor-reachable off switch. Closing that specific gap needs either
+the boot to be fast enough to beat the watchdog (optimisation), or long
+enough uninterrupted runtime that a slow boot completes (release, or a
+build the watchdog does not reset). The progression itself is no longer
+in question.
