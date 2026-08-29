@@ -13862,6 +13862,12 @@ private:
     std::uint64_t vina_suppress_attempts[max_cpus]{};
     std::uint64_t vina_suppress_no_address[max_cpus]{};
     std::uint64_t vina_suppress_read_failed[max_cpus]{};
+    /** The securekernel (VTL1) image base, cached once per cpu for the
+     *  secure-DMA-disable poke. See `nested_vmx::force_no_secure_dma`. */
+    std::uint64_t secure_kernel_base[max_cpus]{};
+    /** How many times bit1 of a securekernel secure-PCI policy global was
+     *  cleared. Non-zero once the SDEV/winload enable was forced off. */
+    std::uint64_t secure_dma_forced[max_cpus]{};
     std::uint64_t vina_suppress_already_clear[max_cpus]{};
     std::uint64_t vina_suppress_write_failed[max_cpus]{};
 

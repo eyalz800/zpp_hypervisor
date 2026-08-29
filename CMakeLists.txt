@@ -114,6 +114,16 @@ option(ZPP_SUPPRESS_VINA
     "Clear the interrupt notification flag when entering VTL1"
     OFF)
 
+# Clear the securekernel's secure-PCI enable (SkhalPciEnabled's two policy
+# globals) on VTL1 entry so VBS degrades to no-DMA-protection. The Phase-1
+# boot livelock is the secure-DMA device-attach to a VT-d IOMMU domain that
+# nested hvix64 cannot create - there is no physical IOMMU here. A deliberate
+# degrade to the nested reality (device DMA already VFIO-constrained), not a
+# defect fix, so it is a switch.
+option(ZPP_FORCE_NO_SECURE_DMA
+    "Force the securekernel secure-PCI enable off so VBS skips secure DMA"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -436,6 +446,7 @@ ExternalProject_Add(hypervisor
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
+        -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -630,6 +641,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
+        -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

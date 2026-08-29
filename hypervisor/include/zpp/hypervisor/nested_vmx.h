@@ -2341,6 +2341,41 @@ constexpr std::uint64_t supported_primary_controls =
 
 inline constexpr bool suppress_vina = (0 != ZPP_SUPPRESS_VINA);
 
+/**
+ * Clear the securekernel's secure-PCI enable so VBS degrades to
+ * no-DMA-protection, which is the only reachable nested reality.
+ *
+ * The Phase-1 boot livelock is the VBS secure-DMA device-attach: the
+ * securekernel spins re-issuing HvCall 0x82 (device-attach to a VT-d
+ * IOMMU domain) that nested hvix64 cannot satisfy - there is no physical
+ * IOMMU here - so the device handle stays -1 and the query never
+ * resolves. It only pursues that path when `SkhalPciEnabled` (sk
+ * 0x7d774) returns 1, which reads two securekernel `.data` policy globals
+ * (proven by disassembly, PDB-real symbols):
+ *   SkhalPciEnabled = (SkpnpSdevDeviceTypesAvailable & 2)
+ *                     ? 1 : ((SkpnpIoProtectionPolicy >> 1) & 1)
+ * at RVA 0x127a50 (driven by an hvloader-synthesised 'SDEV' ACPI table
+ * naming the passed-through NVMe as a type-1 PCIe secure device) and RVA
+ * 0x127a60 (the winload IO-protection boot policy). Neither is
+ * IOMMU-derived - 'DMAR' appears zero times in securekernel.bin - which
+ * is why removing the QEMU vIOMMU/DMAR did not clear the livelock.
+ *
+ * Clearing bit1 of both dwords forces the gate to 0, so
+ * `SkhalpPciInitialize` (sk 0x7d844) skips (je 0x7d908), HvCall 0x82
+ * never fires, `VslGetSecurePciEnabled` returns 0, VTL0 stops polling,
+ * and Phase 1 proceeds. Both globals are read live and never re-set after
+ * early securekernel init, so re-forcing on each VTL1 entry is durable
+ * and cheap (a read, a conditional 4-byte write only while bit1 is set).
+ * A deliberate degrade, not a defect fix: on the nested rig the NVMe's
+ * DMA is already constrained by the host IOMMU (VFIO), so no real
+ * protection is lost.
+ */
+#ifndef ZPP_FORCE_NO_SECURE_DMA
+#define ZPP_FORCE_NO_SECURE_DMA 0
+#endif
+
+inline constexpr bool force_no_secure_dma = (0 != ZPP_FORCE_NO_SECURE_DMA);
+
 inline constexpr bool virtual_interrupt_delivery_offered =
     (0 != ZPP_NESTED_VID);
 

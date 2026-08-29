@@ -338,6 +338,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // guest, so a run with it on describes a different machine.
         ' ', 'n', 'o', 'v', 'i', 'n', 'a', '=',
         digit(nested_vmx::suppress_vina),
+        // Force the securekernel secure-PCI enable off so VBS degrades
+        // to no-DMA-protection nested. A deliberate degrade to the guest,
+        // so a run with it on describes a different machine.
+        ' ', 'n', 'o', 's', 'd', 'm', 'a', '=',
+        digit(nested_vmx::force_no_secure_dma),
         // The application-processor state trace. Observational, so it
         // cannot change what the guest sees - but it is the difference
         // between a log that says which application of the start-up

@@ -8624,6 +8624,70 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // only on the armed entry therefore missed almost every case that
     // mattered. `vtl_half_mark_kind` holds `1` while VTL1 is the running
     // level, which is exactly the window this has to cover.
+
+    // Force the securekernel's secure-PCI enable off so VBS degrades to
+    // no-DMA-protection, the only reachable nested state - there is no
+    // physical IOMMU here. See `nested_vmx::force_no_secure_dma`. The two
+    // securekernel `.data` policy globals are `SkpnpSdevDeviceTypesAvailable`
+    // (RVA 0x127a50, the SDEV enable) and `SkpnpIoProtectionPolicy`
+    // (RVA 0x127a60, the winload policy); `SkhalPciEnabled` reads bit1 of
+    // each live and nothing re-sets them after early init, so re-forcing
+    // on every VTL1 entry is durable and costs a read plus a 4-byte write
+    // only while bit1 is still set. Same `vtl_half_mark_kind == 1` window
+    // and the same walk primitives the VINA suppression below uses.
+    if constexpr (nested_vmx::force_no_secure_dma) {
+        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+            // The image running in VTL1 is the secure kernel; its base is
+            // where the RVAs above are anchored. `image_base_of` walks the
+            // MZ from the entry RIP - vmcs02 carries VTL1's CR3/EPT here,
+            // the state we are about to enter with. Cached once per cpu.
+            if (0 == this->secure_kernel_base[cpu]) {
+                this->secure_kernel_base[cpu] =
+                    image_base_of(cpu, this->vmcs.read(field::guest_rip));
+            }
+
+            auto base = this->secure_kernel_base[cpu];
+
+            if (0 != base) {
+                for (auto rva : {std::uint64_t{0x127a50},
+                                 std::uint64_t{0x127a60}}) {
+                    // Secure-kernel linear -> VTL1 guest-physical ->
+                    // first-level physical, as the VINA walk does: these
+                    // pages are not in VTL0's tables, so the guest-table
+                    // step happens here.
+                    auto guest_physical =
+                        translate_guest_linear(cpu, base + rva);
+                    if (!guest_physical) {
+                        continue;
+                    }
+
+                    auto physical =
+                        l2_physical_to_l1(cpu, *guest_physical);
+                    if (!physical) {
+                        continue;
+                    }
+
+                    std::uint32_t value{};
+                    if (!read_guest_physical(
+                            *physical,
+                            std::as_writable_bytes(
+                                std::span(&value, 1)))) {
+                        continue;
+                    }
+
+                    if (0 != (value & 2)) {
+                        value = value & ~2u;
+                        if (write_guest_physical(
+                                *physical,
+                                std::as_bytes(std::span(&value, 1)))) {
+                            this->secure_dma_forced[cpu] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if constexpr (nested_vmx::suppress_vina) {
         if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
             this->vina_suppress_attempts[cpu] += 1;
