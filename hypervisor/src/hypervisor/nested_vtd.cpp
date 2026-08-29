@@ -307,16 +307,16 @@ bool hypervisor::dmar_mmio(std::size_t cpu,
                         std::as_bytes(std::span(&flags, 1)))) {
                     this->scalable_force_forced += 1;
                     this->scalable_force_armed = true;
+                    // Record the phase for the dump - best effort; a read
+                    // failure leaves the field 0, the runtime value anyway.
                     std::uint32_t phase{};
-                    if (0 != this->bootphasemode_gpa) {
-                        // Best effort, for the dump only - a failure leaves
-                        // phase 0, which is the runtime value anyway.
-                        (void)read_guest_physical(
+                    if ((0 != this->bootphasemode_gpa) &&
+                        read_guest_physical(
                             this->bootphasemode_gpa,
                             std::as_writable_bytes(
-                                std::span(&phase, 1)));
+                                std::span(&phase, 1)))) {
+                        this->scalable_force_phase = phase;
                     }
-                    this->scalable_force_phase = phase;
                     log("nested vt-d: forced scalable master at hvix64's "
                         "first IOMMU access (HvBootPhaseMode {})",
                         phase);
