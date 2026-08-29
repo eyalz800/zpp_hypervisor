@@ -1556,21 +1556,6 @@ private:
         void (*before_write)(void * context, std::uint64_t page) = nullptr,
         page_watch::filter filter_write = nullptr);
 
-    /** Write-watch handler for hvix64's `g_HvFeatureFlags` page - armed by
-     *  `arm_scalable_iommu_force`. Observation only; the substitution is in
-     *  the filter. */
-    static void on_hvfeatureflags_write(void * context,
-                                        std::uint64_t page,
-                                        const guest_write * written);
-
-    /** Substitute-value filter: ORs bits 5 (scalable) and 6 (present) into
-     *  a write to `g_HvFeatureFlags` (page offset 0x158), leaving other
-     *  writes to the page unchanged. See `arm_scalable_iommu_force`. */
-    static std::optional<std::uint64_t>
-    filter_hvfeatureflags_write(void * context,
-                                std::uint64_t page,
-                                const guest_write * write);
-
     /**
      * Starts and stops holding writers to a watched page.
      *
@@ -14002,6 +13987,7 @@ private:
      * `.references/hyperv/secure-dma-hvcall.md` §9.
      */
     std::uint64_t hvix64_base{};
+    std::uint64_t hvfeatureflags_gpa{};
     bool scalable_force_armed{};
     std::uint64_t scalable_force_forced{};
     std::uint64_t scalable_force_locate_failed{};
