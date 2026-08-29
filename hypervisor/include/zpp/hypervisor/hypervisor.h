@@ -14010,23 +14010,6 @@ private:
     std::uint32_t scalable_force_phase{};
 
     /**
-     * The root-partition object (`*(GS+0x360)` from an hvix64 context) and the
-     * two words its scalable-IOMMU privilege query reads
-     * (`0x247110`/`0x31c8ec`): `+0x2730` (privilege-table present) and
-     * `+0x2734` (offset to the table). The scalable master (bit 5) is granted
-     * here at partition creation from the DeviceGuard config, so setting it is
-     * the coherent alternative to poking `g_HvFeatureFlags` - hvix64's own
-     * finalize then sets bit 5 AND allocates the scalable object in one pass.
-     * Read-only for now (locate verification + empirical table layout); the
-     * write follows once `secure-dma-hvcall.md` §15 maps the exact bit.
-     */
-    std::uint64_t hvix64_partition{};
-    std::uint64_t partition_priv_present{}; // [partition+0x2730]
-    std::uint64_t partition_priv_table{};   // [partition+0x2734]
-    std::uint64_t partition_gs_base{};
-    std::uint64_t partition_locate_failed{};
-
-    /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
      * into VTL1 can be read rather than guessed at.
      *
