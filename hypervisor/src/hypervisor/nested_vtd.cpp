@@ -474,74 +474,166 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
     if constexpr (!nested_vmx::nested_vtd) {
         return;
     } else {
-        // Locate hvix64 once (cheap content-scan) and cache the flag + phase
-        // GPAs. The bit-5 force itself is DEFERRED to dmar_mmio, at hvix64's
-        // first CAP read - the one safe moment to set the scalable master
-        // (agent secure-dma §12). Forcing it on a plain runtime exit resets
-        // the guest before HvpInitializeIommus even runs: a runtime consumer
-        // NULL-derefs the scalable-IOMMU object [0xb1e88] the same way
-        // HvpFinalizeIommuFeatures does in phase 1, and that object is not
-        // allocated until the CAP read's own routine (HvpInitializeIommus)
-        // builds it. Measured: forcing on the first phase-0 exit set bit 5,
-        // but the guest reset with dmar_reads=0 - before the IOMMU init. So:
-        // locate here, force there. Once located, stop entirely.
-        if ((cpu >= max_cpus) || this->running_l2[cpu] ||
-            (0 != this->hvfeatureflags_gpa)) {
-            return; // wrong context, or already located
+        // The COHERENT enable (secure-dma §12): rather than force the derived
+        // flag (bit 5) - which desyncs it from the [0xb1e88] allocation and
+        // NULL-derefs - poke ECAP.IR into the CACHED loader-block IOMMU-unit
+        // caps that hvix64's phase-1 bit-5 setter (0x30b4d8) parses. hvix64
+        // then sets bit 5 and allocates the scalable object itself, in its own
+        // order. Three lazy steps: locate hvix64, locate the loader block,
+        // poke IR until hvix64 has set bit 5.
+        if ((cpu >= max_cpus) || this->running_l2[cpu]) {
+            return; // wrong context
         }
 
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
         constexpr std::uint64_t bootphasemode_rva = 0xa3d34;
         constexpr std::uint64_t snapshot = 0x0040fb2011000002ull;
-        constexpr std::uint64_t scalable_master = 0x20; // bit 5 ONLY
+        constexpr std::uint64_t scalable_master = 0x20; // bit 5
         constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
-        // The first L1 exits run in hvloader (low VA); skip the scan for
-        // them and cross-check the flag word against the feature-assembly
-        // snapshot before trusting the base.
-        auto rip = this->vmcs.guest_rip();
-        if (rip < kernel_floor) {
-            return; // hvloader/firmware, not hvix64
-        }
+        // Step 1: locate hvix64's base (once). The first L1 exits run in
+        // hvloader (low VA); skip the scan for them and cross-check the flag
+        // word against the feature-assembly snapshot before trusting it.
+        if (0 == this->hvfeatureflags_gpa) {
+            auto rip = this->vmcs.guest_rip();
+            if (rip < kernel_floor) {
+                return; // hvloader/firmware, not hvix64
+            }
 
-        auto candidate = find_hvix64_base(cpu, rip);
-        if ((0 == candidate) || (candidate < kernel_floor)) {
-            this->scalable_force_locate_failed += 1;
-            return;
-        }
+            auto candidate = find_hvix64_base(cpu, rip);
+            if ((0 == candidate) || (candidate < kernel_floor)) {
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
 
-        auto flags_phys = translate_guest_linear(
-            cpu, candidate + g_hvfeatureflags_rva);
-        auto phase_phys = translate_guest_linear(
-            cpu, candidate + bootphasemode_rva);
-        if (!flags_phys || !phase_phys) {
-            return; // not mapped yet; retry
-        }
+            auto flags_phys = translate_guest_linear(
+                cpu, candidate + g_hvfeatureflags_rva);
+            auto phase_phys = translate_guest_linear(
+                cpu, candidate + bootphasemode_rva);
+            if (!flags_phys || !phase_phys) {
+                return; // not mapped yet; retry
+            }
 
-        std::uint64_t flags{};
-        if (!read_guest_physical(
+            std::uint64_t flags{};
+            if (!read_guest_physical(
+                    *flags_phys,
+                    std::as_writable_bytes(std::span(&flags, 1)))) {
+                return;
+            }
+
+            if ((flags != snapshot) &&
+                (flags != (snapshot | scalable_master))) {
+                // Wrong image, or feature assembly has not run yet.
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
+            this->hvix64_base = candidate;
+            this->hvfeatureflags_gpa = *flags_phys;
+            this->bootphasemode_gpa = *phase_phys;
+            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
+                "HvBootPhaseMode at {}",
+                candidate,
                 *flags_phys,
-                std::as_writable_bytes(std::span(&flags, 1)))) {
-            return;
+                flags,
+                *phase_phys);
+            return; // loader-block locate on a later exit
         }
 
-        if ((flags != snapshot) &&
-            (flags != (snapshot | scalable_master))) {
-            // Wrong image, or feature assembly has not written it yet.
-            this->scalable_force_locate_failed += 1;
-            return;
+        // Step 2: locate the loader block and its unit-0 cached caps (once).
+        // g_HvLoaderBlockPtr = *(hvix64_base + 0xa24c0); the unit array is at
+        // loaderblock + [+0x26ec], stride 0x20c0, CAP at unit+0x30, ECAP at
+        // unit+0x38 (secure-dma §12).
+        constexpr std::uint64_t loaderblock_ptr_rva = 0xa24c0;
+        constexpr std::uint64_t unit_array_off = 0x26ec;
+        constexpr std::uint64_t unit_cap_off = 0x30;
+        constexpr std::uint64_t unit_ecap_off = 0x38;
+        if (0 == this->loaderblock_ecap_gpa) {
+            auto ptr_phys = translate_guest_linear(
+                cpu, this->hvix64_base + loaderblock_ptr_rva);
+            if (!ptr_phys) {
+                return;
+            }
+            std::uint64_t loaderblock{};
+            if (!read_guest_physical(
+                    *ptr_phys,
+                    std::as_writable_bytes(std::span(&loaderblock, 1)))) {
+                return;
+            }
+            if (loaderblock < kernel_floor) {
+                this->loaderblock_locate_failed += 1;
+                return; // pointer not set yet, or wrong context
+            }
+
+            auto arroff_phys = translate_guest_linear(
+                cpu, loaderblock + unit_array_off);
+            if (!arroff_phys) {
+                return;
+            }
+            std::uint32_t unit_array{};
+            if (!read_guest_physical(
+                    *arroff_phys,
+                    std::as_writable_bytes(std::span(&unit_array, 1)))) {
+                return;
+            }
+
+            auto unit0 = loaderblock + unit_array; // unit index 0
+            auto cap_phys =
+                translate_guest_linear(cpu, unit0 + unit_cap_off);
+            auto ecap_phys =
+                translate_guest_linear(cpu, unit0 + unit_ecap_off);
+            if (!cap_phys || !ecap_phys) {
+                return;
+            }
+            std::uint64_t cap{};
+            std::uint64_t ecap{};
+            if (!read_guest_physical(
+                    *cap_phys,
+                    std::as_writable_bytes(std::span(&cap, 1))) ||
+                !read_guest_physical(
+                    *ecap_phys,
+                    std::as_writable_bytes(std::span(&ecap, 1)))) {
+                return;
+            }
+
+            this->hvloaderblock = loaderblock;
+            this->loaderblock_cap = cap;
+            this->loaderblock_ecap = ecap;
+            this->loaderblock_ecap_gpa = *ecap_phys;
+            log("nested vt-d: loader block {}, unit0 cached CAP {} ECAP {} "
+                "- poking ECAP.IR so hvix64 sets bit 5 itself",
+                loaderblock,
+                cap,
+                ecap);
         }
 
-        this->hvix64_base = candidate;
-        this->hvfeatureflags_gpa = *flags_phys;
-        this->bootphasemode_gpa = *phase_phys;
-        log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
-            "HvBootPhaseMode at {} - scalable master will force at "
-            "hvix64's first IOMMU access",
-            candidate,
-            *flags_phys,
-            flags,
-            *phase_phys);
+        // Step 3: poke ECAP.IR (bit 3) + QI (bit 1) into the cached unit ECAP
+        // so HvpParseVtdCaps passes and 0x30b4d8 sets bit 5. Continuous and
+        // idempotent (unlike forcing bit 5, this cannot NULL-deref) until
+        // hvix64 has set bit 5 - then stop.
+        constexpr std::uint64_t ecap_ir_qi = 0x0a; // bit 3 (IR) + bit 1 (QI)
+        std::uint64_t flags{};
+        if (read_guest_physical(
+                this->hvfeatureflags_gpa,
+                std::as_writable_bytes(std::span(&flags, 1))) &&
+            (0 != (flags & scalable_master))) {
+            return; // hvix64 set bit 5 - the poke took, nothing more to do
+        }
+        std::uint64_t ecap{};
+        if (!read_guest_physical(
+                this->loaderblock_ecap_gpa,
+                std::as_writable_bytes(std::span(&ecap, 1)))) {
+            return;
+        }
+        if (ecap_ir_qi != (ecap & ecap_ir_qi)) {
+            ecap |= ecap_ir_qi;
+            if (write_guest_physical(
+                    this->loaderblock_ecap_gpa,
+                    std::as_bytes(std::span(&ecap, 1)))) {
+                this->loaderblock_ecap = ecap;
+                this->loaderblock_ir_poked += 1;
+            }
+        }
     }
 }
 
