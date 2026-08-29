@@ -349,12 +349,108 @@ bool hypervisor::dmar_mmio(std::size_t cpu,
         }
     }
 
+    // The first accesses, for the state dump - which register, what width,
+    // and the value answered (a read) or written (a store). This is how the
+    // IOMMU init's CAP/ECAP reads and the attach's programming are told
+    // apart from a livelock where the gate never passed.
+    if (this->dmar_access_next < dmar_log_entries) {
+        auto i = this->dmar_access_next;
+        this->dmar_access_offset[i] = static_cast<std::uint32_t>(offset);
+        this->dmar_access_value[i] = writes_memory ? result : old;
+        this->dmar_access_size[i] =
+            static_cast<std::uint8_t>(instruction->size);
+        this->dmar_access_write[i] = writes_memory ? 1 : 0;
+        this->dmar_access_next += 1;
+    }
+
     // The instruction has been carried out, so resume after it by the
     // length the decoder measured (the VMCS length is undefined for an EPT
     // violation; SDM 30.2.5).
     context.rip = context.rip + instruction->length;
     this->vmcs.guest_rip(context.rip);
     return true;
+}
+
+void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
+{
+    if constexpr (!nested_vmx::nested_vtd) {
+        return;
+    } else {
+        // Once, and only from hvix64 running as L1: feature assembly runs
+        // there (before any L2), and the flag lives in hvix64's own image.
+        if (this->scalable_force_armed || (cpu >= max_cpus) ||
+            this->running_l2[cpu]) {
+            return;
+        }
+
+        // hvix64's RIP is inside its own image, so a scan down from it
+        // finds the MZ/PE at its load base.
+        if (0 == this->hvix64_base) {
+            this->hvix64_base = image_base_of(cpu, this->vmcs.guest_rip());
+            if (0 == this->hvix64_base) {
+                // The RIP may still be in hvloader; retry a later L1 exit.
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+        }
+
+        // g_HvFeatureFlags is at RVA 0xaf158; watch its 4 KB page. At L1
+        // `translate_guest_linear` yields the L1-physical directly, which -
+        // this VMM building an identity EPT - is the guest-physical the
+        // watch is keyed on.
+        constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
+        auto page_linear = (this->hvix64_base + g_hvfeatureflags_rva) &
+                           ~std::uint64_t{0xfff};
+        auto physical = translate_guest_linear(cpu, page_linear);
+        if (!physical) {
+            return; // not mapped yet; retry
+        }
+
+        if (watch_guest_page_writes(
+                *physical,
+                &hypervisor::on_hvfeatureflags_write,
+                this,
+                page_watch::mode::notify,
+                nullptr,
+                &hypervisor::filter_hvfeatureflags_write)) {
+            this->scalable_force_armed = true;
+            log("nested vt-d: scalable-force watch armed, hvix64 base {}, "
+                "g_HvFeatureFlags page {}",
+                this->hvix64_base,
+                *physical);
+        }
+    }
+}
+
+void hypervisor::on_hvfeatureflags_write(void * context,
+                                         std::uint64_t page,
+                                         const guest_write * written)
+{
+    // The substitution is done in the filter; nothing to observe here.
+    (void)context;
+    (void)page;
+    (void)written;
+}
+
+std::optional<std::uint64_t> hypervisor::filter_hvfeatureflags_write(
+    void * context, std::uint64_t page, const guest_write * write)
+{
+    (void)page;
+
+    // g_HvFeatureFlags is the qword at page offset 0x158. Force bit 5
+    // (scalable-mode master) and bit 6 (IOMMU-present, so the finalize
+    // path's clear of bit 5 is skipped). Every other write to the page is
+    // passed through untouched.
+    constexpr std::uint64_t g_hvfeatureflags_offset = 0x158;
+    constexpr std::uint64_t scalable_and_present = 0x60;
+
+    if (g_hvfeatureflags_offset == (write->address & 0xfffull)) {
+        auto self = static_cast<hypervisor *>(context);
+        self->scalable_force_forced += 1;
+        return write->value | scalable_and_present;
+    }
+
+    return write->value;
 }
 
 } // namespace zpp::hypervisor

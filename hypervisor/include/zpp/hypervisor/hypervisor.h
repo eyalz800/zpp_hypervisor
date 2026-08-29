@@ -526,6 +526,17 @@ private:
     void drain_qi_ring(std::size_t cpu);
 
     /**
+     * Once, from an hvix64 (L1) exit, locate hvix64's image base and arm a
+     * write-watch on the `g_HvFeatureFlags` page so bit 5 (scalable) and 6
+     * (present) are forced on - the master gate for the secure-DMA feature
+     * set. No-op unless `nested_vmx::nested_vtd`, once armed, or on an L2
+     * exit. See `scalable_force_armed`.
+     */
+    void arm_scalable_iommu_force(std::size_t cpu);
+    // The two static write-watch hooks it arms are declared beside
+    // `watch_guest_page_writes` below, where `guest_write` is in scope.
+
+    /**
      * The 4 KB EPT entry covering a host physical address, splitting the
      * 2 MB entry that covers it if that is what it takes.
      *
@@ -1544,6 +1555,21 @@ private:
         page_watch::mode behaviour = page_watch::mode::notify,
         void (*before_write)(void * context, std::uint64_t page) = nullptr,
         page_watch::filter filter_write = nullptr);
+
+    /** Write-watch handler for hvix64's `g_HvFeatureFlags` page - armed by
+     *  `arm_scalable_iommu_force`. Observation only; the substitution is in
+     *  the filter. */
+    static void on_hvfeatureflags_write(void * context,
+                                        std::uint64_t page,
+                                        const guest_write * written);
+
+    /** Substitute-value filter: ORs bits 5 (scalable) and 6 (present) into
+     *  a write to `g_HvFeatureFlags` (page offset 0x158), leaving other
+     *  writes to the page unchanged. See `arm_scalable_iommu_force`. */
+    static std::optional<std::uint64_t>
+    filter_hvfeatureflags_write(void * context,
+                                std::uint64_t page,
+                                const guest_write * write);
 
     /**
      * Starts and stops holding writers to a watched page.
@@ -13918,6 +13944,11 @@ private:
     {
         std::uint32_t version{0x10};
         std::uint64_t capability{0x80d2008c22260286};
+        // QEMU's 0xf46 plus ECAP.IR (bit3), the one bit that makes the
+        // feature-set compose pass. The compose does not re-read ECAP.SMTS
+        // (verified by the bit-exact simulator and the code review), so
+        // scalable mode is entered purely by the g_HvFeatureFlags bit-5
+        // force, not by an ECAP bit - 0xf4e stands.
         std::uint64_t extended_capability{0xf4e};
         std::uint32_t global_command{};
         std::uint32_t global_status{};
@@ -13946,6 +13977,34 @@ private:
     std::uint64_t dmar_writes[max_cpus]{};
     std::uint64_t dmar_qi_descriptors[max_cpus]{};
     std::uint64_t dmar_qi_waits_completed[max_cpus]{};
+
+    /** The first accesses hvix64 makes to the synthetic unit, so what it
+     *  read (which register, what value we answered) and wrote is visible
+     *  from a state dump. Freezes when full - the interesting part is the
+     *  IOMMU init and the first attach, not the later retries. */
+    static constexpr std::size_t dmar_log_entries = 32;
+    std::uint32_t dmar_access_offset[dmar_log_entries]{};
+    std::uint64_t dmar_access_value[dmar_log_entries]{};
+    std::uint8_t dmar_access_size[dmar_log_entries]{};
+    std::uint8_t dmar_access_write[dmar_log_entries]{};
+    std::uint64_t dmar_access_next{};
+
+    /**
+     * State for forcing hvix64's scalable-mode master flag on. The DMA
+     * feature gate composes `IommuFeatureSet` only in the scalable path,
+     * gated by `g_HvFeatureFlags` (hvix64 RVA 0xaf158) bit 5; on this rig
+     * that bit is derived from a partition privilege the DeviceGuard
+     * config leaves clear, so no cap and no CPUID/MSR lie can set it. zpp
+     * locates hvix64's image base from an L1 exit (`image_base_of`) and
+     * write-watches the flag's page, ORing bits 5 (scalable) and 6
+     * (IOMMU-present, so the finalize path does not clear bit 5) into every
+     * write. See `nested_vmx::nested_vtd` and
+     * `.references/hyperv/secure-dma-hvcall.md` §9.
+     */
+    std::uint64_t hvix64_base{};
+    bool scalable_force_armed{};
+    std::uint64_t scalable_force_forced{};
+    std::uint64_t scalable_force_locate_failed{};
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads

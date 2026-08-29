@@ -116,6 +116,14 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // vmcs02 and vice versa - which is the whole point of a row per VMCS.
     arch::x86_64::vmx::vmcs_cache_forget_current(cpuid);
 
+    // Force hvix64's scalable-mode master flag (g_HvFeatureFlags bit 5) on,
+    // so the secure-DMA feature gate composes and HvCall 0x82 can succeed.
+    // Self-gated: a no-op unless nested_vtd, once the watch is armed, and on
+    // any L2 exit - so it does real work only on hvix64 (L1) exits during
+    // early boot, before the flag's page is written. See
+    // `arm_scalable_iommu_force`.
+    arm_scalable_iommu_force(cpuid);
+
     // `cpuid + 1` throughout, where this used to say `vmcs.vpid()`.
     //
     // They are the same number: `setup_vmcs` writes `vpid(cpu + 1)` and
