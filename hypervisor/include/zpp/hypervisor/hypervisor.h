@@ -13944,7 +13944,15 @@ private:
         // (verified by the bit-exact simulator and the code review), so
         // scalable mode is entered purely by the g_HvFeatureFlags bit-5
         // force, not by an ECAP bit - 0xf4e stands.
-        std::uint64_t extended_capability{0xf4e};
+        // 0xf4e advertises IR (bit 3, the feature-gate lever). Bit 43 (SMTS,
+        // scalable-mode support) is added as an experiment: hvix64's bit-5
+        // setter (0x30b4d8) parses cached DRHD ECAP for the scalable bits, so
+        // if any pre-compose reader (hvloader, or HvpIommuInitUnit filling the
+        // runtime unit) sees SMTS here, hvix64 sets bit 5 through its OWN
+        // coherent path - no poke, no NULL deref. If bit 5 stays clear after
+        // this, no pre-compose reader caches our live ECAP and the fix must
+        // instead make [0xb1e88] non-NULL before forcing bit 5.
+        std::uint64_t extended_capability{0x80000000f4e};
         std::uint32_t global_command{};
         std::uint32_t global_status{};
         std::uint64_t root_table_address{};
