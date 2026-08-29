@@ -485,9 +485,8 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         // builds it. Measured: forcing on the first phase-0 exit set bit 5,
         // but the guest reset with dmar_reads=0 - before the IOMMU init. So:
         // locate here, force there. Once located, stop entirely.
-        if ((cpu >= max_cpus) || this->running_l2[cpu] ||
-            (0 != this->hvfeatureflags_gpa)) {
-            return; // wrong context, or already located
+        if ((cpu >= max_cpus) || this->running_l2[cpu]) {
+            return; // wrong context
         }
 
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
@@ -496,52 +495,117 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         constexpr std::uint64_t scalable_master = 0x20; // bit 5 ONLY
         constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
-        // The first L1 exits run in hvloader (low VA); skip the scan for
-        // them and cross-check the flag word against the feature-assembly
-        // snapshot before trusting the base.
-        auto rip = this->vmcs.guest_rip();
-        if (rip < kernel_floor) {
-            return; // hvloader/firmware, not hvix64
-        }
+        // Step 1: locate hvix64's base (once). The first L1 exits run in
+        // hvloader (low VA); skip the scan for them and cross-check the flag
+        // word against the feature-assembly snapshot before trusting it.
+        if (0 == this->hvfeatureflags_gpa) {
+            auto rip = this->vmcs.guest_rip();
+            if (rip < kernel_floor) {
+                return; // hvloader/firmware, not hvix64
+            }
 
-        auto candidate = find_hvix64_base(cpu, rip);
-        if ((0 == candidate) || (candidate < kernel_floor)) {
-            this->scalable_force_locate_failed += 1;
-            return;
-        }
+            auto candidate = find_hvix64_base(cpu, rip);
+            if ((0 == candidate) || (candidate < kernel_floor)) {
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
 
-        auto flags_phys = translate_guest_linear(
-            cpu, candidate + g_hvfeatureflags_rva);
-        auto phase_phys = translate_guest_linear(
-            cpu, candidate + bootphasemode_rva);
-        if (!flags_phys || !phase_phys) {
-            return; // not mapped yet; retry
-        }
+            auto flags_phys = translate_guest_linear(
+                cpu, candidate + g_hvfeatureflags_rva);
+            auto phase_phys = translate_guest_linear(
+                cpu, candidate + bootphasemode_rva);
+            if (!flags_phys || !phase_phys) {
+                return; // not mapped yet; retry
+            }
 
-        std::uint64_t flags{};
-        if (!read_guest_physical(
+            std::uint64_t flags{};
+            if (!read_guest_physical(
+                    *flags_phys,
+                    std::as_writable_bytes(std::span(&flags, 1)))) {
+                return;
+            }
+
+            if ((flags != snapshot) &&
+                (flags != (snapshot | scalable_master))) {
+                // Wrong image, or feature assembly has not written it yet.
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
+            this->hvix64_base = candidate;
+            this->hvfeatureflags_gpa = *flags_phys;
+            this->bootphasemode_gpa = *phase_phys;
+            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
+                "HvBootPhaseMode at {} - scalable master will force at "
+                "hvix64's first IOMMU access",
+                candidate,
                 *flags_phys,
-                std::as_writable_bytes(std::span(&flags, 1)))) {
-            return;
+                flags,
+                *phase_phys);
+            return; // partition locate on a later exit
         }
 
-        if ((flags != snapshot) &&
-            (flags != (snapshot | scalable_master))) {
-            // Wrong image, or feature assembly has not written it yet.
-            this->scalable_force_locate_failed += 1;
-            return;
-        }
+        // Step 2: locate the root partition (once), read-only. The privilege
+        // that grants the scalable master lives at partition+0x2730/+0x2734
+        // (secure-dma-hvcall.md §9.1); reading it here verifies the
+        // *(GS+0x360) locate and captures the table layout before any write.
+        // Only meaningful from an hvix64 kernel context (CPL 0, GS = hvix64
+        // per-CPU), which is where this runs (high-VA L1 exit).
+        if (0 == this->hvix64_partition) {
+            constexpr std::uint64_t partition_from_gs = 0x360;
+            constexpr std::uint64_t priv_present_off = 0x2730;
+            constexpr std::uint64_t priv_table_off = 0x2734;
 
-        this->hvix64_base = candidate;
-        this->hvfeatureflags_gpa = *flags_phys;
-        this->bootphasemode_gpa = *phase_phys;
-        log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
-            "HvBootPhaseMode at {} - scalable master will force at "
-            "hvix64's first IOMMU access",
-            candidate,
-            *flags_phys,
-            flags,
-            *phase_phys);
+            auto gs_base = this->vmcs.guest_gs_base();
+            if (gs_base < kernel_floor) {
+                return; // not an hvix64 kernel context yet; retry
+            }
+
+            auto part_ptr_phys =
+                translate_guest_linear(cpu, gs_base + partition_from_gs);
+            if (!part_ptr_phys) {
+                return;
+            }
+            std::uint64_t partition{};
+            if (!read_guest_physical(
+                    *part_ptr_phys,
+                    std::as_writable_bytes(std::span(&partition, 1)))) {
+                return;
+            }
+            if (partition < kernel_floor) {
+                this->partition_locate_failed += 1;
+                return; // GS+0x360 did not hold a kernel pointer
+            }
+
+            auto present_phys =
+                translate_guest_linear(cpu, partition + priv_present_off);
+            auto table_phys =
+                translate_guest_linear(cpu, partition + priv_table_off);
+            if (!present_phys || !table_phys) {
+                return;
+            }
+            std::uint32_t present{};
+            std::uint32_t table{};
+            if (!read_guest_physical(
+                    *present_phys,
+                    std::as_writable_bytes(std::span(&present, 1))) ||
+                !read_guest_physical(
+                    *table_phys,
+                    std::as_writable_bytes(std::span(&table, 1)))) {
+                return;
+            }
+
+            this->partition_gs_base = gs_base;
+            this->hvix64_partition = partition;
+            this->partition_priv_present = present;
+            this->partition_priv_table = table;
+            log("nested vt-d: root partition {} (GS {}), priv present@0x2730 "
+                "= {}, table off@0x2734 = {}",
+                partition,
+                gs_base,
+                static_cast<std::uint64_t>(present),
+                static_cast<std::uint64_t>(table));
+        }
     }
 }
 
