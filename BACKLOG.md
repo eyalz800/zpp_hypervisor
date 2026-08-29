@@ -61281,3 +61281,40 @@ machinery.
 The fix is identified and non-trivial; the agent is spec'ing the minimal
 correct form and I will confirm (a) by reading Hyper-V's descriptor
 before building it.
+
+## ROOT CAUSE PROVEN + FIX IDENTIFIED: SkhalPciEnabled is POLICY-mandated (SDEV + winload), not IOMMU - clear two securekernel .data globals - 2026-08-29
+
+Disassembly-proven (Hyper-V agent, skhalpci-real-source.md, PDB-real symbols).
+This explains why the vIOMMU/DMAR removal FAILED and gives the surgical fix.
+
+The gate the securekernel spins on:
+  SkhalPciEnabled (sk 0x7d774) = (SkpnpSdevDeviceTypesAvailable & 2)
+                                 ? 1 : ((SkpnpIoProtectionPolicy >> 1) & 1)
+Two securekernel .data POLICY globals (imagebase 0xfffff80085a81000):
+- SkpnpSdevDeviceTypesAvailable (RVA 0x127a50) bit1 <- ACPI 'SDEV' table
+  (SkpnppSdevInitialize sk 0xaa8f0; no SDEV table -> stays 0). Type-1 = PCIe.
+- SkpnpIoProtectionPolicy (RVA 0x127a60) bit1 <- VBS/DeviceGuard IO-protection
+  boot policy, set by WINLOAD (no securekernel code writes it; proven-by-absence
+  exhaustive decode of all 5 code sections; disk value 0).
+SMOKING GUN: 'DMAR' (0x52414d44) appears ZERO times in securekernel.bin - the
+securekernel never reads the Intel DMA-remapping table. So removing the DMAR
+(vIOMMU) cannot move this gate - exactly what the failed boot test showed. The
+old partition+0x1a0 theory was the hvix64 hypercall-0x82 handler one level down.
+
+**THE FIX (surgical, in our hypervisor):** zpp clears bit1 (&= ~2u) of the two
+securekernel VTL1 .data dwords at securekernel_base+0x127a60 (primary - the
+winload policy, live on QEMU which has no SDEV table) and +0x127a50 (belt-and-
+suspenders). Both read LIVE (no cache) and never re-set after early init, so a
+one-shot/re-forced clear is permanent. Then SkhalPciEnabled->0, SkhalpPciInitialize
+(0x7d844) skips (je 0x7d908), the DMA-target-expose worker + hypercall 0x82 never
+run, VslGetSecurePciEnabled->0, VTL0 stops polling, Phase 1 proceeds. This is VBS
+degrading to no-DMA-protection - the correct nested reality (DMA already
+VFIO-constrained). Gated behind ZPP_FORCE_NO_SECURE_DMA.
+
+Implementation (KVM agent's zpp-force-infrastructure.md): key off EPTP12 ==
+VTL1 root (production-safe VTL discriminator, read on the always-on path, no
+trace_vtl; VTL0/VTL1 roots distinct and held together); find securekernel base
+via find_guest_kernel_base's MZ-walk under the VTL1 cr3; translate_guest_linear
++ l2_physical_to_l1 + read/write_guest_physical (the suppress_vina template,
+nested_entry.cpp:8660). Patch being drafted. Then build+deploy+boot+test (a
+working fix clears the livelock and Phase 1 advances past System in minutes).
