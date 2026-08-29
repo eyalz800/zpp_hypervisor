@@ -3002,11 +3002,19 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     // the layer below.
     auto rip = context.rip;
 
-    // Serialised, because the window is now one shared pair of pages -
-    // and taken before the walk, which reaches through it too.
-    this->mapping_window_lock.lock();
-    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
-
+    // The translations run **without** the window lock held. Each reaches
+    // through the window via `read_guest_physical`, which takes this same
+    // lock for itself - so holding it across them self-deadlocks the moment
+    // a walk misses its cache and has to read a page-table or extended-
+    // page-table entry. A freshly trapped MMIO page provokes exactly that:
+    // decoding the faulting instruction drives a cold `l2_physical_to_l1`
+    // here whose walk re-enters `read_guest_physical` on the held lock.
+    // Measured as a single-processor spin in `spin_lock::lock` under the
+    // nested VT-d unit (`nested_vmx::nested_vtd`). The lock is instead
+    // taken below, around the instruction fetch alone - the one window use
+    // that maps directly rather than through a self-serialising helper. The
+    // fetch still happens after both translations, so the shared window is
+    // never re-pointed under a walk.
     auto physical = this->translate_guest_linear(cpu, rip);
     if (!physical) {
         return {};
@@ -3046,6 +3054,12 @@ hypervisor::decode_guest_instruction(std::size_t cpu,
     // memory, so the second is mapped from its own translation rather
     // than assumed to follow the first.
     constexpr std::size_t longest_instruction = 15;
+
+    // Now serialise the window, for the instruction fetch alone. Both
+    // translations are complete, so the shared window is free; the two
+    // `map_window_at` below are its only direct (non-self-locking) uses.
+    this->mapping_window_lock.lock();
+    scope_exit release{[&] { this->mapping_window_lock.unlock(); }};
 
     auto first_page = instruction_window_first_page(cpu);
     auto * bytes = static_cast<const std::uint8_t *>(
