@@ -7350,6 +7350,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             return result;
         }
 
+        // Arm the synthetic nested VT-d unit before the guest runs, so the
+        // first time hvix64 reads the DRHD register block it already sees
+        // the synthetic capabilities. Modifies the EPT built just above,
+        // so it comes after it. No-op unless nested_vmx::nested_vtd.
+        if (auto result = setup_nested_vtd(); !result) {
+            return result;
+        }
+
         if (auto result = protect_module(); !result) {
             return result;
         }

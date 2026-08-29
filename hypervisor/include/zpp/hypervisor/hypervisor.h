@@ -493,6 +493,39 @@ private:
     std::expected<void, zpp::error> initialize_ept();
 
     /**
+     * Arm the synthetic nested VT-d unit: full-trap the DRHD register page
+     * (GPA 0xfed90000) in the L1 EPT so hvix64's accesses exit to
+     * `dmar_mmio`. Boot-processor only, once, after `initialize_ept`.
+     * No-op unless `nested_vmx::nested_vtd`. See `dmar`.
+     */
+    std::expected<void, zpp::error> setup_nested_vtd();
+
+    /**
+     * Emulate one hvix64 access to the trapped DRHD register page. Decodes
+     * the faulting instruction, serves reads from `dmar` and acts on
+     * writes (global-command status, the QI ring and its invalidation-wait
+     * completion), then advances RIP. Returns true when it handled the
+     * access. Called from `on_ept_violation` for `dmar_register_page`.
+     */
+    bool dmar_mmio(std::size_t cpu,
+                   arch::x86_64::context & context,
+                   std::uint64_t guest_physical);
+
+    /** The value the synthetic unit returns for a read at `offset`. */
+    std::uint64_t dmar_register_read(std::uint64_t offset,
+                                     std::size_t size);
+
+    /** Apply a guest write to the synthetic unit at `offset`. */
+    void dmar_register_write(std::size_t cpu,
+                             std::uint64_t offset,
+                             std::uint64_t value,
+                             std::size_t size);
+
+    /** Drain the invalidation queue from head to tail, performing the
+     *  status-write for each invalidation-wait descriptor. */
+    void drain_qi_ring(std::size_t cpu);
+
+    /**
      * The 4 KB EPT entry covering a host physical address, splitting the
      * 2 MB entry that covers it if that is what it takes.
      *
@@ -13870,6 +13903,49 @@ private:
     std::uint64_t secure_dma_forced[max_cpus]{};
     std::uint64_t vina_suppress_already_clear[max_cpus]{};
     std::uint64_t vina_suppress_write_failed[max_cpus]{};
+
+    /**
+     * The synthetic nested VT-d unit presented to hvix64. See
+     * `nested_vmx::nested_vtd`. A pure register model (M1): the DRHD
+     * register page at `dmar_register_page` is full-trapped in the L1 EPT,
+     * every access is emulated from these fields, and QEMU's real unit is
+     * never touched (left in bypass, so the passed-through NVMe keeps
+     * DMAing). Reset values from Intel VT-d; CAP is QEMU's live value
+     * verbatim and ECAP is QEMU's with `IR` (bit3) set - the one bit that
+     * makes `HvpComputeIommuFeatureSet` pass its gate (measured on the rig).
+     */
+    struct vtd_unit
+    {
+        std::uint32_t version{0x10};
+        std::uint64_t capability{0x80d2008c22260286};
+        std::uint64_t extended_capability{0xf4e};
+        std::uint32_t global_command{};
+        std::uint32_t global_status{};
+        std::uint64_t root_table_address{};
+        std::uint64_t invalidation_queue_address{};
+        std::uint32_t invalidation_queue_head{};
+        std::uint32_t invalidation_queue_tail{};
+        std::uint32_t fault_status{};
+        std::uint32_t fault_event_control{0x80000000};
+        std::uint32_t fault_event_data{};
+        std::uint64_t fault_event_address{};
+        std::uint64_t interrupt_remap_table_address{};
+    };
+
+    vtd_unit dmar{};
+
+    /** GPA >> 12 of the trapped DRHD register page, 0 until armed by
+     *  `setup_nested_vtd`. `on_ept_violation` dispatches this page to
+     *  `dmar_mmio`. */
+    std::uint64_t dmar_register_page{};
+
+    /** Census of the emulated unit, per processor. `qi_waits_completed`
+     *  counts invalidation-wait descriptors whose status-write this VMM
+     *  performed - the completion the securekernel used to spin on. */
+    std::uint64_t dmar_reads[max_cpus]{};
+    std::uint64_t dmar_writes[max_cpus]{};
+    std::uint64_t dmar_qi_descriptors[max_cpus]{};
+    std::uint64_t dmar_qi_waits_completed[max_cpus]{};
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads

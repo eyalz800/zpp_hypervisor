@@ -2376,6 +2376,60 @@ inline constexpr bool suppress_vina = (0 != ZPP_SUPPRESS_VINA);
 
 inline constexpr bool force_no_secure_dma = (0 != ZPP_FORCE_NO_SECURE_DMA);
 
+/**
+ * Present hvix64 a working nested VT-d unit so VBS secure-DMA succeeds with
+ * kernel DMA protection FUNCTIONAL, rather than disabling it as
+ * `force_no_secure_dma` does. This is the end state the user asked for.
+ *
+ * Root cause, measured on the rig (2026-08-29): the securekernel asks
+ * hvix64 to attach the passed-through NVMe to an IOMMU device-domain
+ * (HvCallAttachDevice, 0x82). hvix64 discovers the QEMU `intel-iommu`
+ * (DMAR reaches hvloader; register block at GPA 0xfed90000 is alive - read
+ * VER=0x10 directly) but `HvpComputeIommuFeatureSet` (0x30a6b4) rejects
+ * QEMU's advertised capabilities, so the worker (0x3057ec) soft-fails 0x1e
+ * at its feature gate (0x305921) BEFORE ever programming the unit -
+ * measured GCMD/GSTS/RTADDR all 0 after 41,434+ attempts. The securekernel
+ * retries forever => the Phase-1 livelock.
+ *
+ * The exact missing bit is ECAP.IR (bit3, interrupt remapping), proven by a
+ * bit-exact simulator of the decompiled computation (HvpParseVtdCaps
+ * 0x355650 -> HvpComputeIommuFeatureSet 0x30a70e): QEMU's live
+ * CAP=0x80d2008c22260286 is complete, but ECAP=0xf46 has IR=0 (the rig's
+ * `intremap=off`), so HvpParseVtdCaps short-circuits (REGX=1), no feature
+ * bit propagates, IommuFeatureSet=0, gate returns 0x1e. Setting ECAP.IR
+ * (=> ECAP 0xf4e) makes IommuFeatureSet=0x40 and the gate PASS. The gate
+ * needs ECAP.IR|QI|PT, CAP.RWBF=0, CAP.DWD|DRD|SAGAW - the rig has all but
+ * IR. (The KVM-review agent guessed ECAP.SC/C from "what real VT-d sets";
+ * the bit-exact simulation refuted that - it is IR.)
+ *
+ * The IR tension: ECAP.IR=1 is exactly what `intremap=off` clears to stop
+ * nested Hyper-V reboot-looping. Advertising it risks hvix64 enabling
+ * interrupt remapping. Under M1 (pure fake) this is absorbed: hvix64's IR
+ * programming (IRTA, GCMD.IRE) hits the full-trapped synthetic unit and is
+ * acknowledged locally; QEMU's real intel-iommu is never touched and stays
+ * `intremap=off`. Whether hvix64 then relies on real remapping is verified
+ * empirically at boot.
+ *
+ * The fix cannot be a memory poke: CAP/ECAP come from a live MMIO read, so
+ * the read itself must be intercepted. zpp full-traps the DRHD register
+ * page in its L1 (hvix64) EPT (epte_for + read/write/execute(false)) and
+ * emulates a synthetic legacy unit: VER=0x10, CAP verbatim, ECAP=0xf4e
+ * (IR bit3 set), CM=1, QI. On the QI doorbell
+ * (IQT) it drains the queue and, for the invalidation-wait descriptor
+ * (type 5), performs the status-write itself so hvix64's completion poll
+ * succeeds. That makes 0x82 return success and clears the livelock WITHOUT
+ * disabling VBS. Minimal front-end (M1, pure fake): QEMU's real unit is
+ * left in bypass - the rig's mtree shows every device in `vtd-nodmar` and
+ * the disk DMAs today, so the NVMe's live I/O is not vIOMMU-gated and stays
+ * alive untouched. Full per-page enforcement (a translating shadow SLPT)
+ * is a later step; see `.references/nested-vtd-design.md`.
+ */
+#ifndef ZPP_NESTED_VTD
+#define ZPP_NESTED_VTD 0
+#endif
+
+inline constexpr bool nested_vtd = (0 != ZPP_NESTED_VTD);
+
 inline constexpr bool virtual_interrupt_delivery_offered =
     (0 != ZPP_NESTED_VID);
 

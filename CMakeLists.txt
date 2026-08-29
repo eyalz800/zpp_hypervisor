@@ -124,6 +124,10 @@ option(ZPP_FORCE_NO_SECURE_DMA
     "Force the securekernel secure-PCI enable off so VBS skips secure DMA"
     OFF)
 
+option(ZPP_NESTED_VTD
+    "Present hvix64 a synthetic nested VT-d unit so VBS secure DMA succeeds"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -447,6 +451,7 @@ ExternalProject_Add(hypervisor
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
+        -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -642,6 +647,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
+        -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

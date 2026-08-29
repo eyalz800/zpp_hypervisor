@@ -343,6 +343,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // so a run with it on describes a different machine.
         ' ', 'n', 'o', 's', 'd', 'm', 'a', '=',
         digit(nested_vmx::force_no_secure_dma),
+        // Present hvix64 a synthetic nested VT-d unit (ECAP.IR set) so VBS
+        // secure-DMA attach passes the IommuFeatureSet gate and Phase 1
+        // proceeds with kernel DMA protection functional.
+        ' ', 'n', 'v', 't', 'd', '=',
+        digit(nested_vmx::nested_vtd),
         // The application-processor state trace. Observational, so it
         // cannot change what the guest sees - but it is the difference
         // between a log that says which application of the start-up

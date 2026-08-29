@@ -229,6 +229,18 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 {
     auto page = guest_physical >> 12;
 
+    // The synthetic nested VT-d unit. Its register page is full-trapped so
+    // hvix64 sees a synthetic CAP/ECAP, and every access is emulated here
+    // rather than reaching QEMU's real unit. Handled before the local-APIC
+    // adoption logic below, which is about a different page. See
+    // `nested_vmx::nested_vtd`.
+    if constexpr (nested_vmx::nested_vtd) {
+        if ((0 != this->dmar_register_page) &&
+            (page == this->dmar_register_page)) {
+            return dmar_mmio(cpu, context, guest_physical);
+        }
+    }
+
     // Every violation an application processor takes, with the
     // qualification decoded. It takes four on the local APIC page and
     // dies, and its emulated and stepped counts are both zero - so
