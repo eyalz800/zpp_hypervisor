@@ -378,7 +378,10 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
     } else {
         // Only from hvix64 running as L1: feature assembly and the IOMMU
         // init both run there, and the flag lives in hvix64's own image.
-        if ((cpu >= max_cpus) || this->running_l2[cpu]) {
+        // Once forced, stop entirely - bit 6 keeps bit 5 across the
+        // finalize, so no re-poke is needed and no per-exit cost remains.
+        if ((cpu >= max_cpus) || this->running_l2[cpu] ||
+            this->scalable_force_armed) {
             return;
         }
 
@@ -398,8 +401,17 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         // directly (`l2_physical_to_l1` no-ops), which - identity EPT - is
         // the address `read/write_guest_physical` want.
         if (0 == this->hvfeatureflags_gpa) {
-            auto candidate = image_base_of(cpu, this->vmcs.guest_rip());
             constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
+
+            // hvloader and firmware run at low VA. Skip the (expensive,
+            // page-by-page) image scan entirely for them rather than scan
+            // and then reject a low result - which was ~1689 wasted scans.
+            auto rip = this->vmcs.guest_rip();
+            if (rip < kernel_floor) {
+                return;
+            }
+
+            auto candidate = image_base_of(cpu, rip);
             if ((0 == candidate) || (candidate < kernel_floor)) {
                 this->scalable_force_locate_failed += 1;
                 return;
