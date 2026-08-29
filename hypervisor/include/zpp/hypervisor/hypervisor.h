@@ -533,8 +533,18 @@ private:
      * exit. See `scalable_force_armed`.
      */
     void arm_scalable_iommu_force(std::size_t cpu);
-    // The two static write-watch hooks it arms are declared beside
-    // `watch_guest_page_writes` below, where `guest_write` is in scope.
+
+    /**
+     * hvix64's image base, found by matching its `.text` prologue signature
+     * rather than scanning for the MZ header. `image_base_of` scans up to
+     * `image_search_pages` for the header on every call and can miss it (as
+     * for the securekernel); worse, calling it per exit lands hundreds of
+     * thousands of probe cycles inside hvix64's VM-entry-latency benchmark
+     * and resets the guest. This is bounded (one 64 KB-step window anchored
+     * to the L1 rip) and keyed on always-mapped `.text`. Returns 0 if not
+     * found. See `arm_scalable_iommu_force`.
+     */
+    std::uint64_t find_hvix64_base(std::size_t cpu, std::uint64_t rip);
 
     /**
      * The 4 KB EPT entry covering a host physical address, splitting the
@@ -13980,17 +13990,24 @@ private:
      * gated by `g_HvFeatureFlags` (hvix64 RVA 0xaf158) bit 5; on this rig
      * that bit is derived from a partition privilege the DeviceGuard
      * config leaves clear, so no cap and no CPUID/MSR lie can set it. zpp
-     * locates hvix64's image base from an L1 exit (`image_base_of`) and
-     * write-watches the flag's page, ORing bits 5 (scalable) and 6
-     * (IOMMU-present, so the finalize path does not clear bit 5) into every
-     * write. See `nested_vmx::nested_vtd` and
-     * `.references/hyperv/secure-dma-hvcall.md` §9.
+     * locates hvix64's image base from an L1 exit (`find_hvix64_base`) and
+     * pokes bit 5 (scalable master) into the flag - but ONLY in the runtime
+     * phase (`HvBootPhaseMode`, RVA 0xa3d34, != 1). In phase 1 the finalize
+     * path (`HvpFinalizeIommuFeatures`, phase-1-only) derefs the
+     * scalable-IOMMU object [0xb1e88] the instant bit 5 is set, and that
+     * object is not allocated until `HvpInitializeIommus` runs in runtime -
+     * so a phase-1 bit-5 poke is a NULL deref -> #PF -> reset. Bit 6 is not
+     * set: finalize is the only bit-5 clearer and never runs in runtime, so
+     * bit 5 needs no protection there. See `nested_vmx::nested_vtd` and
+     * `.references/hyperv/secure-dma-hvcall.md` §12.
      */
     std::uint64_t hvix64_base{};
     std::uint64_t hvfeatureflags_gpa{};
+    std::uint64_t bootphasemode_gpa{};
     bool scalable_force_armed{};
     std::uint64_t scalable_force_forced{};
     std::uint64_t scalable_force_locate_failed{};
+    std::uint32_t scalable_force_phase{};
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads

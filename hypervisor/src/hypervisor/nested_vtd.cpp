@@ -371,98 +371,168 @@ bool hypervisor::dmar_mmio(std::size_t cpu,
     return true;
 }
 
+std::uint64_t hypervisor::find_hvix64_base(
+    std::size_t cpu, std::uint64_t rip)
+{
+    if constexpr (!nested_vmx::nested_vtd) {
+        return 0;
+    } else {
+        // hvix64's .text begins at RVA 0x200000 with eight int3 pad bytes
+        // then a distinctive prologue (from hvix64.bin, verified against the
+        // shipped image): mov r11,rsp / mov [r11+0x20],r9 / sub rsp,0x48 /
+        // movzx eax,byte [rdx]. Match it rather than the MZ header, which
+        // `image_base_of` scans up to `image_search_pages` for and can miss.
+        // The rip is inside .text (this is only called for high kernel VAs),
+        // so the base is 64 KB-aligned and 0x200000..~8 MB below it.
+        static constexpr std::uint8_t signature[] = {
+            0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // int3 pad
+            0x4c, 0x8b, 0xdc,             // mov r11, rsp
+            0x4d, 0x89, 0x4b, 0x20,       // mov [r11+0x20], r9
+            0x48, 0x83, 0xec, 0x48,       // sub rsp, 0x48
+            0x0f, 0xb6, 0x02,             // movzx eax, byte [rdx]
+        };
+        constexpr std::uint64_t text_rva = 0x200000;
+        constexpr std::uint64_t step = 0x10000;    // 64 KB alignment
+        constexpr std::size_t max_steps = 0x800000 / step; // 8 MB window
+
+        auto candidate = (rip - text_rva) & ~(step - 1);
+        for (std::size_t n{}; n < max_steps; ++n, candidate -= step) {
+            // .text (candidate + text_rva) is always mapped - the rip is
+            // executing in it - so a translate failure means a wrong
+            // candidate, not "not yet". At L1 this yields the L1-physical
+            // directly (identity EPT), which read_guest_physical wants.
+            if (auto physical =
+                    translate_guest_linear(cpu, candidate + text_rva)) {
+                std::uint8_t bytes[sizeof(signature)]{};
+                if (read_guest_physical(
+                        *physical,
+                        std::as_writable_bytes(std::span(bytes)))) {
+                    bool match = true;
+                    for (std::size_t i{}; i < sizeof(signature); ++i) {
+                        if (bytes[i] != signature[i]) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        return candidate;
+                    }
+                }
+            }
+            if (candidate < step) {
+                break;
+            }
+        }
+        return 0;
+    }
+}
+
 void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
 {
     if constexpr (!nested_vmx::nested_vtd) {
         return;
     } else {
-        // Only from hvix64 running as L1: feature assembly and the IOMMU
-        // init both run there, and the flag lives in hvix64's own image.
-        // Once forced, stop entirely - bit 6 keeps bit 5 across the
-        // finalize, so no re-poke is needed and no per-exit cost remains.
+        // Only from hvix64 running as L1: the flag, the phase word and the
+        // scalable-IOMMU object all live in hvix64's own image. Once the
+        // runtime poke has taken (armed), stop entirely - nothing clears
+        // bit 5 in the runtime phase, so no re-poke and no per-exit cost.
         if ((cpu >= max_cpus) || this->running_l2[cpu] ||
             this->scalable_force_armed) {
             return;
         }
 
-        // g_HvFeatureFlags is at RVA 0xaf158, and the snapshot value the
-        // feature assembler writes on this rig - bit 5 (scalable master)
-        // and bit 6 (IOMMU-present) both clear.
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
+        constexpr std::uint64_t bootphasemode_rva = 0xa3d34;
         constexpr std::uint64_t snapshot = 0x0040fb2011000002ull;
-        constexpr std::uint64_t scalable_and_present = 0x60;
+        constexpr std::uint64_t scalable_master = 0x20; // bit 5 ONLY
 
-        // Locate + verify hvix64's base once, and cache the flag's
-        // guest-physical. The first L1 exits run in hvloader (a low VA
-        // image), so require a high kernel VA and cross-check the flag's
-        // value - hvloader's bytes at +0xaf158 are not the snapshot, and a
-        // pre-assembly read is not the snapshot either, so both are
-        // retried. At L1 `translate_guest_linear` yields the L1-physical
-        // directly (`l2_physical_to_l1` no-ops), which - identity EPT - is
-        // the address `read/write_guest_physical` want.
+        // Locate hvix64 once (cheap content-scan) and cache both GPAs. The
+        // first L1 exits run in hvloader (low VA), so skip the scan for low
+        // rips and cross-check the flag word against the feature-assembly
+        // snapshot before trusting the base.
         if (0 == this->hvfeatureflags_gpa) {
             constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
-            // hvloader and firmware run at low VA. Skip the (expensive,
-            // page-by-page) image scan entirely for them rather than scan
-            // and then reject a low result - which was ~1689 wasted scans.
             auto rip = this->vmcs.guest_rip();
             if (rip < kernel_floor) {
-                return;
+                return; // hvloader/firmware, not hvix64
             }
 
-            auto candidate = image_base_of(cpu, rip);
+            auto candidate = find_hvix64_base(cpu, rip);
             if ((0 == candidate) || (candidate < kernel_floor)) {
                 this->scalable_force_locate_failed += 1;
                 return;
             }
 
-            auto physical = translate_guest_linear(
+            auto flags_phys = translate_guest_linear(
                 cpu, candidate + g_hvfeatureflags_rva);
-            if (!physical) {
+            auto phase_phys = translate_guest_linear(
+                cpu, candidate + bootphasemode_rva);
+            if (!flags_phys || !phase_phys) {
                 return; // not mapped yet; retry
             }
 
             std::uint64_t flags{};
             if (!read_guest_physical(
-                    *physical,
+                    *flags_phys,
                     std::as_writable_bytes(std::span(&flags, 1)))) {
                 return;
             }
 
             if ((flags != snapshot) &&
-                (flags != (snapshot | scalable_and_present))) {
+                (flags != (snapshot | scalable_master))) {
                 // Wrong image, or feature assembly has not written it yet.
                 this->scalable_force_locate_failed += 1;
                 return;
             }
 
             this->hvix64_base = candidate;
-            this->hvfeatureflags_gpa = *physical;
-            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {} - "
-                "forcing scalable-mode master",
+            this->hvfeatureflags_gpa = *flags_phys;
+            this->bootphasemode_gpa = *phase_phys;
+            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
+                "HvBootPhaseMode at {} - scalable master armed for runtime",
                 candidate,
-                *physical,
-                flags);
+                *flags_phys,
+                flags,
+                *phase_phys);
         }
 
-        // Force bits 5 (scalable master) and 6 (IOMMU-present, so the
-        // finalize path does not clear bit 5) on every L1 exit. Idempotent
-        // and cheap once set - a read that already shows them does no
-        // write; a re-clear by hvix64 is corrected on the next exit.
+        // Phase gate. In phase 1 (HvBootPhaseMode == 1)
+        // HvpFinalizeIommuFeatures derefs the scalable-IOMMU object
+        // [0xb1e88] the instant bit 5 is set, and that object is not
+        // allocated until HvpInitializeIommus runs in the runtime phase - so
+        // forcing bit 5 in phase 1 is a NULL deref -> #PF -> reset (hvix64
+        // disasm 0x30b988..0x30b99a; agent secure-dma §12). Waiting for
+        // HvBootPhaseMode != 1 lands the compose (0x30a59f) and the present
+        // flag (0x3096f7) where the object exists.
+        std::uint32_t phase{};
+        if (!read_guest_physical(
+                this->bootphasemode_gpa,
+                std::as_writable_bytes(std::span(&phase, 1)))) {
+            return;
+        }
+        if (1 == phase) {
+            return; // object not yet allocated - do not touch bit 5
+        }
+
+        // Runtime: force bit 5 ONLY. Finalize (the only bit-5 clearer) is
+        // phase-1-only, so bit 5 needs no bit-6 protection here, and one
+        // write suffices. HvpInitializeIommus runs first among runtime IOMMU
+        // code and allocates [0xb1e88] before its bit-5 compose reads it, so
+        // this lands where the object exists.
         std::uint64_t flags{};
         if (!read_guest_physical(
                 this->hvfeatureflags_gpa,
                 std::as_writable_bytes(std::span(&flags, 1)))) {
             return;
         }
-
-        if (scalable_and_present != (flags & scalable_and_present)) {
-            flags |= scalable_and_present;
+        if (scalable_master != (flags & scalable_master)) {
+            flags |= scalable_master;
             if (write_guest_physical(
                     this->hvfeatureflags_gpa,
                     std::as_bytes(std::span(&flags, 1)))) {
                 this->scalable_force_forced += 1;
+                this->scalable_force_phase = phase;
                 this->scalable_force_armed = true;
             }
         }
