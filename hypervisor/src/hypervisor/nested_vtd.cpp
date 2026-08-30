@@ -556,23 +556,38 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             this->scalable_force_forced = 1;
         }
 
-        // Step 3: steer the 0x82 attach off the scalable route (§16). The
+        // Step 3: steer the 0x82 attach off the scalable route (§16/§22). The
         // worker sends a plain-PCI NVMe to the scalable context 0x318508
         // (whose object never allocates on this rig) unless the root
         // partition's DMA-cap [partition+0x1a0] bit 0 is clear. Locate the
-        // partition GS-free via g_RootPartition (hvix64 RVA 0xa9ed0, a plain
-        // global holding the partition VA - *(GS+0x360) was the wrong,
-        // GS-swapped privilege block). Reader-proof [partition+0x1a0] ==
-        // 0x40e9000221 (the rig's DMA-cap, bit 0 set) so the base is right
-        // and the partition is fully created, then clear bit 0 - routing the
-        // attach to the object-free 0x108e6c/0x318bfc path. Retry until the
-        // reader-proof passes, then clear once and arm.
-        constexpr std::uint64_t root_partition_rva = 0xa9ed0;
+        // partition the way HvpRefPartition does - the partition VA is at
+        // %gs:0x360 - but ONLY from an hvix64-KERNEL exit: GS is hvix64's
+        // per-LP block only while hvix64's kernel runs; at most L1 exits the
+        // context is Windows-under-hvix64 and GS/CR3 are Windows' (§22, why
+        // the earlier ungated *(GS+0x360) read garbage 521k times). Gate on
+        // rip in hvix64 .text so guest_gs_base and translate_guest_linear's
+        // CR3 are hvix64's. Reader-proof [partition+0x1a0] == 0x40e9000221
+        // before writing, so a wrong base cannot corrupt the guest; then
+        // clear bit 0, routing the attach onto the object-free 0x318bfc path.
+        constexpr std::uint64_t text_start = 0x200000;
+        constexpr std::uint64_t text_end = 0x3b3894;
+        constexpr std::uint64_t partition_from_gs = 0x360;
         constexpr std::uint64_t dma_cap_off = 0x1a0;
         constexpr std::uint64_t dma_cap_expected = 0x40e9000221ull;
 
-        auto part_ptr_phys = translate_guest_linear(
-            cpu, this->hvix64_base + root_partition_rva);
+        auto rip = this->vmcs.guest_rip();
+        if ((rip < this->hvix64_base + text_start) ||
+            (rip >= this->hvix64_base + text_end)) {
+            return; // not an hvix64-kernel exit; GS/CR3 not hvix64's, retry
+        }
+
+        auto gs_base = this->vmcs.guest_gs_base();
+        if (gs_base < kernel_floor) {
+            return; // retry
+        }
+
+        auto part_ptr_phys =
+            translate_guest_linear(cpu, gs_base + partition_from_gs);
         if (!part_ptr_phys) {
             return;
         }
@@ -583,8 +598,12 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             return;
         }
         if (partition < kernel_floor) {
-            return; // g_RootPartition not written yet; retry
+            return; // GS+0x360 did not hold a kernel pointer; retry
         }
+        // Record what GS+0x360 pointed at (diagnostic - visible even if the
+        // reader-proof below never passes, to tell a wrong base from a
+        // not-yet-created partition).
+        this->partition_va = partition;
 
         auto dma_cap_phys =
             translate_guest_linear(cpu, partition + dma_cap_off);
@@ -597,12 +616,11 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 std::as_writable_bytes(std::span(&dma_cap, 1)))) {
             return;
         }
+        this->partition_dma_cap = dma_cap; // diagnostic, pre-check
         if (dma_cap_expected != dma_cap) {
             return; // wrong base, or partition not fully set up; retry
         }
 
-        this->partition_va = partition;
-        this->partition_dma_cap = dma_cap;
         dma_cap &= ~1ull; // clear DMA-cap bit 0 -> object-free legacy routing
         if (!write_guest_physical(
                 *dma_cap_phys,
