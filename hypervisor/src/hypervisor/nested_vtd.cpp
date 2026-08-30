@@ -509,11 +509,16 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         }
 
         // Step 2 (once): make the [0xb1e88] deref crash-safe, then force
-        // bit 5+6. Order matters - the dummy must be in place before any
+        // bit 5 ONLY. Order matters - the dummy must be in place before any
         // consumer can see bit 5. Only set the dummy if the slot is still
         // NULL, so a real unit that HvpInitializeIommus already allocated is
         // never clobbered. hvix64_base's [+0x2c] is 0 (verified §16), so the
-        // deref yields a harmless zero.
+        // deref yields a harmless zero. Bit 6 (present) is NOT set: it is
+        // only needed to survive finalize's phase-1 bit-5 clear, and by the
+        // time this runs (runtime, after finalize) nothing clears bit 5;
+        // measured, forcing bit 6 too made hvix64 VMXOFF right after its
+        // VM-entry-latency benchmark (its runtime present-path reacting to a
+        // present flag with no real unit).
         std::uint64_t obj{};
         if (!read_guest_physical(
                 this->scalable_obj_gpa,
@@ -530,14 +535,15 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             this->scalable_obj_dummy = dummy;
         }
 
+        constexpr std::uint64_t scalable_master = 0x20; // bit 5 only
         std::uint64_t flags{};
         if (!read_guest_physical(
                 this->hvfeatureflags_gpa,
                 std::as_writable_bytes(std::span(&flags, 1)))) {
             return;
         }
-        if (scalable_and_present != (flags & scalable_and_present)) {
-            flags |= scalable_and_present;
+        if (scalable_master != (flags & scalable_master)) {
+            flags |= scalable_master;
             if (!write_guest_physical(
                     this->hvfeatureflags_gpa,
                     std::as_bytes(std::span(&flags, 1)))) {
@@ -553,7 +559,7 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         }
         this->scalable_force_forced += 1;
         this->scalable_force_armed = true;
-        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5+6 "
+        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5 "
             "(HvBootPhaseMode {})",
             this->scalable_obj_dummy,
             phase);
