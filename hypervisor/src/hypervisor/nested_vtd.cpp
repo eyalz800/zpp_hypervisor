@@ -283,48 +283,9 @@ bool hypervisor::dmar_mmio(std::size_t cpu,
                            arch::x86_64::context & context,
                            std::uint64_t guest_physical)
 {
-    // hvix64's first touch of the IOMMU is HvpInitializeIommus reading CAP -
-    // the one safe moment to set g_HvFeatureFlags bit 5 (scalable master).
-    // At this point HvpInitializeIommus is running and about to allocate the
-    // scalable-IOMMU object [0xb1e88], and no earlier runtime consumer has
-    // seen bit 5, so the phase-1/early-runtime NULL deref is avoided (agent
-    // secure-dma §12). arm_scalable_iommu_force has already located + cached
-    // the flag from an earlier exit; here we only flip the bit, once. The
-    // compose (0x30a59f) then reads it set and takes the scalable path,
-    // building IommuFeatureSet from the ECAP.IR we advertise.
-    if constexpr (nested_vmx::nested_vtd) {
-        if ((0 != this->hvfeatureflags_gpa) &&
-            (0 == this->scalable_force_forced)) {
-            constexpr std::uint64_t scalable_master = 0x20;
-            std::uint64_t flags{};
-            if (read_guest_physical(
-                    this->hvfeatureflags_gpa,
-                    std::as_writable_bytes(std::span(&flags, 1))) &&
-                (scalable_master != (flags & scalable_master))) {
-                flags |= scalable_master;
-                if (write_guest_physical(
-                        this->hvfeatureflags_gpa,
-                        std::as_bytes(std::span(&flags, 1)))) {
-                    this->scalable_force_forced += 1;
-                    this->scalable_force_armed = true;
-                    // Record the phase for the dump - best effort; a read
-                    // failure leaves the field 0, the runtime value anyway.
-                    std::uint32_t phase{};
-                    if ((0 != this->bootphasemode_gpa) &&
-                        read_guest_physical(
-                            this->bootphasemode_gpa,
-                            std::as_writable_bytes(
-                                std::span(&phase, 1)))) {
-                        this->scalable_force_phase = phase;
-                    }
-                    log("nested vt-d: forced scalable master at hvix64's "
-                        "first IOMMU access (HvBootPhaseMode {})",
-                        phase);
-                }
-            }
-        }
-    }
-
+    // The scalable-master enable happens in arm_scalable_iommu_force (the
+    // dummy-then-force one-shot), not here - by the time hvix64 reads the CAP
+    // register bit 5 is long set. dmar_mmio only answers the register access.
     auto instruction = decode_guest_instruction(cpu, context);
     if (!instruction) {
         // The decoder could not read this access. Refusing (rather than
@@ -474,74 +435,128 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
     if constexpr (!nested_vmx::nested_vtd) {
         return;
     } else {
-        // Locate hvix64 once (cheap content-scan) and cache the flag + phase
-        // GPAs. The bit-5 force itself is DEFERRED to dmar_mmio, at hvix64's
-        // first CAP read - the one safe moment to set the scalable master
-        // (agent secure-dma §12). Forcing it on a plain runtime exit resets
-        // the guest before HvpInitializeIommus even runs: a runtime consumer
-        // NULL-derefs the scalable-IOMMU object [0xb1e88] the same way
-        // HvpFinalizeIommuFeatures does in phase 1, and that object is not
-        // allocated until the CAP read's own routine (HvpInitializeIommus)
-        // builds it. Measured: forcing on the first phase-0 exit set bit 5,
-        // but the guest reset with dmar_reads=0 - before the IOMMU init. So:
-        // locate here, force there. Once located, stop entirely.
+        // The COHERENT-crash-safe enable (secure-dma §15/§16): break the
+        // circular dependency (bit 5 must be set for HvpInitializeIommus to
+        // allocate [0xb1e88], but earlier bit-5 consumers NULL-deref it) by
+        // first pointing [0xb1e88] at hvix64_base - a non-NULL page whose
+        // [+0x2c] is 0 - so the deref reads a harmless zero, then forcing
+        // bit 5+6. HvpInitializeIommus later overwrites [0xb1e88] with the
+        // real unit and composes IommuFeatureSet. One-shot: locate, then set
+        // the dummy and force in a single exit, then arm and stop - no
+        // per-exit overhead (which reset earlier heavy-scan builds).
         if ((cpu >= max_cpus) || this->running_l2[cpu] ||
-            (0 != this->hvfeatureflags_gpa)) {
-            return; // wrong context, or already located
+            this->scalable_force_armed) {
+            return; // wrong context, or already done
         }
 
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
         constexpr std::uint64_t bootphasemode_rva = 0xa3d34;
+        constexpr std::uint64_t scalable_obj_rva = 0xb1e88;
         constexpr std::uint64_t snapshot = 0x0040fb2011000002ull;
-        constexpr std::uint64_t scalable_master = 0x20; // bit 5 ONLY
+        constexpr std::uint64_t scalable_and_present = 0x60; // bits 5 + 6
         constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
-        // The first L1 exits run in hvloader (low VA); skip the scan for
-        // them and cross-check the flag word against the feature-assembly
-        // snapshot before trusting the base.
-        auto rip = this->vmcs.guest_rip();
-        if (rip < kernel_floor) {
-            return; // hvloader/firmware, not hvix64
+        // Step 1: locate hvix64's base (once) and cache the three GPAs. The
+        // first L1 exits run in hvloader (low VA); skip the scan for them and
+        // cross-check the flag word against the feature-assembly snapshot.
+        if (0 == this->hvfeatureflags_gpa) {
+            auto rip = this->vmcs.guest_rip();
+            if (rip < kernel_floor) {
+                return; // hvloader/firmware, not hvix64
+            }
+
+            auto candidate = find_hvix64_base(cpu, rip);
+            if ((0 == candidate) || (candidate < kernel_floor)) {
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
+            auto flags_phys = translate_guest_linear(
+                cpu, candidate + g_hvfeatureflags_rva);
+            auto phase_phys = translate_guest_linear(
+                cpu, candidate + bootphasemode_rva);
+            auto obj_phys = translate_guest_linear(
+                cpu, candidate + scalable_obj_rva);
+            if (!flags_phys || !phase_phys || !obj_phys) {
+                return; // not mapped yet; retry
+            }
+
+            std::uint64_t flags{};
+            if (!read_guest_physical(
+                    *flags_phys,
+                    std::as_writable_bytes(std::span(&flags, 1)))) {
+                return;
+            }
+
+            if ((flags != snapshot) &&
+                (flags != (snapshot | scalable_and_present))) {
+                // Wrong image, or feature assembly has not written it yet.
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
+            this->hvix64_base = candidate;
+            this->hvfeatureflags_gpa = *flags_phys;
+            this->bootphasemode_gpa = *phase_phys;
+            this->scalable_obj_gpa = *obj_phys;
+            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
+                "scalable obj [0xb1e88] at {}",
+                candidate,
+                *flags_phys,
+                flags,
+                *obj_phys);
+            return; // set the dummy and force on the next exit
         }
 
-        auto candidate = find_hvix64_base(cpu, rip);
-        if ((0 == candidate) || (candidate < kernel_floor)) {
-            this->scalable_force_locate_failed += 1;
+        // Step 2 (once): make the [0xb1e88] deref crash-safe, then force
+        // bit 5+6. Order matters - the dummy must be in place before any
+        // consumer can see bit 5. Only set the dummy if the slot is still
+        // NULL, so a real unit that HvpInitializeIommus already allocated is
+        // never clobbered. hvix64_base's [+0x2c] is 0 (verified §16), so the
+        // deref yields a harmless zero.
+        std::uint64_t obj{};
+        if (!read_guest_physical(
+                this->scalable_obj_gpa,
+                std::as_writable_bytes(std::span(&obj, 1)))) {
             return;
         }
-
-        auto flags_phys = translate_guest_linear(
-            cpu, candidate + g_hvfeatureflags_rva);
-        auto phase_phys = translate_guest_linear(
-            cpu, candidate + bootphasemode_rva);
-        if (!flags_phys || !phase_phys) {
-            return; // not mapped yet; retry
+        if (0 == obj) {
+            auto dummy = this->hvix64_base;
+            if (!write_guest_physical(
+                    this->scalable_obj_gpa,
+                    std::as_bytes(std::span(&dummy, 1)))) {
+                return;
+            }
+            this->scalable_obj_dummy = dummy;
         }
 
         std::uint64_t flags{};
         if (!read_guest_physical(
-                *flags_phys,
+                this->hvfeatureflags_gpa,
                 std::as_writable_bytes(std::span(&flags, 1)))) {
             return;
         }
-
-        if ((flags != snapshot) &&
-            (flags != (snapshot | scalable_master))) {
-            // Wrong image, or feature assembly has not written it yet.
-            this->scalable_force_locate_failed += 1;
-            return;
+        if (scalable_and_present != (flags & scalable_and_present)) {
+            flags |= scalable_and_present;
+            if (!write_guest_physical(
+                    this->hvfeatureflags_gpa,
+                    std::as_bytes(std::span(&flags, 1)))) {
+                return;
+            }
         }
 
-        this->hvix64_base = candidate;
-        this->hvfeatureflags_gpa = *flags_phys;
-        this->bootphasemode_gpa = *phase_phys;
-        log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
-            "HvBootPhaseMode at {} - scalable master will force at "
-            "hvix64's first IOMMU access",
-            candidate,
-            *flags_phys,
-            flags,
-            *phase_phys);
+        std::uint32_t phase{};
+        if (read_guest_physical(
+                this->bootphasemode_gpa,
+                std::as_writable_bytes(std::span(&phase, 1)))) {
+            this->scalable_force_phase = phase;
+        }
+        this->scalable_force_forced += 1;
+        this->scalable_force_armed = true;
+        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5+6 "
+            "(HvBootPhaseMode {})",
+            this->scalable_obj_dummy,
+            phase);
     }
 }
 

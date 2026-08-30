@@ -14018,6 +14018,21 @@ private:
     std::uint32_t scalable_force_phase{};
 
     /**
+     * The scalable-IOMMU object pointer `0xb1e88` and its guest-physical.
+     * Forcing bit 5 is circular - the object is allocated only by
+     * `HvpInitializeIommus`'s bit-5-gated scalable path, yet earlier bit-5
+     * consumers (`0x30b97f`/`0x31964f`, `mov rax,[0xb1e88]; mov edx,[rax+0x2c]`)
+     * NULL-deref it if bit 5 is set first. zpp breaks the loop by pointing
+     * `0xb1e88` at `hvix64_base` (a non-NULL, permanently-mapped page whose
+     * `[+0x2c]` is 0 - the DOS-header e_res2 area, verified in hvix64.bin),
+     * so the deref reads zero (a harmless "feature bit 0") instead of
+     * faulting. Then bit 5+6 is forced; `HvpInitializeIommus` overwrites
+     * `0xb1e88` with the real unit and composes IommuFeatureSet. §15/§16.
+     */
+    std::uint64_t scalable_obj_gpa{};
+    std::uint64_t scalable_obj_dummy{};
+
+    /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
      * into VTL1 can be read rather than guessed at.
      *
