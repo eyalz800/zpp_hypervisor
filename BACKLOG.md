@@ -62016,3 +62016,41 @@ nested-VMCS accesses trapping to zpp.
 climbing into driver load / smss), and pursue the compounding cuts
 (§24): shadow-VMCS engagement for hvix64's nested VMCS (§23.4), lazy-EOI
 (§17). Each is functional (exit-count, not the forbidden per-exit cost).
+
+## census=OFF progressed the guest into DPC_WATCHDOG (0x133) - 2026-08-31
+
+The census=OFF guest ran, escaped the hang (vtl_fresh climbing, KiSwapThread
+0.8%), then RESET. VM status `paused (shutdown)`, no zpp fault
+(unhandled_exit=0, vm_entry_failure=0). KiBugCheckData (read via VTL0 cr3):
+
+    *** 0x133 DPC_WATCHDOG  param1=0x1 param2=0x1e00 param3=...5c53c8 param4=0
+
+param1=1 = **the system cumulatively spent too long at DISPATCH_LEVEL**.
+So census=OFF restored SOME PASSIVE (progress past the hang) but not
+enough - the residual per-tick DISPATCH cost still accumulated past the
+watchdog. This changed the failure from HANG (census=ON) to
+DPC_WATCHDOG_RESET, which is forward motion: the guest is now doing
+enough that Windows' watchdog notices and acts.
+
+Both agents closed the loop on the residual:
+- **KVM §24: irreducible on this rig.** ZPP_NESTED_SHADOW_VMCS cannot
+  engage - KVM advertises SHADOW_VMCS to zpp (nested.c:7070) but STRIPS
+  it in prepare_vmcs02 (nested.c:2427) because L0 has enable_shadow_vmcs=N.
+  zpp arms it correctly and stands it down (nested_shadow_vmcs.cpp:143).
+  Not a zpp bug; hvix64's ~44 VMCS accesses/reflect trap unavoidably -
+  same L0-config family that blocks eVMCS/APICv, which the user forbids.
+- **Hyper-V §25: lazy-EOI is the compounding escape.** Once VTL0 idles,
+  the dynamic tick backs off and NoEOIRequired is granted (sole-pending),
+  collapsing the per-tick HV_EOI (0x40000070) storm -> less DISPATCH ->
+  more idle (positive feedback). Grant condition: edge, not-in-service,
+  A0+0x5ec==0 (sole-pending), not-auto-EOI. **BLOCKED only by a phantom
+  IRR bit** if zpp over-reflects the self-IPI (0x40000071) or timer
+  vector. Rig check: A0+0x522 (granted) reads 1 in idle windows if
+  working; pending==1 && A0+0x5ec!=0 = phantom bit.
+
+**Next functional lever:** find/fix any over-reflection blocking lazy-EOI.
+If lazy-EOI engages, the compounding reduces per-tick DISPATCH enough to
+stay under the DPC watchdog and reach login. This is a bug fix (a vector
+reflected twice), squarely functional - not the forbidden per-exit-cost
+fix. The DPC watchdog cannot be disabled (no registry edits), so reducing
+DISPATCH time is the only path.
