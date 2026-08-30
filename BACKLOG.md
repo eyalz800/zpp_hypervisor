@@ -61769,3 +61769,34 @@ commits hvix64 to synthetic MSRs + hypercall page + nested SINT overlay,
 and a failed nested entry - `vmlaunch` then `vmoff` - is what "stand down"
 is; read `vm_entry_failure.reason` on a ZPP_EVMCS=ON run to name the
 unbacked field) and is insufficient alone (6.64ms*0.46=3.05ms > 1.74ms).
+
+## NESTED_VTD unsticks the VTL progression - the secure-DMA spin was real - 2026-08-30
+
+Reversed the earlier "secure-DMA is a detour" call, which rested on a
+VMCALL census that **cannot see securekernel->hvix64 hypercalls** (it
+hooks zpp's VMCALL exits = hvix64->zpp only). With `ZPP_NESTED_VTD=ON`
+(present hvix64 a synthetic VT-d unit with ECAP.IR set, so
+`HvpComputeIommuFeatureSet` passes and HvCallAttachDevice 0x82 succeeds),
+measured on the live guest (ZPP_CPUS=1, nested=ON, novina=1, nvtd=1):
+
+- **`vtl_fresh_calls` is CLIMBING** - +719 over 59 s (~12/s), absolute
+  **22,214, past the ~20,848 plateau** every prior config froze at.
+  `vtl_protect_count` also climbing (+1,017). In every nvtd=0 run these
+  were frozen. `vtl_reentries` frozen (no VINA spin).
+
+So the Phase-1 stall was (at least in part) the VBS secure-DMA device
+attach: securekernel (VTL1) spinning on HvCall 0x82 that hvix64 could not
+satisfy because the vIOMMU's ECAP.IR bit was 0 - so VTL1 never completed
+its init, never went dormant, and stayed active. ECAP.IR set -> 0x82
+succeeds -> VTL1 progresses -> `vtl_fresh_calls` climbs past the plateau.
+This matches Hyper-V §18 ("VTL1 must go dormant") and the Opus-5
+nested-vtd analysis, and it is the user's stated end state (kernel DMA
+protection FUNCTIONAL, not the force-no-secure-dma degrade).
+
+Caveat, honestly: the wrmsr synthetic-clock storm PERSISTS (35.5%), so the
+guest is progressing *through* it, likely still slow. The storm is a
+separate, now-orthogonal lever (nested VID kills the HV_EOI+self-IPI half
+of it - Hyper-V §19 - by advertising apic-reg-virt(bit8)+VID(bit9) in
+0x48b so VTL0 uses the architectural x2APIC with no exits; gated on KVM
+exposing APICv to zpp's vmcs01). Sustained-progress monitor running to
+confirm nested_vtd reaches driver init / login.
