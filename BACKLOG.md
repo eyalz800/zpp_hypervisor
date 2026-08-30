@@ -1,5 +1,71 @@
 # Known defects
 
+## The hard-stuck guest is the shadow_vmcs=N VMCS-trap tax, not a functional bug - 2026-08-30
+
+This supersedes the "external-interrupt delivery" framing below as the
+*cause* of the hard-stuck state. That section correctly measured the
+symptom (every VTL counter frozen, only the VTL0 clock/DPC loop moving);
+this one measures **why** the boot thread never runs, and it is not a
+gap in what this VMM answers.
+
+### The functional path is complete and clean
+
+With `NESTED_VTD=ON` (secure-DMA fixed, commit b8c1d56) the guest is
+running (`info status` = running), executing cleanly, and **every
+functional tripwire reads zero** on the live guest (module base
+`0x6706a000`):
+
+- `nested_vmfail_count[0..1] = 0` - hvix64 never VMfails, so it is *not*
+  requesting a secondary control zpp refuses (KVM-review §21 risk #1,
+  refuted on the medium).
+- `entry_failures_seen = 0`, `last_entry_failure_flags = 0`,
+  `entry_failure_error = 0` - no entry failure of any kind.
+- `vtl_fresh_calls = 22214`, `vtl_protect_count = 41162` - frozen
+  (boot thread starved), `exit_total` climbing 20.8M -> 26.6M.
+
+So nothing a guest executes is reaching `default:`, nothing is being
+mis-reflected into a VMfail. The guest is not stuck on a missing
+handler.
+
+### Measured: 53.5 L0 exits per single entry into zpp
+
+KVM's own per-VM debugfs counters (`/sys/kernel/debug/kvm/28403-17`),
+differenced over a 20 s window on the live guest:
+
+- `nested_run` +170,071 -> **8,504/s** (KVM's entries into zpp = our
+  L2-exit-reflect rate).
+- `exits` +9,103,628 -> **455,181/s** (every VM exit L0/KVM took).
+- **Ratio = 53.5 L0 exits per `nested_run`.**
+
+That ratio *is* the `enable_shadow_vmcs=N` cost. The rig runs
+`kvm-intel-trace.ko` with `enable_shadow_vmcs=N`, so each VMREAD/VMWRITE
+zpp issues to build vmcs02 and reflect the exit **traps to L0**, and one
+reflect does ~53 of them. At 8,504 reflects/s that is 455K L0 exits/s -
+the physical CPU spends ~99% of its time inside KVM emulating zpp's VMCS
+shadowing, which is why the VTL0 clock/DPC handler cannot finish inside
+its 1.74 ms tick and the boot thread is never scheduled. With
+`enable_shadow_vmcs=1` those 53 accesses are hardware-direct, the ratio
+collapses to ~1, and the guest reaches login - which is the config that
+was almost certainly in force the last time 3x-nested login was seen.
+
+### The two fixes and why both are currently gated
+
+- **Restore `enable_shadow_vmcs=1`** - the proven config. Needs a
+  `kvm_intel` module reload (`rmmod`/`modprobe`) or a reboot, both of
+  which the rig rules forbid ("never rmmod - reboot instead"; "never
+  reboot the rig"). Loses the traced KVM.
+- **eVMCS in zpp (Lever B)** - zpp uses KVM's enlightened VMCS so its
+  VMCS accesses are read from a memory page instead of trapped; the 53.5
+  collapses to ~1 with **no reboot and no host change**, keeping the
+  traced KVM. ~300-800 lines. It is squarely "performance" work, which
+  the standing steer deprioritised - but it is now the *only* no-reboot
+  path to the functional goal, because the wall is provably the VMCS
+  tax and nothing functional.
+
+Decision required: relax "no reboot" (restore shadow_vmcs=1) or relax
+"no performance" (eVMCS Lever B). The evidence cannot settle which; it
+is the operator's call.
+
 ## The single-CPU guest is HARD-STUCK in phase-1, and it is external-interrupt delivery - 2026-08-30
 
 Two independent lines converged this session onto one gap, and both
