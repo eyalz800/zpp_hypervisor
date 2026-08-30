@@ -6203,9 +6203,10 @@ void hypervisor::setup_vmcs(std::size_t cpu,
             (sample_l1 ? arch::x86_64::vmx::vm_execution_controls::pin::
                              activate_preemption_timer
                        : 0) |
-            (virtualize_apic ? arch::x86_64::vmx::vm_execution_controls::
-                                   pin::external_interrupt_exiting
-                             : 0)));
+            (virtualize_apic || nested_vmx::deliver_external
+                 ? arch::x86_64::vmx::vm_execution_controls::pin::
+                       external_interrupt_exiting
+                 : 0)));
 
     // **Only if the control was actually granted, which here it is
     // not.** `adjust_msr` above silently drops a pin control the
@@ -6386,9 +6387,10 @@ void hypervisor::setup_vmcs(std::size_t cpu,
             // Without this the exit reports no vector and leaves the
             // interrupt pending at the controller, so there is nothing
             // to inject. SDM 30.2.
-            (virtualize_apic ? arch::x86_64::vmx::vm_exit_controls::
-                                   acknowledge_interrupt_on_exit
-                             : 0)));
+            (virtualize_apic || nested_vmx::deliver_external
+                 ? arch::x86_64::vmx::vm_exit_controls::
+                       acknowledge_interrupt_on_exit
+                 : 0)));
 
     // The mirror on entry. apply_start_up clears ia_32e_mode_guest
     // again, since it has to agree with CR0.PG or entry fails.

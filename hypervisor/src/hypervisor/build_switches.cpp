@@ -338,6 +338,11 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // guest, so a run with it on describes a different machine.
         ' ', 'n', 'o', 'v', 'i', 'n', 'a', '=',
         digit(nested_vmx::suppress_vina),
+        // Intercept + acknowledge external interrupts as this VMM's own so
+        // a VTL0-destined device interrupt arriving while VTL1 runs is not
+        // lost. Ack-only, no EOI. Pairs with novina=0.
+        ' ', 'e', 'x', 't', 'i', 'n', 't', '=',
+        digit(nested_vmx::deliver_external),
         // Force the securekernel secure-PCI enable off so VBS degrades
         // to no-DMA-protection nested. A deliberate degrade to the guest,
         // so a run with it on describes a different machine.

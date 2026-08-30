@@ -1804,6 +1804,24 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // what makes the exit its own to handle.
     pin02 |= pin12 & pin_external_interrupt;
 
+    // With ZPP_DELIVER_EXTERNAL, also intercept as **this VMM's own**,
+    // whatever vmcs12 says - so a VTL0-destined device interrupt that
+    // arrives while VTL1 (the secure kernel) is the running second-level
+    // guest, which VTL1's pin12 did not ask to see, is taken here rather
+    // than delivered into VTL1's IDT or lost. pin01 carries external-
+    // interrupt exiting under the same switch (see the vmcs01 setup), and
+    // exit02 inherits the acknowledge from exit01, so the exit reports a
+    // valid vector. An interrupt pin12 *did* ask for still reflects
+    // (`l1_wants_l2_exit`); one it did not is queued for the first-level
+    // guest by `deliver_pending_external_interrupt`, never put into the
+    // second-level guest. The measured phase-1 blocker this addresses:
+    // the VINA return never fires when such an interrupt is lost. See
+    // `nested_vmx::deliver_external` - it requires `suppress_vina` off so
+    // the held-interrupt priority-pin is bounded by the VINA.
+    if constexpr (nested_vmx::deliver_external) {
+        pin02 |= pin01 & pin_external_interrupt;
+    }
+
     // The profiler's clock, which is the timer put back. See
     // `nested_vmx::profile_l2` for why this is the only instrument that
     // can see a guest spinning on memory.

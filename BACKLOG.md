@@ -183,6 +183,56 @@ fix clears the VINA-set condition promptly (by delivering the VTL0
 interrupt), so `ShvlVinaHandler` no longer spins and the reason
 `suppress_vina` existed is gone.
 
+### Two experiments run 2026-08-30, both stuck - and they partly refute the "lost interrupt" framing
+
+The converged diagnosis (above) led to `ZPP_DELIVER_EXTERNAL` (extint):
+intercept external interrupts as this VMM's own in vmcs01+vmcs02,
+acknowledge, and let the existing `queue_external_interrupt` /
+`deliver_pending_external_interrupt` machinery carry them to hvix64/L1.
+Built, deployed and measured on the rig (ZPP_CPUS=1). Both arms of the
+one-variable experiment are recorded here because both are informative.
+
+**extint=1, novina=0 - FROZE the guest, harder than the baseline.**
+`rig-dump-state --delta 35`: **0 of 75 counters moved**, TSC not
+advancing, wedged at 100,136 exits (baseline ran to 100M+ in the clock
+loop). The reader passed its proof, `unhandled exit: never`. The cause,
+read directly: `external_interrupts_taken=2`, **`injected=0`**,
+`pending=2` (high-water 2), vectors `0x20` and `0xef`. zpp acknowledged
+two external interrupts - removing them from the LAPIC and **setting the
+ISR** - queued them, and never delivered them, because
+`deliver_pending_external_interrupt` holds while `running_l2` and injects
+only when vmcs01 is current, which almost never happens (hvix64 nearly
+always runs *its* L2, not bare). With `0xef` (priority class 14) pinned
+in the ISR, every lower interrupt including the timer is blocked, the
+guest HLTs, nothing wakes it - total freeze. **Consuming (ack-on-exit) a
+VTL0-destined interrupt is harmful**: it breaks the natural VINA path,
+which needs the interrupt to stay *pending* so hvix64 can see it. And the
+"queue for L1, deliver when vmcs01 current" model does not deliver,
+because that condition is rarely met. `vmcs12_exit_asked` bit 15 was SET
+(Case A confirmed - the ack-of-reflected-0xef concern was not the
+problem; the consuming model itself is).
+
+**extint=0, novina=0 (un-suppress VINA only) - the ShvlVinaHandler spin,
+as the `suppress_vina` doc predicted.** 30 of 75 counters moved (guest
+alive), and crucially **`vtl_reentries` MOVED (+799 in 36 s, ~22/s)**
+where the baseline froze it - so un-suppressing VINA *does* make the VTL
+hand-back fire. But `vtl_fresh_calls` stayed frozen (20,848), so **VTL0
+regains the processor and still makes no forward progress**. The clock
+ran at 376 Hz, int-window 11%.
+
+**What this refutes and reframes.** The interrupt is not simply *lost*:
+with novina=0 the VINA delivers it and VTL0 gets the CPU back, yet phase-1
+still does not advance. So the blocker is not (only) delivery - VTL0 is
+stuck at IRQL 2 in the clock/DPC loop and does not run its phase-1 thread
+even when it holds the processor. That points back at the IRQL-2/DPC
+question, not at a missing interrupt. `ZPP_DELIVER_EXTERNAL` stays in the
+tree (default OFF, manifest `extint=`) because the *machinery* is right
+and a corrected **non-consuming** form (trap without ack, keep the
+interrupt pending, let hvix64 assert VINA) may still be wanted - but the
+consuming form is a dead end, and the round-trip latency that makes VINA
+too slow to clear is the standing suspect (`suppress_vina` doc; the
+region-instruction lever at the top of this file).
+
 ### One concrete lost vector, still to be classified
 
 The injection reconciliation shows vector `0x40` **staged 3,789 / carried

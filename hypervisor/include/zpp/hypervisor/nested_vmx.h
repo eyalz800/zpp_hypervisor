@@ -2342,6 +2342,43 @@ constexpr std::uint64_t supported_primary_controls =
 inline constexpr bool suppress_vina = (0 != ZPP_SUPPRESS_VINA);
 
 /**
+ * Intercept external interrupts as **this VMM's own** and acknowledge
+ * them, so a VTL0-destined device interrupt that arrives while VTL1 (the
+ * secure kernel) is the running second-level guest is taken here rather
+ * than lost. Measured blocker (2026-08-30, converged three ways - KVM
+ * review §6/§9, Hyper-V §10, and the live delta): with external-interrupt
+ * exiting masked out of vmcs02 (`nested_entry.cpp:1799-1805`) and
+ * `suppress_vina` on, such an interrupt never reaches VTL0, the VINA
+ * return never fires, and phase-1 blocks in `VslpEnterIumSecureMode`
+ * forever while the clock/DPC loop keeps moving on the reflected `0xef`.
+ *
+ * On, this composes external-interrupt exiting + acknowledge-interrupt-
+ * on-exit into vmcs01 and adds external-interrupt exiting to vmcs02
+ * (whatever vmcs12 says), and `l0_wants_l2_exit` claims an external
+ * interrupt **only where vmcs12 did not ask for it** - so an interrupt
+ * VTL0 wanted still reflects to the guest hypervisor. The exit is
+ * **ack-only**: SDM 30.2 (`sdm.txt:203416`) makes acknowledge-interrupt-
+ * on-exit take the interrupt out of the controller (IRR->ISR, no longer
+ * pending) which is what breaks the 200-of-200 re-exit livelock; the one
+ * EOI that clears the ISR is the guest's to issue after the vector is
+ * injected, so this VMM writes none - an explicit EOI would double-pop
+ * the ISR stack and corrupt priority (KVM review §9). `queue_external_
+ * interrupt` / `deliver_pending_external_interrupt` already hold the
+ * vector until vmcs01 (hvix64) is current and inject the physical vector
+ * into the guest hypervisor, which owns device->VTL routing.
+ *
+ * **Requires `suppress_vina` OFF.** A held VTL1-time interrupt pins the
+ * physical ISR at its priority until VTL0 runs its handler and EOIs; the
+ * VINA (vector `0x40`) is what returns the processor to VTL0 to do that,
+ * so suppressing it leaves the pin unbounded. The two are one fix.
+ */
+#ifndef ZPP_DELIVER_EXTERNAL
+#define ZPP_DELIVER_EXTERNAL 0
+#endif
+
+inline constexpr bool deliver_external = (0 != ZPP_DELIVER_EXTERNAL);
+
+/**
  * Clear the securekernel's secure-PCI enable so VBS degrades to
  * no-DMA-protection, which is the only reachable nested reality.
  *

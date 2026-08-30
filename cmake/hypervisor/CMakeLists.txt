@@ -53,6 +53,10 @@ option(ZPP_HOLD_CLOCK_IN_VTL1
     "Hold the clock interrupt while the secure kernel (VTL1) is current and deliver it on the first entry after VTL0 resumes. Bounded by one trust-level turn rather than a fixed gap."
     OFF)
 
+option(ZPP_DELIVER_EXTERNAL
+    "Intercept external interrupts as this VMM's own (vmcs01 and vmcs02) and acknowledge them, so a VTL0-destined device interrupt arriving while VTL1 runs is not lost. Ack-only, no explicit EOI (the guest issues the one EOI). Requires ZPP_SUPPRESS_VINA=OFF so the held-interrupt priority-pinning window is bounded by the VINA."
+    OFF)
+
 option(ZPP_DELIVER_SELF_IPI
     "Deliver a second-level guest's self-directed interrupt when the guest hypervisor does not. See the root CMakeLists."
     OFF)
@@ -349,6 +353,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_PUBLISH_REFERENCE_TSC=$<BOOL:${ZPP_PUBLISH_REFERENCE_TSC}>
     -DZPP_DELIVER_SELF_IPI=$<BOOL:${ZPP_DELIVER_SELF_IPI}>
     -DZPP_HOLD_CLOCK_IN_VTL1=$<BOOL:${ZPP_HOLD_CLOCK_IN_VTL1}>
+    -DZPP_DELIVER_EXTERNAL=$<BOOL:${ZPP_DELIVER_EXTERNAL}>
     -DZPP_LAZY_TICK_SECONDS=${ZPP_LAZY_TICK_SECONDS}
     -DZPP_POLL_L1=$<BOOL:${ZPP_POLL_L1}>
     -DZPP_LAZY_TICK_MAX=${ZPP_LAZY_TICK_MAX}
