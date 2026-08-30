@@ -61727,3 +61727,45 @@ via find_guest_kernel_base's MZ-walk under the VTL1 cr3; translate_guest_linear
 + l2_physical_to_l1 + read/write_guest_physical (the suppress_vina template,
 nested_entry.cpp:8660). Patch being drafted. Then build+deploy+boot+test (a
 working fix clears the livelock and Phase 1 advances past System in minutes).
+
+## Shadow VMCS works; the cost is inherent nested amplification, not a bug - 2026-08-30
+
+The Hyper-V review's best functional lead - "maybe shadow VMCS is not
+eliding hvix64's VMWRITEs" - is **refuted by measurement.** Exit-reason
+census on the live guest (`--delta 30`, ZPP_CPUS=1, novina=0): **zero
+VMWRITE exits**, VMREAD only 21/s (0.3%). hvix64's ninety-nine VMWRITEs
+run in hardware through the shadow VMCS and do not trap. `shadowvmcs=1`
+is live and correct.
+
+So the functional path is sound end to end - VTL transitions, VBS, VINA
+delivery (novina=0), and shadow VMCS all function. What remains is
+inherent nested overhead: the dominant exits are **vmresume 49.3%**
+(4,028/s - each re-entry of hvix64's guest, whose vmcs02-prep VMWRITEs
+trap to KVM at ~58x) and **wrmsr 37.2%** (3,037/s - VTL0's synthetic-MSR
+storm: HV_EOI/HV_ICR/HV_STIMER, each an unconditional exit reflected to
+hvix64). `guest_state_writes_skipped` 871k vs `_done` 263k shows zpp
+already swaps only the vmcs02 delta, so the composition is not redundant -
+it is the ~58x KVM amplification of the writes that remain.
+
+**The livelock is a rig artifact.** zpp runs nested under KVM on the rig
+(for VFIO + the monitor), so every zpp VMX op is ~58x its bare-metal cost;
+VTL0's per-tick clock/DPC processing then exceeds the 1.74 ms tick and
+never idles to PASSIVE -> RCU/work-item starvation. On bare metal (zpp as
+L0, no KVM beneath) the same exits cost ~58x less and fit under the tick -
+so this specific livelock most likely does not reproduce off the rig. It
+cannot be tested there (running zpp bare-metal on the rig needs a reboot,
+which is forbidden, and loses the VFIO/monitor setup).
+
+**The only unblocked lever that attacks the amplification is eVMCS Lever B**
+(KVM review §14): zpp uses eVMCS as KVM's *own* guest so its vmcs02-prep
+VMWRITEs become memory writes and stop trapping to KVM. No Hv#1 wall (it
+is downward to KVM, invisible to hvix64). Cost: `boot-zpp.sh` adds
+`hv-evmcs`/`hv-passthrough` for the L1, and zpp implements the eVMCS
+**guest** side (nested_evmcs.cpp is host-side only). This is a
+rig-amplification workaround - pure latency work - and does not change the
+functional path, which already works. Lever A (hvix64->zpp eVMCS) is gated
+behind the all-or-nothing Hyper-V interface (Hyper-V §15: announcing Hv#1
+commits hvix64 to synthetic MSRs + hypercall page + nested SINT overlay,
+and a failed nested entry - `vmlaunch` then `vmoff` - is what "stand down"
+is; read `vm_entry_failure.reason` on a ZPP_EVMCS=ON run to name the
+unbacked field) and is insufficient alone (6.64ms*0.46=3.05ms > 1.74ms).
