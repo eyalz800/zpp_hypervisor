@@ -220,18 +220,103 @@ hand-back fire. But `vtl_fresh_calls` stayed frozen (20,848), so **VTL0
 regains the processor and still makes no forward progress**. The clock
 ran at 376 Hz, int-window 11%.
 
-**What this refutes and reframes.** The interrupt is not simply *lost*:
-with novina=0 the VINA delivers it and VTL0 gets the CPU back, yet phase-1
-still does not advance. So the blocker is not (only) delivery - VTL0 is
-stuck at IRQL 2 in the clock/DPC loop and does not run its phase-1 thread
-even when it holds the processor. That points back at the IRQL-2/DPC
-question, not at a missing interrupt. `ZPP_DELIVER_EXTERNAL` stays in the
-tree (default OFF, manifest `extint=`) because the *machinery* is right
-and a corrected **non-consuming** form (trap without ack, keep the
-interrupt pending, let hvix64 assert VINA) may still be wanted - but the
-consuming form is a dead end, and the round-trip latency that makes VINA
-too slow to clear is the standing suspect (`suppress_vina` doc; the
-region-instruction lever at the top of this file).
+**Third arm, extint=0 novina=0 hold_clock_in_vtl1=1 - identical to
+novina=0 alone.** The `suppress_vina` doc says the VINA cannot clear
+because the clock re-requests its vector faster than the ~11 ms
+half-round-trip; holding the clock (0xd1) through the VTL1 turn should
+give the round-trip time. It did not: `vtl_fresh_calls` frozen at the
+**same** 20,848, `vtl_reentries` still spinning at 19/s. So the
+clock-re-triggers-VINA timing is **not** the fixable lever here - holding
+the clock changed nothing.
+
+**What this refutes and reframes - interrupt delivery is NOT the blocker.**
+Across all four arms (novina=1 baseline; extint=1; novina=0; novina=0+
+hold-clock) the guest stops at the **same** ~20-22k VTL-fresh-call point
+in early phase-1 (1-3 processes, before smss). With novina=0 the VINA
+provably delivers - `vtl_reentries` move (frozen at baseline), reference-
+TSC reads jump 50x (0.15/s -> 7.9/s) - so VTL0 *is* getting its interrupts
+and running more, **yet phase-1 still does not advance**. The converged
+"lost VTL0 interrupt" diagnosis (three agents/measurements) is therefore
+tested and does **not** hold as the blocker: delivery works and the guest
+is still stuck. VTL0 is blocked on something intrinsic at that phase-1
+point, not on a missing or mis-delivered interrupt. `ZPP_DELIVER_EXTERNAL`
+stays in the tree (default OFF, `extint=`) for a possible non-consuming
+form, but the whole interrupt-delivery line is now a **measured dead end**
+for this stall.
+
+### The proven mechanism: VTL0 never reaches PASSIVE, so RCU stalls and work items starve
+
+The Hyper-V RE settles what VTL0 is stuck on (`.references/hyperv/
+msix-enable-gate.md` §13, decompiled `KeClockInterruptNotify` 0x30f630 and
+`SkSwitchToLimitedDispatchLoop` 0xd9bd0):
+
+- **RCU/SRCU grace periods only advance when a clock tick preempts
+  sub-DISPATCH code.** The quiescent block is gated `if (*(byte*)(Fiber
+  Data+0x20) < 2)`; `KiRcuReportQuiescentState`/`KiSrcuReportQuiescent`
+  run *only* when the tick landed at IRQL < 2. VTL0 is pinned at DISPATCH
+  (IRQL 2) in the DPC loop, so **no quiescent state is ever reported and
+  every RCU/SRCU grace period stalls forever** - any phase-1 op gated on a
+  grace period hangs with nothing "waiting on an interrupt."
+- **PASSIVE work items and the PASSIVE boot thread cannot run while the
+  CPU is pinned >= DISPATCH.** "Queue a work item, wait the event a worker
+  signals" hangs because the worker is never scheduled. That is exactly
+  `vtl_fresh_calls` frozen while `vtl_reentries` moves.
+- **Why VTL0 is pinned at DISPATCH:** the nested per-tick cost exceeds the
+  1.74 ms (574.7 Hz) tick period, so VTL0 never drains its clock DPCs and
+  never idles to PASSIVE. `vtl_reentries` ~22/s vs 574.7/s clock ~ a 45 ms
+  VTL0 turn, ~26 clock periods burned per round-trip.
+- **Why `hold_clock_in_vtl1` did nothing:** VINA is re-asserted by *two*
+  sources - the clock `0xd1` AND the pending DPC softint `0x2f`. Holding
+  only `0xd1` leaves `0x2f` re-triggering VINA. And the securekernel does
+  **not** need VTL0's clock (`SkSwitchToLimitedDispatchLoop` is
+  synchronous, never polls a timer), so coalescing the clock across one
+  VTL1 turn is *safe* for VTL1 - it just isn't *sufficient*.
+
+**Rate-change is the wrong lever** (confirmed: 574.7 Hz is validated,
+`HalpWatchdogCheckPreResetNMI` -> bugcheck 0x1CA; `ZPP_STRETCH_GUEST_
+TIMER`/`TIME_DILATION`/`TICK_FLOOR`/`LAZY_TICK` all failed for this). The
+fix is a **VTL0-scheduling/latency change**, under two hard constraints:
+(1) don't consume the interrupt (keep it pending for the VINA); (2)
+coalescing round-trips is necessary but not sufficient - VTL0 must still
+get a periodic **sub-DISPATCH (PASSIVE)** slice, or the coalesced clock
+still lands on a DISPATCH context and the RCU/worker starvation recurs.
+
+**This is the thing the user's "do not focus on performance" steer was
+issued against a different (lost-interrupt) diagnosis of.** The blocker is
+now measured to be latency-induced PASSIVE starvation: either the per-tick
+nested round-trip drops below 1.74 ms (the region-instruction lever, top
+of this file, is 2 of 10 - far short), or VTL0 is forced a PASSIVE window
+by targeted clock+DPC coalescing (which the blanket forms above tripped
+the watchdog on). Both are latency/scheduling work, not more delivery.
+
+### The lever, from the KVM review: enlightened VMCS (eVMCS)
+
+The KVM comparison names the cost precisely (`.references/kvm-nested-
+review.md` §12, against zpp's own `nested_vmx.h:193-198`): the round trip
+is **6.64 ms against a 1.74 ms tick, and trapping VMREAD/VMWRITE are 54%
+of it** - "KVM implements enlightened VMCS; this VMM did not." A round
+trip spanning ~4 tick periods can never complete cleanly, so VINA can
+never clear and VTL0 never idles to PASSIVE. So:
+
+- **eVMCS is the highest-value lever** - it removes the trapping VMREAD/
+  VMWRITE storm (the 54%), is KVM's own answer to the nested-Hyper-V tax,
+  and compounds with the ~58x KVM amplification underneath. It is a large,
+  coupled change: it also forces announcing `Hv#1` to the guest.
+- The **region-instruction lever is small** by comparison - 2 of 10
+  instructions, ~1.5% of the round trip (this file, top) - an order of
+  magnitude below eVMCS.
+- Copying KVM's forced-prompt-exit mechanism does **not** help: zpp's
+  `reflect_l2_exit` already is that mechanism for VTL0-asked interrupts;
+  KVM's prompt delivery works because its round trip is *cheap*, not
+  because the mechanism is special. zpp copied the mechanism (extint) and
+  froze. The lever is the cost, not the mechanism.
+
+**Disambiguation to run before committing to eVMCS (KVM review §12.4):
+read the VTL1 return reason.** `VslpEnterIumSecureMode` advances phase-1
+only on VTL1 return-reason **1 or 6**. If VTL1 spins in `ShvlVinaHandler`
+and returns reason **4** -> latency -> eVMCS is the lever. If it returns
+1/6 and phase-1 still stalls -> VTL0-side scheduling (IRQL-2/DPC) and
+eVMCS is the wrong lever. One read decides the direction.
 
 ### One concrete lost vector, still to be classified
 
