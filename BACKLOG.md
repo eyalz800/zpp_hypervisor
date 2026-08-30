@@ -1,5 +1,92 @@
 # Known defects
 
+## The single-CPU guest is HARD-STUCK in phase-1, and it is external-interrupt delivery - 2026-08-30
+
+Two independent lines converged this session onto one gap, and both
+retire the "NVMe MSI-X / posted-interrupt" framing that the memory file
+had been carrying.
+
+### Measured: hard-stuck, not saturation, not a storage wait
+
+`rig-dump-state --delta 40` on the live single-CPU guest (`ZPP_CPUS=1`,
+`NESTED_VTD=OFF`, module base `0x6706c000`), differenced over a measured
+41.3 s window that refuses non-monotonic members:
+
+- **Every VTL counter is frozen at `+0`**: `vtl_fresh_calls` 22,590,
+  `vtl_protect_count` 41,541, `vtl_reentries` 385, `shadow_ept_builds`
+  17,316, `l2_invept_single_context` 17,316, `vtl_copy_calls` 10,172.
+- Only the tight VTL0 clock/DPC loop moves: 8,472 exits/s, `int-window`
+  13.2%, `shadow_ept_cache_hits` 4,238/s.
+- `reference_read_count` +6 in 41 s (**0.15/s**).
+
+So the guest completed the VBS page-protection sweep (`SkmiProtectPage
+Range`, 41,541 `HvCallModifyVtlProtectionMask`, matching the earlier
+plateau) and its 22,590 fresh trust-level calls, and then **stopped
+making any VTL call at all**, spinning forever in the normal-mode
+(VTL0) clock/DPC loop. Resolved hot RIPs (ntkrnlmp.pdb, base
+`0xfffff800d3400000`): `HalpHvTimerArm+0x7a` -> `HvlWriteApicCommand
+Register+0x1d` (ICR self-IPI vector `0x2f`, DISPATCH_LEVEL) ->
+`HvlEndSystemInterrupt+0x1e` (EOI) -> `KiDpcInterrupt+0x390` /
+`KiDpcInterruptBypass+0x12` -> `KiSwapThread+0x795`. The boot thread
+that does the VTL work is blocked; the CPU is not saturated (this
+reconfirms `CLAUDE.md`'s withdrawn-saturation section from the other
+side) - it is *idle-looping*, waiting for something that never arrives.
+
+This also retires the storage framing: HEAD (`37a58bd`) established the
+NVMe controller is in exactly the state UEFI firmware left it - admin
+queue 2 entries, MSI/MSI-X/DisINTx all firmware - so **Windows' storage
+driver never ran**. The stall is upstream of storage init, in phase-1,
+so "the guest waits on a lost NVMe completion" was the cart before the
+horse. Confirmed at L0: the physical NVMe (`0000:02:00.0`, vfio-pci) is
+in **vfio-intx** mode, IRQ 16, count frozen at 2027 - no `vfio-msix`
+line anywhere - the device is idle, not mid-I/O.
+
+### The gap: zpp does not intercept external interrupts, so they are lost
+
+KVM-review §6 (`.references/kvm-nested-review.md`), cited both sides:
+KVM's L0 **unconditionally** claims every external-interrupt exit
+(`nested_vmx_l0_wants_exit` returns true, `nested.c:6356`) and vmcs02
+always inherits external-interrupt exiting from vmcs01
+(`nested.c:2352-2354`). On each such exit KVM does **both** the physical
+EOI (acknowledge-interrupt-on-exit) **and** the virtual delivery
+(`vmx_inject_irq`, classic injection via `VM_ENTRY_INTR_INFO_FIELD`,
+`vmx.c:4953`).
+
+zpp does the opposite. `nested_entry.cpp:1799-1805` masks external-
+interrupt exiting **out** of vmcs02 and re-adds it only where `pin12`
+(Hyper-V) asked; `l0_wants_l2_exit` (`:3775`) never claims it; and
+without `ZPP_VIRTUALIZE_APIC` zpp does not set it in vmcs01 either. So an
+external interrupt arriving while a second-level guest runs is neither
+intercepted nor delivered by zpp. The mask's own comment
+(`:1786-1798`) records *why* it was added: with the bit in vmcs02 the
+exit fired, `l1_wants_l2_exit` declined it (pin12 never asked), and zpp
+**deferred rather than delivered** - so it stayed pending and re-exited
+immediately, "two hundred of two hundred working exits." That livelock
+is the symptom of doing neither half; KVM keeps the bit and does both.
+
+### What this does and does not settle, and the next move
+
+- Posted interrupts / VID are the **wrong** tools (KVM-review §3):
+  stripping pin bit 7 is correct, and KVM's own `vmx_sync_pir_to_irr`
+  comment (`vmx.c:6928`) says KVM does not use virtual-interrupt
+  delivery to inject into a running L2 - it uses classic injection,
+  which zpp already owns (`resume.cpp:213-370`). So `ZPP_NESTED_VID`
+  and any work aimed at `nested_entry.cpp:1800` (pin bit 7) do not move
+  this. The line to revisit is the pin-bit-**0** strip at `:1801`.
+- The fix is **not a bit flip**: re-adding external-interrupt exiting
+  without the two-halves handling reintroduces the measured livelock,
+  and the delivery is VTL-aware (a device interrupt destined for VTL0
+  arriving while VTL1 runs must set VINA / return-to-VTL0, not be
+  injected into VTL1's vmcs02). That is what the Hyper-V agent's
+  VINA/VTL-return analysis has to settle before the change is written,
+  and the change ships with a negative control that proves the old
+  200-of-200 livelock does not return.
+- Open confound (KVM-review §5): the plain-KVM MSI-X control runs
+  `hv-passthrough` (enlightened Windows) while zpp presents a non-`Hv#1`
+  signature (non-enlightened), so fact (a) - MSI-X off under zpp, on
+  under KVM - is not yet a clean single-variable comparison. But §6 is a
+  code fact independent of it.
+
 ## The region-instruction lever was 2 of 10, not 4 of 10 - landed 2026-08-27
 
 The prediction further down this file ("The instructions nothing was
