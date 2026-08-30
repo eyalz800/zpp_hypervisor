@@ -505,6 +505,64 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 candidate,
                 *flags_phys,
                 *obj_phys);
+            return; // loader-block diagnostic on the next exit
+        }
+
+        // Step 2 (once, read-only): locate the loader block and read the
+        // counts that gate hvix64's scalable-object allocation (§19). If
+        // +0x26f0 is 0, hvix64 never allocates the real object and the dummy
+        // is permanent - so hvix64_base is unsafe (0x31a050 uses [obj+0x60]
+        // as a bitmap pointer). This confirms the rig state before the fix.
+        if (0 == this->hvloaderblock) {
+            constexpr std::uint64_t loaderblock_ptr_rva = 0xa24c0;
+            constexpr std::uint64_t unit_count_off = 0x26e8;
+            constexpr std::uint64_t alloc_count_off = 0x26f0;
+            constexpr std::uint64_t gate2_off = 0x2714;
+
+            auto ptr_phys = translate_guest_linear(
+                cpu, this->hvix64_base + loaderblock_ptr_rva);
+            if (!ptr_phys) {
+                return;
+            }
+            std::uint64_t loaderblock{};
+            if (!read_guest_physical(
+                    *ptr_phys,
+                    std::as_writable_bytes(std::span(&loaderblock, 1)))) {
+                return;
+            }
+            if (loaderblock < kernel_floor) {
+                return; // pointer not set yet; retry
+            }
+
+            auto uc_phys = translate_guest_linear(
+                cpu, loaderblock + unit_count_off);
+            auto ac_phys = translate_guest_linear(
+                cpu, loaderblock + alloc_count_off);
+            auto g2_phys = translate_guest_linear(
+                cpu, loaderblock + gate2_off);
+            if (!uc_phys || !ac_phys || !g2_phys) {
+                return;
+            }
+            std::uint32_t uc{};
+            std::uint32_t ac{};
+            std::uint32_t g2{};
+            (void)read_guest_physical(
+                *uc_phys, std::as_writable_bytes(std::span(&uc, 1)));
+            (void)read_guest_physical(
+                *ac_phys, std::as_writable_bytes(std::span(&ac, 1)));
+            (void)read_guest_physical(
+                *g2_phys, std::as_writable_bytes(std::span(&g2, 1)));
+
+            this->hvloaderblock = loaderblock;
+            this->loaderblock_unit_count = uc;
+            this->loaderblock_alloc_count = ac;
+            this->loaderblock_gate2 = g2;
+            log("nested vt-d: loader block {}, unit count {}, scalable-obj "
+                "alloc count [+0x26f0] {}, gate2 [+0x2714] {}",
+                loaderblock,
+                static_cast<std::uint64_t>(uc),
+                static_cast<std::uint64_t>(ac),
+                static_cast<std::uint64_t>(g2));
             return; // set the dummy and force on the next exit
         }
 

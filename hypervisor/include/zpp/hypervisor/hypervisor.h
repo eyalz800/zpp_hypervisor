@@ -14033,6 +14033,21 @@ private:
     std::uint64_t scalable_obj_dummy{};
 
     /**
+     * The loader block (`*(hvix64_base+0xa24c0)`) and the counts that gate
+     * hvix64's scalable-IOMMU allocation (secure-dma §19): `+0x26e8` unit
+     * count (>=1 here - the unit is allocated, hence the two live CAP/ECAP
+     * reads), `+0x26f0` the scalable-object-region count that gates the
+     * `0x30c098` allocation call, and `+0x2714` a second gate. On this rig
+     * `+0x26f0` is expected 0 (hvloader skipped IOMMU enumeration under
+     * intremap=off), so hvix64 never allocates the real scalable object and
+     * the forced-bit-5 path has no object to program. Read-only diagnostic.
+     */
+    std::uint64_t hvloaderblock{};
+    std::uint32_t loaderblock_unit_count{};   // +0x26e8
+    std::uint32_t loaderblock_alloc_count{};  // +0x26f0
+    std::uint32_t loaderblock_gate2{};        // +0x2714
+
+    /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
      * into VTL1 can be read rather than guessed at.
      *
