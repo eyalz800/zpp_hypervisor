@@ -580,8 +580,10 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             (rip >= this->hvix64_base + text_end)) {
             return; // not an hvix64-kernel exit; GS/CR3 not hvix64's, retry
         }
+        this->steer_rip_ok += 1;
 
         auto gs_base = this->vmcs.guest_gs_base();
+        this->steer_gs_base = gs_base; // diagnostic
         if (gs_base < kernel_floor) {
             return; // retry
         }
@@ -597,12 +599,10 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 std::as_writable_bytes(std::span(&partition, 1)))) {
             return;
         }
+        this->steer_gs360_raw = partition; // diagnostic, raw pre-check
         if (partition < kernel_floor) {
             return; // GS+0x360 did not hold a kernel pointer; retry
         }
-        // Record what GS+0x360 pointed at (diagnostic - visible even if the
-        // reader-proof below never passes, to tell a wrong base from a
-        // not-yet-created partition).
         this->partition_va = partition;
 
         auto dma_cap_phys =
@@ -621,20 +621,39 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             return; // wrong base, or partition not fully set up; retry
         }
 
-        dma_cap &= ~1ull; // clear DMA-cap bit 0 -> object-free legacy routing
-        if (!write_guest_physical(
-                *dma_cap_phys,
-                std::as_bytes(std::span(&dma_cap, 1)))) {
-            return;
+        // Located + verified. Read the default domain + SLPT root (§17): the
+        // attach's scalable context 0x318508 needs NO scalable object, only
+        // these partition structures - if either is null, THAT is the real
+        // precondition to provide. Do NOT clear bit 0 (§17 CORRECTION A: both
+        // bit-0 states fall through to 0x318508, so clearing it is pointless).
+        constexpr std::uint64_t default_domain_off = 0x4540;
+        constexpr std::uint64_t slpt_off = 0x4550;
+        if (auto dd_phys = translate_guest_linear(
+                cpu, partition + default_domain_off)) {
+            std::uint64_t dd{};
+            if (read_guest_physical(
+                    *dd_phys, std::as_writable_bytes(std::span(&dd, 1)))) {
+                this->partition_default_domain = dd;
+            }
+        }
+        if (auto slpt_phys =
+                translate_guest_linear(cpu, partition + slpt_off)) {
+            std::uint64_t slpt{};
+            if (read_guest_physical(
+                    *slpt_phys,
+                    std::as_writable_bytes(std::span(&slpt, 1)))) {
+                this->partition_slpt = slpt;
+            }
         }
 
         this->partition_steer_done += 1;
         this->scalable_force_armed = true;
-        log("nested vt-d: legacy enable - IommuFeatureSet |= {}, present = 1; "
-            "partition {} DMA-cap [+0x1a0] {} -> bit 0 cleared",
-            static_cast<std::uint64_t>(featureset_bits),
+        log("nested vt-d: partition {} located, DMA-cap {}, default domain "
+            "[+0x4540] {}, SLPT [+0x4550] {}",
             partition,
-            this->partition_dma_cap);
+            this->partition_dma_cap,
+            this->partition_default_domain,
+            this->partition_slpt);
     }
 }
 

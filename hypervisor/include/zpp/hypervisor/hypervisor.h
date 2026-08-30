@@ -14043,8 +14043,13 @@ private:
      * proofs `[partition+0x1a0] == 0x40e9000221`, then clears bit 0 once.
      */
     std::uint64_t partition_va{};
-    std::uint64_t partition_dma_cap{}; // [partition+0x1a0] before the clear
+    std::uint64_t partition_dma_cap{};       // [partition+0x1a0]
+    std::uint64_t partition_default_domain{}; // [partition+0x4540]
+    std::uint64_t partition_slpt{};          // [partition+0x4550] SLPT root
     std::uint64_t partition_steer_done{};
+    std::uint64_t steer_rip_ok{};      // times the rip-in-hvix64 gate passed
+    std::uint64_t steer_gs_base{};     // last guest GS base at that gate
+    std::uint64_t steer_gs360_raw{};   // last *(GS+0x360), raw (pre-check)
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
