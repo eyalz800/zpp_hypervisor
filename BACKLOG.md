@@ -62054,3 +62054,42 @@ stay under the DPC watchdog and reach login. This is a bug fix (a vector
 reflected twice), squarely functional - not the forbidden per-exit-cost
 fix. The DPC watchdog cannot be disabled (no registry edits), so reducing
 DISPATCH time is the only path.
+
+## The injection-re-copy phantom-bit theory is largely refuted - 2026-08-31
+
+Chased the Hyper-V §26 phantom-bit lead (over-reflection blocking lazy-EOI
+sole-pending) into the code:
+- zpp reads vmcs12's VM-entry interruption-information at nested_entry.cpp
+  :3130 and writes it to vmcs02 at 3512, incrementing l2_injected_vector.
+  l2_injected_vector[0xd1] (the SynIC timer-message vector) = ~6x/tick.
+- BUT build_vmcs02 is called from exactly ONE site (nested_vmx.cpp:2299,
+  the `enter_or_park_l2` path = the level-above's VMLAUNCH/VMRESUME).
+  **A locally-handled exit is "resumed straight through ... without" it**
+  (resume.cpp:1382) - it re-runs the SAME vmcs02, whose injection valid
+  bit hardware already cleared. So local exits do NOT re-copy or
+  re-deliver the injection.
+- The reflect path writes the IDT-vectoring info back to vmcs12
+  (nested_entry.cpp:5583) and clears vmcs12's injection valid bit (5599-
+  5606, "cleared on every VM exit"), so hvix64 IS told what was delivered
+  and re-evaluates. This matches KVM (copy once per nested VMRESUME,
+  consumed once, IDT-vectoring reported).
+- Net: the 6x/tick is re-STAGINGS on the reflect cycle while 0xd1 is
+  pending-but-not-yet-interruptible, DELIVERED once/tick (InterruptTime is
+  1:1). Not a re-delivery, not an obvious phantom bit.
+
+So lazy-EOI is blocked NOT by a zpp over-reflect bug but by the **absence
+of sole-pending windows during the busy boot storm** (clock 0xd1 + DPC
+0x2f overlap every tick). That absence is the tax: the per-tick reflect
+cost keeps VTL0 busy so it never idles into a sole-pending gap. The one
+open thread is whether hvix64's SynIC carries a phantom across a delivery
+even when reported correctly (agent checking), but the local-re-delivery
+mechanism - the concrete candidate - is refuted.
+
+**Honest state: within {no reboot, no L0-config, no performance}, the
+functional path is exhausted.** census=OFF is the last functional cut (it
+unblocked the phase-1 hang - real progress). The residual wall is the KVM
+enable_shadow_vmcs=N VMCS-trap tax, confirmed irreducible by both agents
+adversarially. Reaching login needs enable_shadow_vmcs=1 (a rig reboot/
+reload) or a large SynIC/NoEOIRequired implementation in zpp (which
+collides with hvix64's ownership and is performance work) - neither
+inside the stated constraints.
