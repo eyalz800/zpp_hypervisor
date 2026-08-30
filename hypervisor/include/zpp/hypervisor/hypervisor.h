@@ -14052,6 +14052,19 @@ private:
     std::uint64_t steer_gs360_raw{};   // last *(GS+0x360), raw (pre-check)
 
     /**
+     * Capture of securekernel's HvCallAttachDevice (0x82) HV_STATUS - the
+     * actual secure-DMA result, which no other member holds (secure-dma §18).
+     * Latched when an L2 VMCALL exit carries call code 0x82 in RCX
+     * (`attach_pending` + the VMCALL rip), then read from the resumed VTL1
+     * RAX at `pending_rip + 3` (VMCALL is 3 bytes). `attach_status` is the
+     * class: 0 success, 0x1e feature/priv gate, 5 param, 8 denied.
+     */
+    std::uint8_t attach_pending[max_cpus]{};
+    std::uint64_t attach_pending_rip[max_cpus]{};
+    std::uint16_t attach_status[max_cpus]{};
+    std::uint64_t attach_captured[max_cpus]{};
+
+    /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
      * into VTL1 can be read rather than guessed at.
      *

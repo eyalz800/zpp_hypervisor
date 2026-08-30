@@ -10015,6 +10015,15 @@ hypervisor::on_l2_exit(std::size_t cpu,
         this->vmcs02_launched[cpu] = true;
     }
 
+    // Latch securekernel's HvCallAttachDevice (0x82) so its HV_STATUS can be
+    // read from the resumed VTL1 RAX (secure-dma §18). RCX low 16 bits is the
+    // hypercall call code; the VMCALL rip lets resume_guest match the return.
+    if ((cpu < max_cpus) && (basic_reason::vmcall == reason.basic()) &&
+        (0x82 == (context.rcx & 0xffff))) {
+        this->attach_pending[cpu] = 1;
+        this->attach_pending_rip[cpu] = this->vmcs.guest_rip();
+    }
+
     if (reason.entry_failure()) {
         // The processor accepted the controls and the host state, loaded
         // the guest state the guest hypervisor wrote, and then found it

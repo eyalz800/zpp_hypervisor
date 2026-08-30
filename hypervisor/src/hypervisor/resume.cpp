@@ -1330,6 +1330,19 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
             auto value = ((context.rdx & 0xffffffff) << 32) |
                          (context.rax & 0xffffffff);
 
+            // Capture the HvCallAttachDevice (0x82) HV_STATUS (secure-dma
+            // §18): hvix64 handled the VTL1 VMCALL in L1 and resumes VTL1
+            // here at pending_rip+3 (VMCALL is 3 bytes) with RAX = the status.
+            // Only that return resumes at pending_rip+3, so no into-VTL1 flag
+            // is needed.
+            if ((cpu < max_cpus) && this->attach_pending[cpu] &&
+                (resume_rip == this->attach_pending_rip[cpu] + 3)) {
+                this->attach_status[cpu] =
+                    static_cast<std::uint16_t>(context.rax & 0xffff);
+                this->attach_captured[cpu] += 1;
+                this->attach_pending[cpu] = 0;
+            }
+
             auto slot_index =
                 this->l2_resume_count[cpu] % l2_resume_sample_capacity;
             this->l2_resume_rip[cpu][slot_index] = guest_rip;
