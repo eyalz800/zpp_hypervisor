@@ -87,6 +87,58 @@ is the symptom of doing neither half; KVM keeps the bit and does both.
   under KVM - is not yet a clean single-variable comparison. But §6 is a
   code fact independent of it.
 
+### Live reads refute the root-partition-gate, confirm delivery is the cause
+
+The Hyper-V agent's sharpest hypothesis for "MSI-X never enabled" was
+that Windows fails to detect itself as the Hyper-V **root partition**, so
+it never installs the enlightened device-MSI thunk `HvlMapDeviceInterrupt`
+(`DAT_140fc1088`) and there is no code path to program physical MSI-X. It
+is a 12-item live-read decision tree over ntoskrnl `.data` globals. Read
+directly off the live guest (`guest-walk` through Windows CR3 `0x1ae002`,
+kernel base `0xfffff800d3400000`):
+
+| global | RVA | read | meaning |
+|---|---|---|---|
+| `HvlHyperVRootPartition` | `0xfc6c2a` | **1** | root partition detected |
+| `HvlMapDeviceInterrupt` thunk | `0xfc1088` | `0xfffff800d39849a0` | **installed** (nonzero) |
+| `HvlpRootFlags` | `0xfc6b18` | `0x3f7` | bit 8 set |
+| `HalpInterruptMsiSupported` | `0xe101c8` | **1** | MSI supported |
+| `HalpInterruptPerDeviceMsiLimit` | `0xe0a780` | `0x800` | 2048, not capped |
+
+Every gate is **open**. The enlightened MSI map path is fully installed
+and MSI is supported - so the root-detection hypothesis is refuted, and
+by the decision tree's own logic this lands on the last branch,
+*installed, delivery failed*. It also agrees with two facts already in
+hand: the VMCALL census recorded call code `0x7c` (the *real*
+`HvCallMapDeviceInterrupt`, per the RE - `0x46` is `GetPartitionId`), and
+external vector `0xef` reflected upward 80,998 times. Both say the guest
+reached and used the mapping machinery; what fails is delivery. The
+MSI-X-disabled state is then fully explained without a gate bug: boot
+never reaches storage init, so `stornvme` never programs the device -
+the gate being open was simply never exercised.
+
+So three independent lines - the KVM code diff (§6), the phase-1
+hard-stuck delta, and the Windows-side gate reads - converge on external-
+interrupt **delivery**, with no competing hypothesis left standing.
+
+### One concrete lost vector, still to be classified
+
+The injection reconciliation shows vector `0x40` **staged 3,789 / carried
+0** - the only vector staged-but-not-carried; `0xd1` (clock) carried
+22,964 *more* than staged and `0x2f` (DPC) carries clean. The field has
+three writers: `build_vmcs02` stages it (`nested_entry.cpp:3494`), the
+`ZPP_VIRTUALIZE_APIC` path (`resume.cpp:332`, off) and the **re-queue**
+(`resume.cpp:899`) which writes a saved `pending_event` back and runs
+*after* `build_vmcs02` on the same entry. `events_requeued` 22,905 tracks
+the extra `0xd1` carried 22,964, so the re-queue overwriting a staged
+vector with the saved clock is the leading mechanism - but all three
+counts are frozen (pre-stall), so `0x40`-dropped is historical and not
+obviously the *active* phase-1 wait. Whether it is a genuine drop (the
+re-queue clobbering a real injection) or an instrument artifact (two
+counters sampling different populations) is what the KVM agent is
+tracing, and `0x40`'s identity in the Hyper-V/Windows vector map is still
+open.
+
 ## The region-instruction lever was 2 of 10, not 4 of 10 - landed 2026-08-27
 
 The prediction further down this file ("The instructions nothing was
