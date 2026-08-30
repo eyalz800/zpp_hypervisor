@@ -1,5 +1,65 @@
 # Known defects
 
+## The block is a PnP boot-driver device action that never completes - 2026-08-30
+
+This is the resolved cause, and it retires BOTH earlier framings on this
+page: it is not the VMCS-trap speed (the section below), and it is not
+external-interrupt *masking* in the abstract - it is a concrete boot
+device whose PnP start action never completes, and the phase-1 thread
+sleeps on its completion for ever.
+
+### The guest is real-time and healthy - it is BLOCKED, not slow
+
+Read on the live NESTED_VTD=ON guest (module base `0x6706a000`,
+VTL0 cr3 `0x1ae000`):
+
+- **The guest clock advances at real time.** `KUSER_SHARED_DATA`
+  (walked through VTL0 cr3 to phys `0x2b6000`): InterruptTime +6.25 s
+  over a 6 s wall window, TickCountQuad +401 (~67/s), SystemTime
+  advancing. So the guest is **not** time-starved and the "1000x too
+  slow / VMCS-tax starvation" reading is wrong for this state. The
+  455K L0 exits/s of shadow_vmcs=N is overhead the guest absorbs while
+  keeping real time; it is not what stops the boot.
+- **Not the spurious-tick bug.** The clock is not frozen, so
+  `HalpHvTimerAcknowledgeInterrupt` is consuming its messages.
+- **Not the reflect event-loss bug.** `pending_event_lost[0] = 0`,
+  `events_requeued` frozen at 22412, all event-accounting zero.
+- **`Phase1Initialization` is `Waiting`/`Executive`** while the only
+  `Running` thread is `KiExecuteDpc`. A dispatcher object it waits on is
+  never signalled.
+
+### The exact wait, from the phase-1 thread's own kernel stack
+
+Walked `_KTHREAD+0x58` (KernelStack) of the `Phase1Initialization`
+thread and symbolised against ntkrnlmp.pdb:
+
+```
+IopInitializeBootDrivers+0x17a
+ -> PipInitializeCoreDriversAndElam+0x12d
+  -> PipInitializeCoreDriversByGroup+0x145
+   -> PnpRequestDeviceAction+0x2ae
+    -> PipProcessDevNodeTree+0x72d
+     -> PnpDeviceCompletionQueueGetCompletedRequest+0x20
+      -> KeWaitForSingleObject+0x859     <- blocked
+```
+
+So during **core boot-driver initialisation** the thread issued a PnP
+device action and is blocked waiting for it to be **completed** on the
+`PnpDeviceCompletionQueue`. A boot device's start action is not
+finishing. The leading cause, consistent with the standing memory
+`blocker-is-external-interrupt-delivery`, is that the device's start
+waits on a device interrupt zpp is not delivering to VTL0, so the action
+never completes and the queue is never signalled.
+
+### Next: which device, which interrupt
+
+Open: identify the device node stuck in `PnpRequestDeviceAction`, the
+driver whose `StartDevice`/AddDevice is outstanding, and the interrupt
+(line or MSI) its completion depends on - then confirm zpp is dropping
+that vector on the VTL0 path. `ZPP_DELIVER_EXTERNAL` was a dead end (it
+consumed a VTL0-destined vector and froze the guest); the fix must
+deliver the device vector to VTL0 *without* consuming it from hvix64.
+
 ## The hard-stuck guest is the shadow_vmcs=N VMCS-trap tax, not a functional bug - 2026-08-30
 
 This supersedes the "external-interrupt delivery" framing below as the
