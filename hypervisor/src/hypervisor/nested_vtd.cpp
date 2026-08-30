@@ -452,7 +452,6 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
         constexpr std::uint64_t bootphasemode_rva = 0xa3d34;
         constexpr std::uint64_t scalable_obj_rva = 0xb1e88;
-        constexpr std::uint64_t scalable_and_present = 0x60; // bits 5 + 6
         constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
         // Step 1: locate hvix64's base (once), FAST. The content scan and the
@@ -505,126 +504,57 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 candidate,
                 *flags_phys,
                 *obj_phys);
-            return; // loader-block diagnostic on the next exit
+            return; // poke the legacy feature gate on the next exit
         }
 
-        // Step 2 (once, read-only): locate the loader block and read the
-        // counts that gate hvix64's scalable-object allocation (§19). If
-        // +0x26f0 is 0, hvix64 never allocates the real object and the dummy
-        // is permanent - so hvix64_base is unsafe (0x31a050 uses [obj+0x60]
-        // as a bitmap pointer). This confirms the rig state before the fix.
-        if (0 == this->hvloaderblock) {
-            constexpr std::uint64_t loaderblock_ptr_rva = 0xa24c0;
-            constexpr std::uint64_t unit_count_off = 0x26e8;
-            constexpr std::uint64_t alloc_count_off = 0x26f0;
-            constexpr std::uint64_t gate2_off = 0x2714;
+        // Step 2 (once): the LEGACY-path enable (§14/§15, KVM agent). The
+        // rig's intremap=off leaves the loader block empty, so hvix64 can
+        // never build the scalable object [0xb1e88] - but the no-PASID NVMe
+        // needs only LEGACY VT-d second-level remapping, which hvix64 has via
+        // HvpProgramDeviceContext (0x303bc8): it uses the SLPT at
+        // partition+0x4550 and the unit (already initialized, M1 answers its
+        // register/QI interface) - no scalable object, no bit 5. The only
+        // obstacle is the attach's feature gate reading IommuFeatureSet
+        // [0xb1f24] (0x303bc8:600 needs bit 13; :642-645 needs one of
+        // {2,4,6,7,16}) and the present flag [0xb1f99] (else 0x303bc8 returns
+        // 8). Poke both; do NOT set bit 5 (so the worker stays legacy) or
+        // build the scalable object. Both share 0xb1e88's page, so the GPAs
+        // come from scalable_obj_gpa + the RVA delta. IommuFeatureSet is
+        // written only by the scalable compose (which never runs here), so a
+        // single poke persists to the 0x82 attach.
+        constexpr std::uint64_t featureset_delta = 0xb1f24 - 0xb1e88;
+        constexpr std::uint64_t present_delta = 0xb1f99 - 0xb1e88;
+        constexpr std::uint32_t featureset_bits = 0x2040; // bit 13 + bit 6
 
-            auto ptr_phys = translate_guest_linear(
-                cpu, this->hvix64_base + loaderblock_ptr_rva);
-            if (!ptr_phys) {
-                return;
-            }
-            std::uint64_t loaderblock{};
-            if (!read_guest_physical(
-                    *ptr_phys,
-                    std::as_writable_bytes(std::span(&loaderblock, 1)))) {
-                return;
-            }
-            if (loaderblock < kernel_floor) {
-                return; // pointer not set yet; retry
-            }
-
-            auto uc_phys = translate_guest_linear(
-                cpu, loaderblock + unit_count_off);
-            auto ac_phys = translate_guest_linear(
-                cpu, loaderblock + alloc_count_off);
-            auto g2_phys = translate_guest_linear(
-                cpu, loaderblock + gate2_off);
-            if (!uc_phys || !ac_phys || !g2_phys) {
-                return;
-            }
-            std::uint32_t uc{};
-            std::uint32_t ac{};
-            std::uint32_t g2{};
-            (void)read_guest_physical(
-                *uc_phys, std::as_writable_bytes(std::span(&uc, 1)));
-            (void)read_guest_physical(
-                *ac_phys, std::as_writable_bytes(std::span(&ac, 1)));
-            (void)read_guest_physical(
-                *g2_phys, std::as_writable_bytes(std::span(&g2, 1)));
-
-            this->hvloaderblock = loaderblock;
-            this->loaderblock_unit_count = uc;
-            this->loaderblock_alloc_count = ac;
-            this->loaderblock_gate2 = g2;
-            log("nested vt-d: loader block {}, unit count {}, scalable-obj "
-                "alloc count [+0x26f0] {}, gate2 [+0x2714] {}",
-                loaderblock,
-                static_cast<std::uint64_t>(uc),
-                static_cast<std::uint64_t>(ac),
-                static_cast<std::uint64_t>(g2));
-            return; // set the dummy and force on the next exit
-        }
-
-        // Step 2 (once): make the [0xb1e88] deref crash-safe, then force
-        // bit 5 ONLY. Order matters - the dummy must be in place before any
-        // consumer can see bit 5. Only set the dummy if the slot is still
-        // NULL, so a real unit that HvpInitializeIommus already allocated is
-        // never clobbered. hvix64_base's [+0x2c] is 0 (verified §16), so the
-        // deref yields a harmless zero. Bit 6 (present) is NOT set: it is
-        // only needed to survive finalize's phase-1 bit-5 clear, and by the
-        // time this runs (runtime, after finalize) nothing clears bit 5;
-        // measured, forcing bit 6 too made hvix64 VMXOFF right after its
-        // VM-entry-latency benchmark (its runtime present-path reacting to a
-        // present flag with no real unit).
-        std::uint64_t obj{};
+        auto featureset_gpa = this->scalable_obj_gpa + featureset_delta;
+        std::uint32_t featureset{};
         if (!read_guest_physical(
-                this->scalable_obj_gpa,
-                std::as_writable_bytes(std::span(&obj, 1)))) {
+                featureset_gpa,
+                std::as_writable_bytes(std::span(&featureset, 1)))) {
             return;
         }
-        if (0 == obj) {
-            auto dummy = this->hvix64_base;
-            if (!write_guest_physical(
-                    this->scalable_obj_gpa,
-                    std::as_bytes(std::span(&dummy, 1)))) {
-                return;
-            }
-            this->scalable_obj_dummy = dummy;
-        }
-
-        // Force bit 5+6. Bit 6 is needed because this now runs EARLY (before
-        // finalize), and finalize clears bit 5 unless bit 6 is set (§18 Q3:
-        // 0x30b375, gated on bit 6). Every g_HvFeatureFlags writer is
-        // read-modify-write and none clears 5/6, so the forced bits survive
-        // feature assembly to both 0x30a59f checks (§18 Q3).
-        std::uint64_t flags{};
-        if (!read_guest_physical(
-                this->hvfeatureflags_gpa,
-                std::as_writable_bytes(std::span(&flags, 1)))) {
+        featureset |= featureset_bits;
+        if (!write_guest_physical(
+                featureset_gpa,
+                std::as_bytes(std::span(&featureset, 1)))) {
             return;
         }
-        if (scalable_and_present != (flags & scalable_and_present)) {
-            flags |= scalable_and_present;
-            if (!write_guest_physical(
-                    this->hvfeatureflags_gpa,
-                    std::as_bytes(std::span(&flags, 1)))) {
-                return;
-            }
-        }
 
-        std::uint32_t phase{};
+        auto present_gpa = this->scalable_obj_gpa + present_delta;
+        std::uint8_t present{};
         if (read_guest_physical(
-                this->bootphasemode_gpa,
-                std::as_writable_bytes(std::span(&phase, 1)))) {
-            this->scalable_force_phase = phase;
+                present_gpa,
+                std::as_writable_bytes(std::span(&present, 1)))) {
+            present |= 1;
+            (void)write_guest_physical(
+                present_gpa, std::as_bytes(std::span(&present, 1)));
         }
+
         this->scalable_force_forced += 1;
         this->scalable_force_armed = true;
-        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5+6 "
-            "(HvBootPhaseMode {})",
-            this->scalable_obj_dummy,
-            phase);
+        log("nested vt-d: legacy enable - IommuFeatureSet [0xb1f24] |= {}, "
+            "present [0xb1f99] |= 1 (no bit 5, no scalable object)",
+            static_cast<std::uint64_t>(featureset_bits));
     }
 }
 
