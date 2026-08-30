@@ -61978,3 +61978,41 @@ of it - Hyper-V §19 - by advertising apic-reg-virt(bit8)+VID(bit9) in
 0x48b so VTL0 uses the architectural x2APIC with no exits; gated on KVM
 exposing APICv to zpp's vmcs01). Sustained-progress monitor running to
 confirm nested_vtd reaches driver init / login.
+
+## census=OFF unblocks the phase-1 stall - the worker gets a PASSIVE slice - 2026-08-31
+
+Tested the census lever on the medium (fresh 1-CPU guest, module base
+0x6706b000, `census=0` verified in manifest). Measured against the
+census=ON stuck state:
+
+| signal | census=ON (stuck) | census=OFF |
+|---|---|---|
+| `KiSwapThread` in entry-RIP census | 0.1% (38/45849) | **0.8% (14/1790), 8x** |
+| `vtl_fresh_calls` | frozen at 22214 | **climbing +61/min** |
+| `reference_read_count` | climbing (clock-wait loop) | **frozen** (loop escaped) |
+
+Three independent signals agree: removing the 3 diagnostic VMREADs per
+exit (`census_exits`, gated at multiple reflect/entry hot-path points)
+freed enough per-tick budget that VTL0 reaches the scheduler and the PnP
+worker gets PASSIVE slices. This confirms the Hyper-V §24 model: the
+`PnpDeviceActionWorker` is **preemptible** (short DISPATCH spinlock
+sections, resumes each schedule), so a **tiny recurring** PASSIVE slice
+suffices - the window only has to *exist* every tick, not be large. And
+the dynamic tick (`PoIdle`/`KeResumeClockTimerFromIdle`) backs the 1.74
+ms timer off once VTL0 idles, so reaching idle **compounds**.
+
+Root of the stall, restated: it was per-tick saturation right at the
+razor's edge (real-time, ~zero PASSIVE slack); a small functional cut
+tips it. This is squarely the functional path (removing debug overhead),
+not the forbidden VMCS-trap/eVMCS/reboot fix.
+
+**`defer_guest_state` is already ON** (manifest `defer=1`, KVM-review
+§23) - the 44-VMREAD guest-state deferral (mirrors KVM's
+`sync_vmcs02_to_vmcs12_rare`) is applied, so the ~9 remaining accesses
+per reflect are near KVM's floor; the residue above that is hvix64's own
+nested-VMCS accesses trapping to zpp.
+
+**Next:** confirm the progress is SUSTAINED to login (vtl_fresh keeps
+climbing into driver load / smss), and pursue the compounding cuts
+(§24): shadow-VMCS engagement for hvix64's nested VMCS (§23.4), lazy-EOI
+(§17). Each is functional (exit-count, not the forbidden per-exit cost).
