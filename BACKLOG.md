@@ -318,6 +318,40 @@ and returns reason **4** -> latency -> eVMCS is the lever. If it returns
 1/6 and phase-1 still stalls -> VTL0-side scheduling (IRQL-2/DPC) and
 eVMCS is the wrong lever. One read decides the direction.
 
+**Disambiguation run 2026-08-30 (`vtl_return_vina_by_call_class`):** VTL1
+COMPLETES its turns - VINA-clear dominant at call-class 2 (16,178) - and
+VTL0 does briefly reach PASSIVE (VINA-set at class 0 = 6,944) but the
+pending `0x2f` DPC softint pulls it straight back to DISPATCH. So it is
+the DPC backlog draining slower than the clock queues it, under the
+nested per-tick cost - which eVMCS reduces. User (2026-08-30) chose to
+pursue eVMCS with full autonomy.
+
+### The eVMCS wall: hvix64 stands down under an announced Hv#1
+
+Turning `ZPP_EVMCS=ON` is **already known** to hit a wall
+(`nested_vmx.h:212-236`), and it is the gating problem: eVMCS is
+advertised through the nested-features leaf *inside* the `0x40000000`
+block, so offering it also announces `Hv#1`. Measured with it on: 187
+CPUID entries in the hypervisor range (0 otherwise); hvix64 probes,
+executes `vmon`/`vmptrld`, **ninety-nine real `VMWRITE`s**, one
+`vmlaunch`, then `vmclear`/`vmoff` - it **stands down**.
+`hyperv_vp_assist_writes`, `evmcs_reads`, `evmcs_writes` all 0: it never
+registers a VP assist page and never takes the enlightened path. zpp
+answers leaf `0x40000003` (partition privilege mask) as **zero** - "told
+Microsoft's interface is present and that it is entitled to none of it."
+
+So eVMCS as wired is a coupled change that *stops* VBS instead of speeding
+it. The two candidate fixes (`nested_vmx.h:180-183`): populate
+`0x40000003` with privileges zpp can back, or present a non-`Hv#1`
+signature that still carries eVMCS. Which one, and the exact privilege/
+feature bits (leaf `0x40000003` EAX/EBX; nested/eVMCS leaf `0x4000000A`;
+the VP-assist-page MSR contract and eVMCS revision), is what both agents
+are decoding from hvix64 and from KVM's Hyper-V CPUID synthesis. The
+leading hypothesis: the standdown is the **zero privilege mask**, not the
+`Hv#1` announcement itself - KVM presents `Hv#1` (under `hv-passthrough`)
+*and* hvix64 uses eVMCS and runs VBS, so a non-zero privilege mask is the
+difference. Confirm before building.
+
 ### One concrete lost vector, still to be classified
 
 The injection reconciliation shows vector `0x40` **staged 3,789 / carried
