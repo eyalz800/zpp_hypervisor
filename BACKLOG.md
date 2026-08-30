@@ -51,26 +51,55 @@ finishing. The leading cause, consistent with the standing memory
 waits on a device interrupt zpp is not delivering to VTL0, so the action
 never completes and the queue is never signalled.
 
-### The mechanism: a DPC spins at IRQL 2, IRQL-0 threads starve
+### The mechanism: a THREADED DPC in KiExecuteDpc never yields (CONFIRMED)
 
-Re-sampled the System thread states 10 s apart (sampler live,
-`guest_thread_refreshes` climbing): the states are FROZEN.
-`KeBalanceSetManager` and `KeSwapProcessOrStack` are **persistently
-Ready** - readied but not scheduled in 10 s+, when they normally run
-about once a second - while `KiExecuteDpc` is persistently the current
-thread. So the CPU is pinned at **DISPATCH_LEVEL (IRQL 2)**: a DPC
-spins/re-queues forever, the CPU never drops to IRQL 0, and every
-IRQL-0 thread (Phase1Initialization, the PnP device-action worker)
-starves. The guest clock still advances because the DPC churn is fast
-(hence "real time but blocked") - this is NOT the slow VMCS-tax storm,
-it is a DPC that never finishes.
+Read `KPRCB.CurrentThread` directly (KiProcessorBlock -> KPRCB, +8),
+three samples: it is **persistently `KiExecuteDpc`** (0xffffba06be4fa040),
+never the idle thread (0xfffff806a0dd25c0). So the CPU is NOT idling and
+this is NOT a reschedule bug. `KiExecuteDpc` is the **threaded-DPC
+dispatcher thread** (priority ~31, runs threaded DPCs at IRQL 0 in a
+thread). It is the current thread and **never yields**, because the
+threaded DPC it is running never completes. Every lower-priority thread
+- `KeBalanceSetManager` (pri 16), `KeSwapProcessOrStack`, and
+Phase1Initialization - is therefore correctly never scheduled (they show
+persistently Ready over 10 s+). That is exactly why `KiSwapThread` is
+0.1%: the scheduler keeps the highest-priority runnable thread on the
+CPU, and that is `KiExecuteDpc`. Its saved KernelStack reads
+`KeWaitForGate` because that is stale (where it last blocked); it is
+running now, not waiting.
 
-Leading model, consistent with all of the above: a boot driver's device
-start polls/awaits its device (via a self-requeuing DPC or an interrupt
-wait); the device never responds (no passed-through device interrupts -
-IRQ 16 frozen at 2150; the NVMe is still in the firmware-left state); so
-the DPC spins for ever, IRQL-0 work never runs, and the PnP action never
-completes.
+**Corrected by the Hyper-V RE (msix-enable-gate.md §23), which decoded
+KiDispatchInterrupt - there is NO spinning DPC body.** The census RIPs
+are all in the ISR/DPC *wrapper* doing synthetic-MSR WRMSRs, not a DPC
+routine. `KiDispatchInterrupt` reschedules only if `KPRCB.NextThread` is
+set, and `NextThread` for an idle->ready transition is selected by
+`KiIdleLoop` at **PASSIVE** - which never runs. The reason IRQL never
+falls below DISPATCH: **the per-tick ISR+DPC reflect processing consumes
+~= the whole 1.74 ms tick, leaving no PASSIVE slice.** CurrentThread =
+KiExecuteDpc is incidental (the thread current when saturation locked
+in). So this is **saturation, not a scheduler bug and not a device
+poll**: zero PASSIVE slack -> the PnP worker never runs.
+
+The block is **device-agnostic** (§23 #2): phase-1 waits on mutex
+`DAT_140f8b7c8`, signalled by `PnpDeviceActionWorker` at IRQL 0; the
+worker never gets a PASSIVE slice, so ANY device action blocks here.
+Naming the driver is a red herring - the fix is giving IRQL 0 a slice.
+
+The per-tick cost is the 53.5x VMCS-trap tax PLUS possibly a FUNCTIONAL
+component. Three checks separate the two (both agents converged):
+1. **Manifest audit** - experimental exit-adding switches ON in the
+   deployed build (window_on_tpr, deliver_on_drop, profile_l2, step_vtl,
+   census_exits, poll_l1, hold_clock_in_vtl1, ...) each add a per-tick
+   exit KVM has no analog for. Free functional cut. `strings <deployed>
+   | grep 'zpp switches'`, read every field.
+2. **Shadow-VMCS for hvix64's NESTED VMCS not engaging** - if hvix64's
+   VMREAD/VMWRITE around each reflect trap to zpp, ~5 reflects/tick blow
+   the budget and it *looks* like raw overhead but is a zpp bug. Measure
+   VMREAD(23)/VMWRITE(25) exits per tick; nonzero = fixable.
+3. **Self-IPI/injection over-generation** - count HV_ICR (wrmsr
+   0x40000071) and 0x2f/SINT3 injections per synthetic-timer tick; >1 of
+   either is zpp/hvix64 over-generating (functional).
+If all three are clean, the residue is the forbidden 53.5x tax.
 
 ### Next: which device, which interrupt
 
