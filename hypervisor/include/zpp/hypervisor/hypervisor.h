@@ -14018,27 +14018,6 @@ private:
     std::uint32_t scalable_force_phase{};
 
     /**
-     * The COHERENT scalable-mode enable (secure-dma-hvcall.md §12, KVM agent):
-     * hvix64's phase-1 bit-5 setter `0x30b4d8` sets `g_HvFeatureFlags` bit 5
-     * itself iff the CACHED loader-block IOMMU-unit ECAP passes
-     * `HvpParseVtdCaps` (needs ECAP.IR bit 3, ECAP.QI bit 1, not CAP.RWBF).
-     * The rig's cached ECAP has IR=0 (only its low byte is read; the synthetic
-     * live ECAP never reaches this phase-1 path), so bit 5 stays clear. zpp
-     * pokes IR into the cached ECAP at
-     * `*(hvix64_base+0xa24c0)` -> `+[+0x26ec]` -> `unit0+0x38`; hvix64 then
-     * parses it, sets bit 5, and allocates the scalable object `0xb1e88`
-     * itself in the runtime path - no NULL deref, no forced flag. This is the
-     * designed data path (the loader-block cap cache), so the sequencing is
-     * hvix64's own. Members below record the cache and the poke for the dump.
-     */
-    std::uint64_t hvloaderblock{};
-    std::uint64_t loaderblock_ecap_gpa{};
-    std::uint64_t loaderblock_cap{};
-    std::uint64_t loaderblock_ecap{};
-    std::uint64_t loaderblock_ir_poked{};
-    std::uint64_t loaderblock_locate_failed{};
-
-    /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
      * into VTL1 can be read rather than guessed at.
      *
