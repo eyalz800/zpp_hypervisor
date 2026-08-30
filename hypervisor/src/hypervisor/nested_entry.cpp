@@ -10022,6 +10022,16 @@ hypervisor::on_l2_exit(std::size_t cpu,
     // The VMCALL rip lets resume_guest match the return.
     if ((cpu < max_cpus) && (basic_reason::vmcall == reason.basic())) {
         auto code = context.rcx & 0xffff;
+
+        // Census: which hypercall codes does the guest actually issue.
+        this->vmcall_seen += 1;
+        if (code < 256) {
+            this->vmcall_code_bitmap[code >> 6] |= (1ull << (code & 63));
+        }
+        if (code > this->vmcall_max_code) {
+            this->vmcall_max_code = static_cast<std::uint16_t>(code);
+        }
+
         if ((0x82 == code) || ((code >= 0xb1) && (code <= 0xb6))) {
             this->attach_pending[cpu] = 1;
             this->attach_pending_rip[cpu] = this->vmcs.guest_rip();

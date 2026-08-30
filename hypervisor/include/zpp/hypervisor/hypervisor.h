@@ -14066,6 +14066,16 @@ private:
     std::uint64_t attach_captured[max_cpus]{};
 
     /**
+     * Census of every L2 VMCALL's hypercall code (secure-dma §19): the attach
+     * hook is silent, so this shows what codes securekernel actually issues.
+     * `vmcall_code_bitmap` bit c is set if call code c (0..255) was seen;
+     * `vmcall_max_code` is the highest 16-bit code; `vmcall_seen` the total.
+     */
+    std::uint64_t vmcall_seen{};
+    std::uint64_t vmcall_code_bitmap[4]{};
+    std::uint16_t vmcall_max_code{};
+
+    /**
      * The IOMMU-unit list head `[0xb1e70]` (secure-dma §24). The scalable
      * attach's HvpFindIommuUnit searches it; on the un-enumerated rig it is
      * an empty self-linked LIST_ENTRY (holds its own address), so the rebuild
