@@ -51,14 +51,37 @@ finishing. The leading cause, consistent with the standing memory
 waits on a device interrupt zpp is not delivering to VTL0, so the action
 never completes and the queue is never signalled.
 
+### The mechanism: a DPC spins at IRQL 2, IRQL-0 threads starve
+
+Re-sampled the System thread states 10 s apart (sampler live,
+`guest_thread_refreshes` climbing): the states are FROZEN.
+`KeBalanceSetManager` and `KeSwapProcessOrStack` are **persistently
+Ready** - readied but not scheduled in 10 s+, when they normally run
+about once a second - while `KiExecuteDpc` is persistently the current
+thread. So the CPU is pinned at **DISPATCH_LEVEL (IRQL 2)**: a DPC
+spins/re-queues forever, the CPU never drops to IRQL 0, and every
+IRQL-0 thread (Phase1Initialization, the PnP device-action worker)
+starves. The guest clock still advances because the DPC churn is fast
+(hence "real time but blocked") - this is NOT the slow VMCS-tax storm,
+it is a DPC that never finishes.
+
+Leading model, consistent with all of the above: a boot driver's device
+start polls/awaits its device (via a self-requeuing DPC or an interrupt
+wait); the device never responds (no passed-through device interrupts -
+IRQ 16 frozen at 2150; the NVMe is still in the firmware-left state); so
+the DPC spins for ever, IRQL-0 work never runs, and the PnP action never
+completes.
+
 ### Next: which device, which interrupt
 
-Open: identify the device node stuck in `PnpRequestDeviceAction`, the
-driver whose `StartDevice`/AddDevice is outstanding, and the interrupt
-(line or MSI) its completion depends on - then confirm zpp is dropping
-that vector on the VTL0 path. `ZPP_DELIVER_EXTERNAL` was a dead end (it
-consumed a VTL0-destined vector and froze the guest); the fix must
-deliver the device vector to VTL0 *without* consuming it from hvix64.
+Open: identify the spinning DPC's driver (name the device), and whether
+its device is unreachable by MMIO (VTL0 -> device BAR through the nested
+EPTs) or its interrupt is undelivered (no vector reaches VTL0; IRQ 16
+frozen means the device is not even raising one - so likely the device
+is not being commanded, i.e. MMIO not reaching it). `ZPP_DELIVER_EXTERNAL`
+was a dead end (it consumed a VTL0-destined vector and froze the guest);
+the fix must let VTL0 reach the physical device and/or deliver its vector
+*without* consuming it from hvix64.
 
 ## The hard-stuck guest is the shadow_vmcs=N VMCS-trap tax, not a functional bug - 2026-08-30
 
