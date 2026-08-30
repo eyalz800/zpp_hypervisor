@@ -573,7 +573,6 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         constexpr std::uint64_t text_end = 0x3b3894;
         constexpr std::uint64_t partition_from_gs = 0x360;
         constexpr std::uint64_t dma_cap_off = 0x1a0;
-        constexpr std::uint64_t dma_cap_expected = 0x40e9000221ull;
         // The partition lives in a lower canonical-kernel range than hvix64's
         // own image (measured *(GS+0x360) = 0xffffe80000001000), so accept any
         // canonical high-half address, not hvix64's 0xfffff8.. floor.
@@ -621,8 +620,13 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             return;
         }
         this->partition_dma_cap = dma_cap; // diagnostic, pre-check
-        if (dma_cap_expected != dma_cap) {
-            return; // wrong base, or partition not fully set up; retry
+        // Reader-proof: the DMA-cap signature (0x40e9.. in the high bytes)
+        // with the root-partition attach-privilege bit 0 set. Measured
+        // 0x40e9002221 - the agents' 0x40e9000221 differed only in cap bit 13
+        // - so match the stable signature + bit 0, not the exact value.
+        if (((dma_cap & 0xffffff000000ull) != 0x40e9000000ull) ||
+            (0 == (dma_cap & 1))) {
+            return; // not the partition, or not fully set up; retry
         }
 
         // Located + verified. Read the default domain + SLPT root (§17): the
