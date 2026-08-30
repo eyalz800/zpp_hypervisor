@@ -524,37 +524,99 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         // single poke persists to the 0x82 attach.
         constexpr std::uint64_t featureset_delta = 0xb1f24 - 0xb1e88;
         constexpr std::uint64_t present_delta = 0xb1f99 - 0xb1e88;
+        // bit 6 passes the bit-0-set gate (0x303bc8:642); bit 13 passes the
+        // bit-0-clear gate (:600) that the routing steer below enters. Both,
+        // so the gate passes on either branch.
         constexpr std::uint32_t featureset_bits = 0x2040; // bit 13 + bit 6
 
-        auto featureset_gpa = this->scalable_obj_gpa + featureset_delta;
-        std::uint32_t featureset{};
+        if (0 == this->scalable_force_forced) {
+            auto featureset_gpa = this->scalable_obj_gpa + featureset_delta;
+            std::uint32_t featureset{};
+            if (!read_guest_physical(
+                    featureset_gpa,
+                    std::as_writable_bytes(std::span(&featureset, 1)))) {
+                return;
+            }
+            featureset |= featureset_bits;
+            if (!write_guest_physical(
+                    featureset_gpa,
+                    std::as_bytes(std::span(&featureset, 1)))) {
+                return;
+            }
+
+            auto present_gpa = this->scalable_obj_gpa + present_delta;
+            std::uint8_t present{};
+            if (read_guest_physical(
+                    present_gpa,
+                    std::as_writable_bytes(std::span(&present, 1)))) {
+                present |= 1;
+                (void)write_guest_physical(
+                    present_gpa, std::as_bytes(std::span(&present, 1)));
+            }
+            this->scalable_force_forced = 1;
+        }
+
+        // Step 3: steer the 0x82 attach off the scalable route (§16). The
+        // worker sends a plain-PCI NVMe to the scalable context 0x318508
+        // (whose object never allocates on this rig) unless the root
+        // partition's DMA-cap [partition+0x1a0] bit 0 is clear. Locate the
+        // partition GS-free via g_RootPartition (hvix64 RVA 0xa9ed0, a plain
+        // global holding the partition VA - *(GS+0x360) was the wrong,
+        // GS-swapped privilege block). Reader-proof [partition+0x1a0] ==
+        // 0x40e9000221 (the rig's DMA-cap, bit 0 set) so the base is right
+        // and the partition is fully created, then clear bit 0 - routing the
+        // attach to the object-free 0x108e6c/0x318bfc path. Retry until the
+        // reader-proof passes, then clear once and arm.
+        constexpr std::uint64_t root_partition_rva = 0xa9ed0;
+        constexpr std::uint64_t dma_cap_off = 0x1a0;
+        constexpr std::uint64_t dma_cap_expected = 0x40e9000221ull;
+
+        auto part_ptr_phys = translate_guest_linear(
+            cpu, this->hvix64_base + root_partition_rva);
+        if (!part_ptr_phys) {
+            return;
+        }
+        std::uint64_t partition{};
         if (!read_guest_physical(
-                featureset_gpa,
-                std::as_writable_bytes(std::span(&featureset, 1)))) {
+                *part_ptr_phys,
+                std::as_writable_bytes(std::span(&partition, 1)))) {
             return;
         }
-        featureset |= featureset_bits;
+        if (partition < kernel_floor) {
+            return; // g_RootPartition not written yet; retry
+        }
+
+        auto dma_cap_phys =
+            translate_guest_linear(cpu, partition + dma_cap_off);
+        if (!dma_cap_phys) {
+            return;
+        }
+        std::uint64_t dma_cap{};
+        if (!read_guest_physical(
+                *dma_cap_phys,
+                std::as_writable_bytes(std::span(&dma_cap, 1)))) {
+            return;
+        }
+        if (dma_cap_expected != dma_cap) {
+            return; // wrong base, or partition not fully set up; retry
+        }
+
+        this->partition_va = partition;
+        this->partition_dma_cap = dma_cap;
+        dma_cap &= ~1ull; // clear DMA-cap bit 0 -> object-free legacy routing
         if (!write_guest_physical(
-                featureset_gpa,
-                std::as_bytes(std::span(&featureset, 1)))) {
+                *dma_cap_phys,
+                std::as_bytes(std::span(&dma_cap, 1)))) {
             return;
         }
 
-        auto present_gpa = this->scalable_obj_gpa + present_delta;
-        std::uint8_t present{};
-        if (read_guest_physical(
-                present_gpa,
-                std::as_writable_bytes(std::span(&present, 1)))) {
-            present |= 1;
-            (void)write_guest_physical(
-                present_gpa, std::as_bytes(std::span(&present, 1)));
-        }
-
-        this->scalable_force_forced += 1;
+        this->partition_steer_done += 1;
         this->scalable_force_armed = true;
-        log("nested vt-d: legacy enable - IommuFeatureSet [0xb1f24] |= {}, "
-            "present [0xb1f99] |= 1 (no bit 5, no scalable object)",
-            static_cast<std::uint64_t>(featureset_bits));
+        log("nested vt-d: legacy enable - IommuFeatureSet |= {}, present = 1; "
+            "partition {} DMA-cap [+0x1a0] {} -> bit 0 cleared",
+            static_cast<std::uint64_t>(featureset_bits),
+            partition,
+            this->partition_dma_cap);
     }
 }
 

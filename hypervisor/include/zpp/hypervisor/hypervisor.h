@@ -14033,19 +14033,18 @@ private:
     std::uint64_t scalable_obj_dummy{};
 
     /**
-     * The loader block (`*(hvix64_base+0xa24c0)`) and the counts that gate
-     * hvix64's scalable-IOMMU allocation (secure-dma §19): `+0x26e8` unit
-     * count (>=1 here - the unit is allocated, hence the two live CAP/ECAP
-     * reads), `+0x26f0` the scalable-object-region count that gates the
-     * `0x30c098` allocation call, and `+0x2714` a second gate. On this rig
-     * `+0x26f0` is expected 0 (hvloader skipped IOMMU enumeration under
-     * intremap=off), so hvix64 never allocates the real scalable object and
-     * the forced-bit-5 path has no object to program. Read-only diagnostic.
+     * The routing steer (secure-dma §16). The 0x82 device-attach worker
+     * routes a plain-PCI NVMe to the SCALABLE context (`0x318508`, whose
+     * object never allocates on this rig) unless the root partition's DMA-cap
+     * `[partition+0x1a0]` bit 0 is clear. Clearing it steers to the
+     * object-free legacy path (`0x108e6c`/`0x318bfc` + the SLPT context
+     * write). zpp locates the partition GS-free via `g_RootPartition` at
+     * hvix64 RVA 0xa9ed0 (a plain global holding the partition VA), reader-
+     * proofs `[partition+0x1a0] == 0x40e9000221`, then clears bit 0 once.
      */
-    std::uint64_t hvloaderblock{};
-    std::uint32_t loaderblock_unit_count{};   // +0x26e8
-    std::uint32_t loaderblock_alloc_count{};  // +0x26f0
-    std::uint32_t loaderblock_gate2{};        // +0x2714
+    std::uint64_t partition_va{};
+    std::uint64_t partition_dma_cap{}; // [partition+0x1a0] before the clear
+    std::uint64_t partition_steer_done{};
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads
