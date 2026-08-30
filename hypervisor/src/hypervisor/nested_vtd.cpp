@@ -574,6 +574,10 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         constexpr std::uint64_t partition_from_gs = 0x360;
         constexpr std::uint64_t dma_cap_off = 0x1a0;
         constexpr std::uint64_t dma_cap_expected = 0x40e9000221ull;
+        // The partition lives in a lower canonical-kernel range than hvix64's
+        // own image (measured *(GS+0x360) = 0xffffe80000001000), so accept any
+        // canonical high-half address, not hvix64's 0xfffff8.. floor.
+        constexpr std::uint64_t partition_floor = 0xffff800000000000ull;
 
         auto rip = this->vmcs.guest_rip();
         if ((rip < this->hvix64_base + text_start) ||
@@ -600,7 +604,7 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             return;
         }
         this->steer_gs360_raw = partition; // diagnostic, raw pre-check
-        if (partition < kernel_floor) {
+        if (partition < partition_floor) {
             return; // GS+0x360 did not hold a kernel pointer; retry
         }
         this->partition_va = partition;
