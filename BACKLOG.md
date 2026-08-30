@@ -121,6 +121,68 @@ So three independent lines - the KVM code diff (§6), the phase-1
 hard-stuck delta, and the Windows-side gate reads - converge on external-
 interrupt **delivery**, with no competing hypothesis left standing.
 
+### CONVERGED: the blocker is a lost VTL0 interrupt breaking the VINA return
+
+Both background agents plus the live reads now name one mechanism, three
+ways, with no competing hypothesis:
+
+- **Hyper-V §10 (decompiled stuck stack).** `VslpEnterIumSecureMode+0x3a8
+  -> HvlSwitchToVsmVtl1+0xab` is a VTL round-trip, not a device wait.
+  `VslpEnterIumSecureMode` (sk 0x38dd60) loops `HvCallVtlCall` and returns
+  to phase-1 only on VTL1 return-reason 1 or 6. VTL1 hands the CPU back via
+  `ShvlVinaHandler` (sk 0x942cc) -> `SkCallNormalMode` reason 4, and the
+  bridge is **VINA** - `ShvlpEnableVina` (sk 0x94660) arms VP register
+  `0xd0005` (HvRegisterVsmVina). If the VTL0-destined external interrupt,
+  or its VINA notification, is dropped, the VINA return never fires, VTL0
+  never runs the ISR/DPC that would signal phase-1's wait, and it blocks
+  forever. The clock/DPC loop still moves - via the separately-working
+  reflected `0xef` - which is exactly why it looks alive.
+- **The two drops, both present in the deployed build.** (1) zpp masks
+  external-interrupt exiting out of vmcs02 (`nested_entry.cpp:1799-1805`),
+  so a VTL0 device interrupt arriving while VTL1 runs is not intercepted.
+  (2) `suppress_vina` is ON (manifest `novina=1`): `record_l2_entry_event`
+  strips the VINA (vector `0x40`) valid bit on VTL1 entries
+  (`nested_entry.cpp:8781-8793`). Measured live: `vina_suppressed=7593`,
+  `l2_given_vector[0x40]=0` - the VINA was requested 7,593 times and
+  delivered 0. `suppress_vina` was added to dodge the *other* failure
+  (securekernel spinning in `ShvlVinaHandler` because a too-slow round trip
+  never clears VINA in time); it traded that stall for this one.
+- **Live state agrees.** `in_vtl1=0`, VTL switches balanced and frozen
+  (22,976 / 23,218), so VTL1 has already handed back and VTL0 is parked -
+  a VTL0-only wait, consistent with a lost VTL0 interrupt, not with an
+  active secure-DMA spin (which would keep VTL1 running).
+
+Vector 0x40 is the VINA - not a device vector - proven in zpp source
+(`record_l2_entry_event`, `nested_entry.cpp:8765-8780`: `KiVinaInterrupt
+Shadow -> KiVinaInterrupt` on VTL1's IDT) and in securekernel. So the
+"staged 3,789 / carried 0" below was two things at once: a cross-path
+counter artifact (`l2_injected_vector` on the `enter_or_park_l2` path vs
+`l2_entry_vector` on the `resume_guest` path - never comparable) *and*, on
+top of it, the real deliberate `suppress_vina` strip.
+
+### The fix (KVM §8 + Hyper-V §10), and why the old attempt livelocked
+
+Intercept every external interrupt as **zpp's own** in both vmcs01 and
+vmcs02, **acknowledge-interrupt-on-exit**, **EOI the physical APIC**, then
+deliver **VTL-aware**: a VTL0-destined interrupt arriving while VTL1 runs
+is queued and held until VTL0 is current (never classic-injected into
+VTL1's vmcs02), with the VINA - **no longer suppressed** - bounding the
+hand-back. The 200-of-200 livelock the current mask avoids was caused by
+the **missing acknowledge + EOI** (an exit without ack reports no vector,
+leaves it pending, re-exits immediately), not by the control bit - so the
+repair is to add those two, not to keep dropping the bit. KVM keeps the
+bit and does exactly this (`nested.c:6356`, `vmx.c:4953`); it has no
+VTL0-vs-VTL1 routing because that is purely Hyper-V's, so the hold-until-
+VTL0-current step is zpp's own. Ships behind a switch with a four-part
+negative control (bounded takings; no single-vector saturation; the
+physical ISR drains via a new `eoied` counter; bounded VTL1-time holds) -
+old arm must reproduce the livelock, new arm must pass all four.
+
+Correct end config: the §8 delivery fix **with `suppress_vina` off** - the
+fix clears the VINA-set condition promptly (by delivering the VTL0
+interrupt), so `ShvlVinaHandler` no longer spins and the reason
+`suppress_vina` existed is gone.
+
 ### One concrete lost vector, still to be classified
 
 The injection reconciliation shows vector `0x40` **staged 3,789 / carried
