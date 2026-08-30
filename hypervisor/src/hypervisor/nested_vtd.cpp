@@ -452,23 +452,38 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         constexpr std::uint64_t g_hvfeatureflags_rva = 0xaf158;
         constexpr std::uint64_t bootphasemode_rva = 0xa3d34;
         constexpr std::uint64_t scalable_obj_rva = 0xb1e88;
-        constexpr std::uint64_t snapshot = 0x0040fb2011000002ull;
         constexpr std::uint64_t scalable_and_present = 0x60; // bits 5 + 6
         constexpr std::uint64_t kernel_floor = 0xfffff80000000000ull;
 
-        // Step 1: locate hvix64's base (once) and cache the three GPAs. The
-        // first L1 exits run in hvloader (low VA); skip the scan for them and
-        // cross-check the flag word against the feature-assembly snapshot.
+        // Step 1: locate hvix64's base (once), FAST. The content scan and the
+        // snapshot cross-check took ~2805 exits - far too late: HvpInitializeIommus's
+        // 0x30a59f bit-5 check runs very early, so the force must land before
+        // it (§18 Q4). hvix64 is 2 MB-aligned with .text at +0x200000, so for
+        // a rip in the first 2 MB of .text the base is O(1): mask to the 2 MB
+        // page and subtract 0x200000. Verify the 'MZ' header to reject a wrong
+        // 2 MB (a higher-.text rip) - retry then, the early exits are low-RVA.
+        // No snapshot requirement: every writer is RMW and never clears bit
+        // 5/6, so forcing before feature assembly is safe and survives (§18 Q3).
         if (0 == this->hvfeatureflags_gpa) {
             auto rip = this->vmcs.guest_rip();
             if (rip < kernel_floor) {
                 return; // hvloader/firmware, not hvix64
             }
 
-            auto candidate = find_hvix64_base(cpu, rip);
-            if ((0 == candidate) || (candidate < kernel_floor)) {
-                this->scalable_force_locate_failed += 1;
+            auto candidate = (rip & ~0x1fffffull) - 0x200000ull;
+            if (candidate < kernel_floor) {
                 return;
+            }
+
+            auto base_phys = translate_guest_linear(cpu, candidate);
+            std::uint16_t mz{};
+            if (!base_phys ||
+                !read_guest_physical(
+                    *base_phys,
+                    std::as_writable_bytes(std::span(&mz, 1))) ||
+                (0x5a4d != mz)) {
+                this->scalable_force_locate_failed += 1;
+                return; // wrong 2 MB or not mapped yet; retry
             }
 
             auto flags_phys = translate_guest_linear(
@@ -478,32 +493,17 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             auto obj_phys = translate_guest_linear(
                 cpu, candidate + scalable_obj_rva);
             if (!flags_phys || !phase_phys || !obj_phys) {
-                return; // not mapped yet; retry
-            }
-
-            std::uint64_t flags{};
-            if (!read_guest_physical(
-                    *flags_phys,
-                    std::as_writable_bytes(std::span(&flags, 1)))) {
-                return;
-            }
-
-            if ((flags != snapshot) &&
-                (flags != (snapshot | scalable_and_present))) {
-                // Wrong image, or feature assembly has not written it yet.
-                this->scalable_force_locate_failed += 1;
-                return;
+                return; // hvix64 .data not mapped yet; retry
             }
 
             this->hvix64_base = candidate;
             this->hvfeatureflags_gpa = *flags_phys;
             this->bootphasemode_gpa = *phase_phys;
             this->scalable_obj_gpa = *obj_phys;
-            log("nested vt-d: hvix64 base {}, g_HvFeatureFlags at {} = {}, "
-                "scalable obj [0xb1e88] at {}",
+            log("nested vt-d: hvix64 base {} (rip-located), "
+                "g_HvFeatureFlags at {}, scalable obj [0xb1e88] at {}",
                 candidate,
                 *flags_phys,
-                flags,
                 *obj_phys);
             return; // set the dummy and force on the next exit
         }
@@ -535,15 +535,19 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
             this->scalable_obj_dummy = dummy;
         }
 
-        constexpr std::uint64_t scalable_master = 0x20; // bit 5 only
+        // Force bit 5+6. Bit 6 is needed because this now runs EARLY (before
+        // finalize), and finalize clears bit 5 unless bit 6 is set (§18 Q3:
+        // 0x30b375, gated on bit 6). Every g_HvFeatureFlags writer is
+        // read-modify-write and none clears 5/6, so the forced bits survive
+        // feature assembly to both 0x30a59f checks (§18 Q3).
         std::uint64_t flags{};
         if (!read_guest_physical(
                 this->hvfeatureflags_gpa,
                 std::as_writable_bytes(std::span(&flags, 1)))) {
             return;
         }
-        if (scalable_master != (flags & scalable_master)) {
-            flags |= scalable_master;
+        if (scalable_and_present != (flags & scalable_and_present)) {
+            flags |= scalable_and_present;
             if (!write_guest_physical(
                     this->hvfeatureflags_gpa,
                     std::as_bytes(std::span(&flags, 1)))) {
@@ -559,7 +563,7 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
         }
         this->scalable_force_forced += 1;
         this->scalable_force_armed = true;
-        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5 "
+        log("nested vt-d: [0xb1e88] dummy set to {}, forced bit 5+6 "
             "(HvBootPhaseMode {})",
             this->scalable_obj_dummy,
             phase);
