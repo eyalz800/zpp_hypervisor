@@ -352,6 +352,45 @@ leading hypothesis: the standdown is the **zero privilege mask**, not the
 *and* hvix64 uses eVMCS and runs VBS, so a non-zero privilege mask is the
 difference. Confirm before building.
 
+### KVM review §13 decoded the contract - a synthetic-interface lift, not a bit-flip
+
+Confirmed from `hyperv.c`:
+- **Standdown is the privilege mask, not Hv#1.** KVM presents `"Hv#1"`
+  too and hvix64 uses eVMCS + runs VBS on it. zpp answers leaf
+  `0x40000003` as **EAX=0x60** (bits 5,6: HYPERCALL + VP_INDEX), EBX=0 -
+  missing the synthetic interfaces VBS needs: **SYNIC(b2), SYNTIMER(b3),
+  REFERENCE_TSC(b9), TIME_REF_COUNT(b1), APIC_ACCESS(b4)**.
+- **Two free bug-fixes** that bisect the wall: (1) zpp advertises the
+  eVMCS recommendation (leaf `0x40000004` bit 14) **only after
+  `guest_in_vmx_operation`** (`exit_dispatch.cpp:1739-1741`), but hvix64
+  reads it at init *before* VMXON - KVM sets it unconditionally; (2) the
+  eVMCS revision L0 must accept is `KVM_EVMCS_VERSION`(1) OR the guest's
+  `IA32_VMX_BASIC` revision_id (`nested.c:2123-2135`) - zpp must accept
+  its own VMX_BASIC revision in the assist page's first u32.
+- **The wall:** a privilege bit is a promise the backing MSRs answer -
+  advertising SYNIC/SYNTIMER means zpp must *implement* them or hvix64
+  faults. So **the eVMCS lever is gated behind a chunk of the Hyper-V
+  synthetic interface** (SYNIC + SYNTIMER large; TIME_REF_COUNT +
+  REFERENCE_TSC already backed by `publish_reference_tsc`). Announcing
+  Hv#1 with thin backing is *worse* than not - VBS stands down.
+
+### The disambiguation leans VTL0-scheduling, which would make eVMCS the wrong lever
+
+§12.4's gate: if VTL1 **completes** and phase-1 still stalls, it is
+VTL0-side scheduling and eVMCS is the wrong constraint. Measured
+(`vtl_return_vina_by_call_class`): VTL1 **completes** (VINA-clear at
+call-class 2 = 16,178); VTL0 briefly reaches PASSIVE (VINA-set class 0 =
+6,944) but the pending `0x2f` DPC softint pulls it back. So the dominant
+cost is **VTL0's own per-tick synthetic-MSR exit storm** (HV_EOI 34% /
+HV_STIMER0 32% / HV_ICR 30% - each an unconditional exit, synthetic-MSR
+range being outside both MSR-bitmap windows), not the 22/s VTL round-trip
+eVMCS shrinks. Third reframe of the lever: cut VTL0's per-tick exit cost,
+which eVMCS may not touch. Open question before any large lift: is the
+binding cost the round-trip (eVMCS) or the per-tick synthetic-MSR storm (a
+SYNIC-shaped fix)? Both are the same synthetic-interface implementation,
+both are latency work on a rig whose per-exit cost is mostly KVM's ~58x
+amplification - which on bare metal (zpp as L0) would not arise.
+
 ### One concrete lost vector, still to be classified
 
 The injection reconciliation shows vector `0x40` **staged 3,789 / carried
