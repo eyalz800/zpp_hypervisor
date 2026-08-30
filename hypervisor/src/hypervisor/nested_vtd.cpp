@@ -553,6 +553,17 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 (void)write_guest_physical(
                     present_gpa, std::as_bytes(std::span(&present, 1)));
             }
+
+            // Read the IOMMU-unit list head [0xb1e70] (§24): the scalable
+            // attach's HvpFindIommuUnit walks it, and empty (a self-linked
+            // LIST_ENTRY holding its own VA) means status 5. It sits 0x18
+            // below the scalable object [0xb1e88].
+            std::uint64_t unit_head{};
+            if (read_guest_physical(
+                    this->scalable_obj_gpa - 0x18,
+                    std::as_writable_bytes(std::span(&unit_head, 1)))) {
+                this->unit_list_head = unit_head;
+            }
             this->scalable_force_forced = 1;
         }
 

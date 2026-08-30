@@ -14062,7 +14062,16 @@ private:
     std::uint8_t attach_pending[max_cpus]{};
     std::uint64_t attach_pending_rip[max_cpus]{};
     std::uint16_t attach_status[max_cpus]{};
+    std::uint16_t attach_call_code[max_cpus]{}; // which HvCall latched
     std::uint64_t attach_captured[max_cpus]{};
+
+    /**
+     * The IOMMU-unit list head `[0xb1e70]` (secure-dma §24). The scalable
+     * attach's HvpFindIommuUnit searches it; on the un-enumerated rig it is
+     * an empty self-linked LIST_ENTRY (holds its own address), so the rebuild
+     * fails status 5. Read-only diagnostic to confirm the list is empty.
+     */
+    std::uint64_t unit_list_head{};
 
     /**
      * VTL0's stack at the `HvCallVtlCall`, so the call chain that leads

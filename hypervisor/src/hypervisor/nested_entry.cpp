@@ -10015,13 +10015,18 @@ hypervisor::on_l2_exit(std::size_t cpu,
         this->vmcs02_launched[cpu] = true;
     }
 
-    // Latch securekernel's HvCallAttachDevice (0x82) so its HV_STATUS can be
-    // read from the resumed VTL1 RAX (secure-dma §18). RCX low 16 bits is the
-    // hypercall call code; the VMCALL rip lets resume_guest match the return.
-    if ((cpu < max_cpus) && (basic_reason::vmcall == reason.basic()) &&
-        (0x82 == (context.rcx & 0xffff))) {
-        this->attach_pending[cpu] = 1;
-        this->attach_pending_rip[cpu] = this->vmcs.guest_rip();
+    // Latch securekernel's device-attach hypercalls so their HV_STATUS can be
+    // read from the resumed VTL1 RAX (secure-dma §18/§19). RCX low 16 bits is
+    // the call code; the family is 0x82 HvCallAttachDevice and 0xb1..0xb6
+    // (Create/Attach DeviceDomain etc. - modern VBS DMA-guard uses these).
+    // The VMCALL rip lets resume_guest match the return.
+    if ((cpu < max_cpus) && (basic_reason::vmcall == reason.basic())) {
+        auto code = context.rcx & 0xffff;
+        if ((0x82 == code) || ((code >= 0xb1) && (code <= 0xb6))) {
+            this->attach_pending[cpu] = 1;
+            this->attach_pending_rip[cpu] = this->vmcs.guest_rip();
+            this->attach_call_code[cpu] = static_cast<std::uint16_t>(code);
+        }
     }
 
     if (reason.entry_failure()) {
