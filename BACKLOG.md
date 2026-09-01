@@ -62780,3 +62780,41 @@ The two hardening counters reading zero is worth recording separately:
 the XSETBV and host PAT/EFER validation reject nothing a correct guest
 hypervisor does, so they are the safety nets they were meant to be
 rather than a behaviour change.
+
+### The clock rate is ~1,070/s, and it has been all along - 2026-08-31
+
+Caught the guest in `ExSetTimerResolution -> ExpUpdateTimerResolution ->
+ExpUpdateTimerConfiguration -> KeGenericProcessorCallback` - a driver
+raising the system timer resolution during load - and measured what it
+did:
+
+    KeTimeIncrement       9,765  (0.977 ms, 1024 Hz)   was 20,000 (2.000 ms, 500 Hz)
+    clock ISR entries     1,075/s      (HalpClockTickLogIndex over 25 s)
+    0xd1 injected         1,076/s
+
+**The interrupt rate did not change.** The previous boot measured 1,059
+ISR entries a second with `KeTimeIncrement` at 20,000; this one measures
+1,075 with it at 9,765. What changed is Windows' *accounting* per tick,
+not how often the interrupt arrives - and the new value makes the two
+agree 1:1, where before `InterruptTime` advanced at about half the ISR
+rate.
+
+**So every per-tick figure in this file was divided by the wrong
+number.** 574.7 Hz came from a disassembled constant, 500 Hz from
+`KeTimeIncrement` read live; the rate that actually matters is the one
+counted at the interrupt itself, ~1,070/s in both boots. At ~8,800
+exits/s that is about **8.2 exits per clock interrupt**, not the 16 this
+file has been quoting. The reflect accounting still closes - it was the
+denominator that was wrong, not the numerator.
+
+The instrument that settles it is `HalpClockTickLogIndex`, because it
+counts entries into the interrupt service routine and cannot be
+reinterpreted by an accounting constant. Prefer it to any increment.
+
+**And a reading discarded rather than quoted.** The same pass read
+`KeMaximumIncrement` and `KeMinimumIncrement` as 105,872,432 and
+4,294,935,695 - 10,587 ms and 429,493 ms. Those are not possible values
+for a timer increment, so those two RVAs are wrong and both numbers go
+in the bin. The check that caught it costs nothing and is the one this
+file keeps asking for: **ask whether a reading is possible before asking
+whether it is believable.**
