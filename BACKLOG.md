@@ -62863,3 +62863,37 @@ after it writes, and whether what it reads back can ever satisfy it.
 Next: decompile `ExpUpdateTimerConfigurationWorker` and
 `KeGenericProcessorCallback` for the exact loop condition, then check it
 against what this VMM returns for the STIMER registers it reflects.
+
+### The clock is periodic and healthy while the guest is stuck - 2026-08-31
+
+Measured the synthetic-timer accounting during the `ExSetTimerResolution`
+stall, to see whether a missed or unanswered timer arm is what the
+worker is waiting on. It is not:
+
+    stimer_arm_count        952,341   (+26,887 in 25 s = 1,075/s)
+    stimer_given_arms         1,039   (+0)
+    stimer_given_cycles  6,974,482,535 (+0)
+    stimer_arm_pending_tsc        0   (+0)
+
+Read against the code rather than by name: `stimer_arm_count` is
+incremented where the **clock vector is injected** (kind 3 in the arm
+ring), so its 1,075/s is the delivery rate and matches
+`HalpClockTickLogIndex` exactly. `stimer_given_arms` increments only when
+an outstanding guest *arm* is closed by that delivery, and
+`stimer_arm_pending_tsc` is zero - so **there is no arm outstanding**.
+
+Which means the timer is running **periodic and self-sustaining**: it
+fires 1,075 times a second without the guest re-arming it per tick, and
+every one of those is delivered. So the stall is not a timer this VMM
+failed to arm, failed to deliver, or answered late. The clock is the one
+part of the machine that is demonstrably working.
+
+That narrows the `ExpUpdateTimerConfigurationWorker` loop to something it
+reads or computes rather than something it waits to receive - the
+outstanding question for the disassembly.
+
+One instrument caveat recorded while here: `l2_msr_write_counts` reads 2
+and `synthetic_msr_accesses` reads 7, both frozen, while the exit
+histogram puts `wrmsr` at 36% of ~9,400 exits/s. They are not counting
+the reflected synthetic writes, so neither can be used as an MSR-traffic
+gauge. Read the histogram for that.
