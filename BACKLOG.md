@@ -62139,3 +62139,59 @@ Reading each:
 Next: census the faulting guest-physical addresses. Repeats on a small
 set names the pages; a spread names a policy. This is the functional
 lead, and unlike the VMCS-trap tax it is ours to fix.
+
+## The L1 host-state elision was dead behind `census_exits` - 2026-08-31
+
+`load_l1_host_state` restates the guest hypervisor's host state into
+vmcs01 on every reflection - 52 VMWRITEs, "26% of the wall clock" by its
+own comment, and on this rig every one of them traps to L0. It has an
+elision for exactly that, `host_field_elidable`, which skips a write
+whose slot has been *measured* stable. The measurement is taken by an
+audit loop, and that loop was gated:
+
+    if (nested_vmx::census_exits && cpu < max_cpus) {
+
+with the comment "It is diagnostic, so it goes behind `census_exits` ...
+the host elision it validates is unaffected and stays live."
+
+**The second half of that sentence was false, and it cost the whole
+elision.** `host_field_elidable` demands `l1_host_stable_after` samples
+in a slot, and that loop is the only thing that ever takes a sample. Off,
+the evidence is never gathered, every slot stays unmeasured, and the
+elision can never fire. It is not a diagnostic that feeds the elision; it
+is the elision's evidence with a diagnostic attached.
+
+Measured on the rig with `ZPP_CENSUS_EXITS=OFF` - which is how the guest
+has been built since the census's three VMREADs an exit were found to
+cost the boot:
+
+    l1_host_audits 0    l1_host_elided 0    l1_host_samples[*] 0
+    l1_host_written 53,706,900
+
+Not one write elided in a boot, in the phase that had once measured
+80.7%. So turning the census off silently turned the elision off with
+it - saving three reads an exit and paying forty-odd writes a
+reflection. That is the better account of why census=OFF unblocked the
+phase-1 hang and then drowned in DISPATCH time at the DPC watchdog.
+
+The gate is now the processor index alone. Measured either side, same
+guest, same 20 s window shape:
+
+| | before | after |
+|---|---|---|
+| `wrmsr` reflect | 85.6 acc/exit | **43.7** |
+| interrupt-window | 87.0 | **45.0** |
+| `vmresume` | 45.5 | 45.7 |
+| all exits | **65.7** | **44.8** |
+
+`l1_host_elided` climbs 4,246,858 in 20 s, **100.0%** of host-state
+writes in the window, `l1_host_stable_count` 52 of 52, and
+`l1_host_diverged` **0** - the audit's own divergence check, still
+running, still clean, which is what makes the skip sound rather than
+merely cheap. Exits in the window rose 152,936 -> 184,896: the guest gets
+more work done per second, which is the point.
+
+The general lesson is one this tree keeps paying for: **a switch that
+gates a measurement gates everything the measurement licenses.** The
+comment asserted the elision was unaffected; the counters said otherwise,
+and nothing read them until the exit mix was censused.

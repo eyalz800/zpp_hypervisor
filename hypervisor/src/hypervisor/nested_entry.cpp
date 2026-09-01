@@ -4675,11 +4675,34 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
     // the difference between "stable when I looked" and "stable".
     // The audit is a divergence check on the 37k-cycle host-load phase:
     // `l1_host_audit_batch` VMREADs a call at the maintenance rate, all
-    // 52 during the 4,096-call warm-up. It is diagnostic, so it goes
-    // behind `census_exits` with the other hot-path samplers - the host
-    // elision it validates (`host_field_elidable`) is unaffected and
-    // stays live.
-    if (nested_vmx::census_exits && cpu < max_cpus) {
+    // 52 during the 4,096-call warm-up.
+    //
+    // **It used to sit behind `census_exits`, on the reasoning that it
+    // is diagnostic and that "the host elision it validates
+    // (`host_field_elidable`) is unaffected and stays live". That
+    // reasoning was wrong, and the cost of it was the whole elision.**
+    // `host_field_elidable` demands `l1_host_stable_after` samples in a
+    // slot, and this loop is the *only* thing that ever takes a sample -
+    // so behind that gate the evidence is never gathered, every slot
+    // stays unmeasured, and the elision below can never fire. It is not
+    // a diagnostic that also happens to feed the elision; it is the
+    // elision's evidence, with a diagnostic attached.
+    //
+    // Measured on the rig with `ZPP_CENSUS_EXITS=OFF`, which is how the
+    // guest is built now that the census's three VMREADs an exit were
+    // found to cost the boot: `l1_host_audits` **0**, `l1_host_elided`
+    // **0**, every `l1_host_samples` slot **0**, against
+    // `l1_host_written` **53,706,900**. Not one write elided in a boot,
+    // where the phase this exists for had measured 80.7%.
+    //
+    // What that was worth, from the same run: a reflected `wrmsr` cost
+    // 85.6 VMCS accesses, 54 of them writes, and this function is 26% of
+    // the wall clock. The audit's price at the maintenance rate is
+    // `l1_host_audit_batch` reads a call - four, against the forty-odd
+    // writes a warmed-up slot table skips. Turning the census off must
+    // not turn the elision off with it, so the gate is on the processor
+    // index alone and the sampling runs unconditionally.
+    if (cpu < max_cpus) {
         if (auto recorded = this->l1_host_count[cpu]; 0 != recorded) {
             // A batch rather than a single slot, because the elision
             // below is live between one check of a slot and the next.
