@@ -62644,3 +62644,48 @@ and this phase makes few of them.
 `InitializationPhase` still reads 1, which is consistent rather than
 contradictory: it increments only after `StartFirstUserProcess` returns.
 That, and a process count of 4, remain the signals to wait for.
+
+### Shadow-EPT pool exhaustion refuted, and MBEC closed as correct - 2026-08-31
+
+Two open risks settled, one by measurement and one by the SDM.
+
+**The shadow-EPT pool is not exhausted.** The concern was arithmetic and
+sound: `shadow_ept_tables_per_cpu` is 96 and its own comment sizes it for
+2 MB leaves, while HVCI protects per 4 KB page - one pool table then
+covers only 2 MB, and the secure sweep protects about 73,000 pages, some
+285 MB, which wants ~143 tables against 96 shared by two trust levels'
+pointers. The predicted degradation is a sawtooth: install fails, the
+other slot is released, then the whole shadow is wiped and every leaf
+refaults one VM exit at a time - which would look exactly like the exit
+rate seen here.
+
+Measured on the live guest over 30 s:
+
+    shadow_ept_resets             0   (+0)     <- the whole question
+    shadow_ept_builds        18,266   (+0)
+    shadow_ept_cache_hits 16,675,909  (+135,199 = 4,507/s)
+    shadow_ept_replayed           0   (+0)
+    shadow_ept_next_victim        0
+    shadow_ept_current_slot       0
+
+Not one reset, no eviction pressure, one slot in use, and the cache
+serving every lookup. So the exits are not shadow thrashing.
+
+**MBEC is correct as shipped**, and the "HVCI's execute split is not
+enforced" risk carried since 21.4 is closed rather than outstanding.
+Mode-based execute control is off in three consistent places, and with
+MBEC=0 the SDM makes the user-execute bit **ignored, not reserved**, so
+the unconditional `execute_user(true)` in every shadow entry is inert -
+had it been reserved nothing would have run at all. Testing the plain
+execute bit for a fetch is then the right bit, and leaving qualification
+bit 6 clear is right because that bit is undefined with MBEC=0. The cost
+is honest: HVCI degrades to one execute bit per page, and it *is*
+enforced - the leaf histogram shows 372,205 read-write-no-execute
+against 15,347 read-write-execute.
+
+Left latent and worth fixing on its own: `install_shadow_split` aliases
+512 leaves onto one host frame when the guest mapping is already 4 KB
+(`page & 0xfff` is zero every iteration). Unreachable today - its only
+caller is behind `refresh_shadow_on_invept = false` - but it is exactly
+the sequence HVCI produces, and `tests/shadow_ept` only ever drives the
+splitter with a 2 MB mapping, which is why it passes.
