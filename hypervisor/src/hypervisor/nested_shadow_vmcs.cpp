@@ -326,7 +326,15 @@ void hypervisor::detect_underlying_hypervisor()
 
     constexpr std::uint32_t enlightened_vmcs_recommended = 1u << 14;
 
+    // Behind `use_underlying_evmcs`, and gated *here* rather than at each
+    // use: this one assignment is what every downstream decision reads,
+    // so switching it off leaves the whole upward enlightenment inert
+    // without a second place to keep in step. The recommendation is still
+    // read and still logged either way, because "what is underneath
+    // offered" and "what this VMM took up" are different facts and the
+    // log should carry both.
     this->underlying_offers_evmcs =
+        nested_vmx::use_underlying_evmcs &&
         (0 != (leaf[0] & enlightened_vmcs_recommended));
 
     log("underneath: recommendations {}, enlightened vmcs offered = {}",

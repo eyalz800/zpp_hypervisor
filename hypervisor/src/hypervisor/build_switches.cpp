@@ -353,6 +353,14 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // proceeds with kernel DMA protection functional.
         ' ', 'n', 'v', 't', 'd', '=',
         digit(nested_vmx::nested_vtd),
+        // Whether an enlightened VMCS is used with the hypervisor
+        // underneath this one, where it offers one. The upward
+        // direction, and the only enlightenment in the tree that used to
+        // have no switch - so it is in the manifest for the same reason
+        // the rest are: a run is not comparable with another until this
+        // is known, and the cache is not evidence.
+        ' ', 'u', 'e', 'v', 'm', 'c', 's', '=',
+        digit(nested_vmx::use_underlying_evmcs),
         // The application-processor state trace. Observational, so it
         // cannot change what the guest sees - but it is the difference
         // between a log that says which application of the start-up

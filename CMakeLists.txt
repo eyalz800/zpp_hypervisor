@@ -128,6 +128,23 @@ option(ZPP_NESTED_VTD
     "Present hvix64 a synthetic nested VT-d unit so VBS secure DMA succeeds"
     OFF)
 
+# Whether this VMM uses an enlightened VMCS with the hypervisor *underneath*
+# it, when that hypervisor offers one.
+#
+# Separate from ZPP_EVMCS, which is about what is offered to the guest above.
+# This one is the upward direction and had no switch at all: the decision was
+# taken from the underlying CPUID recommendation alone, so on a host that
+# advertises it this VMM would register a VP assist page and change how it
+# states its own VMCS with nothing to turn that off. Every other
+# enlightenment in this tree is switchable and this is now too.
+#
+# ON preserves the behaviour that was there before the switch existed - use
+# it where it is offered - so turning it OFF is the deliberate act, not
+# leaving it alone.
+option(ZPP_USE_UNDERLYING_EVMCS
+    "Use an enlightened VMCS with the hypervisor underneath, if it offers one"
+    ON)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -456,6 +473,7 @@ ExternalProject_Add(hypervisor
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
+        -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -654,6 +672,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
+        -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

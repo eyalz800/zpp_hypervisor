@@ -2461,6 +2461,30 @@ inline constexpr bool force_no_secure_dma = (0 != ZPP_FORCE_NO_SECURE_DMA);
  * alive untouched. Full per-page enforcement (a translating shadow SLPT)
  * is a later step; see `.references/nested-vtd-design.md`.
  */
+/**
+ * Whether this VMM uses an enlightened VMCS with the hypervisor
+ * *underneath* it, where one is offered.
+ *
+ * The opposite direction to `evmcs_offered`, which is about the guest
+ * above, and until this switch existed it had no control at all:
+ * `underlying_offers_evmcs` was taken from the underlying hypervisor's
+ * own CPUID recommendation, and everything downstream of it - the VP
+ * assist page this VMM registers for itself, and the shadow-VMCS path
+ * that consults it - followed from that with nothing able to decline.
+ *
+ * Defaulted on, because on is what the code did before the switch was
+ * added and a switch that silently changes behaviour is worse than the
+ * absence of one. Off is then a deliberate act, and it is the state to
+ * reach for when an enlightenment has to be ruled out of an
+ * investigation rather than argued about.
+ */
+#ifndef ZPP_USE_UNDERLYING_EVMCS
+#define ZPP_USE_UNDERLYING_EVMCS 1
+#endif
+
+inline constexpr bool use_underlying_evmcs =
+    (0 != ZPP_USE_UNDERLYING_EVMCS);
+
 #ifndef ZPP_NESTED_VTD
 #define ZPP_NESTED_VTD 0
 #endif

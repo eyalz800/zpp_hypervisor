@@ -1746,9 +1746,39 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             } else if (nested_vmx::evmcs_offered &&
                        (nested_features_leaf == leaf)) {
                 // The enlightened VMCS version, in the low half of eax.
-                // One is the only version defined, and the only one the
-                // structure transcribed here describes.
-                constexpr std::uint32_t enlightened_vmcs_version = 1;
+                //
+                // **`0x101`, not `1`, and the difference is the whole
+                // reason `ZPP_EVMCS=ON` has never worked.** Hyper-V does
+                // not read this as a plain integer: it tests
+                // `(eax & 0xff00) > 0xff`, so the *high* byte carries the
+                // version it compares and a low-byte-only answer reads as
+                // version zero - malformed. That is the missing half of
+                // the recorded stand-down. With this leaf answered, the
+                // guest hypervisor commits to the nested path early
+                // (`HvpRegisterWithUnderlyingHypervisor` writes
+                // `GUEST_OS_ID` and installs a hypercall stub as soon as
+                // leaf `0x40000003` EAX reports the pair it needs), then
+                // reaches `HvpInitializeNestedEnlightenments`, finds the
+                // enlightened-VMCS version it cannot parse, and executes
+                // VMXOFF - which is what "ninety-nine real VMWRITEs, one
+                // VMLAUNCH, then VMCLEAR and VMXOFF" was.
+                //
+                // Checked against both references rather than chosen:
+                // Hyper-V's own producer for this leaf writes `0x101`,
+                // and KVM's `KVM_EVMCS_VERSION` is `0x101`. Version one
+                // is still the only layout, and it is still the one
+                // `zpp/hypervisor/enlightened_vmcs.h` describes - the
+                // encoding of the number is what was wrong, not the
+                // structure behind it.
+                //
+                // Note what this does and does not turn on. It makes the
+                // guest hypervisor able to *recognise* that it is nested,
+                // which is the precondition for the relaxed-timing
+                // enlightenment it then grants its own guest. It does not
+                // recommend that it use an enlightened VMCS: that is bit
+                // 14 above, still behind the VMX-operation gate, and
+                // deliberately left there.
+                constexpr std::uint32_t enlightened_vmcs_version = 0x101;
 
                 cpuid_result[0] = enlightened_vmcs_version;
                 cpuid_result[1] = 0;
