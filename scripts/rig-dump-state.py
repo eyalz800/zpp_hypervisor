@@ -1910,14 +1910,16 @@ def dump_interrupt_window(args, elf, instance):
     branch to loop on.
     """
     members = ["int_window_asked", "int_window_stale", "int_window_vtpr",
-               "l2_given_vector", "l2_entries"]
+               "l2_given_vector", "l2_entries",
+               "nested_virtual_apic_address"]
     off = gdb_offsets(elf, members)
     classes = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)"
         "->int_window_vtpr[0] / 8"])[0]
 
     reader = Monitor(args.rig, args.port)
-    for member in ("int_window_asked", "int_window_stale", "l2_entries"):
+    for member in ("int_window_asked", "int_window_stale", "l2_entries",
+                   "nested_virtual_apic_address"):
         reader.queue(instance + off[member], args.cpus)
     reader.queue(instance + off["int_window_vtpr"], args.cpus * classes)
     # 32 bit counters, two to a quadword - the same packing
@@ -1967,10 +1969,30 @@ def dump_interrupt_window(args, elf, instance):
                 for i in range(classes)]
         rows = [r for r in rows if r[0]]
         if not rows:
-            print("  *** THIS NEVER HAPPENED: the priority was never "
-                  "sampled, because nested_virtual_apic_address is zero "
-                  "- the level above set no TPR shadow, so this VMM has "
-                  "no page to read the priority from. ***")
+            # Report the empty histogram, then READ the member that
+            # would explain it.  This branch used to assert "because
+            # nested_virtual_apic_address is zero" without ever
+            # looking, and on 2026-09-02 that was false - the member
+            # read 0x117a3c000 while this printed "no TPR shadow".
+            # The false cause vetoes ZPP_DELIVER_ON_DROP, whose whole
+            # precondition is that the level above DID set the shadow
+            # and left the threshold at zero.  An instrument may name
+            # a cause only from a value it has read.
+            page = word("nested_virtual_apic_address", cpu)
+            print(f"  the priority was never sampled: the class "
+                  f"histogram is empty on {asked:,} window exits.")
+            if page:
+                print(f"  *** but nested_virtual_apic_address is "
+                      f"0x{page:x}, NOT zero - the level above DID set "
+                      f"a TPR shadow, so 'no page to read from' is not "
+                      f"the reason. The sampling site is not running, "
+                      f"or is storing elsewhere. Do not read this as "
+                      f"evidence against a TPR-threshold fix. ***")
+            else:
+                print("  *** nested_virtual_apic_address is zero on "
+                      "this processor - the level above set no TPR "
+                      "shadow, so there is no page to read the "
+                      "priority from. ***")
             continue
 
         total = sum(c for c, _ in rows) or 1
