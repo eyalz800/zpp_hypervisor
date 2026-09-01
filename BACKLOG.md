@@ -62439,3 +62439,38 @@ The rule this is the third instance of in this file: **a rate derived by
 subtracting two counters that measure different things is not a
 measurement.** The exit histogram was already in the tree and answers it
 directly.
+
+### Reference-TSC live reads: the fit is inert, the offset is not - 2026-08-31
+
+Three members read off the running guest, to settle which of the
+reference-TSC defects are live rather than theoretical:
+
+    reference_fit_implied_hz  = 0            <- fit never produced a value
+    reference_implied_hz      = 0
+    reference_read_count      = 447          <- the guest IS reading the page
+    tsc_offset_from_guest     = -9,591,386,648 (signed)   <- NOT zero
+    l2_activity_state         = 0            <- active, not halted
+
+What that settles:
+
+- **The scale defects are not live.** Both implied-frequency members are
+  zero, so nothing has fitted a slope and the "1.58x fast scale" failure
+  is not happening here. The bounded-scale proposal was also withdrawn
+  on its own merits: `scale = 10^7 * 2^64 / tsc_hz`, so a 500 MHz - 8 GHz
+  bound is a 16x window and a 1.58x error sits inside it.
+- **The anchor mismatch is live.** `tsc_offset_from_guest` is about
+  -9.59e9 ticks, roughly -4.8 s at this machine's ~2 GHz. The reference
+  page is anchored on this VMM's own counter while the guest reads its
+  time-stamp counter through vmcs02, whose offset carries a term the
+  publish path does not. A guest computing reference time from the page
+  and comparing it against its own `rdtsc` sees two clocks that disagree
+  - and Windows cross-checks its clocks: `HalpWatchdogCheckPreResetNMI`
+  is the only reachable caller of bugcheck `0x1CA`, which this tree has
+  already produced once.
+- **`l2_activity_state` is 0 (active).** So the absence of `hlt` exits
+  is not a halted second-level guest being mis-reported.
+
+Not yet acted on: whether the guest actually derives anything from the
+page that it then compares against `rdtsc`. `reference_read_count` 447
+says it reads it; it does not say what it does with it. That is the read
+that decides whether this is a live wrong-answer or latent.
