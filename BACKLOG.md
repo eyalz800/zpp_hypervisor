@@ -62093,3 +62093,49 @@ adversarially. Reaching login needs enable_shadow_vmcs=1 (a rig reboot/
 reload) or a large SynIC/NoEOIRequired implementation in zpp (which
 collides with hvix64's ownership and is performance work) - neither
 inside the stated constraints.
+
+## The per-tick exit mix, measured: EPT violations are the anomaly - 2026-08-31
+
+`handler_reason_from_l2` and `handler_reason_exits` read off the paused
+census=OFF guest (module base 0x6706b000, memory intact after the
+DPC_WATCHDOG reset). These are the L2/all exit-reason histograms; note
+`exit_reason_counts` does NOT answer this question - most exits are
+answered inside `on_l2_exit` and never reach the main dispatcher, which
+is why it read a zero delta and why the earlier "5-6 reflects per tick"
+model was never checked against the medium.
+
+    exit_total = 4,551,496          from_l2 sum = 2,411,145
+
+    ALL exits by reason              L2 exits by reason
+      24 vmresume  2,060,136 45.3%    32 wrmsr      1,508,498 62.6%
+      32 wrmsr     1,508,498 33.1%     7 int-window   447,395 18.6%
+       7 int-window  447,395  9.8%    48 ept-viol     351,135 14.6%
+      48 ept-viol    351,136  7.7%    18 vmcall        83,515  3.5%
+      18 vmcall       83,515  1.8%    43 virt-eoi      10,246  0.4%
+      21 vmptrld      46,944  1.0%     1 ext-int        9,282  0.4%
+      50 invept       16,206  0.4%    31 rdmsr            572  0.0%
+
+At ~7,500 exits/s and a 574.7 Hz tick the boot ran ~349k ticks, so **per
+tick**: ~4.3 wrmsr, ~1.3 interrupt-window, ~1.0 EPT violation, ~0.24
+vmcall, ~5.9 vmresume = **~13 exits/tick**, not the 5-6 the reflect model
+predicted.
+
+Reading each:
+- **wrmsr 4.3/tick** matches the synthetic-MSR set (STIMER re-arm, EOM,
+  self-IPI, clock EOI, DPC EOI). Structural, hvix64 owns the SynIC.
+- **vmresume 5.9/tick** is one per L2 exit hvix64 handles and returns
+  from. Structural given the exit count above it.
+- **int-window 1.3/tick** is ~1 per injected clock: hvix64 wants 0xd1 in
+  while VTL0 is briefly non-interruptible, arms the window, takes the
+  exit when it opens. Real hardware does the same, so not obviously ours.
+- **ept-viol 1.0/tick is the ANOMALY.** A settled guest that is touching
+  no new memory should approach zero. One per tick, 351,135 of them,
+  against only 17,316 shadow-EPT rebuilds recorded earlier, says pages
+  are faulting repeatedly rather than being mapped once. That is a
+  correctness question - a mapping this VMM should have installed and
+  did not, or installed without the permission the access needs - and it
+  is worth ~8% of all exits.
+
+Next: census the faulting guest-physical addresses. Repeats on a small
+set names the pages; a spread names a policy. This is the functional
+lead, and unlike the VMCS-trap tax it is ours to fix.
