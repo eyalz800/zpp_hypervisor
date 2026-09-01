@@ -63047,3 +63047,39 @@ by guessing: walk candidate offsets, follow each as a pointer, and keep
 only the one whose `+0x168` holds an address inside the loaded kernel.
 That check is self-validating, which is what the last three instruments
 were not.
+
+### The livelock is located: ExpUpdateTimerConfigurationWorker - 2026-08-31
+
+Found it with an instrument that validates itself, after three that did
+not. When an interrupt is taken the processor pushes a five-qword frame
+whose second word is CS and fifth is SS; in kernel mode those are `0x10`
+and `0x18`. Scanning the current stack page for that exact shape, at that
+exact spacing, cannot match by accident the way a stack scan can.
+
+Six samples, six identical answers:
+
+    interrupted RIP = ExpUpdateTimerConfigurationWorker+0x1c5   (6/6)
+    also present    = KiDpcInterruptBypass+0x12                 (4/6)
+
+**And it reconciles with the CR8 test rather than contradicting it**,
+which is what makes it believable. That test said a thread spinning
+inside the worker would mask the clock, and the clock is advancing - so
+the thread cannot be in the body. It is not: the worker restores CR8 at
+RVA `0x30d471`, and `+0x1c5` is about `0x30d485`, roughly twenty bytes
+**past the restore**, in the epilogue where the clock is unmasked again.
+So the thread is repeatedly *leaving* that function and being
+interrupted on the way out - the re-entry case, not the spin case.
+
+What does not yet fit, and is the next thing to settle:
+`ExpLastRequestedTime` is **fixed** at 9,765 across six samples, and
+`ExpUpdateTimerResolution` is supposed to filter - it descends only when
+the request differs from that value. A caller re-entering the worker
+without changing the requested resolution should not get past the
+filter. So either the filter is not where it is believed to be, or
+something above `ExpUpdateTimerConfiguration` is calling it directly and
+repeatedly.
+
+The retraction two entries up stands as written - the guest is not
+*spinning inside* that function - but the function is where the loop
+lives, and the earlier stack samples that kept naming it were pointing
+at the right place for the wrong reason.
