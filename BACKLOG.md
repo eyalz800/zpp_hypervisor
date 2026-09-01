@@ -62474,3 +62474,38 @@ Not yet acted on: whether the guest actually derives anything from the
 page that it then compares against `rdtsc`. `reference_read_count` 447
 says it reads it; it does not say what it does with it. That is the read
 that decides whether this is a live wrong-answer or latent.
+
+### The clock is delivered exactly once - double-delivery refuted - 2026-08-31
+
+The last functional lead on the dominant per-tick cost was that hvix64
+re-injects the clock: SDM 27.8.3 has a VM exit clear the valid bit in
+the *current* VMCS (vmcs02) and not in vmcs12, and hvix64 reads that
+field back (RVA 0x35c100) and re-injects when it is still set, on the
+correct reasoning that its event never landed. If this VMM reflected an
+exit without clearing vmcs12's bit 31, one timer expiry would become two
+deliveries.
+
+Measured on the guest, 30 s window:
+
+    KeTimeIncrement (rva 0xfc6bbc)  = 20,000 (100ns) = 2.000 ms, 500 Hz
+    HalpClockTickLogIndex           +31,767   (1,059 ISR entries/s)
+    l2_injected_vector[0xd1]        +31,702   (1,057 injections/s)
+
+    injections per clock-ISR entry  = 1.00
+
+**One delivery per interrupt-service entry. There is no double
+delivery**, and there is nothing to fix: `nested_entry.cpp:5599` already
+clears the valid bit in vmcs12 on every reflected exit, citing the same
+rule, and this measurement is the evidence that it works.
+
+**It also retires the figure that started the hunt.** The "1.86
+injections per accounted tick" was arithmetic over the wrong constant:
+it used `KeQuantumEndTimerIncrement` (17,400) as the denominator, and
+`InterruptTime` advances by `KeTimeIncrement`, which reads **20,000**
+live. Both are runtime-initialised, so neither can be taken from a
+disassembly - which is how a 574.7 Hz figure quoted throughout this file
+became 500 Hz on the machine.
+
+That closes the clock-cost question as a correctness matter: the guest
+asks for these interrupts and gets exactly them. What remains is what
+each one costs, which is the per-exit tax and not a defect.
