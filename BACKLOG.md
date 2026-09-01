@@ -62302,3 +62302,27 @@ What this does and does not fix: the guest may now grind without being
 killed by the watchdog. It does **not** give VTL0 a PASSIVE slice - the
 per-tick cost is unchanged - so whether it reaches login is now a
 question of patience rather than of surviving a timeout.
+
+### It crossed both plateaus - 2026-08-31
+
+With `ZPP_ANNOUNCE_NESTED=ON` the guest went past the two counts every
+previous configuration froze at, and kept going:
+
+    vtl_fresh_calls   23,351   (every earlier build stopped at 22,214)
+    vtl_protect_count 41,982   (every earlier build stopped at 41,162)
+    VM status running, exits 3,784,592
+
+The rate is also unlike anything measured before - `vtl_fresh` +732/min
+and `vtl_protect` +934/min, against a previous best of 273/min in a
+burst that then died. So this is not the old burst-then-stall: it is
+sustained, and it is through the point that defined the stall.
+
+Worth separating two effects, because the switch was aimed at only one
+of them. Disarming the watchdog explains why the guest is not *killed*;
+it does not by itself explain why it is *faster*. `UseRelaxedTiming`
+also zeroes all six DPC timeout globals before `KiInitDpcThresholds`
+derives the per-processor values, so Windows stops enforcing DPC
+deadlines it could never meet here - and a kernel that is not
+continually policing its own late DPCs has less to do per tick. That is
+the likely second effect and it is worth confirming rather than
+assuming.
