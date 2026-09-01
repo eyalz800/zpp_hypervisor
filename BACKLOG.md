@@ -63384,3 +63384,44 @@ NVMe with real I/O completions, and then **stops in phase 1 with
 `Phase1Initialization` holding the processor, no trust-level transitions,
 and the clock still ticking.** That is the blocker, it is reproducible,
 and it is where the work now goes.
+
+### The frame is live, and the guest's clocks are correct - 2026-09-02
+
+Two measurements at the barrier, both on a residency-verified boot.
+
+**The `ExpUpdateTimerConfigurationWorker` frame is LIVE, not a fossil.**
+The IRET-frame scan now applies the liveness test it was missing: the
+stack grows down, so a frame at an address *below* the live stack
+pointer has already been popped and is fossil, while one at or above it
+is on the current chain. Sampled with `guest_stack_pointer` as the
+reference:
+
+    RSP 0xfffff48651807090   LIVE  (+0x168)  ExpUpdateTimerConfigurationWorker+0x1c5
+                             fossil(-0x058)  KiDpcInterruptBypass+0x12
+    RSP 0xfffff48651807060   LIVE  (+0x198)  ExpUpdateTimerConfigurationWorker+0x1c5
+
+So the earlier retraction was half right and half wrong: the *rate*
+claim was unfounded, but the frame really is on the current call chain,
+and `KiDpcInterruptBypass` - which the same scan reported alongside it -
+really was a fossil. The test separates them cleanly, and RSP moves
+between samples (0x7090, 0x6a98, 0x7060), so the thread is executing
+rather than parked.
+
+**And the guest's clocks are correct**, which removes the obvious reason
+a time-adjustment path would spin. Over a 45.0 s wall window:
+
+    InterruptTime  +45.27 s   ratio 1.006
+    SystemTime     +45.27 s   ratio 1.006
+    TickCountQuad  +2,897     (64/s, the ordinary 15.6 ms count)
+
+Both clocks track real time to six parts in a thousand and agree with
+each other. So whatever is re-entering
+`NtSetSystemInformation(SystemTimeAdjustmentInformation)` is not doing it
+because this VMM is telling the guest the wrong time or the wrong rate -
+the two failures that would make Windows retry a time adjustment.
+
+That leaves the caller. `ExpUpdateTimerConfigurationWorker` itself needs
+nothing from a hypervisor, its callers contain no retry, and the clock it
+would be retrying against is right. What is not yet known is **what calls
+`NtSetSystemInformation` with that class, repeatedly, on the
+`Phase1Initialization` thread**.
