@@ -62897,3 +62897,32 @@ and `synthetic_msr_accesses` reads 7, both frozen, while the exit
 histogram puts `wrmsr` at 36% of ~9,400 exits/s. They are not counting
 the reflected synthetic writes, so neither can be used as an MSR-traffic
 gauge. Read the histogram for that.
+
+### What the ExSetTimerResolution stall is not - 2026-08-31
+
+Everything eliminated so far, each on the medium rather than by
+argument, so the decompilation of the loop condition has a clear field:
+
+| candidate | measurement | verdict |
+|---|---|---|
+| VTL1 busy hashing | `in_vtl1` 0 x8, `vtl_half_cycles` bit-identical | not involved |
+| a processor that never answers | `KeNumberProcessors` 1, `KAFFINITY_EX` Count=1 | one target, itself |
+| timer never armed or delivered | arms 1,075/s delivered, no arm outstanding | clock is healthy |
+| self-IPI lost | `0x2f` injected **10.4/s** | delivered |
+| a bugcheck being missed | `KiBugCheckData` all zero | still running |
+
+The self-IPI rate is worth a note rather than a conclusion. `0x2f` is the
+dispatch software interrupt the scheduler requests through
+`HalRequestSoftwareInterrupt`, and 10.4/s against a 1,072/s clock is a
+hundredfold gap. That is *consistent with* correct behaviour - a
+dispatch interrupt is deferred until the task priority drops below
+DISPATCH, so the rate measures how often the guest actually falls below
+that level, not how often it asks. It is also consistent with a
+scheduler that cannot make progress. **The rate alone does not
+distinguish them**, and the `l2_self_ipi_*` counters cannot help: they
+instrument the `deliver_self_ipi` path, which is off, so their zeroes
+are inert rather than evidence.
+
+So the worker is executing, the machine underneath it is delivering
+everything it is asked to deliver, and what remains is what the loop
+itself tests.
