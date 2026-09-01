@@ -4231,6 +4231,40 @@ private:
     std::uint64_t tsc_offset_from_guest[max_cpus]{};
 
     /**
+     * The time-stamp counter **as the second-level guest reads it**.
+     *
+     * `resume_guest` already states the rule this exists to keep:
+     * "vmcs02's field carries both levels' offsets ... and vmcs01's
+     * carries only this VMM's". So a second-level guest executing
+     * `rdtsc` sees the host's counter plus *both* offsets, and anything
+     * this VMM publishes for that guest to compare against its own
+     * counter has to be anchored on the same view.
+     *
+     * The reference time-stamp page is exactly that: the guest computes
+     * `scaled(rdtsc) + offset` from it, so a page anchored on
+     * `rdtsc + dilation_offset` alone is out by
+     * `tsc_offset_from_guest` - a constant error, invisible to any rate
+     * or delta check, and Windows compares its clocks *against each
+     * other* (`HalpWatchdogCheckPreResetNMI`, the only reachable caller
+     * of bugcheck `0x1CA`). Measured on the rig with the page live -
+     * `TscSequence` 1, so the guest is reading it - and
+     * `tsc_offset_from_guest` at -14,107,386,648.
+     *
+     * The plain sum is exact only because time-stamp-counter *scaling*
+     * is not offered to the guest hypervisor; if it ever is, this
+     * becomes a multiply and every caller has to follow.
+     */
+    std::uint64_t l2_time_stamp_counter(std::size_t cpu) const
+    {
+        if (cpu >= max_cpus) {
+            return arch::x86_64::rdtsc();
+        }
+
+        return arch::x86_64::rdtsc() + this->dilation_offset[cpu] +
+               this->tsc_offset_from_guest[cpu];
+    }
+
+    /**
      * Moves `dilation_offset` on by whatever this VMM has just spent in
      * root operation, and writes the result into whichever VMCS is about
      * to be entered. Called from `resume_guest`, at the point where the

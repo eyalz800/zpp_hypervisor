@@ -7493,7 +7493,11 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
         std::uint64_t offset{};
 
         if (0 != published) {
-            auto now = arch::x86_64::rdtsc() + this->dilation_offset[cpu];
+            // The guest's own view, not this VMM's. See
+            // `l2_time_stamp_counter`: the page is read by the
+            // second-level guest against its `rdtsc`, which carries the
+            // guest hypervisor's offset as well as ours.
+            auto now = l2_time_stamp_counter(cpu);
             auto current = reference_tsc::scaled_tsc(
                                now, this->reference_scale[cpu]) +
                            this->reference_offset[cpu];

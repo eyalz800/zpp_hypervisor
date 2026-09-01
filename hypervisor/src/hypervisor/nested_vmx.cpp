@@ -2572,7 +2572,11 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
             // b` holds with constant `a` and `b` for the life of the
             // boot, where against the host's counter the relation bends
             // as the two levels' share of the machine changes.
-            auto when = arch::x86_64::rdtsc() + this->dilation_offset[cpu];
+            // Anchored on the guest's counter, not this VMM's - the
+            // baseline this feeds is compared against the reference
+            // counter the guest derives from its own `rdtsc`. See
+            // `l2_time_stamp_counter`.
+            auto when = l2_time_stamp_counter(cpu);
             this->reference_read_tsc[cpu][slot] = when;
             this->reference_read_count[cpu] =
                 this->reference_read_count[cpu] + 1;
