@@ -3426,6 +3426,30 @@ void hypervisor::intercept_io_port(std::uint16_t port, bool intercept)
     } else {
         byte &= static_cast<std::uint8_t>(~mask);
     }
+
+    // The same invariant `intercept_interrupt_command` states, and this
+    // function was the one place editing a bitmap without honouring it:
+    // every processor's merged bitmap was built from the page just
+    // edited, and `merge_nested_bitmaps` has a fast path that skips the
+    // merge entirely when it believes nothing has changed. That belief
+    // is true only until this runs.
+    //
+    // Left out, the failure is a livelock rather than a wrong answer,
+    // and it is on a path a boot reaches: this VMM releases a port by
+    // clearing its bit and asks for the instruction to be re-executed
+    // with `advance_rip` false, but a skipped merge leaves vmcs02's
+    // bitmap with the bit still set - so the same instruction takes the
+    // same exit, and neither level claims it, for ever. The measurement
+    // that makes it certain rather than theoretical is already recorded
+    // beside the cache: on Hyper-V, two of the three pages take the skip
+    // branch on every entry. ACPI.sys is a boot-start driver and ACPICA
+    // reads PM1_CONTROL routinely.
+    //
+    // Found by the KVM-comparison review
+    // (.references/kvm-nested-review.md 31.1). The tell in a dump, if it
+    // ever recurs: `exit_reason_counts[cpu][30]` climbing at a fixed
+    // guest RIP with `ept_violation_unclaimed` flat.
+    forget_nested_bitmaps();
 }
 
 bool hypervisor::on_io_instruction(arch::x86_64::context & context,
