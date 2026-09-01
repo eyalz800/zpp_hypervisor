@@ -62612,3 +62612,35 @@ MiWaitForInPageComplete -> MiValidateInPage -> MiValidateImagePfn ->
 SeValidateImageData -> VslValidateSecureImagePages`. It is paging driver
 images in from the NVMe and validating them through VTL1, which is what
 the 645 I/O completions were for.
+
+### It is past IoInitSystem and into the phase-1 tail - 2026-08-31
+
+Sampled the stack five times over a minute while the VTL counters were
+flat and the NVMe was idle - the shape that had just been written up as
+a possible stalled page-in. It is not one:
+
+    [45s]  KiPageFault <- PspLocateNtdllAddressesForScpCfg
+           <- PspNativeSystemDllData <- memmove <- PsInitializeScpCfgPages
+
+`PspNativeSystemDllData` and `PspLocateNtdllAddressesForScpCfg` are
+**ntdll initialisation**, which belongs to `MmInitSystemDll` /
+`PsInitSystem(2)` - steps *inside* `Phase1InitializationIoReady`. So the
+guest is **past `IoInitSystem`**, past both driver-load passes, and into
+the tail of phase 1. On the ordered list that leaves roughly four steps
+before `StartFirstUserProcess` creates the session manager.
+
+The other four samples are `MiProbeAndLockComplete ->
+VslpEnterIumSecureMode -> HvlSwitchToVsmVtl1` - secure page locking
+through VTL1, which is the same work seen from its other side.
+
+**Two readings this corrects, both mine.** The frozen NVMe counters
+(82 and 645, unmoving for minutes) were about to be written up as a
+submitted-and-never-completed page-in; they are idle because ntdll
+initialisation runs against pages that are already resident, and the
+disk has nothing to do. And the flat VTL counters do not mean the
+guest stopped - `vtl_fresh` and `vtl_protect` count trust-level calls,
+and this phase makes few of them.
+
+`InitializationPhase` still reads 1, which is consistent rather than
+contradictory: it increments only after `StartFirstUserProcess` returns.
+That, and a process count of 4, remain the signals to wait for.
