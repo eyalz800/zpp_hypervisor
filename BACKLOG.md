@@ -62926,3 +62926,55 @@ are inert rather than evidence.
 So the worker is executing, the machine underneath it is delivering
 everything it is asked to deliver, and what remains is what the loop
 itself tests.
+
+## RETRACTION: the guest was never pinned in ExSetTimerResolution - 2026-08-31
+
+The entry above it, and its commit, are **wrong**. The guest is not
+stalled in the timer-resolution path and never was.
+
+What settled it was a falsifiable prediction taken from the
+disassembly rather than the decompiler.
+`ExpUpdateTimerConfigurationWorker` raises `CR8` to `0xF` (HIGH_LEVEL) as
+the second thing it does and restores it at the very end:
+
+    mov rcx, cr8 / mov r15d, 0xf / mov cr8, r15   ...body...   mov cr8, rbp
+
+The clock vector `0xd1` is priority class 13, so it is **masked for the
+whole body**. That gives a test with only one way to pass:
+
+> spinning inside the worker => `HalpClockTickLogIndex` MUST be frozen.
+
+Measured:
+
+    HalpClockTickLogIndex  1,204,343 -> 1,256,952 over 50 s  (~1,043/s)
+    ExpLastRequestedTime   9,765, unchanged across six samples
+
+The clock is advancing, so the thread is **not** inside that function;
+and `ExpLastRequestedTime` is fixed at 9,765 - which is exactly
+`KeTimeIncrement` - so the resolution was requested once, applied, and
+finished. Both halves of the decision table point the same way: the
+frames were **stale residue in a stack scan**, and the real work is
+somewhere the scan did not show.
+
+Also retired with it: the worker reads no `HV_X64_MSR_*`, no reference
+counter and no VP-assist field - the only value it reads back is one it
+wrote two instructions earlier - so nothing in this VMM's synthetic-timer
+path could ever have failed it. And its self-IPI is issued at `CR8=0xF`,
+queued by construction, never waited on. The contrast that proves the
+shape: `HalpTimerInitializeClock` *does* poll a timer register for about
+three seconds and ends in `KeBugCheckEx(0x5C, 0x110, ...)` - **a
+hypervisor-dependent timer wait here is bounded and bugchecks; it does
+not hang.**
+
+**Third time the stack scan has misled this investigation**, and the
+pattern is now unmistakable: stale residue read as a call chain, flat
+counters read as a stall, and now stale frames read as a pin. It is a
+scan of a stack region, not an unwind, so a frame appearing in it means
+only that the value was once written there. **Use it for hints, never
+for conclusions**, and prefer a counter that cannot be reinterpreted -
+`HalpClockTickLogIndex` decided this in one read.
+
+One more instrument disqualified while here: `l2_entry_priority` is
+`std::uint8_t[max_cpus]` - the last priority per processor, not a
+histogram. Reading it as a census produced a "delta" of -32 spread over
+one bucket, which is meaningless.
