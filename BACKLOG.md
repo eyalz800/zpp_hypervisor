@@ -63009,3 +63009,41 @@ the same direction: **frozen VTL counters, a repeated stack frame and a
 low dispatch-interrupt rate all suggested a stall, and none of them was
 one.** The counter that settled it was the one that could not mean
 anything else.
+
+## CORRECTION: this is a livelock, not slowness - 2026-08-31
+
+Ninety minutes of observation across two independent watches, sampling
+every three minutes. Every validated indicator is frozen:
+
+    vtl_fresh_calls    36,459   +0 on all 15 samples
+    vtl_protect_count  53,563   +0
+    processes               3   phase 1   PspFirstUserProcessStarted 0
+    KPRCB.CurrentThread  0xffff848f064de080 - the SAME Phase1Initialization
+                         thread, unchanged in every sample
+
+while the clock advances at ~1,043/s and exits accrue at ~9,400/s.
+
+**A thread that owns the processor for ninety minutes and advances
+nothing is looping.** The "healthy but slow" reading recorded further up
+this page is wrong, and so is the inference that what separates this
+guest from the login screen is only the per-exit tax. There is a
+functional blocker, in VTL0, and it is ours to find.
+
+Two things that make it harder than it looks, both established here:
+
+- **The stack scan cannot locate it.** It is a scan of a stack region,
+  not an unwind, and it has produced three wrong answers already. Its
+  repeated `ExpUpdateTimerConfigurationWorker` frames were disproved by
+  the CR8 test: that function masks the clock for its whole body, and
+  the clock is advancing, so the thread is not inside it.
+- **The interrupted instruction pointer is not directly readable.** The
+  ntoskrnl PDB shipped here is public-symbols-only, so `_KTHREAD` has no
+  layout and `TrapFrame`'s offset cannot be looked up; and QEMU's gdb
+  stub shows this VMM's own context, never VTL0's, so `hbreak` answers a
+  different question.
+
+So the next step is to find `_KTHREAD.TrapFrame` empirically rather than
+by guessing: walk candidate offsets, follow each as a pointer, and keep
+only the one whose `+0x168` holds an address inside the loaded kernel.
+That check is self-validating, which is what the last three instruments
+were not.
