@@ -62249,3 +62249,56 @@ hypervisor interface (`ZPP_EVMCS=ON`) kills the boot at 4,756 exits with
 version was genuinely wrong (`1` where Hyper-V tests
 `(eax & 0xff00) > 0xff`, and both its own producer and KVM use `0x101`)
 and fixing it was necessary but not sufficient.
+
+## ZPP_ANNOUNCE_NESTED disarms the DPC watchdog, and the boot survives it - 2026-08-31
+
+The `0x133 DPC_WATCHDOG` bugcheck that ended the census=OFF boot is
+**gone**, and Hyper-V still runs. Both halves measured on the rig
+(module base per run, VTL0 cr3 `0x1ae000`, kernel `0xfffff805d4400000`):
+
+    HvlEnlightenments   rva 0xfc6af8  bit 5 = 1   (UseRelaxedTiming granted)
+    KeEnableWatchdogTimeout rva 0xfc6b33 = 0      (watchdog disarmed)
+
+    VM status running   vtl_fresh_calls 20,868   guest_vmxon_count 1
+
+The chain, every link now confirmed rather than inferred: zpp answers
+the minimum nested announcement -> Hyper-V sets `HvNestedFlags` bit 0 ->
+it grants `UseRelaxedTiming` to the root partition ->
+`HvlpDetermineEnlightenments` sets `HvlEnlightenments` bit 5 ->
+`KeInitSystem` calls `KeRelaxTimingConstraints(1)` ->
+`KeEnableWatchdogTimeout = 0`, and the six DPC timeout globals are
+zeroed before `KiInitDpcThresholds` derives the per-processor values, so
+the machinery is disarmed at both levels. The later re-arm is
+conditional on no hypervisor being present at all, so nothing undoes it.
+
+**Why this worked where `ZPP_EVMCS=ON` did not**, which is the part
+worth keeping. That switch changes seven things at once and the boot
+died at 4,756 exits with `vtl_fresh_calls` **0** - earlier than Hyper-V
+starting at all. Only three of the seven are needed. The other four are
+untested deltas, and the strongest suspect is the hypercall page: with
+the enlightenment offered it is swapped from one that answers locally to
+one that traps, and `exit_dispatch.cpp` already records that answering
+both ends made the trapping page **reset-loop** - `paused (shutdown)` at
+4,756 exits *is* a reset. `ZPP_ANNOUNCE_NESTED` leaves the page local.
+
+The announcement was also narrowed by disassembling Hyper-V's detection
+rather than decompiling it: it executes exactly two CPUID leaves, `1`
+and `0x40000001`, and **never reads the vendor leaf** at `0x40000000`.
+So the vendor stays `ZppZppZppZpp` - the earlier justification for
+flipping it to "Microsoft Hv" cites *Xen's* probe, which is not the
+guest hypervisor here.
+
+And the privilege mask is split, which is the one bit that separates the
+two outcomes. Hyper-V reads `0x40000003` EAX in two places wanting
+different masks: `HvpInitializeNestedEnlightenments` tests **bit 5
+alone**, and that is what sets `HvNestedFlags` bit 0;
+`HvpRegisterWithUnderlyingHypervisor` tests **bits 5 and 6 together**,
+and taking that branch makes it write `HV_X64_MSR_GUEST_OS_ID`, install
+a hypercall stub and start issuing hypercalls down to this VMM. Bit 6 is
+withheld, so the guest hypervisor learns it is nested without starting a
+conversation this VMM has not finished implementing.
+
+What this does and does not fix: the guest may now grind without being
+killed by the watchdog. It does **not** give VTL0 a PASSIVE slice - the
+per-tick cost is unchanged - so whether it reaches login is now a
+question of patience rather than of surviving a timeout.
