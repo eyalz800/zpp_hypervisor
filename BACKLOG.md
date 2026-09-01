@@ -63188,3 +63188,49 @@ storm), the L1 host-state elision (65.7 -> 44.8 VMCS accesses an exit),
 and the reference-page anchor (measured to carry the guest 47% past the
 previous ceiling, and confirmed by A/B that reverting it makes the guest
 much slower).
+
+### The trustlet call type is safe here, checked before the guest reached it - 2026-08-31
+
+The decompilation of the path ahead named a specific way Credential
+Guard could hang at `lsass` startup: `VslInitializeSecureProcess`
+(`0x58a93c`) calls `VslpEnterIumSecureMode` with its first argument
+**`0`, not `2`** - call *type* 0, "resume a parked secure thread",
+rather than a service invocation. That is a call type this boot has
+never exercised, with a different RBX contract, and the failure it would
+produce is a **hang, not a bugcheck** - the worst shape to diagnose
+after the fact.
+
+Checked in this tree before the guest got there. **zpp keys on the entry
+reason, not on RBX**: `nested_entry.cpp:10678-10679` decodes the
+hypercall code in RCX - `0x11` `HvCallVtlCall`, `0x12`
+`HvCallVtlReturn` - and every VTL transition is recognised from that.
+The single comparison involving RBX (`:10735`,
+`rbx != vtl_return_previous[cpu]`) is a census de-duplication for the
+trace ring, with no functional consequence. `capture_vtl_switch`'s
+`kind` argument is a literal at each of its three call sites, naming
+which census slot to fill, not anything the guest supplied.
+
+So call type 0 is handled exactly as call type 2 is, and the named hang
+cannot arise from that cause. Recorded as discharged rather than left as
+a worry, and worth the ten minutes: this is the first risk on this
+project to have been named, checked and closed *before* the guest
+reached the code that would have triggered it.
+
+Two other surfaces named at the same time, both still open and neither
+yet reachable: session-space creation is a `HvCallModifyVtlProtectionMask`
+burst (proven mechanism, new volume), and the **passed-through GPU
+aperture is the largest untested surface** - 256 MB to 16 GB at 4 KB
+shadow granularity would be up to four million EPT leaves against 8,192
+at 2 MB. zpp advertises `IA32_VMX_EPT_VPID_CAP` bits 16 and 17, so large
+pages are available; what is unconfirmed is whether the shadow builder
+installs 2 MB leaves for a large MMIO range rather than splitting to
+4 KB. That single decision is 512x. The tell is exit reason 48 with a
+faulting GPA inside the aperture.
+
+Markers for the next milestones, each with exactly one writer, so a
+process-list walk is not needed:
+
+    PspSessionIdBitmap      0xf05290  bit 0 = session 0, bit 1 = session 1
+    PsWin32kDataTableEntry  0xf05d20  non-NULL = win32k.sys loaded
+    PsWin32CalloutsEstablished 0xf05ba8  0->1 = csrss registered Win32
+    ExReadyForErrors        0xe68508  0->1 = csrss registered the error port
