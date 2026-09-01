@@ -206,10 +206,34 @@ std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
     auto page = guest_physical & ~0xfffull;
     auto slot = (page >> 12) % l2_translate_cache_entries;
 
+    // **The tag is `page | 1`, not `page`, and the low bit is what makes
+    // "empty" expressible.** `forget_l2_translations` writes zero into
+    // every tag to mean empty, and zero is also a perfectly legal guest
+    // page - the first one. So a lookup of any guest-physical address
+    // below 4 KiB used to *hit* a slot nobody had filled, and return
+    // `l2_translate_cache_value[slot]` - zero, or whatever the slot held
+    // before the flush - plus the offset. That is a host address, it is
+    // the wrong one, nothing faults, and callers of this function do not
+    // only read through what it returns: `nested_entry.cpp` writes
+    // guest-supplied page fields back through the same translation. A
+    // wrong answer here is memory corruption, not a stale read.
+    //
+    // A page is 4 KiB aligned, so bit zero is always clear in a real
+    // tag and setting it costs nothing: `page | 1` is never zero, for
+    // page zero or any other, so an untouched slot can no longer be
+    // mistaken for a filled one. The flush stays as it is - zero still
+    // means empty, and now only means that.
+    //
+    // Found by the KVM-comparison review
+    // (.references/kvm-nested-review.md 27.4); KVM keeps its shadow
+    // pages in a hash keyed by role and has no "zero means absent" slot
+    // to collide with.
+    auto tag = page | 1;
+
     if (this->l2_translate_cache_eptp[cpu] != eptp12) {
         forget_l2_translations(cpu);
         this->l2_translate_cache_eptp[cpu] = eptp12;
-    } else if (this->l2_translate_cache_tag[cpu][slot] == page) {
+    } else if (this->l2_translate_cache_tag[cpu][slot] == tag) {
         this->l2_translate_cache_hits[cpu] =
             this->l2_translate_cache_hits[cpu] + 1;
 
@@ -258,8 +282,10 @@ std::expected<std::uint64_t, zpp::error> hypervisor::l2_physical_to_l1(
     //
     // The page is stored, not the address, so a hit can serve any offset
     // within it - which is what makes one entry cover the whole of a
-    // page-table page being walked entry by entry.
-    this->l2_translate_cache_tag[cpu][slot] = page;
+    // page-table page being walked entry by entry. Tagged `page | 1` to
+    // match the lookup above: zero is reserved for "this slot is empty",
+    // and page zero is a real page.
+    this->l2_translate_cache_tag[cpu][slot] = tag;
     this->l2_translate_cache_value[cpu][slot] =
         walk.physical_address & ~0xfffull;
 
