@@ -63154,3 +63154,37 @@ is not yet proven, and the discriminator is cheap: if this path is the
 hot one, `KeSetTimeAdjustment` (`0x30d648`) must appear in the
 hot-address census, because it runs on this path and on no other path
 into the worker.
+
+## PHASE 1 IS COMPLETE - smss.exe is running - 2026-08-31
+
+The session manager exists. Three independent indicators, all agreeing,
+read off the live guest:
+
+    processes (4): System, Secure System, Registry, **smss.exe**
+    InitializationPhase         2     (StartFirstUserProcess returned)
+    PspFirstUserProcessStarted  1     (ZwResumeThread ran on smss)
+    vtl_fresh   40,146  (+5,378 in 30 s)
+    vtl_protect 56,766  (+4,593 in 30 s)
+
+`vtl_fresh` is **past 36,459**, the point the previous boot froze at, and
+still climbing at the fastest sustained rate this investigation has
+measured. Windows has left kernel initialisation and entered user-mode
+startup; what remains before the login screen is csrss, wininit,
+winlogon and LogonUI.
+
+**The previous boot's freeze was not deterministic.** This is the *same
+build* that froze - the anchor fix was reverted for one A/B boot and then
+restored, so the binary is identical to the one that sat at
+`vtl_fresh` 36,459 for ninety minutes. It sailed past that point this
+time. So whatever that was, it is not a reproducible barrier at a fixed
+place, and the `ExpUpdateTimerConfigurationWorker` re-entry - whose
+mechanism is now understood and which needs nothing from this VMM - is
+consistent with having been a fossil frame rather than a hot loop, which
+is exactly the caveat recorded one entry above.
+
+What carried the boot here, in the order the evidence supports it:
+`ZPP_ANNOUNCE_NESTED` (disarmed the `0x133` watchdog and stopped the DPC
+storm), the L1 host-state elision (65.7 -> 44.8 VMCS accesses an exit),
+and the reference-page anchor (measured to carry the guest 47% past the
+previous ceiling, and confirmed by A/B that reverting it makes the guest
+much slower).
