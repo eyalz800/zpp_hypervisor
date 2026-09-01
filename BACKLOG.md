@@ -62370,3 +62370,34 @@ interrupt - IRQ 16 frozen at 2150" was about the **INTx** line and is
 consistent with this: the NVMe uses MSI-X, on IRQs 124-149, and those
 are the ones that moved. An INTx counter says nothing about an MSI-X
 device.
+
+### It is not deadlocked - the worker is executing, slowly - 2026-08-31
+
+Two things checked before concluding anything about the storage stall,
+and both changed the reading:
+
+- **The nested VT-d unit was never programmed.** `dmar.global_command`
+  0, `dmar.global_status` 0 (so TES, RTPS and IRES all clear),
+  `root_table_address` 0, invalidation queue head and tail 0. hvix64
+  read ECAP to pass the feature gate and never enabled translation, so
+  device DMA is untranslated exactly as it was before `nvtd=1`. **The
+  fake VT-d is not the storage blocker** - which also means the five
+  known defects in that path are not implicated in this stall.
+- **The worker is running, not spinning on one instruction.** Sampled
+  `guest_stack_trace` twice, twenty seconds apart: at the first sample
+  the top of stack was `ExAllocateHeapPool+0x143c` under
+  `MiProbeLeafPteAccess`, at the second it was `HalpHvTimerArm+0x7a`
+  under `KiUpdateTime` and `HalPerformEndOfInterrupt`. Different RIP,
+  different RSP, walker count moving. The guest alternates between the
+  clock interrupt and real heap and memory-manager work.
+
+So the state is not a deadlock and not a lost interrupt: it is the same
+per-tick tax as ever, now applied to a guest that has got much further.
+`Phase1Initialization` waits behind the worker's heap segment lock
+because the worker holds it while being descheduled by the clock, not
+because anything is lost. Storage completed 37 admin commands and is
+idle because nothing has asked it for more yet.
+
+With the watchdog disarmed there is no longer a deadline to miss, so
+this is now a question of how long the remaining work takes rather than
+whether it can finish.
