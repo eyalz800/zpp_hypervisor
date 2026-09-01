@@ -62978,3 +62978,34 @@ One more instrument disqualified while here: `l2_entry_priority` is
 `std::uint8_t[max_cpus]` - the last priority per processor, not a
 histogram. Reading it as a census produced a "delta" of -32 spread over
 one bucket, which is meaningless.
+
+### The boot thread holds the processor - measured without a stack scan - 2026-08-31
+
+After retiring the stack scan, the question "where is the guest" needed
+an instrument that cannot be reinterpreted. `KPRCB.CurrentThread` is a
+single pointer written by the scheduler, so it answers directly.
+
+Eight samples over 84 s, every one identical:
+
+    KPRCB 0xfffff801482f4180   idle 0xfffff801bb9d25c0
+    CurrentThread 0xffff848f064de080  ->  Phase1Initialization
+
+**The boot thread itself is on the processor, continuously, and it is
+not the idle thread.** So phase 1 is *executing* - not blocked on a
+dispatcher object, not starved behind a worker, not waiting on an I/O.
+Every earlier state in this file had something else current:
+`KiExecuteDpc` during the storm, `ExpWorkerThread` during driver
+loading. This is the first time the thread that owns the boot is also
+the thread that owns the processor.
+
+Put beside the other live readings - clock advancing at ~1,043/s, VTL
+counters flat, three processes, `InitializationPhase` 1, no bugcheck -
+the picture is consistent and unremarkable: phase 1 is running plain
+kernel work that makes no trust-level calls, at the speed the per-exit
+tax allows.
+
+Worth stating because three separate readings in this file were wrong in
+the same direction: **frozen VTL counters, a repeated stack frame and a
+low dispatch-interrupt rate all suggested a stall, and none of them was
+one.** The counter that settled it was the one that could not mean
+anything else.
