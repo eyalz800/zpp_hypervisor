@@ -62566,3 +62566,49 @@ the I/O queue being created. It was true of that moment and wrong as a
 conclusion - the same bursty shape that made flat VTL windows look like
 stalls. **A device counter that is not moving means "not moving now",
 and on this guest almost everything is intermittent.**
+
+### A monotonic gauge for the rest of phase 1, and HVCI is not amplified by us - 2026-08-31
+
+**Stop reading the stack walk for progress; read these.** Both are
+monotonic, neither can report a dead frame, and the stack scan has now
+misled this investigation twice (stale residue read as a call chain, and
+flat windows read as stalls):
+
+    InitializationPhase   ntoskrnl RVA 0xfc3580   reads 1
+    PsActiveProcessHead   ntoskrnl RVA 0xf05c60   walk and count
+
+`InitializationPhase` increments immediately after
+`StartFirstUserProcess` returns, so **2 is the unambiguous "smss
+created" signal**; a process count of **4** is the same fact from the
+other side. Read live: `InitializationPhase` = 1, unchanged over 45 s -
+phase 1 is still inside `IoInitSystem`, which is where the stack census
+also puts it.
+
+What is still owed before that: `IoInitSystemPreDrivers`,
+`WerLiveKernelInitSystem`, **`IopInitializeSystemDrivers`** - a second
+and larger driver-load pass that pays the whole HVCI validation cost
+again - then `PnpSerializeBoot`, and only then the 29 ordered steps of
+`Phase1InitializationIoReady`. Five of those can block indefinitely
+rather than merely be slow (`IopReassignSystemRoot`/`IopMountVolume`,
+`CmInitSystem2`, `MmInitSystemDll`, `BapdpProcessVsmKeyBlobs`,
+`StartFirstUserProcess`) and they share two dependencies: the file
+system, and VTL1 answering. Both are alive here.
+
+**And the HVCI cost is not something this VMM inflates.** The question
+was whether our EPT or VTL protection makes the secure kernel re-walk or
+re-hash. It does not, and the proof is a measurement already taken
+rather than an argument: every mechanism that could cause it - a dropped
+mapping, a page-size split, a protection change VTL0 trips over, a leaf
+reinstalled per access - must surface as exit reason 48, and
+`ept-violation` measured **+0** through this exact phase. Two supporting
+facts: zpp advertises `IA32_VMX_EPT_VPID_CAP` bits 16 and 17, so hvix64
+is not forced into 4 KB-only EPT12; and `SkmiValidateImagePageNumber` is
+a cached-index-then-binary-search membership test over a sorted range
+array, not crypto - a page inside an already-validated range is never
+re-hashed.
+
+The guest's own stack agrees with all of it: `IoPageReadEx ->
+MiWaitForInPageComplete -> MiValidateInPage -> MiValidateImagePfn ->
+SeValidateImageData -> VslValidateSecureImagePages`. It is paging driver
+images in from the NVMe and validating them through VTL1, which is what
+the 645 I/O completions were for.
