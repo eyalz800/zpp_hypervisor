@@ -63083,3 +63083,25 @@ The retraction two entries up stands as written - the guest is not
 *spinning inside* that function - but the function is where the loop
 lives, and the earlier stack samples that kept naming it were pointing
 at the right place for the wrong reason.
+
+### The anchor fix did not cause the livelock - it exposed it - 2026-08-31
+
+The livelock appears in a *timer* path, and one of the three fixes
+deployed just before it deliberately changed the guest's clock, so the
+obvious suspicion was that I had caused it. Tested rather than argued:
+reverted `l2_time_stamp_counter` at both sample sites, rebuilt,
+redeployed, rebooted.
+
+    anchor fix ON   vtl_fresh reached 36,459 quickly, then froze
+    anchor fix OFF  vtl_fresh 20,897 after the same interval, +29 per 35 s
+
+Reverting made the guest **much slower**, not unstuck - the same
+difference measured when the fix first went in, where it carried the
+boot 47% past the previous ceiling. So the fix is not the cause; it is
+what got the guest far enough along to reach this livelock at all. Every
+earlier boot died or stalled before this point.
+
+Restored. The A/B is worth the twenty minutes it cost: "my last change
+broke it" is the right first suspicion when a new failure appears
+immediately after a deploy, and the only honest way to hold it is to put
+the change back and look.
