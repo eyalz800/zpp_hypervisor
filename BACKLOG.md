@@ -62818,3 +62818,48 @@ for a timer increment, so those two RVAs are wrong and both numbers go
 in the bin. The check that caught it costs nothing and is the one this
 file keeps asking for: **ask whether a reading is possible before asking
 whether it is believable.**
+
+## The guest is pinned in ExSetTimerResolution, and VTL1 is not involved - 2026-08-31
+
+The most specific stall this investigation has isolated. Six of six
+stack samples over 75 s, identical:
+
+    IoQueryFullDriverPath -> ExSetTimerResolution -> ExpUpdateTimerResolution
+      -> ExpUpdateTimerConfiguration -> KeGenericProcessorCallback
+        -> ExpUpdateTimerConfigurationWorker
+
+A driver is raising the system timer resolution during load, and the
+guest has been inside that call for minutes.
+
+**VTL1 is not involved, measured rather than assumed.** Eight samples
+over 70 s: `in_vtl1` **0** every time, and `vtl_half_cycles`
+*bit-identical* across all of them (107,544,787,620), with
+`vtl_reentries` 689, `vtl_fresh_calls` 36,459 and `vtl_copy_calls`
+12,387 all frozen. So this is not the HVCI hashing that explained
+earlier plateaus - no trust-level transition happens at all while exits
+climb at about 10,000/s. The "flat counters mean secure-kernel work"
+reading does not apply here and would have sent this to the wrong place.
+
+**It is not waiting for a processor that does not exist**, which was the
+obvious guess for a `KeGenericProcessorCallback` that does not return:
+
+    KeNumberProcessors        1
+    KUSER_SHARED_DATA ActiveProcessorCount  1
+    KeNumberProcessorsGroup0  1
+    KeActiveProcessors        0x200001  -> KAFFINITY_EX Count=1, Size=32
+
+One processor, consistently, so the callback has exactly one target and
+that target is the processor running it. `ExpUpdateTimerConfigurationWorker`
+is the *top* frame repeatedly, so the worker is executing rather than
+blocked waiting for peers.
+
+That points at the timer reprogramming itself, which is this VMM's
+business: under Hyper-V the HAL drives the synthetic timer through the
+`HV_X64_MSR_STIMER*` MSRs, every one of which this VMM reflects. Some of
+the reconfiguration clearly took - `KeTimeIncrement` changed from 20,000
+to 9,765 - so the question is what the worker is waiting to observe
+after it writes, and whether what it reads back can ever satisfy it.
+
+Next: decompile `ExpUpdateTimerConfigurationWorker` and
+`KeGenericProcessorCallback` for the exact loop condition, then check it
+against what this VMM returns for the STIMER registers it reflects.
