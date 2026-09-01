@@ -62195,3 +62195,57 @@ The general lesson is one this tree keeps paying for: **a switch that
 gates a measurement gates everything the measurement licenses.** The
 comment asserted the elision was unaffected; the counters said otherwise,
 and nothing read them until the exit mix was censused.
+
+## The stalled steady state, measured exit by exit - 2026-08-31
+
+With the L1 host-state elision live (44.8 VMCS accesses an exit, down
+from 65.7) the guest makes the fastest bursts this investigation has
+seen - `vtl_protect` +273/min, a counter that was **frozen** in every
+earlier configuration - and then stops again. Measured over 20 s in the
+stalled state, against an estimated 11,494 ticks at 574.7 Hz:
+
+    exits 185,049 (9,252/s) = 16.1 exits per tick
+
+    wrmsr        5.94/tick     0xd1 injected  1.96/tick
+    int-window   2.04/tick     0x2f injected  0.03/tick
+    vmresume     8.04/tick
+    ept-viol     0.00/tick
+    vmcall       0.00/tick
+
+Three things this settles:
+
+- **The loop is closed and it is only the clock.** `vmcall` at zero
+  means VTL0 is making no hypercalls at all, which is why `vtl_fresh`,
+  `vtl_protect` and `vtl_reentries` are all frozen: it is not
+  progressing slowly, it is attempting nothing but the tick. `ept-viol`
+  at zero says the same from the other side - no new memory is being
+  touched, so the ~1/tick EPT violations measured earlier belong to the
+  *bursts*, not to the stall.
+- **The reflect accounting closes exactly.** 5.94 + 2.04 = 7.98
+  reflected exits against 8.04 `vmresume`, one per reflection as the
+  level above returns. Nothing unaccounted for.
+- **There is no injection re-staging to reclaim.** 0xd1 is injected
+  1.96 times a tick, not the ~6 the cumulative `l2_injected_vector`
+  count had suggested. The earlier figure was boot-cumulative and
+  included the phase where the clock could not be delivered; in steady
+  state the staging is close to the delivery, so the "wasted entry per
+  failed injection" theory is refuted on the medium.
+
+What is left per tick is the synthetic-clock set the level above owns -
+six MSR writes and two interrupt-window exits - each costing a reflect
+and its return. That is 16 exits at ~45 VMCS accesses each, and every
+one of those accesses traps to L0 because the rig runs with
+`enable_shadow_vmcs=N`: about 725 trapping accesses a tick against a
+1.74 ms budget. The elision removed a third of that and the guest still
+cannot find a PASSIVE slice, which bounds how much more is needed.
+
+So the remaining levers are (a) `UseRelaxedTiming`, which is functional -
+Hyper-V grants it to a root partition that knows it is nested, and it
+sets `KeEnableWatchdogTimeout = 0` so the guest may grind without the
+`0x133` bugcheck - and (b) further per-exit cost, which is the thing the
+standing steer excludes. (a) is blocked today because announcing the
+hypervisor interface (`ZPP_EVMCS=ON`) kills the boot at 4,756 exits with
+`vtl_fresh` 0, far earlier than anything else; the enlightened-VMCS
+version was genuinely wrong (`1` where Hyper-V tests
+`(eax & 0xff00) > 0xff`, and both its own producer and KVM use `0x101`)
+and fixing it was necessary but not sufficient.
