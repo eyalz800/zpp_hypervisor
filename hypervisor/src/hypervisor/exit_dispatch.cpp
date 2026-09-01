@@ -1698,9 +1698,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 constexpr std::uint32_t privilege_hypercall_msrs = 1u << 5;
                 constexpr std::uint32_t privilege_vp_index_msr = 1u << 6;
 
+                // **Bit 6 only where the enlightened VMCS is offered,
+                // and the split is the whole point of
+                // `announce_nested`.** Hyper-V reads this mask in two
+                // places and they want different things: the nested
+                // enlightenment path tests bit 5 alone, and setting it
+                // is what makes it record that it is running nested -
+                // which is all `announce_nested` is after, because that
+                // is what grants `UseRelaxedTiming` to the level above
+                // and disarms the DPC watchdog. The *registration* path
+                // tests bits 5 and 6 together, and taking that branch
+                // makes it write `HV_X64_MSR_GUEST_OS_ID`, install a
+                // hypercall stub and begin issuing hypercalls down to
+                // this VMM.
+                //
+                // So with bit 6 clear the guest hypervisor learns it is
+                // nested and does not start a conversation this VMM has
+                // not finished implementing. With the enlightened VMCS
+                // actually offered the conversation is the point, and
+                // both bits are set as before.
                 if (features_leaf == leaf) {
                     cpuid_result[0] =
-                        privilege_hypercall_msrs | privilege_vp_index_msr;
+                        privilege_hypercall_msrs |
+                        (nested_vmx::evmcs_offered ? privilege_vp_index_msr
+                                                   : 0u);
                 }
 
                 // The one recommendation this VMM makes, and it is a

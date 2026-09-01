@@ -145,6 +145,32 @@ option(ZPP_USE_UNDERLYING_EVMCS
     "Use an enlightened VMCS with the hypervisor underneath, if it offers one"
     ON)
 
+# Tell the guest hypervisor it is running nested, and nothing more than that.
+#
+# Separate from ZPP_EVMCS on purpose. Offering the enlightened VMCS changes
+# seven things at once - the vendor string, the maximum leaf, the nested
+# features leaf, the privilege mask, and it swaps the hypercall page from one
+# that answers locally to one that traps - and the boot dies at 4,756 exits
+# with vtl_fresh_calls zero, which is earlier than Hyper-V starting at all.
+# The trapping page is the strongest suspect: exit_dispatch.cpp already
+# records that answering both ends made it reset-loop.
+#
+# This switch is the minimum that makes Hyper-V set HvNestedFlags bit 0, which
+# is what makes it grant UseRelaxedTiming to the root partition - and that
+# clears KeEnableWatchdogTimeout, disarming the 0x133 DPC watchdog that ends
+# the boot today. Disassembled rather than inferred: hvix64's detection reads
+# exactly two leaves, 1 and 0x40000001, and never the vendor leaf. It needs
+# ECX[31], 'Hv#1', 0x40000003 EAX bit 5, and EBX bit 12 clear.
+#
+# Bit 6 of that mask is deliberately NOT set here. Bit 5 alone is what
+# HvpInitializeNestedEnlightenments tests; HvpRegisterWithUnderlyingHypervisor
+# wants bits 5 and 6 together, and that is the path that installs a hypercall
+# stub and starts issuing hypercalls down to us. So this says "you are nested"
+# without inviting a conversation we have not finished implementing.
+option(ZPP_ANNOUNCE_NESTED
+    "Tell the guest hypervisor it is nested, without offering an eVMCS"
+    OFF)
+
 # Nested VMX: whether the guest is told VT-x exists.
 #
 # Off, and the default is the decision rather than a convenience. With it off
@@ -474,6 +500,7 @@ ExternalProject_Add(hypervisor
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
         -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
+        -DZPP_ANNOUNCE_NESTED=$<BOOL:${ZPP_ANNOUNCE_NESTED}>
         -DZPP_NESTED_VMX=${ZPP_NESTED_VMX}
         -DZPP_REQUEUE_INTERRUPTED_EVENTS=${ZPP_REQUEUE_INTERRUPTED_EVENTS}
         -DZPP_NESTED_TPR_SHADOW=${ZPP_NESTED_TPR_SHADOW}
@@ -673,6 +700,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
         -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
+        -DZPP_ANNOUNCE_NESTED=$<BOOL:${ZPP_ANNOUNCE_NESTED}>
     INSTALL_COMMAND ""
     BUILD_ALWAYS ON
     DEPENDS hypervisor

@@ -273,7 +273,36 @@ inline constexpr bool evmcs_offered =
 inline constexpr bool announce_hypervisor_bit =
     (0 != ZPP_ANNOUNCE_HYPERVISOR_BIT);
 
-inline constexpr bool announce_hypervisor = evmcs_offered;
+/**
+ * Tell the guest hypervisor it is running nested, and nothing more.
+ *
+ * `evmcs_offered` is seven changes at once and the boot does not
+ * survive it. This is the subset that matters, taken from Hyper-V's own
+ * detection path disassembled rather than decompiled: it reads exactly
+ * two leaves, `1` and `0x40000001`, and never the vendor leaf at
+ * `0x40000000` - so the vendor stays `ZppZppZppZpp`, the maximum leaf
+ * stays at the limits leaf, the nested-features leaf stays unanswered
+ * and the hypercall page stays the one that answers locally. All four
+ * follow from `evmcs_offered` staying off; only the announcement itself
+ * is new here.
+ *
+ * What it buys: `HvNestedFlags` bit 0, which is what makes Hyper-V
+ * grant `UseRelaxedTiming` to the root partition, which clears
+ * `KeEnableWatchdogTimeout` and disarms the `0x133` DPC watchdog - the
+ * bugcheck that ends the boot once the guest starts making progress.
+ * There is no other route to it: every other caller of
+ * `KeRelaxTimingConstraints` is a kernel debugger, a deferred-violation
+ * path that cannot be set from outside, or a no-hypervisor case that
+ * cannot hold once Hyper-V has connected.
+ */
+#ifndef ZPP_ANNOUNCE_NESTED
+#define ZPP_ANNOUNCE_NESTED 0
+#endif
+
+inline constexpr bool announce_nested = (0 != ZPP_ANNOUNCE_NESTED);
+
+inline constexpr bool announce_hypervisor =
+    evmcs_offered || announce_nested;
 
 inline constexpr bool enabled =
 #if defined(ZPP_NESTED_VMX) && ZPP_NESTED_VMX

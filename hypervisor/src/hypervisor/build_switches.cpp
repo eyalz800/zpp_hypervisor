@@ -361,6 +361,13 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // is known, and the cache is not evidence.
         ' ', 'u', 'e', 'v', 'm', 'c', 's', '=',
         digit(nested_vmx::use_underlying_evmcs),
+        // Whether the guest hypervisor is told it is nested at all -
+        // the minimum announcement, separate from offering it an
+        // enlightened VMCS. It decides whether Windows disarms its DPC
+        // watchdog, so a boot cannot be compared with another without
+        // it.
+        ' ', 'a', 'n', 'e', 's', 't', '=',
+        digit(nested_vmx::announce_nested),
         // The application-processor state trace. Observational, so it
         // cannot change what the guest sees - but it is the difference
         // between a log that says which application of the start-up

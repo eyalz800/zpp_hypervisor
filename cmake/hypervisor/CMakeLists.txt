@@ -341,6 +341,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
     -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
     -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
+    -DZPP_ANNOUNCE_NESTED=$<BOOL:${ZPP_ANNOUNCE_NESTED}>
     # Nested VMX. Same shape as the diagnostic switch - an always defined 0/1
     # macro turned into a constexpr bool by nested_vmx.h - and defined for both
     # configurations rather than debug only, because unlike diagnostics this is
