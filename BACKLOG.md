@@ -62541,3 +62541,28 @@ protection changes for that image land together.
 
 So the counter to watch is not the rate but whether bursts keep
 arriving. They are.
+
+### The NVMe I/O queue is live - real disk reads are completing - 2026-08-31
+
+Correlated across the two sides, and it retires the "storage stopped"
+reading recorded earlier on this page:
+
+    host  vfio-msix[0] (admin)  37 -> 82      zpp injected 0x60  37 -> 81
+    host  vfio-msix[1] (I/O)     1 -> 645     zpp injected 0x50  23 -> 598
+
+The two sides agree to within a couple of interrupts in flight, which
+also fixes the vector mapping: `msix[0]` is the admin queue and arrives
+as `0x60`, `msix[1]` is the first I/O completion queue and arrives as
+`0x50`. Nothing in this tree had established which was which.
+
+**645 I/O completions.** So the guest created an I/O completion queue,
+submitted real reads to the disk, and every completion was delivered
+device -> VFIO -> KVM -> zpp -> hvix64 -> VTL0. The storage path works
+end to end under four levels of nesting, with a passed-through NVMe.
+
+The earlier entry that read "storage completed 37 admin commands and
+then stopped" was a snapshot taken in the gap between admin bring-up and
+the I/O queue being created. It was true of that moment and wrong as a
+conclusion - the same bursty shape that made flat VTL windows look like
+stalls. **A device counter that is not moving means "not moving now",
+and on this guest almost everything is intermittent.**
