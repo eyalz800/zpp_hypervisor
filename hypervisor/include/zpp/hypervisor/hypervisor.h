@@ -3610,6 +3610,29 @@ private:
      */
 
     /**
+     * XSETBV refused for the guest hypervisor and answered with
+     * `#GP(0)` instead of being executed on the physical processor.
+     *
+     * Counted because the alternative to refusing is not "it works" but
+     * "the processor stops": XSETBV in root operation faults where the
+     * recovery point is disarmed, so a bad index or value from the level
+     * above would end the boot with nothing recorded anywhere. A count
+     * that climbs says that shape was reached and survived; a count that
+     * stays zero says the guest hypervisor only ever asks for what the
+     * machine supports, which is what every run so far has shown.
+     *
+     * `index` and `value` hold the last one refused, so a climbing count
+     * can be attributed rather than only noticed.
+     * @{
+     */
+    volatile std::uint64_t refused_xsetbv_count{};
+    volatile std::uint64_t refused_xsetbv_index{};
+    volatile std::uint64_t refused_xsetbv_value{};
+    /**
+     * @}
+     */
+
+    /**
      * Decodes that cannot describe the instruction that faulted.
      *
      * `watch_guest_page_writes` clears the write permission and nothing

@@ -1901,9 +1901,81 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // this handler already masks; this one did not.
         constexpr std::uint64_t low = 0xffffffffull;
 
-        arch::x86_64::xsetbv(context.rcx & low,
-                             (context.rax & low) |
-                                 ((context.rdx & low) << 32));
+        auto index = context.rcx & low;
+        auto value =
+            (context.rax & low) | ((context.rdx & low) << 32);
+
+        // **Every #GP condition SDM XSETBV lists, checked here, because
+        // this instruction is about to run on the physical processor in
+        // root operation.**
+        //
+        // The CPL check above was the only one, and it is the one that
+        // matters least: a guest hypervisor at ring zero may legally
+        // execute XSETBV, and what it passes is still its own to get
+        // wrong. `mov ecx, 1` alone is `#GP(0)` on every processor - and
+        // taken *here* that fault lands in root operation, where the
+        // recovery point is disarmed, so the processor stops with no
+        // exit record, no log line and nothing to read afterwards. It
+        // would present as a hang, which is the one failure shape this
+        // investigation can least afford to add.
+        //
+        // So the fault is emulated rather than taken: the answer a real
+        // processor gives is `#GP(0)` with RIP left where it is, which
+        // is what the CPL arm above already does. KVM validates the
+        // identical set in `__kvm_set_xcr` (.references/kvm/x86.c) and
+        // this follows it, condition for condition:
+        //
+        //   - only XCR0 exists, so any other index faults;
+        //   - x87 state cannot be turned off;
+        //   - nothing outside what this processor reports in
+        //     CPUID.(EAX=0DH,ECX=0):EDX:EAX may be set;
+        //   - AVX needs SSE under it;
+        //   - the two MPX halves are all or nothing;
+        //   - the three AVX-512 pieces are all or nothing, and need AVX.
+        constexpr std::uint64_t xcr0_x87 = 1ull << 0;
+        constexpr std::uint64_t xcr0_sse = 1ull << 1;
+        constexpr std::uint64_t xcr0_ymm = 1ull << 2;
+        constexpr std::uint64_t xcr0_bndreg = 1ull << 3;
+        constexpr std::uint64_t xcr0_bndcsr = 1ull << 4;
+        constexpr std::uint64_t xcr0_opmask = 1ull << 5;
+        constexpr std::uint64_t xcr0_zmm_hi256 = 1ull << 6;
+        constexpr std::uint64_t xcr0_hi16_zmm = 1ull << 7;
+        constexpr std::uint64_t xcr0_avx512 =
+            xcr0_opmask | xcr0_zmm_hi256 | xcr0_hi16_zmm;
+
+        // Asked of the processor rather than assumed: the supported set
+        // is a property of this machine, and a constant here would be a
+        // guess that fails in the permissive direction on the next one.
+        constexpr std::uint32_t extended_state_leaf = 0xd;
+        std::uint32_t extended_state[4]{};
+        arch::x86_64::cpuid(extended_state_leaf, 0, extended_state);
+
+        auto allowed =
+            static_cast<std::uint64_t>(extended_state[0]) |
+            (static_cast<std::uint64_t>(extended_state[3]) << 32);
+
+        auto mpx_split = ((0 != (value & xcr0_bndreg)) !=
+                          (0 != (value & xcr0_bndcsr)));
+
+        auto avx512_broken =
+            (0 != (value & xcr0_avx512)) &&
+            ((xcr0_avx512 != (value & xcr0_avx512)) ||
+             (0 == (value & xcr0_ymm)));
+
+        if ((0 != index) || (0 == (value & xcr0_x87)) ||
+            (0 != (value & ~allowed)) ||
+            ((0 != (value & xcr0_ymm)) && (0 == (value & xcr0_sse))) ||
+            mpx_split || avx512_broken) {
+            this->refused_xsetbv_count = this->refused_xsetbv_count + 1;
+            this->refused_xsetbv_index = index;
+            this->refused_xsetbv_value = value;
+
+            inject_general_protection_fault();
+            advance_rip = false;
+            break;
+        }
+
+        arch::x86_64::xsetbv(index, value);
         break;
     }
     case basic_reason::wrmsr:
