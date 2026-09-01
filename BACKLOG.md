@@ -62326,3 +62326,47 @@ deadlines it could never meet here - and a kernel that is not
 continually policing its own late DPCs has less to do per tick. That is
 the likely second effect and it is worth confirming rather than
 assuming.
+
+## The guest reaches storage, and NVMe completions arrive - 2026-08-31
+
+Furthest this investigation has got. With `ZPP_ANNOUNCE_NESTED=ON` the
+guest completed the VBS sweep, ran driver initialisation, brought up the
+storage stack, and **NVMe MSI-X completions were delivered into VTL0**:
+
+    L0  vfio-msix[0](0000:02:00.0)  37     vfio-msix[1]  1
+    zpp l2_injected_vector  0x60 x37, 0x50 x17, 0x51 x16
+        l2_external_vector  0x60 x23
+
+`msix[0]` and vector `0x60` agree at 37, so the admin-queue completion
+path works end to end: device -> VFIO -> KVM -> zpp -> hvix64 -> VTL0.
+That retires the standing worry that no device interrupt could reach
+VTL0; it can, and it did.
+
+The captured guest stack shows what it was doing, and it is the storage
+path rather than anything to do with trust levels:
+
+    Phase1Initialization -> IoInitSystem -> ExpWorkerThread ->
+    IopProcessWorkItem -> IofCallDriver -> KeFlushIoBuffers ->
+    IopBuildSynchronousFsdRequest -> IoAllocateMdl ->
+    MmProbeAndLockPages -> IofCallDriver -> ExAllocateHeapPool
+
+**And then it stopped.** Measured over 30 s: `0x50`, `0x51` and `0x60`
+all `+0`, `msix[0]` still 37, while the clock vector `0xd1` took
+`+30,434` and exits `+269,030`. So the machine is still running and
+still ticking; what has stopped is storage. One `ExpWorkerThread` has
+been the current thread continuously for 50 s inside a synchronous
+file-system request, and `Phase1Initialization` waits behind it on a
+heap segment push lock.
+
+Two shapes fit and they are worth separating before either is chased:
+an I/O was submitted and the device never completed it (the submission
+never reached the device - a doorbell or BAR write that did not land),
+or the completion arrived and something on our side lost the wakeup. The
+frozen `msix[0]` favours the first, since a device that had work would
+interrupt again.
+
+Note the earlier reading that "no passed-through device raises an
+interrupt - IRQ 16 frozen at 2150" was about the **INTx** line and is
+consistent with this: the NVMe uses MSI-X, on IRQs 124-149, and those
+are the ones that moved. An INTx counter says nothing about an MSI-X
+device.
