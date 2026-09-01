@@ -62509,3 +62509,35 @@ became 500 Hz on the machine.
 That closes the clock-cost question as a correctness matter: the guest
 asks for these interrupts and gets exactly them. What remains is what
 each one costs, which is the per-exit tax and not a defect.
+
+### Phase 1 is running, and progress arrives in bursts - 2026-08-31
+
+A 45-minute watch of the `ZPP_ANNOUNCE_NESTED` guest, sampling the VTL
+counters and the runnable threads together:
+
+    t=15..24m  vtl_fresh 23,351  vtl_protect 41,982   +0     [Ready: ExpWorkQueueManagerThread]
+    t=27m      vtl_fresh 23,664  vtl_protect 42,189   +313/+207
+                                                      [Running: Phase1Initialization]
+    t=30..39m  unchanged                              +0     [Running: Phase1Initialization]
+    t=42m      vtl_fresh 24,715  vtl_protect 43,310   +1,051/+1,121
+    t=45m      vtl_fresh 24,738  vtl_protect 43,348   +23/+38
+
+Two things worth keeping.
+
+**`Phase1Initialization` is the *running* thread from t=27m on.** For the
+whole earlier part of this investigation it was `Waiting` - first on the
+PnP device-action completion, then behind the worker's heap segment push
+lock. It now holds the processor itself, which is the state the boot
+needs and has not been seen before.
+
+**Progress is bursty, and a flat window is not a stall.** Twelve minutes
+at `+0` sit between two bursts of about a thousand VTL calls each. Read
+at three-minute resolution the guest looks stopped four times over and
+is not; the earlier readings in this file that called a flat window a
+stall were sampling the same pattern. The shape fits the work the stack
+census names - `MiWalkEntireImage` and `MiValidateSectionSigningPolicy`
+hash an image through without needing a single VTL call, and then the
+protection changes for that image land together.
+
+So the counter to watch is not the rate but whether bursts keep
+arriving. They are.
