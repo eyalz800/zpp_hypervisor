@@ -62741,3 +62741,42 @@ gave `HvlEndSystemInterrupt`, `HvlWriteApicCommandRegister` and
 the guest spends its time there. The real cost sits inside one secure
 call that VTL0 cannot see into. **A stack sample tells you where a
 thread is, not where the time is.**
+
+### The fixes carry the guest well past the previous ceiling - 2026-08-31
+
+Redeployed with everything committed this session - the I/O-bitmap
+invalidation, the watched-store double-apply, and the reference-page
+anchor - and restarted. The previous boot had gone about forty minutes
+without moving any validated indicator, and one of the undeployed fixes
+was for a *live* defect, so preserving it was no longer worth more than
+testing them.
+
+Measured on the fresh guest, minutes in:
+
+    vtl_fresh_calls    36,459   (+1,032 in 40 s)
+    vtl_protect_count  53,563   (+858   in 40 s)
+    exit_total       1,571,389
+    refused_host_msr_count 0    refused_xsetbv_count 0
+
+Against the previous boot's **maxima** of 24,738 and 43,348 - not its
+values at the same point, its ceilings, reached and then held for the
+rest of that run. So this guest is about 47% beyond where the last one
+stopped, and still climbing at roughly twice the best sustained rate
+that boot ever showed (1,548/min against 732/min), steadily rather than
+in the sparse bursts recorded above.
+
+**Attribution, honestly.** This is one run against one run, and the
+per-boot variation on this rig has never been characterised, so the
+magnitude is measured but the cause is not isolated. The reference-page
+anchor is the most plausible of the three: it was live, it made the
+guest's page-derived clock disagree with its own `rdtsc` by a constant
+several seconds, and a wrong constant in a clock is exactly what
+corrupts a timed wait in a phase that is full of them. The other two
+were verified latent on the medium before deployment - I/O exits at 0/s,
+and the watched-store site unreachable unless the decoder misreads - so
+neither should have changed anything, which is itself a useful control.
+
+The two hardening counters reading zero is worth recording separately:
+the XSETBV and host PAT/EFER validation reject nothing a correct guest
+hypervisor does, so they are the safety nets they were meant to be
+rather than a behaviour change.
