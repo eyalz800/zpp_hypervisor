@@ -2264,15 +2264,35 @@ def dump_dropped_requests(args, elf, instance):
                   "single-variable control - rebuild with the same "
                   "manifest and only the switch under test moved.")
 
-        if carried and carried < 100000:
-            print("  *** COST, READ THIS FIRST: the total carried is "
-                  "far below the 404,029 baseline. Delivery of "
-                  "EVERYTHING has collapsed, not just the vector under "
-                  "test, and a low ask count below is then an effect of "
-                  "that and not a measurement of the guest. This is "
-                  "what withholding the interrupt window does. Check "
-                  "`window withheld` on the next line: it must be 0. "
-                  "***")
+        # Judge the RATE, never the total.  This test used to read
+        # `carried < 100000` against a baseline accumulated over ~676 s,
+        # so a healthy run eleven seconds in tripped it: on 2026-09-02 it
+        # printed "delivery of EVERYTHING has collapsed" for a guest
+        # carrying 575.4 vectors/s against a 598.1/s baseline, three
+        # lines under its own correct per-second figure.  That is the
+        # "a total is not a rate" trap from CLAUDE.md, committed by the
+        # instrument written to catch it.  A short run must say it is
+        # short, not call the difference a collapse.
+        baseline_rate = 598.1
+        if carried and clock:
+            rate = carried / (clock / 574.7)
+            if (clock / 574.7) < 30.0:
+                print(f"  cannot judge cost yet: {clock / 574.7:,.1f}s "
+                      f"of guest clock is too short a span. The rate so "
+                      f"far is {rate:,.1f}/s against {baseline_rate}/s "
+                      f"- let it run and re-read.")
+            elif rate < 0.5 * baseline_rate:
+                print(f"  *** COST, READ THIS FIRST: {rate:,.1f} vectors "
+                      f"per second against a {baseline_rate}/s baseline. "
+                      f"Delivery of EVERYTHING has collapsed, not just "
+                      f"the vector under test, and a low ask count below "
+                      f"is then an effect of that and not a measurement "
+                      f"of the guest. This is what withholding the "
+                      f"interrupt window does. Check `window withheld` "
+                      f"on the next line: it must be 0. ***")
+        elif carried and not clock:
+            print("  cannot judge cost: no 0xd1 clock count, so there "
+                  "is no wall clock to turn the total into a rate.")
 
         # The mechanism's own account, which says whether the fix is
         # even running rather than whether it worked.

@@ -3123,6 +3123,68 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  * of `window_on_tpr` rather than a modifier of it; both on is refused
  * by a static assertion, since they drive the same state and one of
  * them withholds.
+ *
+ * ### It was run, 2026-09-02, and it reaches its own criterion
+ *
+ * One variable, every other manifest field byte-identical and checked
+ * as the whole string on the deployed binary, residency verified on
+ * both boots:
+ *
+ *     quantity                     drop=0            drop=1
+ *     distinct 0x2f requests       26,452            8
+ *     DROPPED                      14,916 (56.4%)    0
+ *     window withheld              0                 0
+ *     threshold armed on           -                 1,461 entries
+ *     priority drops reported      33 in 3.6M        59
+ *     all vectors carried per s    598.1 (baseline)  575.4
+ *
+ * Both halves of the criterion above hold: the drops go to zero and
+ * the total carried does not fall. The failure the two previous
+ * attempts shared did not recur.
+ *
+ * **Read the per-second line, not the totals.** `rig-dump-state.py`
+ * prints a `*** COST, READ THIS FIRST ***` here that is wrong: it
+ * compares 6,281 carried against the 404,029 baseline across ~11 s and
+ * ~676 s of guest clock. That is CLAUDE.md's own "a total is not a
+ * rate", committed by the instrument written to catch it.
+ *
+ * Still **off by default** after that run, for one reason: the guest
+ * then stopped, `paused (shutdown)`, for a cause not yet settled. It
+ * is not a crash - KiBugCheckData reads five zero words, and there was
+ * no unhandled exit and no VM-entry failure - but until the stop is
+ * explained this is a measured improvement to one counter and not a
+ * demonstrated path to a booted guest. Turning the default on needs a
+ * run that gets past it.
+ *
+ * ### What the two references say about the mechanism, added after
+ *
+ * Both of these arrived after the run and neither was known when the
+ * switch was written, so read them before extending it:
+ *
+ * - KVM declines this case outright. `vmx_update_cr8_intercept`
+ *   returns immediately when `is_guest_mode(vcpu) &&
+ *   nested_cpu_has(vmcs12, CPU_BASED_TPR_SHADOW)`
+ *   (`.references/kvm/vmx.c:6719`), and `prepare_vmcs02` writes
+ *   `vmcs12->tpr_threshold` verbatim with no merge
+ *   (`.references/kvm/nested.c:2368`). A threshold of 0 is KVM's own
+ *   encoding for "nothing pending that TPR blocks"
+ *   (`tpr_threshold = (irr == -1 || tpr < irr) ? 0 : irr`). It cannot
+ *   arise for KVM because KVM never owes a vector to L2 - its pending
+ *   interrupts belong to L1 and force a nested exit instead.
+ * - hvix64 agrees that 0 means cleared. `HvpApicRequestInterruptWakeup`
+ *   (RVA 0x32dcec) forks on *why* delivery was withheld: TPR-blocked
+ *   writes the vector's own class to 0x401C, interruptibility-blocked
+ *   sets primary bit 2 - the interrupt window - instead. Teardown
+ *   `HvpApicClearInterruptWakeup` (0x32cc20) writes 0x401C = 0.
+ *
+ * The consequence for this switch is worth stating plainly, because it
+ * argues the fix may be aimed one mechanism to the left:
+ * `KiDpcInterruptBypass+0x12` is inside an **STI shadow**, which is an
+ * interruptibility block and not a TPR block, so hvix64 answers it
+ * with the window by design. What must then be true is that vmcs12's
+ * primary bit 2 reaches vmcs02 and that the resulting reason-7 exit is
+ * *reflected* to hvix64 rather than consumed here. That is a different
+ * counter than any of the above and nothing has read it yet.
  */
 inline constexpr bool deliver_on_drop = (0 != ZPP_DELIVER_ON_DROP);
 
