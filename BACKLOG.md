@@ -63301,3 +63301,45 @@ something in user mode faulted and Windows Error Reporting was started.
 It is not on the path to the login screen and did not stop it.
 
 What remains is `LogonUI.exe`, which draws the credential screen.
+
+## A boot without the hypervisor could pass as ours - closed - 2026-09-02
+
+**This happened twice in one session, and the second time a fully booted
+Windows desktop - 55 processes, `dwm` running - was reported as a result
+of this VMM when there was no hypervisor under it at all.** The operator
+caught it, not any check here.
+
+Three separate holes, all now closed in `rig-boot.sh`:
+
+- **The varstore drifts.** QEMU opens `RELEASEX64_OVMF_VARS.fd`
+  read-write, so the firmware rewrites the boot order whenever it likes.
+  `deploy-to-rig.sh` reinstalls a single boot option pointing at our
+  loader, but a plain `kill` + `boot` with no deploy between them does
+  not - so the firmware drifts back to Windows' own loader and the guest
+  comes up bare. The boot script now reinstalls that option itself before
+  every launch, behind the existing `ZPP_KEEP_BOOT_ORDER` escape hatch,
+  and refuses to launch if it cannot.
+- **The serial log was never truncated.** The "did it start" check was
+  `grep -ac "zpp:" serial.out`, and `serial.out` persists across boots -
+  so a *previous* boot's output satisfied it. A stale instrument that
+  reports success is worse than no instrument, and this file already
+  records several of them. The log is now truncated immediately before
+  launch, so any match must belong to this boot.
+- **The check asked the wrong question.** Any `zpp:` line proved only
+  that the loader printed something. It now requires
+  **`allocate_rwx done at`**, which is the line the hypervisor emits when
+  it has mapped itself - the same marker every state reader uses to find
+  the singleton. If that is absent there is nothing to read and nothing
+  to report.
+
+The general rule, which is the one this project keeps rediscovering:
+**an instrument that cannot report its own absence will report health for
+ever after the thing stops.** The boot check had exactly that shape, and
+the cost was a page of conclusions drawn from a guest that was not
+running our code.
+
+What survives from those readings, and why: the milestones read out of
+zpp's own singleton - `vtl_fresh_calls`, `vtl_protect_count`, the module
+base - can only be read if the hypervisor is resident, so smss, csrss,
+win32k, winlogon and LsaIso stand. The 55-process desktop, read purely
+from guest memory through the monitor, does not.

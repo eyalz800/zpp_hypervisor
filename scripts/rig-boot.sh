@@ -194,6 +194,32 @@ say "/home/tc/zpp/serial.out, cpus ${CPUS:-<launcher default>}"
 # the sudo the launcher walks past every device step printing permission
 # denials and then tears itself down, which looks exactly like a guest
 # that booted and died.
+# **The varstore is rewritten before every launch, and the serial log is
+# truncated.** Both exist because a boot that silently ran *without* the
+# hypervisor was reported as ours, twice, and neither check below could
+# have caught it:
+#
+#   - QEMU opens `RELEASEX64_OVMF_VARS.fd` read-write, so the firmware
+#     rewrites the boot order as it pleases. A `kill` and `boot` without
+#     an intervening deploy therefore drifts back to whatever the
+#     firmware prefers, which is Windows' own loader, and the guest comes
+#     up with no hypervisor under it. Reinstalling the single boot option
+#     here makes every launch deterministic rather than dependent on
+#     whether a deploy happened to precede it.
+#   - `serial.out` was never truncated, so the "did the hypervisor start"
+#     check below could be satisfied by a *previous* boot's output. A
+#     stale instrument that reports success is worse than no instrument;
+#     this is the same class as every other stale reading in BACKLOG.md.
+if [ "${ZPP_KEEP_BOOT_ORDER:-0}" != "1" ]; then
+    "$(dirname "$0")/rig-one-boot-option.sh" >/dev/null || {
+        say "FAIL: could not install the boot option, so the firmware"
+        say "      would choose what boots. Refusing to launch."
+        exit 1
+    }
+fi
+
+rig 30 ': > /home/tc/zpp/serial.out' >/dev/null 2>&1 || true
+
 rig 120 "
     cd /home/tc/vm
     export ZPP_QEMU_EXTRA='$CHANNELS $EXTRA'
@@ -250,15 +276,16 @@ deadline=$((SECONDS + 240))
 
 while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 5
-    if rig 20 'grep -ac "zpp:" /home/tc/zpp/serial.out' 2>/dev/null \
-            | grep -qE '^[1-9]'; then
+    if rig 20 'grep -ac "allocate_rwx done at" /home/tc/zpp/serial.out' \
+            2>/dev/null | grep -qE '^[1-9]'; then
         serial=1
         break
     fi
 done
 
 if [ "$serial" -eq 0 ]; then
-    say "FAIL: no 'zpp:' line on serial within 240s. The firmware booted"
+    say "FAIL: no 'allocate_rwx done at' on serial within 240s - the"
+    say "      hypervisor never mapped itself. The firmware booted"
     say "      something other than the loader, so this run has no"
     say "      hypervisor in it. Check the guest's boot option with"
     say "      rig-one-boot-option.sh before debugging anything else."
