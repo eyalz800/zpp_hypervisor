@@ -63105,3 +63105,52 @@ Restored. The A/B is worth the twenty minutes it cost: "my last change
 broke it" is the right first suspicion when a new failure appears
 immediately after a deploy, and the only honest way to hold it is to put
 the change back and look.
+
+### The re-entry has a name, and my locating instrument has a limit - 2026-08-31
+
+**`NtSetSystemInformation(SystemTimeAdjustmentInformation)` calls
+`ExpUpdateTimerConfiguration` with its first parameter NULL**
+(`0xae2999`: `xor ecx, ecx` before the call). That parameter is the
+requested-resolution pointer, and with it NULL the worker's
+`if (*param_2 != 0)` guard is false - so the red-black tree descent, the
+clock reprogram and the self-IPI are **all skipped**. It raises CR8 to
+0xF, calls `KeSetTimeAdjustment`, writes `KeTimeSynchronization`,
+restores CR8, and leaves at `+0x1c5`.
+
+That single fact accounts for every observation at once, which is what
+makes it convincing: re-entry that never touches the filter,
+`ExpLastRequestedTime` and `KeTimeIncrement` frozen because the tree
+branch is never entered, the sampled RIP always `+0x1c5`, the clock
+still ticking because the CR8 window is short, and `vtl_fresh` /
+`vtl_protect` at +0 because nothing on that path touches VTL1.
+
+**And there is no retry to blame us for.** `ExSetTimerResolution` is
+single-pass; `ExpUpdateTimerResolution`'s only loop is a
+sentinel-terminated list walk; the requested-versus-achieved comparison
+exists but its only consequence is whether to emit a trace, and both
+branches return. The achieved value comes from
+`KiSetClockIntervalToMinimumRequested` over ntoskrnl's own tree, clamped
+by its own minimum and maximum - no HAL query, no STIMER read-back
+(`HalpHvTimerArm` returns 0 unconditionally). **Nothing this VMM answers
+can fail to converge, because nothing is converging.**
+
+**The limit of the IRET-frame scan, recorded because I over-claimed
+with it.** It validates the frame's *format* - CS `0x10`, SS `0x18`, at
+the architectural spacing - not its *liveness*. A frame below the live
+stack pointer is a fossil that nothing overwrites, so an identical frame
+at an identical offset for ninety minutes is at least as consistent with
+a parked thread as with a hot loop. And `+0x1c5` is a **deterministic
+landing site**: the first unmasked instruction after the CR8 window,
+exactly where a pending clock interrupt must land. Six samples out of six
+is what a *single* pass through that function would also produce. **It
+proves entry, not rate.** The fix is one more read - compare the frame's
+address against the live RSP, and sample RSP itself: varying means a live
+loop, identical means a fossil.
+
+So "the livelock is located" is too strong as written. What is
+established is the *mechanism* by which the worker is re-entered without
+the filter; whether that re-entry is the thing consuming ninety minutes
+is not yet proven, and the discriminator is cheap: if this path is the
+hot one, `KeSetTimeAdjustment` (`0x30d648`) must appear in the
+hot-address census, because it runs on this path and on no other path
+into the worker.
