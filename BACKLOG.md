@@ -63425,3 +63425,55 @@ nothing from a hypervisor, its callers contain no retry, and the clock it
 would be retrying against is right. What is not yet known is **what calls
 `NtSetSystemInformation` with that class, repeatedly, on the
 `Phase1Initialization` thread**.
+
+## The barrier is VBoxSup.sys's DriverEntry - 2026-09-02
+
+The complete live stack, every frame at or above the live RSP so every
+one is on the current chain:
+
+    KxStartSystemThread -> PspSystemThreadStartup -> Phase1Initialization+0x3b
+      -> IoInitSystem+0x2c -> IopInitializeSystemDrivers+0x1a6
+        -> PipCheckDependencies -> IopGetRegistryValue -> IopLoadDriver+0x6f2
+          -> PnpCallDriverEntry+0x54
+            -> ... -> ExSetTimerResolution+0xbc -> ExpUpdateTimerResolution+0x1cd
+              -> ExpUpdateTimerConfiguration -> KeGenericProcessorCallback
+                -> ExpUpdateTimerConfigurationWorker+0x1c5
+
+and the loaded-module list, walked from `PsLoadedModuleList`, ends:
+
+    ... vfpext.sys, pacer.sys, ndiscap.sys, netbios.sys,
+        Vid.sys, winhvr.sys, rdbss.sys, **VBoxSup.sys**
+
+`PnpCallDriverEntry` is on the stack and `VBoxSup.sys` is the most
+recently loaded module, so **the driver whose `DriverEntry` never
+returns is VirtualBox's support driver** - a third-party hypervisor
+driver, initialising inside a Windows that is itself running under
+Hyper-V under this VMM, four levels deep. It is present because it is
+installed in this Windows image, not because of anything this VMM does.
+
+**`+0x1c5` is not a spin, and the disassembly settles it:**
+
+    14030d471: mov cr8, rbp     ; restore the caller's IRQL
+    14030d475: mov rbx, [rsp+0x40]   <-- the sampled RIP
+               ... pop/ret, straight line, no branch
+
+`rbp` holds the IRQL the caller had, and on this path that is PASSIVE -
+so this single write drops from 15 to 0 and releases the clock, the DPC
+software interrupt and APCs at once. It is the largest unmask point in
+phase 1, which makes it the deterministic landing site for the whole
+masked backlog. The sampler finds it there every time because that is
+where a pending interrupt *must* land, not because the thread loops.
+
+Three readings retired by this, and they were mine: the frame is an
+**ancestor** the thread has not returned through, not evidence of
+re-entry; `ExpLastRequestedTime` is fixed at 9,765 because one call set
+it and nothing has run since; and `ExpTimerResolutionListHead` is empty
+(self-pointing, count 0), so the list walk was never looping either.
+
+**And one consequence of our own change, worth stating plainly:**
+`ZPP_ANNOUNCE_NESTED` grants `UseRelaxedTiming`, which zeroes
+`KeEnableWatchdogTimeout` and all six DPC timeout globals. That is what
+let the boot past the `0x133` bugcheck - and it is also why a driver that
+never returns now **hangs silently instead of naming itself in a
+bugcheck**. The trade was right, but it removed the instrument that would
+have identified this in one stop code.
