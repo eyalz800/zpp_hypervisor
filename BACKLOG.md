@@ -63265,3 +63265,39 @@ through VTL1, VTL protection, the synthetic clock, the SynIC - was
 already proven. The trustlet call-type risk was discharged before it was
 reached, and it is the next milestone (wininit -> lsass -> LsaIso under
 Credential Guard) that first exercises anything new.
+
+## winlogon and LsaIso are running - Credential Guard works - 2026-08-31
+
+Fourteen processes on the live guest:
+
+    System, Secure System, Registry, smss.exe,
+    csrss.exe, wininit.exe, csrss.exe,        <- session 0 and session 1
+    winlogon.exe, services.exe, WerFault.exe,
+    LsaIso.exe, lsass.exe, fontdrvhost.exe x2
+
+**`winlogon.exe` is the process that presents the login screen**, and it
+is running. Two `csrss` and two `fontdrvhost` mean both session 0 and the
+interactive session 1 exist.
+
+**`LsaIso.exe` is the Credential Guard trustlet, and it started.** That
+is the surface flagged two entries above as the only genuinely new one
+left - the trustlet path enters through `VslInitializeSecureProcess`
+with call *type* 0 rather than 2, and the predicted failure was a hang at
+`lsass` startup. It was checked against this tree before the guest got
+there and found safe, because zpp keys VTL transitions on the hypercall
+code in RCX rather than on RBX. **The prediction and the check both
+held**: `lsass.exe` and `LsaIso.exe` are both present, so an isolated
+user-mode trustlet is running under this VMM, four levels deep, with
+virtualization-based security on.
+
+That discharges the last named hypervisor dependency on the path. Every
+surface this boot needed - synthetic MSRs, the SynIC and its timers, the
+clock, image validation through VTL1, VTL protection masks, NVMe MSI-X,
+secure DMA, `UseRelaxedTiming`, and now the secure-process call type -
+has been exercised and works.
+
+`WerFault.exe` is present and worth watching rather than alarming at:
+something in user mode faulted and Windows Error Reporting was started.
+It is not on the path to the login screen and did not stop it.
+
+What remains is `LogonUI.exe`, which draws the credential screen.
