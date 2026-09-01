@@ -63234,3 +63234,34 @@ process-list walk is not needed:
     PsWin32kDataTableEntry  0xf05d20  non-NULL = win32k.sys loaded
     PsWin32CalloutsEstablished 0xf05ba8  0->1 = csrss registered Win32
     ExReadyForErrors        0xe68508  0->1 = csrss registered the error port
+
+## csrss is running - win32k loaded, Win32 subsystem registered - 2026-08-31
+
+Three of the four single-writer markers confirm it, and one of them
+changed **during** the observation, which is as close to watching it
+happen as this rig allows:
+
+    PsWin32kDataTableEntry      0xffffb00566473d50   non-NULL -> win32k.sys loaded
+    PsWin32CalloutsEstablished  1                    csrss registered the Win32 subsystem
+    ExReadyForErrors            0 -> 1               csrss registered the hard-error port
+    vtl_fresh 137,068 -> 140,524 across the same window
+
+So the chain now stands: phase 1 complete -> smss -> **csrss**, with
+win32k.sys mapped and validated. What remains before the login screen is
+wininit, winlogon and LogonUI.
+
+**One marker misread, corrected here rather than quoted.**
+`PspSessionIdBitmap` came back as 128 and that is not a session mask -
+the symbol names an `RTL_BITMAP`, whose first field is `SizeOfBitMap`
+(128 bits) with the bits themselves behind a `Buffer` pointer at +8. So
+"128" is the capacity, not "session 7". Reading a structure's header as
+its payload is the same class of error as the `KAFFINITY_EX` header that
+looked like two processors earlier today; both were caught by asking
+whether the value was *possible* rather than whether it was plausible.
+
+Worth noting what this milestone did **not** require: nothing new from
+this VMM. Every hypervisor surface csrss depends on - image validation
+through VTL1, VTL protection, the synthetic clock, the SynIC - was
+already proven. The trustlet call-type risk was discharged before it was
+reached, and it is the next milestone (wininit -> lsass -> LsaIso under
+Credential Guard) that first exercises anything new.
