@@ -63343,3 +63343,44 @@ zpp's own singleton - `vtl_fresh_calls`, `vtl_protect_count`, the module
 base - can only be read if the hypervisor is resident, so smss, csrss,
 win32k, winlogon and LsaIso stand. The 55-process desktop, read purely
 from guest memory through the monitor, does not.
+
+## WITHDRAWN: the smss/csrss/winlogon milestones, and the barrier is deterministic - 2026-09-02
+
+With residency **verified** (`allocate_rwx done at 0x6706a000` present in
+a serial log truncated at launch), the guest stops here:
+
+    vtl_fresh_calls   36,453      +0 across 70 s
+    vtl_protect_count 53,563      +0
+    in_vtl1           0
+    KPRCB.CurrentThread  Phase1Initialization
+    InitializationPhase 1, PspFirstUserProcessStarted 0, 3 processes
+
+The earlier boot that was also verified stopped at **36,459 / 53,563** -
+`vtl_protect` identical to the digit, `vtl_fresh` six apart. **This is a
+deterministic barrier**, reproducible across boots.
+
+Three things this retracts, all mine:
+
+- **The smss, csrss, win32k, winlogon and LsaIso milestones are
+  withdrawn.** Every one of them was read *past* this barrier, and the
+  only boot that went past it had **no hypervisor resident**. I argued
+  they survived because they came from zpp's singleton and the singleton
+  only exists if zpp is resident - but the address I read them at was
+  derived from a module base found in a **stale, untruncated** serial
+  log, so it named a location from a previous boot, not a live
+  hypervisor. That is precisely the failure the boot script has now been
+  hardened against, and I should not have leaned on the distinction to
+  keep the result.
+- **"The previous freeze was not deterministic" is withdrawn.** It rested
+  entirely on the boot that sailed past 36,459 - and that boot was bare
+  Windows, so it was never evidence about this VMM at all.
+- **"The livelock is located at `ExpUpdateTimerConfigurationWorker`" stays
+  withdrawn** for the reason already recorded (the IRET frame proved
+  entry, not rate), and the fossil reading is now the more likely one.
+
+What is actually established, on verified boots only: the guest completes
+the VBS sweep, loads and validates boot drivers through VTL1, brings up
+NVMe with real I/O completions, and then **stops in phase 1 with
+`Phase1Initialization` holding the processor, no trust-level transitions,
+and the clock still ticking.** That is the blocker, it is reproducible,
+and it is where the work now goes.
