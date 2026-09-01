@@ -849,17 +849,52 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                             store->length,
                             context.rip);
                     }
-                    return false;
                 }
 
-                // Same as the refused case above, and `context.rip`
-                // moves with it for the same reason.
-                context.rip = context.rip + store->length;
+                // **The processor's length wins here too, and returning
+                // `false` was the worse of the two answers.**
+                //
+                // This is the second of the two sites that disagreed
+                // about a decoded length; the refusal fifty lines above
+                // was fixed for exactly this and records what it cost
+                // ("This used to `return false` on a disagreement, and
+                // that killed a boot"). The reasoning there was that
+                // SDM 25.9.4 makes the VM-exit instruction length
+                // authoritative and this decoder the thing that can be
+                // wrong, so the only open question is how far to step
+                // RIP - and the processor has already answered it.
+                //
+                // What differs here makes `false` worse rather than
+                // better: at the refusal the write is *not* performed,
+                // and at this site **it already has been** - the comment
+                // above says so, "the value already written to the
+                // device register". `false` means "the protection was
+                // put there by something that is not going to handle
+                // the fault", and the caller resumes without advancing
+                // RIP; the page is still write-protected, so the guest
+                // re-executes the same instruction, decodes it the same
+                // way, and the store is applied a *second* time. On the
+                // interrupt command register that is a duplicate IPI,
+                // once per iteration, for as long as it lasts.
+                //
+                // So the disagreement is recorded - it still says the
+                // decoder misread something - and the step uses the
+                // length the processor reported, falling back to the
+                // decoded one only where the processor supplied none
+                // (SDM 25.9.4 leaves it undefined for some reasons, and
+                // zero is how that shows up).
+                //
+                // Found by the KVM-comparison review
+                // (.references/kvm-nested-review.md 33). Cold today, and
+                // it should stay that way: nothing reaches it unless the
+                // decoder is wrong about a store to a watched page.
+                auto advance =
+                    (0 != reported) ? reported : store->length;
+
+                context.rip = context.rip + advance;
                 this->vmcs.guest_rip(context.rip);
-                note_low_emulated_rip(cpu,
-                                      context.rip - store->length,
-                                      context.rip,
-                                      store->length);
+                note_low_emulated_rip(
+                    cpu, context.rip - advance, context.rip, advance);
                 return true;
             }
         }
