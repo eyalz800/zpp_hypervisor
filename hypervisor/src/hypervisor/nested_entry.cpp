@@ -4978,15 +4978,44 @@ void hypervisor::load_l1_host_state(std::size_t cpu)
         this->l1_host_count[cpu] = this->l1_host_written[cpu];
     }
 
+    // **Both values are the guest hypervisor's, and both go to a real
+    // MSR, so both are checked before they are written.**
+    //
+    // A reserved memory type in IA32_PAT or a bit outside the defined
+    // set in IA32_EFER is `#GP` on any processor. Taken *here* it is
+    // `#GP` in root operation, where `on_host_exception` has no recovery
+    // point once the guest is running - so a malformed vmcs12 field
+    // would stop the processor silently, with no exit record and no log
+    // line, on the hottest path this engine has. That is the same shape
+    // the XSETBV handler was just fixed for, one VMCS over.
+    //
+    // `msr_area_value_writable` is the check the MSR-area loader in this
+    // same file already applies to exactly these two indices, so this is
+    // reusing a decision rather than inventing one. Refusing leaves the
+    // register as it was: wrong for a guest hypervisor that asked for
+    // something impossible, against a dead machine for the same input.
+    // Counted, because a silent refusal is how the next investigation
+    // gets misled.
+    auto write_host_msr = [&](std::uint32_t index, std::uint64_t value) {
+        if (!msr_area_value_writable(index, value)) {
+            this->refused_host_msr_count =
+                this->refused_host_msr_count + 1;
+            this->refused_host_msr_index = index;
+            this->refused_host_msr_value = value;
+            return;
+        }
+
+        arch::x86_64::wrmsr(index, value);
+    };
+
     if (0 != (exit12 & exit_load_ia32_pat)) {
-        arch::x86_64::wrmsr(arch::x86_64::msr::ia32_pat,
-                            shadow.read(field::host_ia32_pat));
+        write_host_msr(arch::x86_64::msr::ia32_pat,
+                       shadow.read(field::host_ia32_pat));
     }
 
     if (0 != (exit12 & exit_load_ia32_efer)) {
-        arch::x86_64::wrmsr(
-            arch::x86_64::msr::ia32_extended_feature_enable,
-            shadow.read(field::host_ia32_efer));
+        write_host_msr(arch::x86_64::msr::ia32_extended_feature_enable,
+                       shadow.read(field::host_ia32_efer));
     } else {
         // LMA and LME are not part of that control's remit. SDM 30.5.1,
         // ".references/sdm.txt:204822": "The LMA and LME bits in the

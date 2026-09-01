@@ -3633,6 +3633,34 @@ private:
      */
 
     /**
+     * A vmcs12 host MSR value refused rather than written to the real
+     * register on the reflect path.
+     *
+     * `load_l1_host_state` puts `host_ia32_pat` and `host_ia32_efer`
+     * into the actual MSRs, because this VMM's own entry controls do not
+     * load either and the register is what the guest hypervisor will run
+     * with. That makes the value the guest hypervisor's to get wrong and
+     * the fault this VMM's to take: a reserved PAT byte or an EFER bit
+     * outside the defined set is `#GP`, and taken here it is `#GP` in
+     * root operation with no recovery point - the processor stops, with
+     * nothing recorded, on the hottest path in the nested engine.
+     *
+     * Refusing leaves the register as it was, which is a wrong register
+     * for a guest hypervisor that asked for something impossible; the
+     * alternative is a dead machine for the same input. Counted with the
+     * offending index and value so the choice is visible rather than
+     * silent - and on every run so far the count is zero, which is what
+     * a correct guest hypervisor produces.
+     * @{
+     */
+    volatile std::uint64_t refused_host_msr_count{};
+    volatile std::uint64_t refused_host_msr_index{};
+    volatile std::uint64_t refused_host_msr_value{};
+    /**
+     * @}
+     */
+
+    /**
      * Decodes that cannot describe the instruction that faulted.
      *
      * `watch_guest_page_writes` clears the write permission and nothing
