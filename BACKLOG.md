@@ -62689,3 +62689,55 @@ Left latent and worth fixing on its own: `install_shadow_split` aliases
 caller is behind `refresh_shadow_on_invept = false` - but it is exactly
 the sequence HVCI produces, and `tests/shadow_ept` only ever drives the
 splitter with a 2 MB mapping, which is why it passes.
+
+### No hypervisor dependency remains between here and smss - 2026-08-31
+
+Decompiled the whole stretch from ntdll initialisation to
+`StartFirstUserProcess`. **Nothing in it needs this VMM to implement
+anything new.** That retires the open worry that a hard blocker was
+waiting between the phase-1 tail and the session manager.
+
+**`BapdpProcessVsmKeyBlobs` is off the risk list.** It sounded like VSM
+key material that we would have to answer for; it is not. It selects a
+blob-name table from two attestation feature gates, then per blob does
+`ZwQueryValueKey` -> `ZwDeleteValueKey` -> `ZwCreateFile` ->
+`ZwWriteFile` -> `ZwClose`, migrating key material from the registry to
+files. **Zero hypercalls, zero secure-service calls**, returns `void`,
+and ignores every failure - a missing blob, a failed create and a failed
+write all just continue - so no bugcheck is reachable from it. Its only
+requirement is a writable volume.
+
+**Why `vtl_fresh` is flat, settled from the other side.**
+`VslValidateSecureImagePages` locks a ~1.98 MB chunk and makes **one**
+`VslpEnterIumSecureMode(2, 0xc1, 0)` per chunk, plus one
+`VslpEnterIumSecureMode(2, 0x19, ...)` per image to create the secure
+image object. So the hashing is proportional to *bytes* and happens
+entirely inside VTL1, while the switch count is proportional to
+*megabytes*: ntdll is about two calls, smss about one, a boot driver
+about one. **`vtl_fresh` therefore cannot resolve progress in this
+phase** - it moves twice for the whole of ntdll - and a long quiet
+stretch with a live clock is the expected signature rather than a stall.
+
+**The instruments to use instead**, in the order they change:
+
+    processes == 4                          smss's EPROCESS exists
+    PspFirstUserProcessStarted  0xe65e54    1 between ZwResumeThread and the delay
+    InitializationPhase         0xfc3580    2, but lags by a 5.000 s KeDelayExecutionThread
+
+Read live: 3 processes, `PspFirstUserProcessStarted` 0,
+`InitializationPhase` 1 - consistent, and placing the guest before smss
+creation.
+
+And if it fails rather than being slow, it will say so precisely: every
+failure in `StartFirstUserProcess` is `KeBugCheckEx(0x6D, status, 0, N,
+0)` with **N naming the sub-step** - 4 `ExpInitializeRunLevel0`, 0 pool
+allocation, 1 `RtlpCreateUserProcess` (where smss.exe is sectioned and
+HVCI-validated), 2 `ZwSetInformationProcess`, 3 `ZwResumeThread`.
+
+**Method note, which cost two rounds here.** A sampled RIP histogram
+taken at VM exits is biased to code that *causes exits*: ten samples
+gave `HvlEndSystemInterrupt`, `HvlWriteApicCommandRegister` and
+`HalpHvTimerArm` only, which says the clock produces the exits, not that
+the guest spends its time there. The real cost sits inside one secure
+call that VTL0 cannot see into. **A stack sample tells you where a
+thread is, not where the time is.**
