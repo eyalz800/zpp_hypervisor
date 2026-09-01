@@ -62401,3 +62401,41 @@ idle because nothing has asked it for more yet.
 With the watchdog disarmed there is no longer a deadline to miss, so
 this is now a question of how long the remaining work takes rather than
 whether it can finish.
+
+### The guest is doing HVCI image validation - it is advancing - 2026-08-31
+
+Sampled `guest_stack_trace` five times over 100 s and compared the
+frames with the clock path filtered out. **Five samples, five distinct
+stacks**, and they name work rather than a loop:
+
+    MiInsertPageInFreeOrZeroedList, VslRemoveProtectedPage, KiQuantumEnd
+    MiTryZeroMemory, MiBackgroundZeroLocalPages
+    KeClockInterruptNotify, MiValidateSectionSigningPolicy
+    MmAccessFault, MiProbeLockFrame, VslpIumThreadSemaphore
+    MiCreateNewSection, MiValidateSectionSigningPolicy,
+      SeGetImageRequiredSigningLevel, MiWalkEntireImage
+
+`MiCreateNewSection` with `MiValidateSectionSigningPolicy` and
+`SeGetImageRequiredSigningLevel`, over `HvlSwitchToVsmVtl1` and
+`VslpEnterIumSecureMode`, is **HVCI validating driver images through
+VTL1** - the work that precedes the session manager. The guest is
+mapping and signature-checking images, not repeating one operation.
+
+**Correcting an inference that would have sent this somewhere wrong.**
+The Hyper-V analysis derived "~7,950 non-clock exits a second" by
+subtracting clock *injections* (30,434) from total *exits* (269,030) and
+concluded some thread must be leaving the guest every 125 us on another
+reason - a BAR re-fault loop or a per-I/O `WBINVD` were the candidates.
+That subtraction conflates two different quantities: one clock tick
+causes about sixteen exits (the synthetic-MSR writes, the interrupt
+window, and the level above's `vmresume` for each), so 30,434 injections
+account for essentially all 269,030 exits. The histogram measured
+directly says the same: `wrmsr` 36.0%, `vmresume` 49.9%, `int-window`
+12.8% - about 99% between them - with `ept-viol`, `io`, `apic-access`,
+`hlt` and `cr` all **+0** over 25 s. So there is no hidden polling loop,
+no BAR re-fault (that would be reason 48) and no `WBINVD` storm.
+
+The rule this is the third instance of in this file: **a rate derived by
+subtracting two counters that measure different things is not a
+measurement.** The exit histogram was already in the tree and answers it
+directly.
