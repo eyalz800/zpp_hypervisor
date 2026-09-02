@@ -3124,6 +3124,40 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  * by a static assertion, since they drive the same state and one of
  * them withholds.
  *
+ * ### RE-RUN AT A MATCHED SPAN, 2026-09-02, and it works
+ *
+ * The withdrawal below stands - that experiment was invalid - but the
+ * experiment was then run properly and the switch is good. One
+ * variable, one processor (`ZPP_CPUS=1`) on both sides, same guest,
+ * both sampled ~11-13 minutes in:
+ *
+ *     quantity                    drop=0        drop=1
+ *     distinct 0x2f requests      11,312        47,761   (4.2x)
+ *     DROPPED                     2,862 (25.3%) 158 (0.3%)
+ *     coalesced away              285,240       6,069
+ *     trust-level round trips     37,165        141,735  (3.8x)
+ *     priority drops reported     -             10,250
+ *     window withheld             0             0
+ *
+ * The hot map is the part that is hard to argue with. With the switch
+ * off the guest's two hottest resume sites are
+ * `KiDpcInterruptBypass+0x12` at 50.8% and `KeIpiGenericCall+0x13a` at
+ * 38.2% - 89% of all resumes at two unmask points, which is the
+ * livelock. With it on **neither appears in the top four at all**.
+ *
+ * And the guest moves. Off, it sits in
+ * `IopLoadDriver -> PnpCallDriverEntry -> ExSetTimerResolution`. On, it
+ * is in `IofCallDriver -> PopFxActivateComponent / PopFxProcessWork /
+ * PopPluginComponentActive` with `ExSetTimer`/`KeSetTimer2` - driver
+ * power management, which is work that only happens after driver
+ * initialisation has got somewhere.
+ *
+ * Left off by default even so, because one processor is not the
+ * configuration a shipped default has to survive, and the 8-processor
+ * path dies for an unrelated reason (the VT-d global-status timeout
+ * recorded in `.references/hyperv/hvix64-iommu-gsts-timeout.md`).
+ * Turn it on with `-DZPP_DELIVER_ON_DROP=ON`.
+ *
  * ### WITHDRAWN, 2026-09-02, by its own control. Read this first
  *
  * The table below is **not a valid A/B** and the conclusion drawn from
