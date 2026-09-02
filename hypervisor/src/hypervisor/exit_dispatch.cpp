@@ -806,6 +806,15 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // next entry.
     if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
+
+        // The guest hypervisor's own page-table root, once. See
+        // `l1_cr3`: without it hvix64's globals are unreadable from a
+        // stall, because the processor is not in its address space
+        // then and the monitor's virtual reads have nothing to walk.
+        if ((0 == this->l1_cr3[cpu]) && (!this->running_l2[cpu])) {
+            this->l1_cr3[cpu] = vmcs.guest_cr3();
+        }
+
         constexpr std::uint64_t vectoring_valid = 1ull << 31;
 
         if (auto vectoring =

@@ -6398,6 +6398,26 @@ private:
     std::uint64_t vtl_rip[vtl_kinds]{};
     std::uint64_t vtl_rsp[vtl_kinds]{};
     std::uint64_t vtl_cr3[vtl_kinds]{};
+
+    /**
+     * The guest hypervisor's OWN CR3, captured once per processor.
+     *
+     * `vtl_cr3` holds the SECOND-level guests' roots - Windows and the
+     * secure kernel - which is what this VMM tracks for its own
+     * translation. It does not hold hvix64's, and the difference
+     * matters when a stall is being read: hvix64's globals live in its
+     * address space, and that space is only reachable through the
+     * monitor's virtual reads while the processor happens to be inside
+     * it, which during a stall it is not. With the root recorded here
+     * the same globals can be walked physically with `xp` from any
+     * state, including a shut-down guest.
+     *
+     * Captured on the first exit taken while the guest hypervisor
+     * itself is running, and never refreshed - hvix64 does not
+     * relocate its own page tables, and a capture-once costs one
+     * VMREAD for the life of the boot rather than one per exit.
+     */
+    std::uint64_t l1_cr3[max_cpus]{};
     std::uint64_t vtl_image_base[vtl_kinds]{};
     std::uint64_t vtl_caller_base[vtl_kinds]{};
     std::uint64_t vtl_caller_address[vtl_kinds]{};
