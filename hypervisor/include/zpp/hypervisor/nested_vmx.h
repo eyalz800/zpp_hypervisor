@@ -2432,9 +2432,41 @@ inline constexpr bool deliver_external = (0 != ZPP_DELIVER_EXTERNAL);
  * and Phase 1 proceeds. Both globals are read live and never re-set after
  * early securekernel init, so re-forcing on each VTL1 entry is durable
  * and cheap (a read, a conditional 4-byte write only while bit1 is set).
- * A deliberate degrade, not a defect fix: on the nested rig the NVMe's
- * DMA is already constrained by the host IOMMU (VFIO), so no real
- * protection is lost.
+ * A deliberate degrade, not a defect fix.
+ *
+ * ### What it costs, corrected 2026-09-02
+ *
+ * This used to say "the NVMe's DMA is already constrained by the host
+ * IOMMU (VFIO), so no real protection is lost". **The first clause is
+ * true and the second does not follow, so the sentence is withdrawn.**
+ *
+ * The host IOMMU confines an assigned device to *the guest's memory*.
+ * VTL1's protected pages are **inside** the guest's memory. VBS secure
+ * DMA is an isolation boundary *within* the guest, and the host IOMMU
+ * has no notion of VTL0 against VTL1 - to it both are "the guest". So
+ * VFIO protects the **host** from the device and does nothing whatever
+ * to protect **VTL1** from it. The old sentence answered a different
+ * question than the one it appeared to answer.
+ *
+ * Named plainly, what is given up: a DMA-capable device can read
+ * Credential Guard secrets out of LsaIso, and can write securekernel
+ * pages and HVCI's page tables. HVCI validates *code*; it does not stop
+ * DMA, so this is not covered by anything else that is still on.
+ *
+ * Why it is nevertheless acceptable **on this rig**: the only
+ * DMA-capable devices are the two assigned ones (NVMe and GPU) and
+ * there is no hot-plug path, so the residual threat is specifically
+ * *compromised firmware on one of those two devices* rather than any
+ * device an attacker can introduce. That is a bounded, stateable risk
+ * - which is the reason this stays a switch that has to be asked for
+ * rather than a default.
+ *
+ * Not a permanent limitation. VT-d scalable mode with two-stage
+ * translation exists for exactly this, and what is missing is at L0:
+ * KVM emulates no IOMMU at all, and QEMU's `intel-iommu` here is
+ * `aw-bits=39` with no `x-scalable-mode`, i.e. legacy single-level and
+ * usable only by its own direct guest. Feature work below us, not an
+ * architectural wall.
  */
 #ifndef ZPP_FORCE_NO_SECURE_DMA
 #define ZPP_FORCE_NO_SECURE_DMA 0
