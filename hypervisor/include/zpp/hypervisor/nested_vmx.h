@@ -3025,7 +3025,7 @@ inline constexpr bool evmcs_mixed =
 inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
 
 #ifndef ZPP_DELIVER_ON_DROP
-#define ZPP_DELIVER_ON_DROP 0
+#define ZPP_DELIVER_ON_DROP 1
 #endif
 
 /**
@@ -3221,11 +3221,16 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  * power management, which is work that only happens after driver
  * initialisation has got somewhere.
  *
- * Left off by default even so, because one processor is not the
- * configuration a shipped default has to survive, and the 8-processor
- * path dies for an unrelated reason (the VT-d global-status timeout
- * recorded in `.references/hyperv/hvix64-iommu-gsts-timeout.md`).
- * Turn it on with `-DZPP_DELIVER_ON_DROP=ON`.
+ * **ON by default since 2026-09-02**, because it is what takes this
+ * guest to the login screen and because leaving it off makes the
+ * result depend on remembering a flag. Turn it off for an A/B with
+ * `-DZPP_DELIVER_ON_DROP=OFF`; `drop=` in the build manifest is the
+ * check, and read the whole manifest string rather than a grep of it.
+ *
+ * It does not fix the 8-processor path, which fails earlier and for an
+ * unrelated reason - hvix64's application-processor wait, recorded in
+ * `.references/hyperv/ap-startup-vs-iommu-stall.md`. `ZPP_CPUS=1` is
+ * still required.
  *
  * ### WITHDRAWN, 2026-09-02, by its own control. Read this first
  *

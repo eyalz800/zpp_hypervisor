@@ -373,8 +373,8 @@ option(ZPP_WINDOW_ON_TPR
     OFF)
 
 option(ZPP_DELIVER_ON_DROP
-    "Arm a TPR threshold where the guest hypervisor left none, and take nothing away - the interrupt window is never withheld. See cmake/hypervisor/CMakeLists.txt."
-    OFF)
+    "Arm a TPR threshold where the guest hypervisor left none, and take nothing away - the interrupt window is never withheld. ON by default since 2026-09-02: it is what takes Windows to the login screen. See cmake/hypervisor/CMakeLists.txt."
+    ON)
 
 option(ZPP_COUNT_DROPS
     "Account for the low-priority vector the guest asks for, from the ask to the delivery, and name the requests dropped without one. See cmake/hypervisor/CMakeLists.txt."
