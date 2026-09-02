@@ -348,6 +348,10 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // so a run with it on describes a different machine.
         ' ', 'n', 'o', 's', 'd', 'm', 'a', '=',
         digit(nested_vmx::force_no_secure_dma),
+        // Hand a held second-level event to vmcs12 rather than
+        // destroying it when an unrelated exit reflects.
+        ' ', 'h', 'a', 'n', 'd', '=',
+        digit(nested_vmx::hand_over_pending_event),
         // Present hvix64 a synthetic nested VT-d unit (ECAP.IR set) so VBS
         // secure-DMA attach passes the IommuFeatureSet gate and Phase 1
         // proceeds with kernel DMA protection functional.

@@ -5437,9 +5437,17 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     // IDT-vectoring field, which for that exit reads zero, and the held
     // event is destroyed. See `pending_event_lost`, which is here to
     // establish whether that happens before anything is changed about it.
+    //
+    // `held_event` carries it to the IDT-vectoring copy below, which is
+    // the only place that can still give it to the guest hypervisor.
+    // See `nested_vmx::hand_over_pending_event`.
+    std::uint64_t held_event = 0;
+
     if (cpu < max_cpus) {
         if (0 != this->pending_event[cpu]) {
             auto lost = this->pending_event[cpu];
+
+            held_event = lost;
 
             this->pending_event_lost[cpu] += 1;
             this->pending_event_lost_last[cpu] = lost;
@@ -5632,6 +5640,30 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // apply, and it applied it.
         auto idt_vectoring_information =
             vmcs.read(field::idt_vectoring_information_field);
+
+        // The one case the processor's account cannot cover: an event
+        // this VMM was holding, whose interrupting exit was consumed
+        // here rather than reflected, so the hardware field for *this*
+        // exit is not valid and reports nothing. Writing it through
+        // unchanged is what destroys the event; handing the held one
+        // over is what KVM's `vmcs12_save_pending_event` does by
+        // rebuilding the field from software state instead of reading
+        // the hardware one. Only ever fills in an invalid field, so a
+        // real report is never overwritten.
+        if constexpr (nested_vmx::hand_over_pending_event) {
+            constexpr std::uint64_t vectoring_valid = 1ull << 31;
+
+            if ((0 != held_event) &&
+                (0 == (idt_vectoring_information & vectoring_valid)) &&
+                (0 != (held_event & vectoring_valid))) {
+                idt_vectoring_information = held_event;
+
+                if (cpu < max_cpus) {
+                    this->pending_event_handed_over[cpu] += 1;
+                }
+            }
+        }
+
         shadow.write(field::idt_vectoring_information_field,
                      idt_vectoring_information);
 

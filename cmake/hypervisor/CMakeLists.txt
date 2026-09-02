@@ -173,6 +173,10 @@ option(ZPP_DELIVER_ON_DROP
     "Arm a TPR threshold where the guest hypervisor left none, and take NOTHING away. Withholding the interrupt window has now been measured twice and is wrong both times: it took vector 0x2f from 9,627 to 11 and the CLOCK from 388,241 to 5,550 in the same run, so it does not merely fail to help the vector being chased, it stops delivery of everything. In this VMM the interrupt window is the primary delivery mechanism for every vector and its 1,500,914 exits are load bearing. On, `primary` is untouched - every entry carries the controls the default build would give it, and window_deferred_count must read zero - and a threshold at the dispatch class is ADDED on entries where the level above is holding a vector the priority blocks and left the threshold at zero. A threshold of zero can never fire (SDM 32.1.2: IF VTPR[7:4] < TPR threshold), which is why its own notification never arrives; l2_tpr_threshold_seen is the check. At the drop the threshold is written back down and the window is ensured live in vmcs02 before the resume. Off by default so an A/B is one variable; a static assertion refuses it together with ZPP_WINDOW_ON_TPR."
     ON)
 
+option(ZPP_HAND_OVER_PENDING_EVENT
+    "Hand a held second-level event to vmcs12's IDT-vectoring information field instead of destroying it. An event interrupted mid-delivery whose interrupting exit was handled locally, and whose re-queue the entry state refused, stays held; when an unrelated exit later reflects, the copy gives vmcs12 the hardware field, which reads zero for that exit, and the event is lost. Measured 2026-09-02: pending_event_lost 22,250 climbing at ~102/s, always 0x8000042e - type 4, vector 0x2E, Windows' int 2Eh system-call gate. Only fills in an INVALID hardware field so a real report is never overwritten. This is what KVM does by rebuilding the field from software state (vmcs12_save_pending_event, nested.c:3838). Self-verifying: pending_event_handed_over must rise and pending_event_lost must stop. OFF by default."
+    OFF)
+
 option(ZPP_COUNT_DROPS
     "Account for the low-priority vector the guest asks for, from the ask to the delivery: asked, coalesced, pending at entry, delivered, and DROPPED - entries made while it was outstanding, at a priority that admits it, with nothing staged and nothing armed that could cause an exit at which the level above might stage it. The last is the number this work exists to take to zero and is the only counter in this tree that names a moment rather than an event. Only counts, so it is safe on in both arms of an A/B; not free - one guest-memory read and one VMREAD per second-level entry - which is why it is a switch."
     OFF)
@@ -376,6 +380,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     -DZPP_WINDOW_ON_TPR=$<BOOL:${ZPP_WINDOW_ON_TPR}>
     -DZPP_DELIVER_ON_DROP=$<BOOL:${ZPP_DELIVER_ON_DROP}>
+    -DZPP_HAND_OVER_PENDING_EVENT=$<BOOL:${ZPP_HAND_OVER_PENDING_EVENT}>
     -DZPP_COUNT_DROPS=$<BOOL:${ZPP_COUNT_DROPS}>
     -DZPP_VMCS_CENSUS=$<BOOL:${ZPP_VMCS_CENSUS}>
     -DZPP_EVMCS_TO_KVM=$<BOOL:${ZPP_EVMCS_TO_KVM}>

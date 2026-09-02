@@ -9128,6 +9128,17 @@ private:
     std::uint64_t pending_event_lost_first[max_cpus]{};
     std::uint64_t pending_event_lost_last[max_cpus]{};
     std::uint64_t pending_event_lost_reason[max_cpus]{};
+
+    /**
+     * Held events handed to vmcs12 rather than destroyed.
+     *
+     * Pairs with `pending_event_lost`: with
+     * `nested_vmx::hand_over_pending_event` on, this must rise and that
+     * must stay at whatever it reached before the switch was enabled.
+     * Both climbing means the hand-over condition is not catching the
+     * case that loses them.
+     */
+    std::uint64_t pending_event_handed_over[max_cpus]{};
     /**
      * @}
      */

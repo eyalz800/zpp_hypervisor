@@ -1604,6 +1604,56 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
  * was first given. Nothing about the cost has been re-measured since, so
  * this is still an unanswered experiment rather than a rejected one.
  */
+/**
+ * Hand a held second-level event to vmcs12 instead of destroying it.
+ *
+ * The defect this removes is described where it is counted, in
+ * `reflect_l2_exit`: an event interrupted mid-delivery whose
+ * interrupting exit was handled here (an EPT violation, which
+ * `l0_wants_l2_exit` claims unconditionally) and whose re-queue the
+ * entry state then refused stays in `pending_event`. When some later
+ * and unrelated exit reflects, the IDT-vectoring copy gives vmcs12 the
+ * *hardware* field, which for that exit reads zero, and the held event
+ * is gone.
+ *
+ * Measured 2026-09-02 on a progressing boot: `pending_event_lost`
+ * reached 22,250 and was climbing at ~102/s, every loss the same value
+ * `0x8000042e` - valid, type 4 (software interrupt), vector 0x2E, i.e.
+ * Windows' `int 2Eh` system-call gate. A destroyed `int 2Eh` is a
+ * system call that never returns, reported by nobody.
+ *
+ * On, the held event is written into vmcs12's IDT-vectoring
+ * information field **only when the hardware field is not valid**, so
+ * a real report from the processor is never overwritten - the
+ * architecture's account wins wherever it exists, and this fills in
+ * only the case the architecture has nothing to say about because the
+ * interrupting exit was consumed here.
+ *
+ * This is what KVM does structurally: `__vmx_complete_interrupts`
+ * (`.references/kvm/vmx.c:7105`) decodes the hardware field into
+ * software state on every exit, and `vmcs12_save_pending_event`
+ * (`.references/kvm/nested.c:3838`) rebuilds vmcs12's field from that
+ * queue rather than from `vmcs_read32(IDT_VECTORING_INFO_FIELD)` - so
+ * for KVM it makes no difference which level handled the interrupting
+ * exit. The call site comment there names this exact case: "Transfer
+ * the event that L0 or L1 may wanted to inject into L2".
+ *
+ * **Deliberately NOT changing `l0_wants_l2_exit`.** KVM claims EPT
+ * violations for L0 too and still gets this right, so the
+ * unconditional claim is part of the chain but not the part to fix.
+ *
+ * Off by default so an A/B is one variable. Self-verifying:
+ * `pending_event_handed_over` must rise and `pending_event_lost` must
+ * fall to zero. If `lost` stays non-zero the hand-over condition is
+ * wrong, not the idea.
+ */
+#ifndef ZPP_HAND_OVER_PENDING_EVENT
+#define ZPP_HAND_OVER_PENDING_EVENT 0
+#endif
+
+inline constexpr bool hand_over_pending_event =
+    (0 != ZPP_HAND_OVER_PENDING_EVENT);
+
 #ifndef ZPP_DISARM_APIC_WATCH
 #define ZPP_DISARM_APIC_WATCH 0
 #endif
