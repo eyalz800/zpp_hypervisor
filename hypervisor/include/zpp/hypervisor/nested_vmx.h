@@ -3124,6 +3124,75 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  * by a static assertion, since they drive the same state and one of
  * them withholds.
  *
+ * ### Why it works, measured rather than argued, 2026-09-02
+ *
+ * The account in the sections below was incomplete, and the objection
+ * to it was sharp: "a TPR threshold fixed an STI-shadow block" is
+ * incoherent, since an STI shadow lasts exactly one instruction and a
+ * one-instruction block cannot livelock anything.
+ *
+ * The resolution is that `KiDpcInterruptBypass+0x12` is where an
+ * interrupt taken just after `sti` **pushes its frame** - it is where
+ * delivery *lands*, not what blocked it. The durable block is the task
+ * priority, and the census says so directly: `0x2f` is requested at
+ * priority `0xd0` on 99.9% of asks. So hvix64's interrupt window
+ * handles the transient interruptibility block, and the manufactured
+ * threshold handles the durable priority block. The two readings were
+ * never in conflict.
+ *
+ * What this switch actually adds is **a guaranteed entry boundary at
+ * the instant the priority block clears**. The reason-43 exit forces a
+ * VM entry exactly when VTPR falls below the class, and a VM entry is
+ * where a pending injection is re-evaluated. Before, that moment was
+ * invisible: vmcs12's threshold of 0 can never report it (SDM 32.1.2)
+ * and nothing else was watching. That is precisely the
+ * "reached a moment the guest could have taken the vector with
+ * NOTHING armed" the drop counter names.
+ *
+ * **Measured, and it was a falsifiable prediction.** If the exit
+ * itself is doing the work, the window must already have been live at
+ * the drop; if instead this VMM's ensure-write were supplying a window
+ * hvix64 had lost, the account would be wrong. Read from a running
+ * guest at the login screen:
+ *
+ *     window_granted_on_drop        10,845
+ *     window_already_armed_at_drop  10,845   <- 100%
+ *     window_armed_at_drop               0
+ *     window_deferred_count              0   <- MUST be 0
+ *     window_threshold_refused           0
+ *     nested_entry_error                 0
+ *
+ * The ensure-write never fired once. The exit is the mechanism.
+ *
+ * ### The one hazard, why it has not fired, and what would make it
+ *
+ * `build_vmcs02` is reached only from the level above's own
+ * VMLAUNCH/VMRESUME, so an exit this VMM handles locally resumes
+ * vmcs02 **without rebuilding it** - with the threshold still armed.
+ * SDM 29.2.1.1 then requires threshold bits 3:0 not to exceed VTPR
+ * bits 7:4 at that entry, and nothing re-checks it.
+ *
+ * It has not fired: `nested_entry_error` is 0 over 2,370,375
+ * second-level entries. The structural reason is that VTPR cannot fall
+ * while armed without this VMM being told. SDM 32.1.2 lists three
+ * operations that perform TPR virtualization - MOV to CR8, a write to
+ * offset 080H on the APIC-access page, and WRMSR with ECX = 808H - and
+ * the latter two need "virtualize APIC accesses" (SDM 32.4) and
+ * "virtualize x2APIC mode" (SDM 32.5), neither of which this VMM
+ * offers. So MOV to CR8 is the only path, and it is exactly the one
+ * that raises the reason-43 exit that disarms.
+ *
+ * What would break that, and is the thing to re-check before enabling
+ * either: offering APIC-access-page or x2APIC virtualization would give
+ * VTPR a second way down that raises no exit here, and the entry check
+ * would start failing. The symptom is a VM-entry failure rather than
+ * anything subtle, so `nested_entry_error` is the instrument.
+ *
+ * Disarming on every exit was considered and rejected: local exits far
+ * outnumber rebuilds (2,370,375 entries against 133,613 arming
+ * rebuilds), so it would leave the threshold at 0 for most of the
+ * guest's execution and give back most of what the switch buys.
+ *
  * ### RE-RUN AT A MATCHED SPAN, 2026-09-02, and it works
  *
  * The withdrawal below stands - that experiment was invalid - but the
