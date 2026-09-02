@@ -820,7 +820,8 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // Windows' boot loader. Gating on `l2_entries` skips that era,
         // and refreshing rather than latching survives hvix64 changing
         // its own root.
-        if ((!this->running_l2[cpu]) && (0 != this->l2_entries[cpu])) {
+        if ((0 == this->l1_cr3[cpu]) && (!this->running_l2[cpu]) &&
+            (0 != this->l2_entries[cpu])) {
             this->l1_cr3[cpu] = vmcs.guest_cr3();
         }
 

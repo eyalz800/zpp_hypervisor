@@ -6412,8 +6412,18 @@ private:
      * the same globals can be walked physically with `xp` from any
      * state, including a shut-down guest.
      *
-     * Refreshed on every exit taken while the guest hypervisor itself
-     * is running, **and only once nesting has started**.
+     * Captured **once**, on the first exit taken while the guest
+     * hypervisor itself is running **and nesting has already started**.
+     *
+     * Both halves of that are load-bearing and both were got wrong in
+     * turn. Latching without the `l2_entries` gate records the
+     * firmware's or the boot loader's root, because the earliest exit
+     * with `running_l2` false happens long before hvix64 exists.
+     * Refreshing on every such exit fixes that but adds a VMREAD to
+     * every first-level exit, and three consecutive stalls followed
+     * that change - not proof it caused them, but enough that a
+     * diagnostic has no business carrying the risk. Gated latch is
+     * correct and costs one VMREAD for the boot.
      *
      * The first version latched the very first such exit and recorded
      * 0x7fc01000, a root that does not map hvix64 at all - because the
