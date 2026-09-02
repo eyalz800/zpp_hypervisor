@@ -6412,10 +6412,17 @@ private:
      * the same globals can be walked physically with `xp` from any
      * state, including a shut-down guest.
      *
-     * Captured on the first exit taken while the guest hypervisor
-     * itself is running, and never refreshed - hvix64 does not
-     * relocate its own page tables, and a capture-once costs one
-     * VMREAD for the life of the boot rather than one per exit.
+     * Refreshed on every exit taken while the guest hypervisor itself
+     * is running, **and only once nesting has started**.
+     *
+     * The first version latched the very first such exit and recorded
+     * 0x7fc01000, a root that does not map hvix64 at all - because the
+     * earliest exit with `running_l2` false happens long before hvix64
+     * exists, while the first-level guest is still the firmware or
+     * Windows' boot loader. The `l2_entries` gate skips that era. The
+     * refresh costs one VMREAD per first-level exit, which is the
+     * price of the value being the one that is current rather than the
+     * one that was first.
      */
     std::uint64_t l1_cr3[max_cpus]{};
     std::uint64_t vtl_image_base[vtl_kinds]{};

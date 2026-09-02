@@ -807,11 +807,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
         auto cpu = slot - 1;
 
-        // The guest hypervisor's own page-table root, once. See
-        // `l1_cr3`: without it hvix64's globals are unreadable from a
-        // stall, because the processor is not in its address space
-        // then and the monitor's virtual reads have nothing to walk.
-        if ((0 == this->l1_cr3[cpu]) && (!this->running_l2[cpu])) {
+        // The guest hypervisor's own page-table root. See `l1_cr3`:
+        // without it hvix64's globals are unreadable from a stall,
+        // because the processor is not in its address space then and
+        // the monitor's virtual reads have nothing to walk.
+        //
+        // **Not capture-once, and not before nesting starts.** The
+        // first version was both, and it recorded 0x7fc01000 - a root
+        // that does not map hvix64 at all, because the earliest exit
+        // taken while `running_l2` is false happens long before hvix64
+        // exists, when the first-level guest is still the firmware or
+        // Windows' boot loader. Gating on `l2_entries` skips that era,
+        // and refreshing rather than latching survives hvix64 changing
+        // its own root.
+        if ((!this->running_l2[cpu]) && (0 != this->l2_entries[cpu])) {
             this->l1_cr3[cpu] = vmcs.guest_cr3();
         }
 
