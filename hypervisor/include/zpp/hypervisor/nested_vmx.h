@@ -3124,7 +3124,32 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  * by a static assertion, since they drive the same state and one of
  * them withholds.
  *
- * ### It was run, 2026-09-02, and it reaches its own criterion
+ * ### WITHDRAWN, 2026-09-02, by its own control. Read this first
+ *
+ * The table below is **not a valid A/B** and the conclusion drawn from
+ * it is withdrawn. `drop=1` was measured 11 s into a boot and `drop=0`
+ * 3,512 s into a different one, and the 56.4% drop rate belongs to a
+ * livelock the 11 s run never lived long enough to reach.
+ *
+ * The control, run afterwards - same binary, `drop=0`, fresh boot -
+ * gives `DROPPED 1 of 29 distinct requests` against `drop=1`'s
+ * `0 of 8` and `1 of 29`. **At equal spans the switch makes no
+ * measurable difference.** Nothing here says it works and nothing says
+ * it does not; the experiment was never run.
+ *
+ * What ended it: all three boots - two with `drop=1`, one with
+ * `drop=0` - stop at 21,229 / 21,231 / 21,232 trust-level round trips
+ * and `paused (shutdown)`. A stop that reproduces to four significant
+ * figures across the switch under test is not caused by the switch.
+ * That barrier is now the subject; see the commit that records the
+ * hvix64 triple fault at RVA 0x25bbb8.
+ *
+ * The lesson is the one CLAUDE.md already has and this still walked
+ * into: **compare at equal spans, and run the control before believing
+ * the treatment.** A cumulative counter read at two different ages is
+ * two different experiments.
+ *
+ * ### What was measured, kept only as a record of the run
  *
  * One variable, every other manifest field byte-identical and checked
  * as the whole string on the deployed binary, residency verified on
@@ -3138,9 +3163,11 @@ inline constexpr bool window_on_tpr = (0 != ZPP_WINDOW_ON_TPR);
  *     priority drops reported      33 in 3.6M        59
  *     all vectors carried per s    598.1 (baseline)  575.4
  *
- * Both halves of the criterion above hold: the drops go to zero and
- * the total carried does not fall. The failure the two previous
- * attempts shared did not recur.
+ * The only line above that survives the control is `window withheld
+ * 0`: the failure the two previous attempts shared - withholding the
+ * interrupt window, which collapsed 0xd1 from 388,241 to 5,550 - did
+ * not recur. That is worth keeping. The drop counts are not, for the
+ * reason given above.
  *
  * **Read the per-second line, not the totals.** `rig-dump-state.py`
  * prints a `*** COST, READ THIS FIRST ***` here that is wrong: it
