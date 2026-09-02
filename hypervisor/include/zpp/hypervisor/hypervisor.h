@@ -9139,6 +9139,21 @@ private:
      * case that loses them.
      */
     std::uint64_t pending_event_handed_over[max_cpus]{};
+
+    /**
+     * The hardware IDT-vectoring field as it stood at a loss, and how
+     * many losses happened while it was already valid.
+     *
+     * These separate the two ways a held event can be dropped, which
+     * `pending_event_lost` alone cannot: the field reads zero and the
+     * event is replaced by nothing, or the processor is reporting its
+     * own event and the held one is a second that cannot ride
+     * alongside it. The first is repaired by handing the event to
+     * vmcs12; the second can only be repaired by re-injecting it on a
+     * later entry, so which of them dominates decides the fix.
+     */
+    std::uint64_t pending_event_lost_hardware[max_cpus]{};
+    std::uint64_t pending_event_lost_while_valid[max_cpus]{};
     /**
      * @}
      */

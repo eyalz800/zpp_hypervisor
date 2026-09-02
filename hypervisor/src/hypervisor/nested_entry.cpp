@@ -5449,6 +5449,19 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
 
             held_event = lost;
 
+            // Which of the two losses this is. See
+            // `pending_event_lost_hardware`.
+            constexpr std::uint64_t vectoring_valid_bit = 1ull << 31;
+
+            auto hardware_vectoring =
+                vmcs.read(field::idt_vectoring_information_field);
+
+            this->pending_event_lost_hardware[cpu] = hardware_vectoring;
+
+            if (0 != (hardware_vectoring & vectoring_valid_bit)) {
+                this->pending_event_lost_while_valid[cpu] += 1;
+            }
+
             this->pending_event_lost[cpu] += 1;
             this->pending_event_lost_last[cpu] = lost;
             this->pending_event_lost_reason[cpu] = reason.value();
