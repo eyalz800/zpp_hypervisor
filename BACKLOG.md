@@ -1,5 +1,63 @@
 # Known defects
 
+## The HVCI copy path issues NO per-page TB-flush when SkmiFlags bit 23 is clear - 2026-09-03
+
+Settling the five items the HVCI image-copy decode
+(`.references/hyperv/securekernel-image-copy-and-handles.md`, gitignored)
+left unverified. All from `securekernel.bin` + `securekernel.pdb` +
+`sk_functions.csv`, no rig. Full write-up with every disassembly is in that
+doc's new "## 7" section; the load-bearing results:
+
+- **`securekernel.bin` is laid out by VirtualAddress (RVA == file offset) for
+  every section, not by the on-disk PE `PointerToRawData`.** Proof: `.pdata`
+  read at file offset `0x135000` (its VA) yields RUNTIME_FUNCTIONs
+  `0x1008/0x1036`, `0x103c/0x10dd`, `0x10f0/0x11dc` — an exact match to
+  `sk_functions.csv` rows 1-3; read at the header's `PointerToRawData`
+  (`0x11d000`) it is garbage. A converter using the section table's raw
+  pointers reads every data section wrong. This *extends* the "Naming a guest
+  address" note above, which only claimed `.text` has `ra == va`: the whole
+  file does. And `SkmiFlags` at RVA `0x130ac8` sits past `.data`'s on-disk
+  `RawDataSize` (initialized only `0x10c000`-`0x11f000`), so a plain PE would
+  read zero there — it reads `0x0050b0b7`, proving the file carries live BSS,
+  i.e. it is a genuine runtime snapshot of whatever boot produced it.
+
+- **`SkmiFlags` = RVA `0x130ac8`, verified two ways** (PDB public
+  `0009:150216` -> `.data 0x10c000+0x24ac8`; and the gates at `0x63bed` /
+  `0x63cdd` `test dword [0x130ac8], 0x800000`). The rig-open question is one
+  physical read: dword at `SK + 0x130ac8` (SK = the securekernel VTL1 image
+  base the hypervisor caches per-cpu). **`(V & 0x800000) == 0`** (as in the
+  capture) => step 13 uses `SkmiProtectionToPte` and step 16 skips
+  `ShvlpFlushPartialListTb` entirely -> **no per-page TB-flush hypercall on the
+  image-copy path**, so a missing flush there is not a bug. The captured value
+  is *not* the rig's — `SkmiFlags` is BSS, set at boot by feature detection.
+  If bit 23 is set instead, the flush also needs byte `SK+0x130acb` bit 0,
+  dword `SK+0x1286ac` bit 28, and dword `SK+0x1286e8` == 0 — read all four.
+
+- **`image+0x04` IS the page-count bound the "298 of 299" wedge is measured
+  against** (`0x63976: mov ecx,[r8+4]; cmp r13,rcx; jb`, r13 = the page index,
+  r8 = the resolved image). A walk stopping one page short never trips it —
+  it never asks. `+0x08` is the per-page array (indexed by the same r13, 8
+  B/entry), `+0x88` the lock-decremented shared lock.
+
+- **The two "NTE" encodings are two different tables, not one variant.**
+  `SkmiGetValidNteAddress` (`0x11ef0`) returns `0xffffdc8000000000 +
+  8*(addr>>12)` (per-virtual-page); `SkmiLockImagePage` (`0x6d324`) reads
+  `0xffffe00000000000 + 8*pfn` (per-physical-frame). Different base and index.
+  The doc's tentative "one NTE with flag-discriminated encodings" was a misread.
+
+- **`SkiSecureServiceTable` has 26 entries = `SkiSecureServiceLimit`, not 52.**
+  `SkiCompactSecureServiceTable` (`0x87240`) loops `[SkiSecureServiceLimit]`=26
+  times, reading 8-byte source entries and writing 4-byte compacted entries in
+  place, so the capture is 26 live dwords (`0x13e000`-`0x13e068`) plus the
+  untouched tail of the original 26-qword table (13 stale `0xfffff80085...`
+  pointers). `0xd0/4=52` counted the stale bytes. Decoding the 26 dwords hits
+  **26 exact `Ium*` function starts** — the clinching cross-check. The
+  `(offset<<5)|(argbytes>>2)` format and the 26/26 hit are both in the doc.
+
+The pointer-form item (`(e & (2^48-1)) - 2^47`) is settled by algebra: it is
+the standard bias-subtract canonicalization, always yields a canonical VA
+(kernel half iff the stored field's bit 47 is 0), not a raw sign extension.
+
 ## The block is a PnP boot-driver device action that never completes - 2026-08-30
 
 This is the resolved cause, and it retires BOTH earlier framings on this
