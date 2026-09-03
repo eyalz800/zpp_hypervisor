@@ -30,7 +30,7 @@ rather than in a session that scrolls away.
      build the symbol-server key from the RSDS GUID and age.
   5. Download the PDB and map addresses through the section table.
 
-Two traps, both of which produce plausible wrong answers:
+Four traps, all of which produce plausible wrong answers:
 
   - `llvm-pdbutil dump --publics` prints `addr = SEGMENT:OFFSET` with
     the **offset in decimal**.  Read as hex every symbol lands
@@ -39,6 +39,33 @@ Two traps, both of which produce plausible wrong answers:
   - The segment indexes the PE section table, so an address is only an
     RVA after adding that section's virtual address.  For securekernel
     `.text` is section 1 at RVA 0x1000.
+  - **The segment is decimal too, and zero-padded to four digits**, so
+    it reads like hex.  `KiProcessorBlock` is `addr = 0027:15488`;
+    `ntoskrnl.exe` has **36** sections, so `0x27 = 39` is out of range
+    and the symbol looks unresolvable, while `27` decimal is section
+    `ALMOSTRO` at RVA 0xfc5000 and `0xfc5000 + 15488 = 0xfc8c80` - the
+    value `.references/hyperv/ntkrnlmp_symbols.csv` already had.  This
+    script does the arithmetic; do not redo it by hand, which is what
+    produced a "38 sections" miscount.
+  - **A public symbol is not always a function entry.**  securekernel's
+    publics include interior labels: `SkpReturnFromNormalModeRaxSet`
+    (RVA 0xd9434) has no `.pdata` row of its own - it is
+    `SkCallNormalMode+0x2c4`, inside the range 0xd9170-0xd9687.  So an
+    offset can be exact and still not measure from a function start.
+    Cross-check anything surprising against
+    `.references/hyperv/sk_functions.csv` (`rva_start,rva_end,name`,
+    built from real `.pdata`), which settles it in one lookup.
+
+And one rule for disassembling afterwards, since the wrapper recipe in
+CLAUDE.md hides it: `llvm-objdump --adjust-vma=N` shifts the printed
+instruction addresses but **not** its `# 0x…` resolution of
+RIP-relative operands, so
+
+    true RVA = objdump's `#` comment + N
+
+Checked on twenty references in one session - twelve call targets and
+eight data loads - and all twenty landed on an exact symbol start once
+N was added.  A wrong rule would not hit a symbol boundary even once.
 
 Usage:
     scripts/guest-securekernel-syms.py --pdb securekernel.pdb \\
