@@ -399,6 +399,57 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // written through the APIC page or the x2APIC MSRs, so this VMM sees
     // neither today.
     if (0 != (command & destination_logical)) {
+        // x2APIC makes the match arithmetic rather than bookkeeping.
+        // SDM 12.12.3: in x2APIC mode the logical destination register
+        // is read-only and derived from the x2APIC id - bits 31:16 are
+        // the cluster, `id >> 4`, and bits 15:0 carry a single bit,
+        // `1 << (id & 0xf)`. There is no DFR and nothing is written, so
+        // the LDR this VMM "sees neither" of does not need to be seen:
+        // it is computable from an id already known. This path is the
+        // x2APIC form - `destination_shift` is 32, the whole upper
+        // dword - so the decode applies to every command reaching it.
+        //
+        // Only a destination naming exactly ONE processor is taken. The
+        // trampoline starts one processor, and choosing one of a set
+        // would be a guess dressed as a resolution.
+        if constexpr (nested_vmx::adopt_logical_start_up) {
+            auto logical = command >> destination_shift;
+            auto cluster = logical >> 16;
+            auto members = logical & 0xffff;
+
+            if ((0 != members) && (0 == (members & (members - 1)))) {
+                std::uint64_t index = 0;
+
+                for (auto walk = members; 0 == (walk & 1); walk >>= 1) {
+                    index = index + 1;
+                }
+
+                auto resolved = (cluster << 4) | index;
+                auto vector = command & vector_mask;
+
+                this->ipi_logical_resolved =
+                    this->ipi_logical_resolved + 1;
+
+                log("start-up ipi logical destination {} resolved to "
+                    "apic id {}, vector {}",
+                    logical,
+                    resolved,
+                    vector);
+
+                // The same two steps the physical path takes below, for
+                // the same reasons - the guest has started that
+                // processor whether or not this VMM adopts it.
+                if (auto slot = processor_slot(resolved)) {
+                    this->started_by_guest_start_up_ipi[*slot] = true;
+                }
+
+                return (start_up_result::adopted ==
+                        start_up_processor(resolved, vector))
+                           ? std::optional<std::uint64_t>{}
+                           : std::optional<std::uint64_t>{command};
+            }
+        }
+
         this->ipi_refused_logical = this->ipi_refused_logical + 1;
         log("start-up ipi in logical destination mode, command {}, "
             "not adopted",

@@ -1654,6 +1654,52 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
 inline constexpr bool hand_over_pending_event =
     (0 != ZPP_HAND_OVER_PENDING_EVENT);
 
+/**
+ * Adopt a start-up IPI sent in x2APIC logical destination mode.
+ *
+ * The defect this removes is stated in the code it replaces: a logical
+ * destination is a bitmask, this VMM "has no way to resolve a set of
+ * targets into the one processor it would have to start in its own
+ * trampoline", so the command is passed through and **the processors
+ * start outside this VMM, belonging to neither layer**.
+ *
+ * Measured 2026-09-03 on an 8-processor boot: hvix64 sends exactly one
+ * start-up IPI, `ipi_refused_logical` reaches 804,487 on the target
+ * processor, `l2-entries` stays at 0 on every application processor,
+ * and hvix64's own `LpStartStateArray[1]` sits at 1 - the value the
+ * boot processor writes before the application processor is meant to
+ * advance it to 2. So nothing ever ran, Windows' bring-up loop broke on
+ * the first failure, and the guest continued as a uniprocessor.
+ *
+ * The old comment says resolving it needs each processor's LDR and DFR
+ * tracked, "written through the APIC page or the x2APIC MSRs, so this
+ * VMM sees neither today". **That is no longer the obstacle it was.**
+ * This guest runs x2APIC - measured, it programs its timer through
+ * X2APIC_LVT_TIMER (0x832) and X2APIC_INIT_COUNT (0x838), and the APIC
+ * page is never written at all - and in x2APIC mode the logical
+ * destination register is **read-only and derived from the x2APIC id**
+ * (SDM 12.12.3): bits 31:16 are the cluster, `id >> 4`, and bits 15:0
+ * hold a single bit, `1 << (id & 0xf)`. There is no DFR and there are
+ * no writes to track, so the match is arithmetic on an id this VMM
+ * already knows.
+ *
+ * On, a logical destination naming exactly one processor is decoded
+ * back to that id and handed to the same path a physical destination
+ * takes. A destination naming several is still refused: the trampoline
+ * starts one processor, and picking one of a set would be a guess.
+ *
+ * Off by default so the A/B is one variable. What says it works:
+ * `ipi_logical_resolved` rises, `ipi_refused_logical` stops, and the
+ * application processors show non-zero `l2-entries`. What says it does
+ * not: hvix64's `LpStartStateArray[1]` still reading 1.
+ */
+#ifndef ZPP_ADOPT_LOGICAL_START_UP
+#define ZPP_ADOPT_LOGICAL_START_UP 0
+#endif
+
+inline constexpr bool adopt_logical_start_up =
+    (0 != ZPP_ADOPT_LOGICAL_START_UP);
+
 #ifndef ZPP_DISARM_APIC_WATCH
 #define ZPP_DISARM_APIC_WATCH 0
 #endif

@@ -177,6 +177,10 @@ option(ZPP_HAND_OVER_PENDING_EVENT
     "Hand a held second-level event to vmcs12's IDT-vectoring information field instead of destroying it. An event interrupted mid-delivery whose interrupting exit was handled locally, and whose re-queue the entry state refused, stays held; when an unrelated exit later reflects, the copy gives vmcs12 the hardware field, which reads zero for that exit, and the event is lost. Measured 2026-09-02: pending_event_lost 22,250 climbing at ~102/s, always 0x8000042e - type 4, vector 0x2E, Windows' int 2Eh system-call gate. Only fills in an INVALID hardware field so a real report is never overwritten. This is what KVM does by rebuilding the field from software state (vmcs12_save_pending_event, nested.c:3838). Self-verifying: pending_event_handed_over must rise and pending_event_lost must stop. OFF by default."
     OFF)
 
+option(ZPP_ADOPT_LOGICAL_START_UP
+    "Adopt a start-up IPI sent in x2APIC logical destination mode. Measured 2026-09-03: hvix64 sends its start-up IPI logically, this VMM refuses it (ipi_refused_logical 804,487), no application processor is ever started (l2-entries 0 on cpus 1-7), and hvix64's LpStartStateArray[1] stays at 1 - the value the boot processor writes before the AP should advance it. In x2APIC mode the LDR is read-only and derived from the id (SDM 12.12.3), so the match needs no tracking: cluster is id>>4, member bit is 1<<(id&0xf). Only a destination naming exactly one processor is taken. OFF by default."
+    OFF)
+
 option(ZPP_COUNT_DROPS
     "Account for the low-priority vector the guest asks for, from the ask to the delivery: asked, coalesced, pending at entry, delivered, and DROPPED - entries made while it was outstanding, at a priority that admits it, with nothing staged and nothing armed that could cause an exit at which the level above might stage it. The last is the number this work exists to take to zero and is the only counter in this tree that names a moment rather than an event. Only counts, so it is safe on in both arms of an A/B; not free - one guest-memory read and one VMREAD per second-level entry - which is why it is a switch."
     OFF)
@@ -380,6 +384,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     -DZPP_WINDOW_ON_TPR=$<BOOL:${ZPP_WINDOW_ON_TPR}>
     -DZPP_DELIVER_ON_DROP=$<BOOL:${ZPP_DELIVER_ON_DROP}>
+    -DZPP_ADOPT_LOGICAL_START_UP=$<BOOL:${ZPP_ADOPT_LOGICAL_START_UP}>
     -DZPP_HAND_OVER_PENDING_EVENT=$<BOOL:${ZPP_HAND_OVER_PENDING_EVENT}>
     -DZPP_COUNT_DROPS=$<BOOL:${ZPP_COUNT_DROPS}>
     -DZPP_VMCS_CENSUS=$<BOOL:${ZPP_VMCS_CENSUS}>

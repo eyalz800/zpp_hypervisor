@@ -3502,6 +3502,17 @@ private:
 
     volatile std::uint64_t ipi_refused_logical{};
 
+    /**
+     * Start-up IPIs whose x2APIC logical destination named exactly one
+     * processor and was decoded back to its id.
+     *
+     * Pairs with `ipi_refused_logical`: with
+     * `nested_vmx::adopt_logical_start_up` on, this must rise and that
+     * must stop. Both rising means the destination named more than one
+     * processor, which this deliberately does not guess at.
+     */
+    volatile std::uint64_t ipi_logical_resolved{};
+
     volatile std::uint64_t ipi_last_command{};
 
     /**

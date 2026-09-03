@@ -352,6 +352,10 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // destroying it when an unrelated exit reflects.
         ' ', 'h', 'a', 'n', 'd', '=',
         digit(nested_vmx::hand_over_pending_event),
+        // Adopt a start-up IPI sent in x2APIC logical destination mode
+        // instead of passing it through unvirtualized.
+        ' ', 'l', 's', 'i', 'p', 'i', '=',
+        digit(nested_vmx::adopt_logical_start_up),
         // Present hvix64 a synthetic nested VT-d unit (ECAP.IR set) so VBS
         // secure-DMA attach passes the IommuFeatureSet gate and Phase 1
         // proceeds with kernel DMA protection functional.

@@ -380,6 +380,10 @@ option(ZPP_HAND_OVER_PENDING_EVENT
     "Hand a held second-level event to vmcs12's IDT-vectoring field instead of destroying it when an unrelated exit reflects. See nested_vmx.h."
     OFF)
 
+option(ZPP_ADOPT_LOGICAL_START_UP
+    "Adopt a start-up IPI sent in x2APIC logical destination mode by decoding the LDR back to an APIC id. See nested_vmx.h."
+    OFF)
+
 option(ZPP_COUNT_DROPS
     "Account for the low-priority vector the guest asks for, from the ask to the delivery, and name the requests dropped without one. See cmake/hypervisor/CMakeLists.txt."
     OFF)
@@ -538,6 +542,7 @@ ExternalProject_Add(hypervisor
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
         -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_DELIVER_ON_DROP=${ZPP_DELIVER_ON_DROP}
+        -DZPP_ADOPT_LOGICAL_START_UP=${ZPP_ADOPT_LOGICAL_START_UP}
         -DZPP_HAND_OVER_PENDING_EVENT=${ZPP_HAND_OVER_PENDING_EVENT}
         -DZPP_COUNT_DROPS=${ZPP_COUNT_DROPS}
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
@@ -669,6 +674,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
         -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_DELIVER_ON_DROP=${ZPP_DELIVER_ON_DROP}
+        -DZPP_ADOPT_LOGICAL_START_UP=${ZPP_ADOPT_LOGICAL_START_UP}
         -DZPP_HAND_OVER_PENDING_EVENT=${ZPP_HAND_OVER_PENDING_EVENT}
         -DZPP_COUNT_DROPS=${ZPP_COUNT_DROPS}
         -DZPP_VMCS_CENSUS=${ZPP_VMCS_CENSUS}
