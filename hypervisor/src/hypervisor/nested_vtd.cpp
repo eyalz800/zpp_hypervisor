@@ -485,6 +485,48 @@ void hypervisor::arm_scalable_iommu_force(std::size_t cpu)
                 return; // wrong 2 MB or not mapped yet; retry
             }
 
+            // **"MZ" alone is not enough**, which is the same point
+            // `image_base_of` makes and acts on: it is two common
+            // bytes, occurring in ordinary data roughly once every
+            // 64 KB, and this candidate comes from masking a RIP
+            // rather than from any known image bound. What makes it an
+            // image is the PE signature the DOS header points at.
+            //
+            // This matters more here than almost anywhere, because the
+            // base is latched **for the life of the boot** and then
+            // used as the anchor for writes into guest memory at fixed
+            // offsets - so a false positive would corrupt an unrelated
+            // image, silently, on every exit, and identically on every
+            // boot that took the branch.
+            //
+            // Verified from the monitor before writing this, on the
+            // guest at the login screen: guest-physical 0x100400000
+            // reads 'MZ', e_lfanew 0xf8, signature 0x00004550, machine
+            // 0x8664. So the check passes today and costs two reads;
+            // it exists so that a boot where it would *not* pass says
+            // so rather than proceeding.
+            std::uint32_t lfanew{};
+            auto header = translate_guest_linear(cpu, candidate + 0x3c);
+            if (!header ||
+                !read_guest_physical(
+                    *header,
+                    std::as_writable_bytes(std::span(&lfanew, 1))) ||
+                (lfanew < 0x40) || (lfanew > 0x1000)) {
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
+            std::uint32_t signature{};
+            auto sig = translate_guest_linear(cpu, candidate + lfanew);
+            if (!sig ||
+                !read_guest_physical(
+                    *sig,
+                    std::as_writable_bytes(std::span(&signature, 1))) ||
+                (0x00004550 != signature)) {
+                this->scalable_force_locate_failed += 1;
+                return;
+            }
+
             auto flags_phys = translate_guest_linear(
                 cpu, candidate + g_hvfeatureflags_rva);
             auto phase_phys = translate_guest_linear(
