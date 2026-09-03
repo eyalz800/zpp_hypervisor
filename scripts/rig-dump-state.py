@@ -3174,6 +3174,35 @@ def dump_reference_tsc(args, elf, instance):
     def word(member, cpu):
         return got.get(instance + off[member] + 8 * cpu, 0)
 
+    # **Read the page back.**  Every number below is what this VMM
+    # believes it wrote; none of it is evidence about what the guest
+    # actually reads.  Nothing in the tree closes that loop -
+    # `publish_reference_tsc_page` never re-reads the frame - so
+    # `reference_scale` is a record of an intention.  That matters
+    # because the page has **two possible writers**: we write it, and
+    # the level above is only *believed* not to.  A member and a frame
+    # that disagree is the one reading able to distinguish "we
+    # published a good scale" from "a good scale is there now", and it
+    # is the reading a stuck boot most needs, since a guest spinning on
+    # a clock that never advances is computing from the frame and not
+    # from the member.
+    #
+    # The frame is a second-level guest-physical address and this rig's
+    # extended page tables have measured identity for it, so it is an
+    # `xp` address directly - the route by which this page was read by
+    # hand as sequence 1, scale 0x0148ff7a8e83f7c6, offset 0x6a241a.
+    # Layout is the TLFS one: u32 sequence, u32 reserved, u64 scale,
+    # i64 offset.
+    pages = {}
+    page_reader = Monitor(args.rig, args.port)
+    for cpu in range(args.cpus):
+        enabled = got.get(
+            instance + off["l2_reference_tsc_written"] + 8 * cpu, 0)
+        if enabled:
+            pages[cpu] = enabled & ~0xfff
+            page_reader.queue(pages[cpu], 3)
+    page_got = page_reader.run() if pages else {}
+
     # The counter frequency the hypervisor found for itself, where it
     # found one.  Zero is the expected answer on this rig and is not a
     # failure to read: QEMU's `cpu_x86_cpuid` has no case for CPUID leaf
@@ -3243,6 +3272,38 @@ def dump_reference_tsc(args, elf, instance):
         print(f"    offset 0x{word('reference_offset', cpu):x}, "
               f"collinearity error {word('reference_fit_error', cpu):,} "
               f"x100ns")
+
+        # The frame itself, against what we believe we wrote.
+        if cpu in pages:
+            head = page_got.get(pages[cpu])
+            pscale = page_got.get(pages[cpu] + 8)
+            poff = page_got.get(pages[cpu] + 16)
+            if head is None or pscale is None or poff is None:
+                print(f"    page 0x{pages[cpu]:x} UNREADABLE - the "
+                      f"comparison below is absent, not passing")
+            else:
+                seq = head & 0xffffffff
+                print(f"    page reads   sequence {seq}, "
+                      f"scale 0x{pscale:016x}, offset 0x{poff:x}")
+                # A sequence of 0 is the interface's "not a reliable
+                # source", which sends the guest to the counter MSR.
+                # A non-zero sequence with a zero scale is far worse:
+                # the guest computes a CONSTANT and any loop waiting
+                # for its clock to change spins for ever.
+                if 0 == seq:
+                    print("      sequence 0 - the guest is being sent "
+                          "to the counter MSR, page not in use")
+                elif 0 == pscale:
+                    print("      *** sequence is set but scale is ZERO: "
+                          "the guest's clock is a CONSTANT ***")
+                if scale and pscale and pscale != scale:
+                    print(f"      *** FRAME DISAGREES WITH THE MEMBER: "
+                          f"we believe 0x{scale:016x}, the guest reads "
+                          f"0x{pscale:016x} - somebody else wrote this "
+                          f"page ***")
+                elif scale and pscale == scale:
+                    print("      agrees with reference_scale - the "
+                          "guest reads what we published")
 
         if not published:
             print("    NOT PUBLISHED - the guest is still reading the "
