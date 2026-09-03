@@ -8223,6 +8223,21 @@ private:
      */
     std::uint64_t window_threshold_arm_entries[max_cpus]{};
     std::uint64_t window_threshold_refused[max_cpus]{};
+
+    /**
+     * Thresholds armed on one entry and cleared on the next without
+     * the priority drop ever arriving. `window_threshold_armed` is
+     * re-derived by every `build_vmcs02`, so an arming lives exactly
+     * one entry; this counts the ones that expired unused.
+     *
+     * It exists because a wedged guest read **1,080,221** armings
+     * against **998** grants with `window_threshold_refused` at
+     * **zero** - the gate never declined, so nearly every arming went
+     * somewhere no counter could see. Without this, "the drop landed
+     * on a later entry" and "the guest rarely drops at all" are
+     * indistinguishable, and they call for opposite fixes.
+     */
+    std::uint64_t window_threshold_cleared_unfired[max_cpus]{};
     /** @} */
 
     /**
@@ -8312,6 +8327,28 @@ private:
     std::uint64_t pending_vector_drop_moments[max_cpus]{};
     std::uint64_t pending_vector_blocked[max_cpus]{};
     std::uint64_t pending_vector_unreadable[max_cpus]{};
+
+    /**
+     * Entries where the vector was admissible and **something was
+     * already armed** to produce the exit at which the level above
+     * would stage it - a window request in vmcs02, or this VMM's own
+     * threshold. The healthy case, and until now the *only* branch of
+     * this instrument that returned without counting.
+     *
+     * It exists because the five populations did not sum. Measured on
+     * a wedged guest: `instrument_entries` 188,403 over a window with
+     * `blocked` 170,433 and `drop_moments` 16,562, leaving 1,408
+     * shared between `delivered`, `unreadable` and this silent return
+     * - so "the level above was already asking" could only ever be
+     * inferred by subtraction, which is how a residual gets attributed
+     * to whichever population somebody is arguing for.
+     *
+     * With this, `instrument_entries` equals the sum of `delivered`,
+     * `unreadable`, `blocked`, `window_already_armed` and
+     * `drop_moments`, and a mismatch is a reader bug rather than a
+     * finding.
+     */
+    std::uint64_t pending_vector_window_already_armed[max_cpus]{};
     std::uint64_t pending_vector_instrument_entries[max_cpus]{};
     std::uint8_t pending_vector_now[max_cpus]{};
     bool pending_vector_drop_marked[max_cpus]{};

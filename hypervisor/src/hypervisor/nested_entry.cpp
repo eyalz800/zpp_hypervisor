@@ -2186,6 +2186,22 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     // report it with. `threshold02` still holds
                     // vmcs12's own value, so this entry is byte for
                     // byte the one the default build would have made.
+                    //
+                    // **An arming that never fired.** The flag is
+                    // re-derived on every entry, so a threshold armed
+                    // for one entry and cleared on the next was a
+                    // promise the guest was never given a chance to
+                    // collect. Measured on a wedged guest: 1,080,221
+                    // armings against 998 grants, with
+                    // `window_threshold_refused` at zero - so the gate
+                    // never declined, and the missing million went
+                    // somewhere this branch could not report. Counted
+                    // here so "the drop landed on a later entry" stops
+                    // being a hypothesis and becomes a reading.
+                    if (this->window_threshold_armed[cpu]) {
+                        this->window_threshold_cleared_unfired[cpu] += 1;
+                    }
+
                     this->window_threshold_armed[cpu] = false;
 
                     if (holding && blocked) {

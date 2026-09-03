@@ -561,6 +561,13 @@ void hypervisor::note_pending_vector(std::size_t cpu, std::uint64_t staged)
                       this->window_threshold_armed[cpu]);
 
         if (armed) {
+            // Counted, so the populations sum. This was the one branch
+            // that returned silently, and its size could only be got
+            // by subtracting the other four from
+            // `instrument_entries` - which is how a residual ends up
+            // attributed to whichever population somebody is arguing
+            // for.
+            this->pending_vector_window_already_armed[cpu] += 1;
             return;
         }
 
