@@ -1169,9 +1169,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             constexpr std::uint64_t blocking_by_sti = 1ull << 0;
             constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
 
+            // Bit 3, blocking by NMI, has to go with them, and leaving
+            // it was the very failure the paragraph above describes.
+            // SDM 29.3.1.5: when the "virtual NMIs" VM-execution
+            // control is 1 and the entry injects an NMI, bit 3 must be
+            // 0, or the entry is refused - and virtual-NMIs reaches
+            // vmcs02 from vmcs12, so a second-level guest's own control
+            // decides whether this bites. That is why it was survivable
+            // for as long as it was, and why it is not a theoretical
+            // check: the refusal produces no VM exit, so the processor
+            // stops with nothing recorded.
+            //
+            // Cleared rather than waited on, for the reason
+            // `resume.cpp` already gives on the equivalent path: the
+            // blocking is the architecture's record that an NMI is *in
+            // progress*, and the NMI being injected here is that same
+            // one, so waiting for it to clear waits on the IRET of a
+            // handler that never ran. KVM clears it unconditionally,
+            // `vmx.c:7130`.
             vmcs.guest_interruptibility_state(
                 vmcs.guest_interruptibility_state() &
-                ~(blocking_by_sti | blocking_by_mov_ss));
+                ~(blocking_by_sti | blocking_by_mov_ss |
+                  static_cast<std::uint64_t>(
+                      arch::x86_64::vmx::interruptibility_state::
+                          blocking_by_nmi)));
 
             ++this->guest_nmis_reinjected;
             vmcs.vm_entry_interruption_information_field(valid | type_nmi |
