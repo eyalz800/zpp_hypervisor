@@ -1089,6 +1089,33 @@ hypervisor::epte_for(std::uint64_t physical_address)
         return std::unexpected(zpp::error{error::ept_not_initialized});
     }
 
+    // **Bounded before it is indexed.** The index below is
+    // `physical_address >> 30` into an array of 512 rows, and nothing
+    // above this ever checked it. Past the end it reads a page-directory
+    // entry that is some other member of the singleton, and then the
+    // caller *writes* permissions through the returned pointer -
+    // `watch_guest_page_writes` clears write on it, `protect_region`
+    // clears all four.
+    //
+    // Reachable from guest-chosen addresses, which is why this is a
+    // refusal and not an assertion: the IUM block watch at
+    // `nested_entry.cpp:7837` walks a hypercall's RDX through
+    // `translate_guest_linear` and then `l2_physical_to_l1`, and both
+    // walks take their frame numbers from tables the guest owns. A
+    // 52-bit frame from either indexes thousands of rows past `epd`.
+    //
+    // KVM refuses the same class one level up rather than at the table:
+    // `kvm_vcpu_is_illegal_gpa` (`.references/kvm/mmu.h`) rejects a
+    // guest-physical address above the reported width before anything
+    // indexes on it. There is no equivalent floor here, because this
+    // VMM's identity map is bounded by its own array rather than by
+    // MAXPHYADDR - `epd` is 512 rows of 512 two-megabyte entries, so
+    // 512 GB - and the array is the smaller of the two.
+    if (!physical_address_within_ept(physical_address)) {
+        return std::unexpected(
+            zpp::error{error::physical_address_beyond_ept});
+    }
+
     auto ept_count = std::size(this->ept);
     auto & host_page_table = this->host_page_table;
 

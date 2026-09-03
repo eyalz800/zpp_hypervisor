@@ -219,6 +219,30 @@ public:
          * was never applied gets mistaken for one that was.
          */
         module_protection_missing = 25,
+
+        /**
+         * A physical address past the last one `epd` describes.
+         *
+         * `epte_for` is indexed rather than walked - `epd[address >> 30]`
+         * picks the page directory - which is what `initialize_ept`'s
+         * complete identity map buys. `epd` is 512 directories of 512
+         * two-megabyte entries, so it covers exactly 512 GB, and an
+         * address at or above that indexes past the end of the singleton
+         * and then *writes* through the returned pointer.
+         *
+         * Not a theoretical bound. `epte_for` is reached with addresses
+         * the guest chooses: the IUM block watch at
+         * `nested_entry.cpp:7837` takes a hypercall's RDX, walks the
+         * guest's own page tables with `translate_guest_linear` and then
+         * the guest hypervisor's extended page tables with
+         * `l2_physical_to_l1`, and every frame number in both walks
+         * comes out of a table the guest owns.
+         *
+         * Refused rather than clamped: a clamp would arm a watch, or
+         * protect a page, at an address nobody asked about, and the
+         * caller would be told it worked.
+         */
+        physical_address_beyond_ept = 26,
     };
 
     /**
@@ -249,6 +273,33 @@ public:
      * entry maps at unless it has been split.
      */
     static constexpr std::size_t large_page_size = 0x200000;
+
+    /**
+     * One past the last physical address `epte_for` can name.
+     *
+     * `epd` is 512 page directories of 512 two-megabyte entries, and
+     * `epte_for` *indexes* it rather than walking - `epd[address >> 30]`
+     * - so the array's extent is the bound and it is 512 GB. The
+     * static_assert beside `epd`'s own declaration keeps the two in
+     * step; resizing the array without moving this constant is the
+     * mistake it exists to refuse.
+     *
+     * A bound and not a capability: it is smaller than the processor's
+     * physical-address width, so it is this VMM's limit rather than the
+     * machine's, and an address between the two is legal on the hardware
+     * and still unnameable here.
+     * @{
+     */
+    static constexpr std::uint64_t ept_identity_limit = 512ull << 30;
+
+    static constexpr bool
+    physical_address_within_ept(std::uint64_t physical_address)
+    {
+        return physical_address < ept_identity_limit;
+    }
+    /**
+     * @}
+     */
 
     /**
      * Maximum module size in bytes.
@@ -11987,6 +12038,17 @@ private:
     alignas(page_size) arch::x86_64::vmx::epte epdpt[512];
     alignas(page_size) arch::x86_64::vmx::epte epd[512][512];
     alignas(page_size) arch::x86_64::vmx::epte ept[1024][512];
+
+    // `ept_identity_limit` is the bound `epte_for` refuses past, and it
+    // is spelled as a constant up there rather than derived from here
+    // because a host test has to be able to name it. This is what keeps
+    // the two in step: resizing `epd` without moving the constant would
+    // otherwise widen or narrow the indexable range silently, and the
+    // narrowing direction writes past the array again.
+    static_assert(ept_identity_limit ==
+                      (std::extent_v<decltype(epd), 0> *
+                       std::extent_v<decltype(epd), 1> * large_page_size),
+                  "ept_identity_limit no longer matches epd's extent");
     /**
      * @}
      */
@@ -15778,6 +15840,9 @@ inline const zpp::error_category & category(hypervisor::error)
             case hypervisor::error::ept_not_initialized:
                 return "An EPT entry was asked for before the tables "
                        "were built";
+            case hypervisor::error::physical_address_beyond_ept:
+                return "A physical address past the 512 GB the EPT "
+                       "page directories describe";
             case hypervisor::error::controller_not_available:
                 return "The channel's controller is not known";
             case hypervisor::error::acknowledgement_timed_out:

@@ -140,8 +140,19 @@ hypervisor::decode_guest_instruction(std::size_t,
 }
 
 std::expected<arch::x86_64::vmx::epte *, zpp::error>
-hypervisor::epte_for(std::uint64_t)
+hypervisor::epte_for(std::uint64_t physical_address)
 {
+    // The table lookup is stubbed and the **bound is not**, which is the
+    // same division this harness already makes for
+    // `decode_guest_instruction`: the bytes are supplied and the real
+    // decoder still says what they mean. `epte_for` indexes `epd` rather
+    // than walking it, so the bound is the whole of its input validation
+    // and it is the part a caller can be handed a guest's address for.
+    if (!physical_address_within_ept(physical_address)) {
+        return std::unexpected(
+            zpp::error{error::physical_address_beyond_ept});
+    }
+
     if (g_epte_fails) {
         return std::unexpected(zpp::error{error::out_of_ept_entries});
     }
@@ -2768,6 +2779,84 @@ static void test_apic_timer()
     }
 }
 
+/**
+ * A watch may not be armed on an address past what `epd` describes.
+ *
+ * `epte_for` is indexed rather than walked - `epd[address >> 30]` into an
+ * array of 512 rows - so an address at or above 512 GB reads a
+ * page-directory entry that is some other member of the singleton, and
+ * then this function *writes* through the returned pointer to clear write
+ * permission. That is an out-of-bounds store, not a wrong answer.
+ *
+ * It is reachable from addresses the guest chooses. The IUM block watch
+ * at `nested_entry.cpp:7837` takes a hypercall's RDX, walks the guest's
+ * own page tables with `translate_guest_linear` and then the guest
+ * hypervisor's extended page tables with `l2_physical_to_l1`, and every
+ * frame number in both walks comes out of a table the guest owns - so a
+ * 52-bit frame from either indexed `epd` thousands of rows past its end.
+ *
+ * KVM refuses the same class one level up rather than at the table:
+ * `kvm_vcpu_is_illegal_gpa` rejects a guest-physical address above the
+ * reported width before anything indexes on it. There is no equivalent
+ * here because the bound is this VMM's own array rather than MAXPHYADDR,
+ * and the array is the smaller of the two.
+ *
+ * The negative control is the point of the first two checks: the same
+ * call one page *below* the limit must still succeed, or this would pass
+ * for a `watch_guest_page_writes` that refuses everything.
+ */
+static void test_epte_bound()
+{
+    reset();
+
+    check(hypervisor_t::physical_address_within_ept(
+              hypervisor_t::ept_identity_limit - hypervisor_t::page_size),
+          "the last page below the limit is nameable");
+    check(!hypervisor_t::physical_address_within_ept(
+              hypervisor_t::ept_identity_limit),
+          "the first address at the limit is not nameable");
+    check(!hypervisor_t::physical_address_within_ept(
+              (1ull << 52) - hypervisor_t::page_size),
+          "a 52-bit frame is not nameable");
+
+    // Through the real `watch_guest_page_writes`, so the refusal is the
+    // one a caller actually gets rather than the predicate on its own.
+    auto beyond = hv().watch_guest_page_writes(
+        hypervisor_t::ept_identity_limit,
+        &hypervisor_t::on_local_apic_write,
+        &hv(),
+        page_watch::mode::notify);
+
+    check(!beyond.has_value(),
+          "arming a watch at the limit is refused");
+    check(!beyond.has_value() &&
+              (hypervisor_t::error::physical_address_beyond_ept ==
+               static_cast<hypervisor_t::error>(beyond.error().code())),
+          "and refused with physical_address_beyond_ept");
+
+    auto far = hv().watch_guest_page_writes(
+        (1ull << 52) - hypervisor_t::page_size,
+        &hypervisor_t::on_local_apic_write,
+        &hv(),
+        page_watch::mode::notify);
+
+    check(!far.has_value(), "so is one at a 52-bit frame");
+
+    // The negative control. One page below the limit is an address
+    // `epte_for` may index, so the arming must go through - otherwise
+    // the two refusals above prove nothing about the bound.
+    auto within = hv().watch_guest_page_writes(
+        hypervisor_t::ept_identity_limit - hypervisor_t::page_size,
+        &hypervisor_t::on_local_apic_write,
+        &hv(),
+        page_watch::mode::notify);
+
+    check(within.has_value(),
+          "a watch one page below the limit is still armed");
+
+    reset();
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -2795,6 +2884,7 @@ int main()
     test_straddle_and_width();
     test_roster_drops_the_watch();
     test_apic_timer();
+    test_epte_bound();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
 
