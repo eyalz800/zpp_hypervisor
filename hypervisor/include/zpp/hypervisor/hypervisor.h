@@ -170,8 +170,19 @@ public:
          * the capability MSRs told it it could have, or an extended
          * page-table pointer the same MSRs refuse - both of which SDM
          * 29.2.1 makes checks on the VM-execution controls, so both
-         * answer with error 7. `nested_host_state_unsupported` is SDM
-         * 29.2.2's half of the same, and answers with error 8.
+         * answer with error 7. `nested_host_state_unsupported` is the
+         * host-state-area half of the same and answers with error 8, and
+         * `build_vmcs02` raises it from two of 29.2's three subsections:
+         * SDM 29.2.2 (.references/sdm.txt:202276), "Checks on Host
+         * Control Registers, MSRs, and SSP", for a host CR0 or CR4
+         * outside what the fixed-bit MSRs allow, and SDM 29.2.4
+         * (sdm.txt:202330), "Checks Related to Address-Space Size", for
+         * a host this VMM will not resume in 32-bit mode.
+         *
+         * **This used to cite 29.2.2 for the address-space-size check,
+         * which is 29.2.4.** The number was wrong for as long as it was
+         * because 29.2.2 is real and adjacent, so it read as checked.
+         * Both are now named beside the condition each answers for.
          *
          * `nested_msr_area_unsupported` is the one that is a limit here
          * rather than in the architecture: an MSR area may only name

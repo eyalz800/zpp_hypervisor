@@ -58,6 +58,67 @@ The pointer-form item (`(e & (2^48-1)) - 2^47`) is settled by algebra: it is
 the standard bias-subtract canonicalization, always yields a canonical VA
 (kernel half iff the stored field's bit 47 is 0), not a raw sign extension.
 
+## A guest could halt a physical core with one control-register write - fixed 2026-09-03
+
+Closed, and recorded here for the three decisions taken along the way
+rather than for the defect.
+
+`mov cr0` and `mov cr4` both exit into `control_register_access` -
+`cr0_guest_host_mask` is NE plus PG under `track_long_mode_switch`,
+`cr4_guest_host_mask` is VMXE | SMXE with VMXE shadowed clear, so every
+guest read-modify-write of CR4 arrives. The handler wrote the raw
+operand into the VMCS guest field with no validation, and no
+reserved-bit mask existed anywhere in the tree. The next VM entry failed
+SDM 29.3.1.1 and `on_vm_entry_failure` ends in
+`for (;;) { disable_interrupts(); halt(); }`. vmcs12's `host_cr0` and
+`host_cr4` reached the same place through `load_l1_host_state`, which
+copies them into vmcs01's *guest* fields on the first reflection.
+
+Both now answer the way hardware does - #GP with RIP on the
+instruction for the `mov`, VMfailValid error 8 for the nested entry -
+against `IA32_VMX_CR{0,4}_FIXED{0,1}`, through
+`arch::x86_64::vmx::fixed_bits_valid`.
+
+Three things worth not re-deriving:
+
+- **The mask is read from the capability MSRs, not hardcoded, and that
+  is what made it safe to add under a running guest.** The VM entry the
+  check protects is judged against the same two values - by the
+  processor on bare metal, and by KVM's `nested_guest_cr4_valid`
+  (`.references/kvm/nested.h:285`) when this VMM is itself nested, since
+  that reads the `nested.msrs.cr4_fixed*` KVM hands us. A pre-check
+  derived from the same source cannot refuse a value the entry would
+  have accepted.
+- **No CPUID table, and the argument is checkable.** KVM gates CR4 bits
+  on the guest's CPUID (`cr4_guest_rsvd_bits`, and for a nested guest
+  `nested_vmx_cr_fixed1_bits_update`, `.references/kvm/vmx.c:7703`).
+  That is redundant here because the only CR4-relevant CPUID bits this
+  VMM edits are leaf 1 ECX[5] (VMX) and ECX[6] (SMX), which are exactly
+  the two bits both call sites exempt. **A third edited CPUID feature
+  bit with a CR4 bit behind it breaks that and needs the table.**
+- **CR0.NW set with CD clear is deliberately not refused.** SDM Event 13
+  lists it (`.references/sdm.txt:162059`) and KVM refuses it
+  (`x86.c:1110`), but SDM 29.3.1.1 says bits 29 and 30 "are never
+  checked because the values of these bits are not changed by VM entry",
+  so it cannot fail an entry and cannot halt anything. Adding it would
+  be a new refusal with no defect behind it. Add it if a guest is ever
+  seen to care.
+
+The two references also disagree about the rest of CR0: KVM masks
+unsupported bits away (`cr0 &= ~CR0_RESERVED_BITS` under "Write to CR0
+reserved bits are ignored, even on Intel", `x86.c:1165`) where SDM 26.8
+says #GP. The SDM is followed. The disagreement is moot in practice -
+`IA32_VMX_CR0_FIXED1` is `0xffffffff`, so the two rules differ over no
+CR0 bit below 32 at all, and the fixed-bit test for CR0 reduces to
+"bits 63:32 must be 0" plus the PG-without-PE rule.
+
+One fixture defect found on the way, and it is the fourth of its shape
+in `tests/nested_exit`: `vmx_msr_fixture` answered **zero** for MSRs
+`0x486`-`0x489`, and by SDM A.8 a zero `IA32_VMX_CR4_FIXED1` means every
+CR4 bit is fixed to 0 - a machine on which no CR4 is legal. Nothing
+noticed while nothing read them. **A capability MSR left at a fixture's
+`default:` is an assertion about the processor, not the absence of one.**
+
 ## The block is a PnP boot-driver device action that never completes - 2026-08-30
 
 This is the resolved cause, and it retires BOTH earlier framings on this
