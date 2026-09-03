@@ -44,7 +44,25 @@ def monitor(cmds):
     except Exception: pass
     s.close()
     d=out.decode('utf-8','replace')
-    return re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',d).replace('\x1b','')
+    d=re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',d).replace('\x1b','')
+    # **Drop the echoed command.** The monitor echoes what it was sent,
+    # and the echo contains both the address and the format spec - so a
+    # byte-wide reader whose pattern is `0x[0-9a-f]{2}` matches inside
+    # `0x119800000`, and even `/16xb` contributes the ASCII it is made
+    # of. Measured: process names came back as `////////LogonUI.exe`
+    # and `11111111svchost.exe` - 0x2f is '/' and 0x31 is '1', i.e. the
+    # command being read back as data. The count and the order stayed
+    # right, which is what makes it dangerous: a garbled name still
+    # compares, just never equal.
+    #
+    # `guest-threads.py` had this identical bug and its walk silently
+    # printed nothing at all. Here it corrupted a name instead. Same
+    # cause, two different symptoms, and neither announced itself.
+    for c in cmds:
+        i = d.find(c)
+        if i >= 0:
+            d = d[i + len(c):]
+    return d
 
 def xp_q(phys, n=1):
     d = monitor([f'xp /{n}xg 0x{phys:x}'])
