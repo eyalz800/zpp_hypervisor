@@ -1404,12 +1404,100 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
 
     // A 64-bit host is the only shape this can put back, since the exit
     // comes here and the guest hypervisor is resumed in whatever mode its
-    // own host-state area describes. SDM 29.2.2 makes this an error 8
-    // condition on its own terms - the host-state checks are where the
-    // address-space size and the CS selector are validated together.
+    // own host-state area describes. SDM 29.2.4 (.references/sdm.txt:
+    // 202330), "Checks Related to Address-Space Size", makes this an
+    // error 8 condition on its own terms - it and 29.2.2 and 29.2.3 are
+    // the three subsections of 29.2 that fail the same way.
+    //
+    // **The section number used to read 29.2.2 and that was wrong.**
+    // 29.2.2 (sdm.txt:202276) is "Checks on Host Control Registers,
+    // MSRs, and SSP" - the CR0 and CR4 pair checked immediately below -
+    // and the CS selector this comment appealed to is 29.2.3. The class
+    // was right and the citation was not, which is the failure mode
+    // CLAUDE.md warns about: a wrong section number stops the next
+    // person checking.
     if (0 == (exit12 & exit_host_address_space_size)) {
         return std::unexpected(
             zpp::error{error::nested_host_state_unsupported});
+    }
+
+    // **The host-state area's control registers, and the second way a
+    // guest could stop a physical core.**
+    //
+    // `load_l1_host_state` puts vmcs12's `host_cr0` and `host_cr4`
+    // straight into vmcs01's *guest* fields on the first reflection out
+    // of a second-level guest, unchecked. An illegal one therefore
+    // reached the same place a bad `mov cr4` did: VM entry fails SDM
+    // 29.3.1.1 and `on_vm_entry_failure` halts the processor, with
+    // nothing recorded and the guest hypervisor's own VMCS as the cause.
+    //
+    // A processor answers this at VM entry instead, before anything has
+    // moved. SDM 29.2.2 (.references/sdm.txt:202276): "The CR0 field must
+    // not set any bit to a value not supported in VMX operation (see
+    // Section 26.8)" and the same sentence for CR4. Failing 29.2 is
+    // VMfailValid with error 8, which is what
+    // `nested_host_state_unsupported` maps to in the caller - so this is
+    // exactly KVM's `nested_vmx_check_host_state`
+    // (.references/kvm/nested.c:3013), whose first line is
+    // `CC(!nested_host_cr0_valid(...)) || CC(!nested_host_cr4_valid(...))`
+    // (nested.c:3019) and whose caller answers
+    // `VMXERR_ENTRY_INVALID_HOST_STATE_FIELD` (nested.c:3730-3731).
+    //
+    // Judged against the *capability MSRs the guest hypervisor was
+    // told*, which for this pair is the hardware's own value -
+    // `nested_vmx_capability_msr` passes all four through unchanged,
+    // because they describe the processor the guest really runs on. That
+    // is also what makes this safe to add under a running guest: the
+    // entry it protects is judged against the same two values, by the
+    // processor on bare metal and by KVM's `nested_host_cr4_valid`
+    // (.references/kvm/nested.h:296) when this VMM is itself nested. A
+    // host CR4 that passes today therefore still passes.
+    //
+    // The exemptions differ from the `mov cr4` case, and the difference
+    // is the point. Here the *host* state is being checked, so:
+    //
+    // - CR0's NW and CD are exempt, and by the architecture rather than
+    //   by choice: 29.2.2 footnote 1 says they "are never checked because
+    //   the values of these bits are not changed by VM exit".
+    // - CR0's PE and PG are *not* exempt. "Unrestricted guest" relaxes
+    //   them for a guest (29.3.1.1) and says nothing about a host, and
+    //   KVM draws the line in the same place - `nested_guest_cr0_valid`
+    //   clears them from `fixed0` and `nested_host_cr0_valid`
+    //   (.references/kvm/nested.h:277) does not.
+    // - CR4's VMXE is exempt only because `load_l1_host_state` forces it
+    //   on regardless (`host_cr4_12 | cr4_vmxe`), so the value reaching
+    //   the register always has it. SMXE is not exempt: nothing here
+    //   forces it either way on this path, so the honest answer is the
+    //   processor's.
+    {
+        constexpr std::uint64_t cr0_never_checked =
+            arch::x86_64::cr0_bits::not_write_through |
+            arch::x86_64::cr0_bits::cache_disable;
+
+        constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+
+        auto host_cr0_12 = shadow.read(field::host_cr0);
+        auto host_cr4_12 = shadow.read(field::host_cr4);
+
+        if (!arch::x86_64::vmx::fixed_bits_valid(
+                host_cr0_12,
+                nested_vmx_capability_msr(vmx_msr::cr0_fixed_0),
+                nested_vmx_capability_msr(vmx_msr::cr0_fixed_1),
+                cr0_never_checked) ||
+            !arch::x86_64::vmx::fixed_bits_valid(
+                host_cr4_12,
+                nested_vmx_capability_msr(vmx_msr::cr4_fixed_0),
+                nested_vmx_capability_msr(vmx_msr::cr4_fixed_1),
+                cr4_vmxe)) {
+            log("cpu {} vmcs12 host cr0 {} cr4 {} outside what the "
+                "processor allows in vmx operation - refused",
+                cpu,
+                host_cr0_12,
+                host_cr4_12);
+
+            return std::unexpected(
+                zpp::error{error::nested_host_state_unsupported});
+        }
     }
 
     stamp(1);   // the three MSR areas checked

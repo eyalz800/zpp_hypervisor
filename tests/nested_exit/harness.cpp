@@ -182,6 +182,44 @@ static std::uint64_t vmx_msr_fixture(std::size_t msr)
         return 0x07ffffff00036dfbull;
     case 0x490:
         return 0x0001f3ff000011fbull;
+        // The four VMX-fixed-bit MSRs, which answered **zero** until
+        // there was a caller for them - and zero is not a processor.
+        // With IA32_VMX_CR4_FIXED1 reading 0, SDM A.8 says every bit of
+        // CR4 is fixed to 0, so the fixture described a machine on which
+        // no CR4 at all is legal in VMX operation. Nothing noticed while
+        // nothing read them; the first reader would have refused every
+        // case in this file.
+        //
+        // Same shape of defect as the four TRUE-control values above,
+        // and it is the fourth: a capability MSR left at its `default:`
+        // is an assertion about the processor, not an absence of one.
+        //
+        // The values are KVM's, which is the only source here that gives
+        // all four rather than a measurement of one machine:
+        //
+        //   cr0_fixed0  VMXON_CR0_ALWAYSON, PE | PG | NE
+        //               (.references/kvm/nested.c:7164)
+        //   cr0_fixed1  0xffffffff (.references/kvm/vmx.c:7708), so
+        //               bits 63:32 are the only CR0 bits fixed to 0
+        //   cr4_fixed0  VMXON_CR4_ALWAYSON, VMXE alone
+        //               (.references/kvm/nested.c:7165)
+        //   cr4_fixed1  the whole of `nested_vmx_cr_fixed1_bits_update`'s
+        //               list (.references/kvm/vmx.c:7709-7741): PCE
+        //               unconditionally, then VME, PVI, TSD, DE, PSE,
+        //               PAE, MCE, PGE, OSFXSR, OSXMMEXCPT, UMIP, LA57,
+        //               VMXE, SMXE, FSGSBASE, PCIDE, OSXSAVE, SMEP,
+        //               SMAP, PKE and LAM_SUP - bits 14:0, 18:16, 22:20
+        //               and 28. Everything else, CET (23) and PKS (24)
+        //               included, is fixed to 0, which is what makes a
+        //               reserved-bit case here mean something.
+    case 0x486:
+        return 0x80000021ull;
+    case 0x487:
+        return 0xffffffffull;
+    case 0x488:
+        return 0x2000ull;
+    case 0x489:
+        return 0x10777fffull;
     case 0x485:
         return 0x7004c1e7ull;
     case 0x48b:
@@ -651,6 +689,17 @@ static constexpr std::uint64_t l1_msr_bitmap = 0x40000;
 static constexpr std::uint64_t l1_io_bitmap_a = 0x50000;
 static constexpr std::uint64_t l1_io_bitmap_b = 0x60000;
 
+/**
+ * The host-state control registers the fixture's guest hypervisor runs
+ * with: CR0 = PE | NE | WP | PG and CR4 = PAE | PGE | VMXE.
+ *
+ * Every bit here is one the fixture's processor allows - see the
+ * cr0_fixed and cr4_fixed values in `vmx_msr_fixture` - and PE, PG and
+ * NE are the three CR0 bits it *requires*.
+ */
+static constexpr std::uint64_t l1_host_cr0 = 0x80010021;
+static constexpr std::uint64_t l1_host_cr4 = 0x000020a0;
+
 static constexpr std::size_t cpu = 0;
 
 /**
@@ -691,6 +740,18 @@ static void reset(zpp::arch::x86_64::context & registers)
     shadow.write(fields::msr_bitmap, l1_msr_bitmap);
     shadow.write(fields::io_bitmap_a, l1_io_bitmap_a);
     shadow.write(fields::io_bitmap_b, l1_io_bitmap_b);
+
+    // A host-state area a processor would accept, because
+    // `build_vmcs02` checks it (SDM 29.2.2) and a cleared vmcs12 has
+    // CR0 = 0, which fails the fixed bits: PE, PG and NE are all fixed
+    // to 1 in VMX operation. Left at zero every case in this file would
+    // be refused for the fixture's reason rather than its own.
+    //
+    // These are the values a 64-bit guest hypervisor really has -
+    // paging on, protection on, PAE on, VMXE on - not a minimum that
+    // happens to pass.
+    shadow.write(fields::host_cr0, l1_host_cr0);
+    shadow.write(fields::host_cr4, l1_host_cr4);
 
     // Touch each so the fake memory has a zeroed page there.
     page_of(l1_msr_bitmap);
@@ -4170,6 +4231,22 @@ static std::expected<void, zpp::error> compose_entered(
     shadow.write(field::vm_exit_controls, asked.exit_controls);
     shadow.write(field::vm_entry_controls, asked.entry_controls);
 
+    // A host-state area a processor would accept. `reset` writes the
+    // same pair, and this is not a duplicate of it: `build_vmcs02`
+    // checks vmcs12's host CR0 and CR4 against the fixed bits (SDM
+    // 29.2.2), a cleared or switched vmcs12 has them zero, and CR0 = 0
+    // fails - PE, PG and NE are fixed to 1 in VMX operation. The
+    // ordering cases deliberately reset *once* and then switch vmcs12
+    // underneath themselves, so `reset` alone leaves three of them
+    // refused for the fixture's reason rather than their own. Every
+    // path that composes goes through here.
+    //
+    // A case that wants an illegal host-state area writes it after
+    // composing, which is what `test_control_registers_a_vm_entry_-
+    // refuses` does.
+    shadow.write(field::host_cr0, l1_host_cr0);
+    shadow.write(field::host_cr4, l1_host_cr4);
+
     // Fresh per case: `build_vmcs02` keeps only the first entry's values,
     // and a suite that shares the flag across cases would record the
     // first one and assert about the rest.
@@ -6902,6 +6979,210 @@ static void test_the_control_cache_owns_the_ept_pointer()
     }
 }
 
+// ------------- 19. the control registers a VM entry will not accept
+/**
+ * The two halves of "a guest can stop a physical core with one control
+ * register write", and the predicate both fixes are built on.
+ *
+ * What was wrong, and why it is the worst shape of defect in this tree:
+ * neither `mov cr4` in the exit handler nor vmcs12's host-state area was
+ * checked at all, and there was no reserved-bit mask anywhere in the
+ * source. An illegal value went into vmcs01's guest CR0 or CR4 field, the
+ * next VM entry failed SDM 29.3.1.1, and `on_vm_entry_failure` ends in
+ * `for (;;) { disable_interrupts(); halt(); }`. One guest instruction,
+ * one halted processor, nothing recorded.
+ *
+ * The predicate is tested here rather than in a harness of its own
+ * because `exit_dispatch.cpp` is compiled by no harness in this suite -
+ * the `mov cr0` and `mov cr4` call sites are guarded by
+ * `scripts/ci/check-exit-handler.sh` instead, which reads the source.
+ * What is testable natively is the arithmetic they share and the
+ * nested-entry half, and both are below.
+ */
+static void test_control_registers_a_vm_entry_refuses()
+{
+    std::println("\n-- control registers a VM entry will not accept --");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    // ---------------------------------------- the predicate, on its own
+    //
+    // SDM A.7 and A.8: a bit clear in the value and set in FIXED0 is
+    // illegal, and so is a bit set in the value and clear in FIXED1.
+    // Same shape as KVM's `fixed_bits_valid`
+    // (.references/kvm/nested.h:258).
+    constexpr auto cr0_fixed_0 = 0x80000021ull; // PE | NE | PG
+    constexpr auto cr0_fixed_1 = 0xffffffffull;
+    constexpr auto cr4_fixed_0 = 0x2000ull; // VMXE
+    constexpr auto cr4_fixed_1 = 0x10777fffull;
+
+    constexpr auto cr4_vmxe = 1ull << 13;
+    constexpr auto cr4_smxe = 1ull << 14;
+
+    check(vmx::fixed_bits_valid(cr0_fixed_0, cr0_fixed_0, cr0_fixed_1, 0),
+          "the fixed-to-1 set is its own smallest legal CR0");
+
+    check(!vmx::fixed_bits_valid(0, cr0_fixed_0, cr0_fixed_1, 0),
+          "a CR0 of zero is refused - PE, PG and NE are fixed to 1 in "
+          "VMX operation");
+
+    check(vmx::fixed_bits_valid(0, cr0_fixed_0, cr0_fixed_1, cr0_fixed_0),
+          "and accepted once those three are exempt, which is what the "
+          "`mov cr0` case does: NE is forced on and PE and PG are the "
+          "pair SDM 29.3.1.1 leaves unchecked under unrestricted guest");
+
+    // **The exact value that halted the machine.** Bit 63 of CR0 is
+    // outside IA32_VMX_CR0_FIXED1 on every processor - it is 0xffffffff -
+    // so this is illegal however generous the exemptions are.
+    check(!vmx::fixed_bits_valid(cr0_fixed_0 | (1ull << 63),
+                                 cr0_fixed_0,
+                                 cr0_fixed_1,
+                                 0xe0000021ull),
+          "a CR0 with a bit set above 31 is refused with every exemption "
+          "the `mov cr0` case grants - the high half is the whole of what "
+          "the fixed bits catch for CR0");
+
+    check(!vmx::fixed_bits_valid(
+              (1ull << 23), cr4_fixed_0, cr4_fixed_1, cr4_vmxe | cr4_smxe),
+          "CR4.CET is refused on a processor that does not report it, "
+          "and it is bit 23 - inside the low 32, so a reserved-bit mask "
+          "written by hand would have had to name it");
+
+    check(!vmx::fixed_bits_valid(
+              (1ull << 31), cr4_fixed_0, cr4_fixed_1, cr4_vmxe | cr4_smxe),
+          "and so is a CR4 bit no architecture has ever defined");
+
+    // The two exempt bits, in both directions, because the CPUID/CR4
+    // pairing this VMM maintains depends on them being judged neither
+    // way. See `BACKLOG.md` item 1.
+    check(vmx::fixed_bits_valid(
+              0, cr4_fixed_0, cr4_fixed_1, cr4_vmxe | cr4_smxe),
+          "a CR4 without VMXE is accepted even though VMXE is fixed to "
+          "1 - the guest is told by CPUID that there is no VMX, so "
+          "faulting on its absence would announce the concealment");
+
+    check(!vmx::fixed_bits_valid(0, cr4_fixed_0, cr4_fixed_1, 0),
+          "and refused with no exemption, which is what makes the "
+          "exemption load-bearing rather than decorative");
+
+    check(vmx::fixed_bits_valid(
+              cr4_smxe, cr4_fixed_0, cr4_fixed_1, cr4_vmxe | cr4_smxe),
+          "SMXE is exempt too: this VMM clears it from the register and "
+          "from the shadow, so a guest setting it is answered silently");
+
+    check(vmx::fixed_bits_valid(cr4_fixed_1 & ~cr4_smxe,
+                                cr4_fixed_0,
+                                cr4_fixed_1,
+                                cr4_vmxe | cr4_smxe),
+          "every bit the processor reports as settable is settable "
+          "together - the check refuses nothing a real CR4 can hold");
+
+    // ------------------------------- vmcs12's host-state area, end to end
+    zpp::arch::x86_64::context registers{};
+
+    asked_controls asked;
+    asked.primary = primary_default1;
+
+    auto host_state_refusal = [&](std::uint64_t host_cr0,
+                                  std::uint64_t host_cr4) {
+        auto built = compose(asked, registers);
+        static_cast<void>(built);
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::host_cr0, host_cr0);
+        shadow.write(field::host_cr4, host_cr4);
+        hv().vmcs12_controls_captured = 0;
+
+        return hv().build_vmcs02(cpu);
+    };
+
+    // The control first, so a refusal below is the value's and not the
+    // fixture's.
+    check(host_state_refusal(l1_host_cr0, l1_host_cr4).has_value(),
+          "the fixture's own host CR0 and CR4 build vmcs02");
+
+    {
+        // Bit 23 of CR4, CET, which the fixture's processor does not
+        // report - and which `load_l1_host_state` would have put into
+        // vmcs01's *guest* CR4 field on the first reflection out of a
+        // second-level guest.
+        auto refused =
+            host_state_refusal(l1_host_cr0, l1_host_cr4 | (1ull << 23));
+
+        check(!refused.has_value(),
+              "a vmcs12 host CR4 the processor will not accept refuses "
+              "the entry instead of reaching the guest CR4 field and "
+              "halting the processor on the next VM entry");
+
+        check(!refused.has_value() &&
+                  (zpp::error{
+                       hypervisor_t::error::nested_host_state_unsupported}
+                       .code() == refused.error().code()),
+              "and refuses it as a host-state failure, which is "
+              "VMfailValid error 8 - SDM 29.2.2, and KVM's "
+              "`nested_vmx_check_host_state` answering "
+              "VMXERR_ENTRY_INVALID_HOST_STATE_FIELD "
+              "(.references/kvm/nested.c:3019 and :3730)");
+    }
+
+    {
+        // CR0 with PE cleared. "Unrestricted guest" relaxes PE and PG
+        // for a *guest* (SDM 29.3.1.1) and says nothing about a host, so
+        // this must be refused - and KVM draws the line in the same
+        // place, `nested_guest_cr0_valid` dropping the pair from fixed0
+        // (.references/kvm/nested.h:263) where `nested_host_cr0_valid`
+        // does not (nested.h:277).
+        auto refused =
+            host_state_refusal(l1_host_cr0 & ~1ull, l1_host_cr4);
+
+        check(!refused.has_value(),
+              "a vmcs12 host CR0 without PE is refused: unrestricted "
+              "guest exempts PE and PG for a guest, not for a host");
+    }
+
+    {
+        auto refused =
+            host_state_refusal(l1_host_cr0 | (1ull << 63), l1_host_cr4);
+
+        check(!refused.has_value(),
+              "and so is a host CR0 with a bit set above 31");
+    }
+
+    {
+        // NW and CD, which SDM 29.2.2 footnote 1 says "are never checked
+        // because the values of these bits are not changed by VM exit".
+        // Both set, which is the legal combination.
+        auto accepted =
+            host_state_refusal(l1_host_cr0 | (3ull << 29), l1_host_cr4);
+
+        check(accepted.has_value(),
+              "host CR0.NW and CR0.CD are not checked - SDM 29.2.2 "
+              "footnote 1, because a VM exit does not change them");
+    }
+
+    {
+        // VMXE absent from the host area. `load_l1_host_state` forces it
+        // into the register regardless (`host_cr4_12 | cr4_vmxe`), so
+        // judging it here would refuse an entry that will in fact
+        // succeed.
+        auto accepted =
+            host_state_refusal(l1_host_cr0, l1_host_cr4 & ~cr4_vmxe);
+
+        check(accepted.has_value(),
+              "a host CR4 without VMXE is accepted, because "
+              "load_l1_host_state puts the bit in whatever vmcs12 said");
+    }
+
+    // Restore, so the cases after this one do not inherit an odd
+    // host-state area. `reset` writes both fields, but not every case
+    // below resets.
+    {
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::host_cr0, l1_host_cr0);
+        shadow.write(field::host_cr4, l1_host_cr4);
+    }
+}
+
 static void test_shadow_copies_name_the_current_vmcs()
 {
     std::println("\n-- the shadow copies name the current vmcs --");
@@ -7085,6 +7366,7 @@ int main()
     test_the_top_secondary_controls();
     test_synic_pages_are_kept_per_trust_level();
     test_guest_thread_sample_stride();
+    test_control_registers_a_vm_entry_refuses();
 
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();
