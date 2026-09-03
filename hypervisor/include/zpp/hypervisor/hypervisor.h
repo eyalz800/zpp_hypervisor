@@ -6373,6 +6373,22 @@ private:
      */
     static constexpr std::size_t vtl_slot_count = 20;
 
+    /**
+     * Slot 19, named because it is now read as a gate and not only
+     * printed as a census row.
+     *
+     * `vtl_latest[cpu][1][vtl_eptp_slot]` is the extended-page-table
+     * pointer out of vmcs12 as it stood at the last `HvCallVtlReturn`,
+     * and that is **VTL1's** - `capture_vtl_switch` runs before the
+     * hypercall is reflected, and `HvCallVtlReturn` is the one the
+     * secure kernel itself executes, so the vmcs12 current at that
+     * instant is the one running VTL1. Kind 0 is `HvCallVtlCall`, which
+     * VTL0 executes, so slot 19 of *that* kind holds VTL0's pointer.
+     * The two are not interchangeable and gating on the wrong one is
+     * exactly backwards. See `record_l2_entry_event`.
+     */
+    static constexpr std::size_t vtl_eptp_slot = vtl_slot_count - 1;
+
     /** Two trust-level sides and one synthetic-timer arm; see
      * `timer_arm_kind`, which shares this machinery because what is
      * wanted of it is the same - a stack and an image name for a call
@@ -14104,20 +14120,75 @@ private:
     std::uint64_t vtl1_resume_rip[max_cpus][vtl1_resume_capacity]{};
     std::uint64_t vtl1_resume_count[max_cpus]{};
 
-    /** How many times the notification flag was cleared on a VTL1 entry.
-     *  See `nested_vmx::suppress_vina`. */
-    std::uint64_t vina_suppressed[max_cpus]{};
-    /** Why the suppression did or did not fire, so 293 clears out of
-     *  22,000 entries can be attributed. See `nested_vmx::suppress_vina`. */
+    /**
+     * The two arms of `nested_vmx::suppress_vina`, counted separately.
+     *
+     * **There was one counter here, `vina_suppressed`, and it
+     * double-counted by about 2x.** Both arms incremented it - the arm
+     * that clears the flag byte the secure kernel tests, and the arm
+     * that drops the injected vector `0x40` - and they fire on
+     * essentially the same entries, one VINA event producing one
+     * flag-set and one injection. It read **17,115** on the boot it was
+     * quoted from, and the arms separate as 8,561 flag clears against
+     * 8,554 vector drops: about **8,557 real suppressed events**, 8.4%
+     * of VTL1 entries, not 17,115. The name is retired rather than
+     * reused so a reader still asking for `vina_suppressed` fails
+     * instead of reading a plausible number, and so neither arm's
+     * figure needs recovering by subtraction across four counters.
+     * @{
+     */
+    std::uint64_t vina_flag_cleared[max_cpus]{};
+    std::uint64_t vina_vector_dropped[max_cpus]{};
+    /** @} */
+    /**
+     * Why the suppression did or did not fire, so 293 clears out of
+     * 22,000 entries can be attributed. See `nested_vmx::suppress_vina`.
+     *
+     * **`vina_suppress_attempts` is not independent evidence about VTL1
+     * entries.** It and `vtl1_any_entry_count` increment in the same
+     * function under the identical predicate with no early return
+     * between them, so their exact equality is a tautology - it confirms
+     * that the compiler emitted both statements and nothing else. It was
+     * once quoted as corroboration.
+     *
+     * The breakdown is exhaustive over `vina_suppress_attempts`:
+     * `wrong_space` + `no_address` + `read_failed` + `already_clear` +
+     * `write_failed` + `vina_flag_cleared`, and `no_address` is itself
+     * `no_self` + `no_block` + `no_l1`.
+     */
     std::uint64_t vina_suppress_attempts[max_cpus]{};
     std::uint64_t vina_suppress_no_address[max_cpus]{};
     std::uint64_t vina_suppress_read_failed[max_cpus]{};
+    /**
+     * Entries the hypercall latch called VTL1 and the address space did
+     * not. See `record_l2_entry_event` for the gate.
+     *
+     * This is the discriminator `vina_suppress_no_address` never had.
+     * That counter read **10,075, 9.8% of attempts**, and could not say
+     * whether those were VTL1 entries made before the IUM block exists
+     * or VTL0 entries whose walk failed because `gs:0` is the KPCR
+     * there. With the extended-page-table gate in front of the walk the
+     * second population is counted here and never walked, so whatever
+     * remains in `no_address` is a genuine VTL1 walk failure, split by
+     * which link broke.
+     */
+    std::uint64_t vina_suppress_wrong_space[max_cpus]{};
+    /** Which link of `[[gs:0] + 0x10]` broke, summing to
+     *  `vina_suppress_no_address`. */
+    std::uint64_t vina_suppress_no_self[max_cpus]{};
+    std::uint64_t vina_suppress_no_block[max_cpus]{};
+    std::uint64_t vina_suppress_no_l1[max_cpus]{};
     /** The securekernel (VTL1) image base, cached once per cpu for the
      *  secure-DMA-disable poke. See `nested_vmx::force_no_secure_dma`. */
     std::uint64_t secure_kernel_base[max_cpus]{};
     /** How many times bit1 of a securekernel secure-PCI policy global was
      *  cleared. Non-zero once the SDEV/winload enable was forced off. */
     std::uint64_t secure_dma_forced[max_cpus]{};
+    /** Entries the secure-DMA poke refused because the extended-page-table
+     *  pointer did not identify VTL1's address space, so its walk - and
+     *  its 4-byte write - did not run. The counterpart of
+     *  `vina_suppress_wrong_space`, on the same gate. */
+    std::uint64_t secure_dma_wrong_space[max_cpus]{};
     std::uint64_t vina_suppress_already_clear[max_cpus]{};
     std::uint64_t vina_suppress_write_failed[max_cpus]{};
 

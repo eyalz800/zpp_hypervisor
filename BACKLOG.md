@@ -325,6 +325,29 @@ ways, with no competing hypothesis:
   delivered 0. `suppress_vina` was added to dodge the *other* failure
   (securekernel spinning in `ShvlVinaHandler` because a too-slow round trip
   never clears VINA in time); it traded that stall for this one.
+
+  **Both numbers in that sentence need re-reading, and only one of them
+  is wrong.** `vina_suppressed` no longer exists: it was incremented by
+  *both* suppression arms - the flag clear and the vector drop - which
+  fire on essentially the same entries, so it double-counted by about
+  2x. The 7,593 is therefore about 3,800 real events, and the boot that
+  read 17,115 was about 8,557. The counter is split into
+  `vina_flag_cleared` and `vina_vector_dropped`, and the old name is
+  retired so a reader asking for it fails rather than quoting it again.
+
+  `l2_given_vector[0x40]=0` **stands as taken**, against the review that
+  flagged it. Its declaration defines it as the interruption-information
+  field read back out of vmcs02 at the last instruction before entry -
+  the post-suppression word by construction - so zero there is the drop
+  working and is the correct reading of "delivered 0". What *was*
+  manufactured is its neighbour: `vtl1_any_entry_vector[0x40]` was
+  structurally zero whenever `novina=1`, because it read the same local
+  after the drop had cleared the valid bit, and its "no event" slot
+  carried the difference. That pair - "no event 37,147, 100%" - is the
+  reading to distrust, and it is the one now fixed. See
+  `record_l2_entry_event`: the censuses read the pre-suppression word,
+  `l2_given_vector` deliberately does not, and the difference between
+  the two is the suppression.
 - **Live state agrees.** `in_vtl1=0`, VTL switches balanced and frozen
   (22,976 / 23,218), so VTL1 has already handed back and VTL0 is parked -
   a VTL0-only wait, consistent with a lost VTL0 interrupt, not with an

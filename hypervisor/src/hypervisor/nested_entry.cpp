@@ -3470,6 +3470,33 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // reaches the end of. That is the whole difference from
     // `ZPP_LAZY_TICK`, which froze the machine at 10,000 us and at
     // 2,500 us alike.
+    // **`in_vtl1` has the same defect as `vtl_half_mark_kind` and is
+    // deliberately not gated the same way.** It is set from the
+    // hypercall latch too (`nested_entry.cpp:10780-10784`, the
+    // `HvCallVtlCall`/`HvCallVtlReturn` pair), so it means "the last
+    // trust-level hypercall was a call", not "VTL1's address space is
+    // current" - and on the wedged boot the `vtl_switches` sign says
+    // the latch was left reading VTL0. `record_l2_entry_event` re-gates
+    // its two consumers on vmcs12's extended-page-table pointer; this
+    // consumer, and `hold_self_ipi_in_vtl1`'s below, do not, for two
+    // reasons worth writing down so the omission is not read as an
+    // oversight:
+    //
+    // - **Nothing here dereferences a guest pointer.** The two gated
+    //   blocks walk `[[gs:0] + 0x10]` and *write* a byte through the
+    //   result, so a wrong answer there rewrites a byte of an unrelated
+    //   guest page. A wrong answer here holds a staged clock interrupt
+    //   for one extra turn, or re-stages it one turn early, and
+    //   `vtl1_clock_owed` plus `lazy_tick_not_yet` already count both.
+    // - **It would change a guest-visible injection under a switch
+    //   whose outcome is already recorded.** `hold_clock_in_vtl1` has
+    //   been run (`BACKLOG.md`: third arm, identical to `novina=0`
+    //   alone, `vtl_fresh_calls` frozen), and moving when it fires
+    //   makes that measurement incomparable for no diagnostic gain.
+    //
+    // The gate is available here if that changes - `shadow` is vmcs12,
+    // so `shadow.read(field::ept_pointer)` against
+    // `vtl_latest[cpu][1][vtl_eptp_slot]` is the same one-read test.
     if constexpr (nested_vmx::hold_clock_in_vtl1) {
         constexpr std::uint64_t vtl1_clock_vector = 0xd1;
 
@@ -8745,6 +8772,94 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     auto given =
         this->vmcs.read(field::vm_entry_interruption_information_field);
 
+    // **What the level above staged, before anything in this function
+    // rewrites it. Every census below reads this and not `given`.**
+    //
+    // Two arms here modify `given` on the way through - the VINA vector
+    // drop and `stall_breaker`'s withhold and restage - and a census
+    // taken downstream of them measures this VMM's own suppression while
+    // being labelled as the guest's behaviour. Measured, and it
+    // published a wrong reading twice:
+    //
+    // - `vtl1_any_entry_vector[0x40]` was **structurally zero whenever
+    //   `novina=1`**. It could not have counted a VINA however many
+    //   arrived, because the drop cleared the valid bit first.
+    // - the "no event" slot, index 256, was inflated by exactly the drop
+    //   count. That is where "what the entry running VTL1 carried: no
+    //   event 37,147, 100%" came from, and `BACKLOG.md`'s "the VINA was
+    //   requested 7,593 times and delivered 0" is the same line read
+    //   from the other side.
+    // - a dropped entry was sampled into `quiet_rip` rather than
+    //   `interrupted_rip`, biasing the very table whose declaration
+    //   documents it as the control that "injection cannot shape".
+    //
+    // The drop itself is unchanged and stays where it is: moving it past
+    // the census would put it after `stall_breaker`, which reads and
+    // writes the same field, and that would change what vmcs02 ends up
+    // carrying. Only the censuses move to the pre-suppression word.
+    //
+    // `l2_given_vector` deliberately keeps reading `given`. Its
+    // declaration makes it "the same field read back out of vmcs02 at
+    // the last instruction before entry", i.e. what the processor will
+    // act on, which *is* the post-suppression word. The pair is the
+    // instrument: `staged` says what arrived, `l2_given_vector` says
+    // what was entered with, and the difference is the suppression.
+    auto staged = given;
+
+    // Whether the entry is really about to run VTL1's address space, as
+    // opposed to merely following a `HvCallVtlCall` hypercall.
+    //
+    // **Both memory-walking blocks below used to gate on
+    // `vtl_half_mark_kind == 1` alone, and that flag does not mean what
+    // they need.** `mark_vtl_half` sets it from the hypercall latch, so
+    // it means "the last trust-level hypercall this processor made was
+    // `HvCallVtlCall`" - not "VTL1 is the address space we are about to
+    // enter". The two part company on a missed or refused switch, and
+    // the sign of the `vtl_switches` imbalance says they do: 13 more
+    // returns than calls on the wedged boot, i.e. the latch was left
+    // reading VTL0 when the hypercalls stopped.
+    //
+    // What that costs is not a wrong count. Both blocks walk a guest
+    // pointer chain and then **write** through it. In VTL1
+    // `[[gs:0] + 0x10] + 4` is the IUM block's flag byte; in VTL0
+    // `gs:0` is the KPCR and `[GdtBase + 0x10]` is a GDT descriptor
+    // qword, not a pointer. `translate_guest_linear` applies no
+    // canonicality check, no user/supervisor check and no
+    // write-permission check, so a descriptor qword that happens to
+    // resolve gets a byte of some unrelated guest page rewritten.
+    //
+    // So the gate is the extended-page-table pointer, which is what
+    // actually distinguishes the two trust levels - each VTL has its own
+    // second-level translation. The anchor is vmcs12's EPTP as it stood
+    // at the last `HvCallVtlReturn`, **not** at the last
+    // `HvCallVtlCall`: `capture_vtl_switch` runs before the hypercall is
+    // reflected, and `HvCallVtlReturn` is the one the secure kernel
+    // itself executes, so the vmcs12 current at that instant is VTL1's.
+    // The call side's slot holds VTL0's pointer. See `vtl_eptp_slot`.
+    //
+    // This is a strict conjunction with the old test, so it cannot make
+    // either block fire on an entry it did not fire on before - the only
+    // reachable change is fewer fires, and every refusal is counted
+    // (`vina_suppress_wrong_space`, `secure_dma_wrong_space`) so the
+    // next dump says whether the gate moved anything. Near zero and the
+    // earlier readings stand as taken; near the 10,075 of
+    // `vina_suppress_no_address` and the old gate was admitting VTL0
+    // entries, which is where they went.
+    // `[[maybe_unused]]`: both consumers are behind `if constexpr`
+    // switches that default off, so with defaults nothing calls this.
+    [[maybe_unused]] auto entering_vtl1_space = [&] {
+        // Zero until the first `HvCallVtlReturn` of the boot. A boot
+        // launches VTL1 first and hands over with an unmatched return,
+        // so this is populated before any entry that follows a
+        // `HvCallVtlCall`; and refusing while it is zero is the safe
+        // direction, because no walk means no write.
+        auto anchor = this->vtl_latest[cpu][1][vtl_eptp_slot];
+
+        return (0 != anchor) &&
+               (anchor ==
+                this->guest_vmcs12[cpu].read(field::ept_pointer));
+    };
+
     // Whether the entry about to run VTL1 carries an interrupt, and
     // which. See `vtl1_entry_vector`: this is the only direct evidence
     // available about what ends the secure kernel's turn.
@@ -8771,7 +8886,22 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // only while bit1 is still set. Same `vtl_half_mark_kind == 1` window
     // and the same walk primitives the VINA suppression below uses.
     if constexpr (nested_vmx::force_no_secure_dma) {
-        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+        // The old gate, then the address-space gate on top of it. Kept
+        // as two so the entries the latch admits and the address space
+        // refuses are counted rather than silently skipped - this block
+        // walks the securekernel's image from the entry RIP and writes
+        // 4 bytes into it, so on a wrong answer it would write into
+        // whatever VTL0 has at that linear address instead. See
+        // `entering_vtl1_space` above and `secure_dma_wrong_space`.
+        auto latched =
+            (cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]);
+        auto in_space = latched && entering_vtl1_space();
+
+        if (latched && !in_space) {
+            this->secure_dma_wrong_space[cpu] += 1;
+        }
+
+        if (in_space) {
             // The image running in VTL1 is the secure kernel; its base is
             // where the RVAs above are anchored. `image_base_of` walks the
             // MZ from the entry RIP - vmcs02 carries VTL1's CR3/EPT here,
@@ -8824,9 +8954,34 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     }
 
     if constexpr (nested_vmx::suppress_vina) {
-        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+        auto latched =
+            (cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]);
+
+        // The walk below reads `gs:0` and dereferences what it finds.
+        // `vtl_half_mark_kind` alone does not say that `gs:0` is VTL1's
+        // IUM self-pointer rather than VTL0's KPCR, so the walk runs
+        // only where the extended-page-table pointer identifies VTL1's
+        // address space. See `entering_vtl1_space` above. **Not an early
+        // return**: everything after this block - the vector drop,
+        // `stall_breaker`, and every census - has to run either way.
+        auto in_space = latched && entering_vtl1_space();
+
+        if (latched) {
+            // Counted before the address-space gate, so the breakdown
+            // stays exhaustive over it: `wrong_space` + `no_address` +
+            // `read_failed` + `already_clear` + `write_failed` +
+            // `vina_flag_cleared`. Its equality with
+            // `vtl1_any_entry_count` is a tautology - same function,
+            // identical predicate, no early return between them - and
+            // was once quoted as if it corroborated something.
             this->vina_suppress_attempts[cpu] += 1;
 
+            if (!in_space) {
+                this->vina_suppress_wrong_space[cpu] += 1;
+            }
+        }
+
+        if (in_space) {
             // Walked fresh rather than taken from
             // `vina_block_l1_physical`, and that is the whole difference.
             // The cached address read **clear on 21,921 of 22,317
@@ -8856,21 +9011,38 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
                 std::uint64_t self{};
                 std::uint64_t block{};
 
-                if (load(gs, self) && (0 != self) &&
-                    load(self + 0x10, block) && (0 != block)) {
+                // Split by which link broke. `vina_suppress_no_address`
+                // read **10,075, 9.8% of attempts**, and one number
+                // over a three-pointer walk cannot say which step
+                // failed. The address-space half of that ambiguity is
+                // gone - a VTL0 entry never reaches here now, it is
+                // counted in `vina_suppress_wrong_space` - so what is
+                // left is a genuine VTL1 walk failing, and these three
+                // say where. One increment each, on a path that was
+                // already walking the same three pointers.
+                if (!load(gs, self) || (0 == self)) {
+                    this->vina_suppress_no_self[cpu] += 1;
+                } else if (!load(self + 0x10, block) || (0 == block)) {
+                    this->vina_suppress_no_block[cpu] += 1;
+                } else if (auto physical =
+                               translate_guest_linear(cpu, block)) {
                     // All the way to a first-level physical address, as
                     // the return path does: the page is not in VTL0's
                     // extended page tables, so the guest-table step has
                     // to happen here.
-                    if (auto physical =
-                            translate_guest_linear(cpu, block)) {
-                        if (auto l1 = l2_physical_to_l1(cpu, *physical)) {
-                            at = *l1;
-                        }
+                    if (auto l1 = l2_physical_to_l1(cpu, *physical);
+                        l1 && (0 != *l1)) {
+                        at = *l1;
+                    } else {
+                        this->vina_suppress_no_l1[cpu] += 1;
                     }
+                } else {
+                    this->vina_suppress_no_l1[cpu] += 1;
                 }
             }
 
+            // Kept as the total of the three above, so the 10,075 it
+            // read before stays directly comparable.
             if (0 == at) {
                 this->vina_suppress_no_address[cpu] += 1;
             } else {
@@ -8888,7 +9060,12 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
                     if (write_guest_physical(
                             at + 4,
                             std::as_bytes(std::span(&flags, 1)))) {
-                        this->vina_suppressed[cpu] += 1;
+                        // The flag-clearing arm's own counter. It used
+                        // to share `vina_suppressed` with the vector
+                        // drop below, which made that counter read
+                        // 17,115 for about 8,557 events. See
+                        // `vina_flag_cleared`.
+                        this->vina_flag_cleared[cpu] += 1;
                     } else {
                         this->vina_suppress_write_failed[cpu] += 1;
                     }
@@ -8913,6 +9090,25 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // before the notification arrived. It is advisory by design - it
     // tells VTL1 that VTL0 would like the processor back - so declining
     // to deliver it costs VTL0 latency and nothing else.
+    //
+    // **Deliberately still on `vtl_half_mark_kind` alone, unlike the two
+    // blocks above.** It is the same latch and it is wrong in the same
+    // cases, but the consequence is not the same: this dereferences
+    // nothing, so a mis-gate here costs one withheld advisory interrupt
+    // rather than a byte written through a GDT descriptor read as a
+    // pointer. Against that, `suppress_vina`'s effect on injections *is*
+    // the configuration eighteen boots were compared under - 6 of 18
+    // reaching the login screen, the wedge reproducing byte-identically
+    // at 12,387 - so narrowing when it fires would move the guest into a
+    // regime where none of that is comparable, and the review that
+    // found this defect argues on separate grounds that re-running the
+    // `novina` arm is not worth a boot.
+    //
+    // It costs nothing to know: `vina_suppress_wrong_space` above tests
+    // the same predicate over the same population on every entry the
+    // latch admits, so the next dump bounds how many of these drops were
+    // mis-gated without changing a single one of them. Gate it once
+    // that number says it matters.
     if constexpr (nested_vmx::suppress_vina) {
         constexpr std::uint64_t notification_vector = 0x40;
 
@@ -8923,7 +9119,11 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
                 field::vm_entry_interruption_information_field,
                 given & ~valid);
 
-            this->vina_suppressed[cpu] += 1;
+            // The vector-dropping arm's own counter, separate from the
+            // flag-clearing arm's `vina_flag_cleared`. The two used to
+            // share one, and it read 17,115 where the arms are 8,561
+            // and 8,554 - the same ~8,557 events seen twice.
+            this->vina_vector_dropped[cpu] += 1;
             given = given & ~valid;
         }
     }
@@ -9009,11 +9209,16 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
 
     // Every entry that runs VTL1, not just the armed one. See
     // `vtl1_any_entry_vector`.
+    //
+    // On `staged`, the pre-suppression word. Read on `given` this table
+    // could not count a `0x40` at all with `novina=1` - the drop above
+    // had already cleared the valid bit - so slot `0x40` was
+    // structurally zero and slot 256 carried the difference.
     if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
         this->vtl1_any_entry_count[cpu] += 1;
 
-        if (0 != (given & valid)) {
-            this->vtl1_any_entry_vector[cpu][given & vector_mask] += 1;
+        if (0 != (staged & valid)) {
+            this->vtl1_any_entry_vector[cpu][staged & vector_mask] += 1;
         } else {
             this->vtl1_any_entry_vector[cpu][256] += 1;
         }
@@ -9022,8 +9227,10 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     if (0 != this->vtl1_entry_armed[cpu]) {
         this->vtl1_entry_armed[cpu] = 0;
 
-        if (0 != (given & valid)) {
-            this->vtl1_entry_vector[cpu][given & vector_mask] += 1;
+        // Same word, same reason: what the level above staged for the
+        // armed entry, not what this function left in the field.
+        if (0 != (staged & valid)) {
+            this->vtl1_entry_vector[cpu][staged & vector_mask] += 1;
         } else {
             this->vtl1_entry_vector[cpu][256] += 1;
         }
@@ -9037,32 +9244,48 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
         slot = slot + 1;
     }
 
-    if (0 != (given & valid)) {
-        this->l2_given_vector[cpu][given & vector_mask] += 1;
-
-        // Where the guest was when this landed. See `interrupted_rip`:
-        // the interrupt is asynchronous to the guest's own code, so this
-        // is an unbiased sample of it - the only one in the tree, since
-        // every other instrument samples at an exit and a guest spinning
-        // on memory takes none.
+    // The interrupted-versus-quiet split, on `staged`.
+    //
+    // **This pair is the reason the pre-suppression word exists.**
+    // `interrupted_rip`'s claim to be unbiased rests on the interrupt
+    // arriving asynchronously to the guest's own code, and `quiet_rip`'s
+    // declaration says outright that it "cannot be shaped by injection
+    // at all". Split on `given` both claims are false: the VINA drop
+    // moves an entry from one table to the other, and `stall_breaker`
+    // withholds on a match against `stall_last_rip` - keyed on the very
+    // address being sampled. Split on what the level above staged, the
+    // choice of table is again independent of anything this function
+    // decides.
+    if (0 != (staged & valid)) {
         this->interrupted_samples += 1;
         note_hot_rip(this->interrupted_rip,
                      this->interrupted_hits,
                      this->interrupted_overflow,
                      this->vmcs.guest_rip());
-
-        return;
-    }
-
-    // Where the guest is on an entry that stages nothing - the control
-    // for `interrupted_rip`, which injection cannot shape. See
-    // `quiet_rip`.
-    {
+    } else {
+        // Where the guest is on an entry the level above staged nothing
+        // on - the control for `interrupted_rip`. See `quiet_rip`.
         this->quiet_samples += 1;
         note_hot_rip(this->quiet_rip,
                      this->quiet_hits,
                      this->quiet_overflow,
                      this->vmcs.guest_rip());
+    }
+
+    // What the processor will actually act on, which is a different
+    // question and stays on `given` - see `l2_given_vector`, which is
+    // defined as this field read back at the last instruction before
+    // entry. So `l2_given_vector[0x40]` reading zero under `novina=1` is
+    // correct and is the drop working, not a blinded instrument;
+    // `vtl1_any_entry_vector[0x40]` above is the one that was blind.
+    //
+    // The `return` stays keyed on `given` too, because what follows it
+    // is not only a census: `window_armed_on_drop` is set from there
+    // under `nested_vmx::window_on_tpr`. Keying it on `staged` would
+    // change what the guest is entered with.
+    if (0 != (given & valid)) {
+        this->l2_given_vector[cpu][given & vector_mask] += 1;
+        return;
     }
 
     // No event, so this entry is a moment the guest hypervisor chose
