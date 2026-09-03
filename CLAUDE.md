@@ -988,13 +988,31 @@ map into instruction names. The two reads that mattered:
   one secure-kernel address in the census that moves.
 
 Disassembling either afterwards needs no rebuild and no debugger.
-`securekernel.bin`'s `.text` has `ra == va`, so an RVA is the file
-offset; guest code that is *not* on disk here is readable by walking the
+**`securekernel.bin` is laid out by `VirtualAddress` for *every*
+section, not only `.text`** - so an RVA is the file offset throughout,
+and applying the PE section table's `PointerToRawData` reads every data
+section as zero or garbage. That is the shape of the mistake to avoid:
+the converter looks more correct than the identity and is wrong.
+
+Two proofs, either sufficient. `.pdata` at file offset `0x135000`
+decodes to RUNTIME_FUNCTIONs `0x1008/0x1036`, `0x103c/0x10dd`,
+`0x10f0/0x11dc`, an exact match to `sk_functions.csv`'s first three
+rows. And `SkmiFlags` at RVA `0x130ac8` lies *past* `.data`'s on-disk
+`RawDataSize`, so a PE-faithful reader returns zero there - it reads
+`0x0050b0b7`, which means the file carries **live BSS** and is a
+genuine runtime snapshot rather than an on-disk image. The corollary
+matters when quoting any global out of it: a value read there is that
+capture's boot, **not** the rig's, so a policy or feature flag has to be
+re-read from the running machine before it is evidence.
+
+Guest code that is *not* on disk here is readable by walking the
 guest's own cr3 with the monitor's `xp`, two words at a time. `llvm-mc
 --disassemble` prints no addresses, so wrap the bytes -
 `llvm-objcopy -I binary -O elf64-x86-64` then
 `llvm-objdump -D --adjust-vma=<va> --section=.data` - and the branch
-targets resolve.
+targets resolve. **True RVA = objdump's `#` comment plus
+`--adjust-vma`**, validated on 20 references, all 20 landing on an exact
+symbol start.
 
 Two traps, both of which produce plausible wrong answers:
 
