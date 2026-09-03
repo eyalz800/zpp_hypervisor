@@ -10234,7 +10234,31 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                           l2_exit_outcome::handled);
         }
 
-        vmcs.ept_pointer(*pointer);
+        // **Through `write_vmcs02_control`, because `field::ept_pointer`
+        // is in `control_fields`.** This was a direct
+        // `vmcs.ept_pointer(*pointer)`, which is exactly the hazard that
+        // list's own note describes and does not check: the cache records
+        // what `build_vmcs02` last wrote, a write that goes round it
+        // moves the field underneath the recording, and a later build
+        // that finds vmcs12's value equal to the recorded one skips its
+        // write and leaves vmcs02 holding somebody else's shadow root.
+        //
+        // The sequence is reachable, and it needs the slot set to
+        // renumber - which `shadow_ept_pointer_for` does on a stale
+        // generation. Build writes the pointer for slot 3 and the cache
+        // records it. The generation moves, this fault releases slot 3
+        // and the "a slot never used is taken first" loop picks slot 0
+        // instead, so the direct write put slot 0's pointer in vmcs02
+        // while the cache still names slot 3's. The next new root then
+        // takes slot 3 - now free - `build_vmcs02` computes slot 3's
+        // pointer, the cache agrees, and the write is elided. vmcs02
+        // still points at slot 0, so the second-level guest runs against
+        // the shadow of a root the guest hypervisor did not name, and
+        // that shadow is *filled*, so it does not even fault.
+        //
+        // Nothing else has to change: the value written is the same, so
+        // this is only a question of which path writes it.
+        write_vmcs02_control(cpu, field::ept_pointer, *pointer);
 
         auto page =
             guest_physical & ~((1ull << composition.page_shift) - 1);
@@ -10591,7 +10615,14 @@ hypervisor::on_l2_exit(std::size_t cpu,
             return l2_exit_outcome::handled;
         }
 
-        this->vmcs.ept_pointer(*pointer);
+        // Through `write_vmcs02_control` for the reason spelled out at
+        // the other one of these, in `on_l2_ept_fault`: the field is in
+        // `control_fields`, so a write that goes round the cache leaves
+        // it describing a vmcs02 somebody else moved. This site is the
+        // clearer of the two - VMFUNC switches the root deliberately, so
+        // the value written here differs from what the last
+        // `build_vmcs02` recorded every single time it fires.
+        write_vmcs02_control(cpu, field::ept_pointer, *pointer);
 
         // And vmcs12's own field, because everything that walks the
         // guest hypervisor's tables reads it from there - the fault

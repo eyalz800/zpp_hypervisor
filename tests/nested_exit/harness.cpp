@@ -6734,6 +6734,174 @@ static void test_synic_pages_are_kept_per_trust_level()
  * as something breakable - and it is why `reflect_l2_exit` clears the
  * flag before the copy at its tail rather than after.
  */
+/**
+ * `field::ept_pointer` is in `control_fields`, so nothing may write it
+ * except through `write_vmcs02_control`.
+ *
+ * `control_fields`' own note demands that of every entry and does not
+ * check it: "nothing writes them but `build_vmcs02` and `on_l2_exit`'s
+ * threshold disarm, both of which go through `write_vmcs02_control`, so
+ * the cache follows what they wrote." Two sites in `nested_entry.cpp`
+ * did not - `on_l2_ept_fault`'s "the shadow is behind" branch and the
+ * VMFUNC EPTP-switching handler, both spelling `vmcs.ept_pointer(...)`
+ * directly - and both now go through the helper.
+ *
+ * **What this pins is the contract the repair rests on, and not the two
+ * call sites.** Driving `on_l2_ept_fault` to the branch that writes the
+ * pointer needs a real guest extended-page-table walk to succeed, and
+ * this harness stubs `shadow_ept_pointer_for`, `host_ept_lookup` and
+ * `fill_shadow_leaf` precisely because it has no guest tables to walk;
+ * `tests/shadow_ept` has the walk and does not link `nested_entry.cpp`.
+ * So the first case below is the *hazard*, stated as something
+ * breakable, and the second is the repair.
+ *
+ * The hazard is not hypothetical, and the sequence needs the slot set to
+ * renumber - which `shadow_ept_pointer_for` does on a stale generation.
+ * `build_vmcs02` writes slot 3's pointer and the cache records it; the
+ * generation moves; the fault releases slot 3 and the "a slot never used
+ * is taken first" loop picks slot 0, so a direct write puts slot 0's
+ * pointer in vmcs02 while the cache still names slot 3's; the next new
+ * root takes slot 3, `build_vmcs02` computes slot 3's pointer, the cache
+ * agrees and the write is **elided**. vmcs02 then runs the second-level
+ * guest against the shadow of a root the guest hypervisor did not name,
+ * and that shadow is filled, so it does not even fault.
+ */
+static void test_the_control_cache_owns_the_ept_pointer()
+{
+    std::println("\n-- the control cache owns field::ept_pointer --");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
+
+    // What the stubbed `shadow_ept_pointer_for` above hands back, and
+    // therefore what `build_vmcs02` writes into vmcs02.
+    constexpr std::uint64_t composed = 0x1000ull | (3ull << 3) | 6;
+
+    // Some other legal pointer, standing in for the pointer a different
+    // shadow slot would carry.
+    constexpr std::uint64_t elsewhere = 0x9000ull | (3ull << 3) | 6;
+
+    // The guest hypervisor's own pointer, which is the key rather than
+    // anything vmcs02 carries.
+    constexpr std::uint64_t eptp12 = 0x3000ull | (3ull << 3) | 6;
+
+    static_assert(composed != elsewhere);
+
+    zpp::arch::x86_64::context registers{};
+
+    auto compose_with_ept = [&] {
+        auto own = std::uint64_t{0x1000};
+        static_cast<void>(vmx::vmptrld(&own));
+
+        auto & vmcs = hv().vmcs;
+        vmcs.write(field::pin_based_vm_execution_controls, own_pin);
+        vmcs.write(field::primary_processor_based_vm_execution_controls,
+                   own_primary);
+        vmcs.write(field::secondary_processor_based_vm_execution_controls,
+                   0);
+        vmcs.write(field::vm_exit_controls, own_exit);
+        vmcs.write(field::vm_entry_controls, own_entry);
+        vmcs.write(field::vpid, cpu + 1);
+
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(field::pin_based_vm_execution_controls, pin_default1);
+        shadow.write(field::primary_processor_based_vm_execution_controls,
+                     primary_default1 | primary_secondary_controls);
+        shadow.write(
+            field::secondary_processor_based_vm_execution_controls,
+            secondary_enable_ept);
+        shadow.write(field::vm_exit_controls,
+                     exit_default1 | exit_host_address_space_size);
+        shadow.write(field::vm_entry_controls, entry_default1);
+
+        // The guest hypervisor own extended-page-table pointer, which
+        // build_vmcs02 checks against the capability MSR before it will
+        // shadow it: write-back, a page-walk length of four, and no
+        // accessed/dirty bit. Its value never reaches vmcs02 - the
+        // shadow pointer does - it is the key shadow_ept_pointer_for
+        // is asked with.
+        shadow.write(field::ept_pointer, eptp12);
+
+        hv().host_state_cached[cpu] = false;
+        hv().vmcs12_controls_captured = 0;
+
+        return hv().build_vmcs02(cpu);
+    };
+
+    auto fresh = [&] {
+        reset(registers);
+        hv().vmcs02_physical[cpu] = 0x2000;
+        hv().vmcs02_launched[cpu] = false;
+        hv().guest_state_deferred[cpu] = false;
+        hv().forget_vmcs02_contents(cpu);
+    };
+
+    // ------------------------------------------- the field is written
+    //
+    // Asserted first, because everything below is about a write being
+    // elided and a fixture where the write never happened at all would
+    // make both cases pass for the wrong reason.
+    {
+        fresh();
+
+        check(compose_with_ept().has_value(),
+              "a vmcs12 that enables extended page tables builds");
+        check(composed == hv().vmcs.read(field::ept_pointer),
+              "and vmcs02 carries the shadow pointer");
+    }
+
+    // ------------------------------ THE HAZARD, as something breakable
+    //
+    // A write that goes round the helper leaves the cache describing a
+    // vmcs02 somebody else moved, and the next build with an unchanged
+    // vmcs12 skips its write. This is the shape both call sites had.
+    {
+        fresh();
+
+        check(compose_with_ept().has_value(), "the first build succeeds");
+
+        hv().vmcs.ept_pointer(elsewhere);
+
+        check(compose_with_ept().has_value(),
+              "and so does a second with the same vmcs12");
+        check(elsewhere == hv().vmcs.read(field::ept_pointer),
+              "a direct write to a control_fields member makes the next "
+              "build elide the write vmcs12 asked for - vmcs02 is left "
+              "holding what went round the cache, which is why neither "
+              "call site may spell vmcs.ept_pointer() any more");
+    }
+
+    // ---------------------------------------------------- THE REPAIR
+    //
+    // The identical sequence with the write routed through the helper.
+    // The cache follows it, so the next build sees a disagreement and
+    // writes what vmcs12 asked for.
+    {
+        fresh();
+
+        check(compose_with_ept().has_value(), "the first build succeeds");
+
+        auto done = hv().control_writes_done[cpu];
+        auto skipped = hv().control_writes_skipped[cpu];
+
+        hv().write_vmcs02_control(cpu, field::ept_pointer, elsewhere);
+
+        check((done + skipped) < (hv().control_writes_done[cpu] +
+                                  hv().control_writes_skipped[cpu]),
+              "the helper accounts for the write, which is the second "
+              "thing a direct one loses - neither counter moves for a "
+              "write nobody routed");
+        check(elsewhere == hv().vmcs.read(field::ept_pointer),
+              "and the value reaches vmcs02 either way");
+
+        check(compose_with_ept().has_value(), "the second build succeeds");
+        check(composed == hv().vmcs.read(field::ept_pointer),
+              "the write is not elided: the cache followed the routed "
+              "write, so the build restores what vmcs12 asked for");
+    }
+}
+
 static void test_shadow_copies_name_the_current_vmcs()
 {
     std::println("\n-- the shadow copies name the current vmcs --");
@@ -6919,6 +7087,7 @@ int main()
     test_guest_thread_sample_stride();
 
     // Last, because it resets the shim's region table. See its comment.
+    test_the_control_cache_owns_the_ept_pointer();
     test_shadow_copies_name_the_current_vmcs();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
