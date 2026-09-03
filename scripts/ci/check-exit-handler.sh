@@ -744,6 +744,113 @@ else
     status=1
 fi
 
+# === A control register write the processor will not accept ============
+#
+# The worst instance of the `default:` rule this file exists for, and it
+# was not a `default:` at all - it was a case that *answered*, and
+# answered with a value the next VM entry refuses.
+#
+# `mov cr0` and `mov cr4` both exit here (cr0_guest_host_mask is NE and,
+# under track_long_mode_switch, PG; cr4_guest_host_mask is VMXE | SMXE
+# with VMXE shadowed clear, so every guest read-modify-write of CR4
+# arrives). Until the check below existed the raw operand went into the
+# VMCS guest field with no validation of any kind, the entry failed SDM
+# 29.3.1.1, and `on_vm_entry_failure` ends in
+# `for (;;) { disable_interrupts(); halt(); }`. One guest instruction,
+# one halted physical core, nothing recorded.
+#
+# Checked here rather than in a harness because no harness in tests/
+# compiles exit_dispatch.cpp. tests/nested_exit covers the shared
+# predicate and the vmcs12 host-state half; this covers the two call
+# sites and, more importantly, the *shape* of the answer.
+echo "== an illegal mov to a control register faults, it does not halt"
+
+for pair in cr0:CR0 cr4:CR4; do
+    register=${pair%%:*}
+    upper=${pair##*:}
+    if grep -q "cached_vmx_msr(vmx_msr::${register}_fixed_0)" "$handler" \
+        && grep -q "cached_vmx_msr(vmx_msr::${register}_fixed_1)" \
+            "$handler"; then
+        echo "  ok    the $register write is judged against"\
+             "IA32_VMX_${upper}_FIXED0/1"
+    else
+        echo "  FAIL  the mov to $register no longer consults" >&2
+        echo "        IA32_VMX_${upper}_FIXED0 and _FIXED1, so a" >&2
+        echo "        value the processor refuses reaches the VMCS" >&2
+        echo "        guest field and the next VM entry halts this" >&2
+        echo "        core. SDM 26.8 requires a #GP instead. Read the" >&2
+        echo "        MSRs rather than hardcoding a mask: they are the" >&2
+        echo "        same two values the entry check uses, so a" >&2
+        echo "        derived mask cannot disagree with it." >&2
+        status=1
+    fi
+done
+
+# The answer's shape, which is the half a mask alone would not give. A
+# #GP leaves RIP on the faulting instruction, so the resume path must
+# not add the instruction length - CLAUDE.md's "resuming as though an
+# unhandled instruction had succeeded" is the failure being avoided.
+#
+# Every call of the predicate in the dispatch is required to be followed
+# by both, within the refusal block, so a third register added later
+# cannot be answered with a halt or with a silent skip.
+predicate_calls=$(grep -c 'vmx::fixed_bits_valid(' "$handler")
+
+if [ "$predicate_calls" -ge 2 ]; then
+    echo "  ok    both control-register writes call the predicate"\
+         "($predicate_calls sites)"
+else
+    echo "  FAIL  fewer than two fixed_bits_valid call sites in the" >&2
+    echo "        dispatch. Both mov cr0 and mov cr4 need one." >&2
+    status=1
+fi
+
+faulting=$(grep -A20 'vmx::fixed_bits_valid(' "$handler" \
+    | grep -c 'inject_general_protection_fault();')
+not_advanced=$(grep -A20 'vmx::fixed_bits_valid(' "$handler" \
+    | grep -c 'advance_rip = false;')
+
+if [ "$faulting" -ge "$predicate_calls" ] \
+    && [ "$not_advanced" -ge "$predicate_calls" ]; then
+    echo "  ok    each refusal injects #GP and leaves RIP on the"\
+         "instruction"
+else
+    echo "  FAIL  a control-register refusal does not both inject a" >&2
+    echo "        #GP and clear advance_rip ($faulting faults and" >&2
+    echo "        $not_advanced held RIPs for $predicate_calls" >&2
+    echo "        checks). Without the fault the case falls through to" >&2
+    echo "        a halt; without clearing advance_rip the resume path" >&2
+    echo "        skips the MOV and the guest continues as though its" >&2
+    echo "        illegal write had worked. KVM answers with exactly" >&2
+    echo "        this pair - kvm_complete_insn_gp calls" >&2
+    echo "        kvm_inject_gp and does *not* skip the instruction" >&2
+    echo "        (.references/kvm/x86.c:947)." >&2
+    status=1
+fi
+
+# And control has to leave the case, which is what keeps the check ahead
+# of the write it protects. A refusal that falls through reaches
+# `vmcs.guest_cr4(...)` anyway and the fault is decoration.
+#
+# Spelled as "the refusal block ends in `break;`" rather than as a line
+# number comparison, which was the first attempt and does not work:
+# `vmcs.guest_cr0(` matches the *read* accessor too, and there is one
+# 3,000 lines earlier in a different case.
+left_the_case=$(grep -A20 'vmx::fixed_bits_valid(' "$handler" \
+    | grep -c '^.*break;$')
+
+if [ "$left_the_case" -ge "$predicate_calls" ]; then
+    echo "  ok    and control leaves the case, so the write below is"\
+         "not reached"
+else
+    echo "  FAIL  a control-register refusal does not break out of" >&2
+    echo "        the case ($left_the_case of $predicate_calls). It" >&2
+    echo "        falls through to the VMCS write it was supposed to" >&2
+    echo "        prevent, so the #GP is injected *and* the illegal" >&2
+    echo "        value is loaded - the next VM entry still halts." >&2
+    status=1
+fi
+
 echo
 if [ "$status" = "0" ]; then
     echo "exit handler invariants hold"

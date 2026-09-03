@@ -3195,6 +3195,93 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // back agrees with the write even for the bit the register
         // keeps.
         if (0 == number) {
+            // The CR4 case below carries the argument in full; this is
+            // the same defect and the same answer, on the register a few
+            // lines up. Unchecked, the raw operand went into the VMCS
+            // guest field two statements down, the next VM entry failed
+            // SDM 29.3.1.1 and `on_vm_entry_failure` halted the
+            // processor - so a `mov cr0` with a garbage high half stopped
+            // a physical core. `cr0_guest_host_mask` is NE plus, under
+            // `track_long_mode_switch`, PG, so a guest's own start-up
+            // path already arrives here.
+            //
+            // Two conditions, and between them they are every way a
+            // *this* handler can compose a CR0 the entry check refuses:
+            //
+            // - the fixed bits (SDM 26.8, .references/sdm.txt:198920).
+            //   For CR0 this reduces almost entirely to bits 63:32,
+            //   because IA32_VMX_CR0_FIXED1 is 0xffffffff on every
+            //   processor and the three bits FIXED0 pins - PE, NE, PG -
+            //   are all exempt here: NE is forced on two statements
+            //   below, and PE and PG are the pair SDM 29.3.1.1 does not
+            //   check under "unrestricted guest", which `setup_vmcs`
+            //   sets. KVM checks the same high half first and by hand,
+            //   `kvm_is_valid_cr0` (.references/kvm/x86.c:1106-1107).
+            // - PG without PE. SDM 29.3.1.1: "If bit 31 in the CR0 field
+            //   (corresponding to PG) is 1, bit 0 in that field (PE) must
+            //   also be 1", which "unrestricted guest" does *not* exempt
+            //   - the exemption is from the fixed bits only. It is also a
+            //   plain #GP condition off VMX entirely: "Loading the CR0
+            //   register with a set PG flag (paging enabled) and a clear
+            //   PE flag (protection disabled)" (sdm.txt:162058). KVM:
+            //   x86.c:1113-1114.
+            //
+            // **NW set with CD clear is deliberately not checked**, and
+            // it is the one #GP condition on CR0 left out. SDM Event 13
+            // lists it (sdm.txt:162059) and KVM refuses it
+            // (x86.c:1110-1111), but 29.3.1.1 says bits 29 and 30 "are
+            // never checked because the values of these bits are not
+            // changed by VM entry" - so it cannot fail an entry and
+            // cannot halt anything, which is what this change is for.
+            // Adding a fault for it would be a new refusal with no
+            // defect behind it, on a pair of bits no legal guest can
+            // reach that combination of. Add it if a guest is ever seen
+            // to care.
+            //
+            // The two references also disagree about the *rest* of CR0,
+            // and this follows the SDM. KVM masks unsupported bits away
+            // instead of faulting - `cr0 &= ~CR0_RESERVED_BITS` under
+            // "Write to CR0 reserved bits are ignored, even on Intel"
+            // (.references/kvm/x86.c:1165) - which would also avoid the
+            // halt, but silently, and a guest that reads CR0 back then
+            // disagrees with its own write. The disagreement is moot in
+            // practice: with FIXED1 = 0xffffffff the two rules differ
+            // over no bit below 32 at all.
+            {
+                namespace vmx_msr = arch::x86_64::vmx::msr;
+
+                constexpr auto cr0_exempt =
+                    arch::x86_64::cr0_bits::protection_enable |
+                    arch::x86_64::cr0_bits::numeric_error |
+                    arch::x86_64::cr0_bits::not_write_through |
+                    arch::x86_64::cr0_bits::cache_disable |
+                    arch::x86_64::cr0_bits::paging;
+
+                auto paging_without_protection =
+                    (0 != (value & arch::x86_64::cr0_bits::paging)) &&
+                    (0 ==
+                     (value & arch::x86_64::cr0_bits::protection_enable));
+
+                if (!arch::x86_64::vmx::fixed_bits_valid(
+                        value,
+                        this->cached_vmx_msr(vmx_msr::cr0_fixed_0),
+                        this->cached_vmx_msr(vmx_msr::cr0_fixed_1),
+                        cr0_exempt) ||
+                    paging_without_protection) {
+                    log("cpu {} refused mov cr0 {} - fixed0 {} fixed1 "
+                        "{} - rip {}",
+                        (cpuid + 1) - 1,
+                        value,
+                        this->cached_vmx_msr(vmx_msr::cr0_fixed_0),
+                        this->cached_vmx_msr(vmx_msr::cr0_fixed_1),
+                        vmcs.guest_rip());
+
+                    inject_general_protection_fault();
+                    advance_rip = false;
+                    break;
+                }
+            }
+
             auto paging_was_on =
                 0 != (vmcs.guest_cr0() & arch::x86_64::cr0_bits::paging);
             auto paging_now =
@@ -3436,6 +3523,90 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 }
             }
             break;
+        }
+
+        // **A CR4 the processor will not accept, refused here instead
+        // of stopping the machine two instructions later.**
+        //
+        // Until this existed the raw operand went into the VMCS guest
+        // field below with no check of any kind, and there was no
+        // reserved-bit mask anywhere in the tree. The next VM entry then
+        // failed SDM 29.3.1.1 - "The CR4 field must not set any bit to a
+        // value not supported in VMX operation" - and
+        // `on_vm_entry_failure` ends in
+        // `for (;;) { disable_interrupts(); halt(); }`. So one
+        // `mov cr4` with a reserved bit set stopped a physical core, with
+        // the guest's own instruction as the only cause.
+        //
+        // It was not a theoretical reach either: `cr4_guest_host_mask` is
+        // VMXE | SMXE with VMXE shadowed clear, so every guest
+        // read-modify-write of CR4 already arrives here.
+        //
+        // The answer is the one bare hardware gives, and both references
+        // agree on it. SDM 26.8 (.references/sdm.txt:198920): "Any attempt
+        // to set one of these bits to an unsupported value while in VMX
+        // operation (including VMX root operation) using any of the CLTS,
+        // LMSW, or MOV CR instructions causes a general-protection
+        // exception." SDM Event 13 lists it among the plain #GP conditions
+        // as well - "Attempting to write a 1 into a reserved bit of CR4"
+        // (sdm.txt:162063), which is the non-VMX half of the same rule.
+        // KVM: `handle_set_cr4` -> `kvm_set_cr4` returns 1 when
+        // `kvm_is_valid_cr4` refuses (.references/kvm/x86.c:1381), and
+        // `handle_cr` passes that to `kvm_complete_insn_gp`
+        // (.references/kvm/vmx.c:5508-5509), which is
+        // `kvm_inject_gp(vcpu, 0)` and *no* RIP advance (x86.c:947).
+        //
+        // Which is why `advance_rip` is cleared: the resume path adds the
+        // instruction length, so resuming without clearing it would make
+        // the guest skip the MOV as though it had worked - the
+        // failure mode CLAUDE.md's "answer the whole of whatever it is,
+        // or fault" rule exists for.
+        //
+        // The mask is the processor's own, not a literal: IA32_VMX_CR4_-
+        // FIXED0 and _FIXED1 are the architectural statement of it (SDM
+        // A.8), and they are already cached by `read_vmx_capabilities`.
+        // **Reading them rather than hardcoding also makes the check
+        // incapable of disagreeing with the entry it is protecting**,
+        // which is what makes it safe to add under a running guest: the
+        // VM entry that would have halted is judged against the same two
+        // values - by the processor on bare metal, and by KVM's
+        // `nested_guest_cr4_valid` (.references/kvm/nested.h:285) when
+        // this VMM is itself nested, since that reads the same
+        // `nested.msrs.cr4_fixed*` KVM hands us. So nothing that succeeds
+        // today can start faulting.
+        //
+        // VMXE and SMXE are exempt, and that is the interaction to be
+        // careful with. Both are bits this handler owns: VMXE is forced
+        // *on* in the register below and answered clear in the shadow with
+        // nesting off, SMXE is forced *off* in both. Judging them would
+        // announce exactly the concealment the paragraphs below are for -
+        // a guest told by CPUID that there is no VMX would take a #GP for
+        // leaving VMXE clear, which is fixed to 1 in `cr4_fixed_0`. See
+        // `BACKLOG.md` item 1 on the CPUID/CR4 pairing.
+        //
+        // Nothing else needs exempting, because the *effective* value
+        // written below differs from `value` in those two bits and no
+        // others.
+        {
+            namespace vmx_msr = arch::x86_64::vmx::msr;
+
+            if (!arch::x86_64::vmx::fixed_bits_valid(
+                    value,
+                    this->cached_vmx_msr(vmx_msr::cr4_fixed_0),
+                    this->cached_vmx_msr(vmx_msr::cr4_fixed_1),
+                    cr4_vmxe | cr4_smxe)) {
+                log("cpu {} refused mov cr4 {} - fixed0 {} fixed1 {} - "
+                    "rip {}",
+                    (cpuid + 1) - 1,
+                    value,
+                    this->cached_vmx_msr(vmx_msr::cr4_fixed_0),
+                    this->cached_vmx_msr(vmx_msr::cr4_fixed_1),
+                    vmcs.guest_rip());
+
+                inject_general_protection_fault();
+                advance_rip = false;
+                break;
+            }
         }
 
         // What the guest is allowed to see in the bit it just wrote.
