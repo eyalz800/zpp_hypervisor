@@ -14916,6 +14916,35 @@ private:
     std::uint64_t vtl_copy_min_pfn[max_cpus]{};
     std::uint64_t vtl_copy_max_pfn[max_cpus]{};
     std::uint64_t vtl_copy_last_pfn[max_cpus]{};
+
+    /**
+     * The last copy's source and owner, latched **inside** the 0x0f4
+     * arm rather than read off `vtl_call_block` afterwards.
+     *
+     * `vtl_call_block` holds the block of the most recent secure call
+     * of *any* service and its words mean different things per
+     * service, so reading words 2 and 3 from a dump is only valid if
+     * no other service has called since. Measured on a guest at the
+     * login screen: the block held service 0x00f1,
+     * `VslFastFlushSecureRangeList`, so both words were already
+     * somebody else's.
+     *
+     * From `MiGetPagePrivilege`: `_va` is the source page's kernel
+     * virtual address, or for an image page its byte offset within the
+     * section; `_owner` is a per-image or per-segment owner pointer,
+     * **zero for a plain kernel page**. Symbolise `_owner` against
+     * `PsLoadedModuleList` to name the image the walk was on when it
+     * stopped - which is the one thing seven wedged boots have never
+     * said.
+     *
+     * The two counters beside them split the walk by page kind, so
+     * "the walk stopped" can be told from "the walk ran out of image
+     * pages and was doing something else".
+     */
+    std::uint64_t vtl_copy_last_va[max_cpus]{};
+    std::uint64_t vtl_copy_last_owner[max_cpus]{};
+    std::uint64_t vtl_copy_image_pages[max_cpus]{};
+    std::uint64_t vtl_copy_plain_pages[max_cpus]{};
     std::uint64_t vtl_copy_calls[max_cpus]{};
     std::uint64_t vtl_copy_consecutive[max_cpus]{};
     std::uint64_t vtl_copy_same[max_cpus]{};

@@ -11833,6 +11833,48 @@ hypervisor::on_l2_exit(std::size_t cpu,
 
                                     this->vtl_copy_last_pfn[cpu] = pfn;
                                     this->vtl_copy_calls[cpu] += 1;
+
+                                    // **Latched here, inside the 0x0f4
+                                    // arm, and that is the whole
+                                    // point.** `vtl_call_block` holds
+                                    // the block of the most recent
+                                    // secure call of *any* service, and
+                                    // its words mean different things
+                                    // per service - so reading [2] and
+                                    // [3] as the copy's source and
+                                    // owner from a dump is only valid
+                                    // if nothing else has called since.
+                                    // Measured on a guest at the login
+                                    // screen: the block held service
+                                    // 0x00f1, `VslFastFlushSecureRangeList`,
+                                    // so those two words were already
+                                    // somebody else's. Latching them
+                                    // where the service is known is the
+                                    // only way they mean what they say.
+                                    //
+                                    // From `MiGetPagePrivilege`:
+                                    // block[2] is the source page's
+                                    // kernel virtual address, or for an
+                                    // image page its byte offset within
+                                    // the section; block[3] is a
+                                    // per-image or per-segment owner
+                                    // pointer, zero for a plain kernel
+                                    // page. Together they name which
+                                    // image the walk was on when it
+                                    // stopped, which is the one thing
+                                    // the wedged boots have never said.
+                                    this->vtl_copy_last_va[cpu] =
+                                        this->vtl_call_block[cpu][2];
+                                    this->vtl_copy_last_owner[cpu] =
+                                        this->vtl_call_block[cpu][3];
+
+                                    if (0 != this->vtl_call_block[cpu][3]) {
+                                        this->vtl_copy_image_pages[cpu]
+                                            += 1;
+                                    } else {
+                                        this->vtl_copy_plain_pages[cpu]
+                                            += 1;
+                                    }
                                 }
 
                                 // Re-entries, attributed to the call
