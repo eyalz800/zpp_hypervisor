@@ -130,6 +130,33 @@ def snap():
     }
 
 
+def spin_fields():
+    """The two words `RtlGetInterruptTimePrecise` spins on.
+
+    Disassembled at RVA 0x311ce0: it loads 0xFFFFF78000000340 and
+    **spins with `pause` while bit 0 of it is set** (0x311d56), then
+    reads 0xFFFFF78000000350 at 0x311d67 - the instruction that carries
+    39% of all interrupt-landing samples on a wedged boot.
+
+    +0x340 is a seqlock. A boot driver hanging in a
+    "spin until the clock changes" loop is explained instantly by
+    either of two readings here, and they are different bugs:
+
+      - **bit 0 stuck set** - the lock was left odd by an update that
+        never completed, and every reader spins for ever *taking no VM
+        exits*, which is the shape the 494 reference-MSR reads over 90
+        minutes demand;
+      - **+0x350 frozen** while InterruptTime advances - the precise
+        path's own input has stopped, so the returned value is constant.
+
+    Both are read here rather than argued about.
+    """
+    lock = xp_w(base_phys + 0x340, 1)
+    base = xp_w(base_phys + 0x350, 2)
+    return (lock[0] if lock else None,
+            ((base[1] << 32) | base[0]) if len(base) >= 2 else None)
+
+
 t0 = time.time()
 a = snap()
 time.sleep(SECS)
