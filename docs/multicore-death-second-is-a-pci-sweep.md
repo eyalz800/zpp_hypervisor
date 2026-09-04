@@ -109,10 +109,20 @@ starts from 00:00.0, then everything stops.
 
 ## Still open
 
-Whether the sweep is Windows/PnP re-enumerating, or firmware. Note that
-`serial.out` carried **four** `allocate_rwx` markers on these runs where
-a single boot gives two - the loader runs twice per boot - which means
-the machine went through **two** boot cycles. That is consistent with
-the expected 1->2 CPU hardware-change reboot, and it means the sweep may
-belong to a later cycle than assumed. Establish which cycle the sweep
-sits in before reading intent into it.
+Whether the sweep is Windows/PnP re-enumerating, or firmware.
+
+**The "two boot cycles" worry is REFUTED - measured, do not re-raise.**
+An earlier revision of this file reasoned that four `allocate_rwx`
+markers meant two boot cycles, since one boot gives two. Sampling the
+marker count through a single run settles it:
+
+    t=45s  markers 4  VM status: running
+    t=75s  markers 4  running
+    t=105s markers 4  running
+    t=135s markers 4  paused (shutdown)
+    t=165s markers 4  paused (shutdown)
+
+Four from the first sample and never changing, so the loader simply
+emits four in this configuration and the machine boots **once**. The
+sweep belongs to that single boot. The run also brackets the death
+between 105 s and 135 s.
