@@ -63838,3 +63838,95 @@ there is an **`sti` at `0x24811b`** the previous decompilation omitted
 entirely; and `LpStartRecord[lp].State` is written `2` at `0x248014` -
 the fourth instruction of `HvpLpInitAndReportIn`, after nothing but an
 `iretq` thunk - and `3` at `0x248100`.
+
+## The "cpu 1 takes zero exits" contradiction dissolves - the arithmetic says the silence is expected - 2026-09-04
+
+Full working in `.references/hyperv/ap-trampoline-cr0-exit-arithmetic.md`.
+Three sessions have now treated the same three observations as an
+impossibility: cpu 1's `cr0_guest_host_mask` carries PG, the trampoline
+executes two `mov cr0` writes, and no exit is recorded. **They are not
+in tension, and two of the three are misread.**
+
+**1. Silence from `0x2000` to `0x216b` is the value the architecture
+predicts, not an anomaly.** Every instruction in that window was decoded
+from the `.rdata` template at hvix64 RVA `0x0b750` (`0x6d` bytes,
+byte-exact, the count closes and both relative jumps land on instruction
+boundaries) and checked one at a time against this VMCS. `wbinvd` -
+`wbinvd_exiting` is requested only under `ZPP_GUEST_TESTS`. `wrmsr`
+IA32_PAT `0x277` and `wrmsr` IA32_EFER `0xc0000080` - the MSR bitmap is
+zero-initialised and `intercept_interrupt_command` is its only writer,
+one bit, write-low, `0x830`. `mov cr4, 0x20` - `(0x20 ^ 0) & 0x6000 ==
+0`. `mov cr3` - CR3-load exiting is not requested. **Exactly one
+instruction in the whole window can exit, and it is the last one.**
+
+**2. The breakpoint at `0x216b` proves arrival, not execution.** SDM
+18.3.1.1 (`.references/sdm.txt:182727`): an instruction breakpoint
+"generates a fault-class, debug exception (#DB) **before** it executes
+the target instruction". The rig read `rax = 0x80000001` one instruction
+early. Nothing has measured the retirement of that write.
+
+**3. With the read shadow in the predicate, both CR0 writes are
+decidable with no further measurement.** The rule is `(source ^ shadow)
+& mask` (SDM 28.1.3, `.references/sdm.txt:200760`), and
+`apply_start_up` writes the shadow as `ET` = `0x10`:
+
+    mov cr0, 1           at +0xdc  : (1 ^ 0x10) & 0x80000020 == 0
+                                     -> no exit, correctly
+    mov cr0, 0x80000001  at +0x16b : (0x80000001 ^ 0x10) & 0x80000020
+                                     == 0x80000000 -> MUST exit
+
+There is no assignment of shadow values making both silent: the shadow
+is a VM-execution control field and no processor operation writes it, so
+the first write leaves it stale - **and that staleness is exactly what
+makes the second write visible.** Noted at the one statement that
+re-synchronises it (`exit_dispatch.cpp`, the CR0 case).
+
+**So the open question is "did `+0x16b` retire", and three member reads
+answer it without the log ring:**
+
+- `exit_reason_counts[1][28]` (control-register access). Incremented
+  from `record_exit` inside `resume_guest`, which no handler and no
+  reflection path can bypass - which is what makes it the right
+  instrument for the `on_l2_exit`-swallowing hypothesis `e8f5d32` left
+  open. `>= 3` (the two firmware writes it quotes, plus one) means the
+  write exited; exactly `2` means it never retired.
+- `ap_fault.armed_at_rip`, written only inside the paging-transition
+  branch of the CR0 case. `== 0x216b` proves the exit happened *and*
+  that LMA and `ia_32e_mode_guest` were both applied. Needs
+  `apfault=1` in the `zpp switches:` manifest.
+- `exit_reason_counts[1][2]` (triple fault), which says whether the far
+  jump at `+0x16e` then died.
+
+**Free fourth read, and it is a precondition nobody has checked.**
+`start_up_applied[1] - start_up_declined[1]`. `apply_start_up` writes
+`guest_gdtr_base = 0, limit = 0xffff`, and hvix64's trampoline installed
+its own GDT with `lgdt` at page `+0xcd` - the one the far jump's selector
+`0x10` is read from. A *second* application between those two
+instructions destroys it: `#GP`, no IDT, triple fault. The duplicate
+guard at `start_up.cpp` is what prevents it and `start_up_declined` is
+what proves the guard fired. Commented at the write.
+
+**Two things in the tree corrected in place.**
+`start_up.cpp`/`hypervisor.h` asserted "on a two-processor boot the log
+ring reads **empty**" - refuted by `e8f5d32`, which quotes three cpu-1
+log lines out of a two-processor boot. That claim was the only stated
+reason to distrust the ring, and the same investigation was relying on
+the ring for its central negative; both cannot stand. And
+`trace_guest_state`'s comment framed the question as "is PG in the
+mask", which the measurement answered and which then had nowhere to go -
+the shadow was the missing half.
+
+**Correction to `651ec35`'s trampoline listing.** `74 19  je +0x16e` at
+page `+0x153` is annotated "CR3 == 0 -> stay 32-bit". There is no 32-bit
+continuation: both paths reach the same far jump to a `limit 0`, `L=1`
+descriptor, so a zero `g_LpInitialCr3` is a guaranteed `#GP(0x10)` with
+no IDT. It is a failure path, not a fallback - and not the rig's path,
+since `+0x16b` is only reachable with the branch not taken.
+
+Independently re-derived and confirmed while doing this: the far
+pointer's selector really is `0x10` (`mov [rdi+0x7e], r15w` at
+`0x2590b3`, `r15d = r12d - 0x20`), that descriptor really is built with
+limit `0` and `long = 1` (`xor r9d,r9d` at `0x2590e5`, `mov byte
+[rsp+0x28], 1` at `0x2590e8`), and `r12 = 0x30` follows from the
+template's own hardcoded `mov ax, 0x20` at `+0xfa` against the emitter's
+`edx = r12 - 0x10` for that same descriptor.
