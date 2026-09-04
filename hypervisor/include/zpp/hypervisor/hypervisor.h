@@ -10450,6 +10450,21 @@ private:
      * from CPL != 0 at all - which makes a hit here evidence about the
      * SS access rights this VMM is reading, not about the guest.
      */
+    /**
+     * The two refusals at the BOTTOM of `on_vmx_instruction`'s switch,
+     * which had no counters and which every other instrumented path
+     * eliminated by measuring zero.
+     *
+     * `vmfunc` is refused outright: no VM function is offered, so SDM
+     * 33.3 makes #UD the right architectural answer - but it is only
+     * right if the guest hypervisor never uses it, and a #UD is how
+     * this failure ends. `unhandled` is the `default:` arm, any VMX
+     * exit reason not in the switch at all.
+     */
+    std::uint64_t vmx_refusal_vmfunc[max_cpus]{};
+    std::uint64_t vmx_refusal_unhandled[max_cpus]{};
+    std::uint64_t vmx_refusal_unhandled_reason{};
+
     std::uint64_t vmx_refusal_cpl[max_cpus]{};
     std::uint64_t vmx_refusal_ss_rights{};
 

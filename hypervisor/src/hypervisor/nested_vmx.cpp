@@ -689,8 +689,20 @@ bool hypervisor::on_vmx_instruction(std::size_t cpu,
         // the secondary control that enables the instruction is not
         // offered. SDM 33.3, VMFUNC, raises #UD when that control is 0,
         // which is what the caller does with a false return.
+        //
+        // Counted, because "architecturally correct" and "survivable"
+        // are different claims. A guest hypervisor that executes VMFUNC
+        // gets a #UD here and answers it by bugchecking.
+        if (cpu < max_cpus) {
+            this->vmx_refusal_vmfunc[cpu] += 1;
+        }
         return false;
     default:
+        if (cpu < max_cpus) {
+            this->vmx_refusal_unhandled[cpu] += 1;
+        }
+        this->vmx_refusal_unhandled_reason =
+            static_cast<std::uint64_t>(basic);
         return false;
     }
 }

@@ -6874,6 +6874,8 @@ def main():
                "guest_in_vmx_operation", "guest_vmxon_pointer",
                "guest_current_vmcs", "index_out_of_range",
                "index_out_of_range_last", "index_out_of_range_vpid",
+               "vmx_refusal_vmfunc", "vmx_refusal_unhandled",
+               "vmx_refusal_unhandled_reason",
                "vmx_refusal_cpl", "vmx_refusal_ss_rights",
                "vmx_refusal_mode", "vmx_refusal_vmxe", "vmx_refusal_cr0",
                "vmx_refusal_rflags", "vmx_refusal_entry_controls",
@@ -8885,7 +8887,8 @@ def main():
     else:
         mm = Monitor(args.rig, args.port)
         for _m in ("vmx_refusal_mode", "vmx_refusal_vmxe",
-                   "vmx_refusal_cpl"):
+                   "vmx_refusal_cpl", "vmx_refusal_vmfunc",
+                   "vmx_refusal_unhandled"):
             if _m in off:
                 mm.queue(instance + off[_m], args.cpus)
         if "vmx_refusal_ss_rights" in off:
@@ -8901,13 +8904,17 @@ def main():
             vx = mg.get(instance + off["vmx_refusal_vmxe"] + 8 * cpu, 0)
             cp = (mg.get(instance + off["vmx_refusal_cpl"] + 8 * cpu, 0)
                   if "vmx_refusal_cpl" in off else 0)
-            if md or vx or cp:
+            vf = (mg.get(instance + off["vmx_refusal_vmfunc"] + 8 * cpu, 0)
+                  if "vmx_refusal_vmfunc" in off else 0)
+            uh = (mg.get(instance + off["vmx_refusal_unhandled"] + 8 * cpu, 0)
+                  if "vmx_refusal_unhandled" in off else 0)
+            if md or vx or cp or vf or uh:
                 if not hit:
                     print("\nVMX INSTRUCTIONS REFUSED ON MODE / VMXE "
                           "(each is a #UD to the guest hypervisor)")
                     hit = True
                 print(f"  cpu {cpu}  mode {md:,}  cr4.vmxe {vx:,}  "
-                      f"cpl!=0 {cp:,}"
+                      f"cpl!=0 {cp:,}  vmfunc {vf:,}  unhandled {uh:,}"
                       + ("   <- injects #GP, not #UD" if cp else ""))
                 if cp and "vmx_refusal_ss_rights" in off:
                     ssr = mg.get(instance + off["vmx_refusal_ss_rights"], 0)
