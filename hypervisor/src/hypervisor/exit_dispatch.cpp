@@ -3515,10 +3515,41 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // (vmx.c:3189) on the reverse, and both reach
             // `vmx_set_efer` (vmx.c:3147), which is the single place
             // that sets or clears VM_ENTRY_IA32E_MODE.
-            if constexpr (nested_vmx::track_long_mode_switch) {
+            // **Unconditional, and it used to be behind
+            // `track_long_mode_switch`.** That switch conflated two
+            // separate things, and separating them is what let an
+            // application processor live:
+            //
+            // - the *mask* decides whether a write that changes only
+            //   CR0.PG exits at all. That is what the switch should
+            //   govern, and still does, in `setup_vmcs`.
+            // - the *bookkeeping* below is what has to happen whenever
+            //   this handler runs, whatever brought it here. LMA is not
+            //   state to track: SDM Table 27-15 note 1 makes it the
+            //   logical AND of CR0.PG and IA32_EFER.LME, so it is
+            //   derived, and deriving it costs nothing when nothing
+            //   changed.
+            //
+            // Measured, boot 87. With the switch off, the application
+            // processor's long-mode write still exited - it is
+            // `0xc0010021`, which sets CD, NW and **NE**, and NE is
+            // masked unconditionally - so the handler ran and skipped
+            // this block. Twenty-seven second-level entries later the
+            // entry was refused with exactly the reason the comment
+            // above predicts, 0x80000021, this VMM reflected it, and
+            // hvix64 answered an entry-failure exit the only way it
+            // does: `HvpVpFatal` -> `HvpCrashRendezvous` ->
+            // `HvpResetSystem` -> `out 0xcf9, 0x0f`, which this VMM
+            // then recorded on its way through.
+            //
+            // So the guard's cost was never "no tracking on a build
+            // that opted out". It was an inconsistent VMCS on the one
+            // path that most needs a consistent one.
+            {
                 // `paging_now` is computed above, beside
                 // `paging_was_on`, because the invalidation there needs
-                // it too and needs it whether this switch is on or off.
+                // it too and needs it whether the mask switch is on or
+                // off.
                 if (paging_was_on != paging_now) {
                     namespace entry_control =
                         arch::x86_64::vmx::vm_entry_controls;
