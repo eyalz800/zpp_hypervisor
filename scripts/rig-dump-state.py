@@ -3977,7 +3977,8 @@ def dump_ap_census(args, elf, instance):
                # indistinguishable from a counter that never moved -
                # the exact failure these two exist to expose.
                "start_up_declined", "start_up_from",
-               "resume_count", "last_resume_rip"]
+               "resume_count", "last_resume_rip",
+               "vmcall_seen", "vmcall_max_code", "vmcall_code_bitmap"]
     off = gdb_offsets(elf, members, optional=True)
     if "cpuid_leaf_counts" not in off:
         print("\n[ap census skipped: the deployed ELF has no "
@@ -4006,6 +4007,11 @@ def dump_ap_census(args, elf, instance):
         reader.queue(instance + off["started_by_start_up_ipi"],
                      (args.cpus + 7) // 8)
     # Four slots per processor, packed ASCII of the applying caller.
+    for _m in ("vmcall_seen", "vmcall_max_code"):
+        if _m in off:
+            reader.queue(instance + off[_m], 1)
+    if "vmcall_code_bitmap" in off:
+        reader.queue(instance + off["vmcall_code_bitmap"], 4)
     for _m in ("resume_count", "last_resume_rip"):
         if _m in off:
             reader.queue(instance + off[_m], args.cpus)
@@ -4132,6 +4138,22 @@ def dump_ap_census(args, elf, instance):
             print(f"  guest hypervisor's own index never sampled "
                   f"(no CPUID exit with vmcs01 current)")
 
+        if 0 == cpu:
+            seen = word("vmcall_seen") or 0
+            # uint16_t: a whole-word read carries neighbours in
+            # its high bits, so mask. Reading it wide is the
+            # element-size trap this session hit four times.
+            mx = (word("vmcall_max_code") or 0) & 0xffff
+            codes = []
+            for _w in range(4):
+                v = word("vmcall_code_bitmap", _w) or 0
+                for _b in range(64):
+                    if v >> _b & 1:
+                        codes.append(_w * 64 + _b)
+            print(f"  VMCALL census (second-level path): seen {seen:,}, "
+                  f"max code 0x{mx:x}, distinct codes {len(codes)}")
+            if codes:
+                print("    codes: " + " ".join(f"0x{c:x}" for c in codes[:40]))
         applied = word("start_up_applied", cpu) or 0
         inits = word("init_emulated", cpu) or 0
         started = byte("started_by_start_up_ipi", cpu)
