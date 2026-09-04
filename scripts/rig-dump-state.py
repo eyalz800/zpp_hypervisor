@@ -6883,6 +6883,7 @@ def main():
                "vmx_operand_decode_failures", "vmx_operand_read_failures",
                "vmx_operand_failure_reason", "vmx_operand_failure_linear",
                "vmx_operand_failure_error",
+               "vmx_operand_failure_running_l2", "vmx_operand_failure_cr3",
                "vmx_instructions_refused", "refused_xsetbv_count",
                "refused_xsetbv_index", "refused_xsetbv_value",
                "recovery_field_readback",
@@ -8949,7 +8950,9 @@ def main():
             om.queue(instance + off[_m], args.cpus)
         for _m in ("vmx_operand_failure_reason",
                    "vmx_operand_failure_linear",
-                   "vmx_operand_failure_error"):
+                   "vmx_operand_failure_error",
+                   "vmx_operand_failure_running_l2",
+                   "vmx_operand_failure_cr3"):
             if _m in off:
                 om.queue(instance + off[_m], 1)
         og = om.run()
@@ -8973,6 +8976,14 @@ def main():
                   f"{og.get(instance + off.get('vmx_operand_failure_linear', 0), 0):x}"
                   f"  error "
                   f"{og.get(instance + off.get('vmx_operand_failure_error', 0), 0)}")
+            rl = og.get(instance + off.get("vmx_operand_failure_running_l2", 0), 0)
+            print(f"        running_l2 {rl}  guest_cr3 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_cr3', 0), 0):x}"
+                  + ("   <- SET while the LEVEL ABOVE executed: the walk "
+                     "went through EPT12 and could not have worked"
+                     if rl == 1 else
+                     "   <- clear, so the walk was a plain L1 walk and "
+                     "the page really was absent"))
         else:
             print("\nVMX operand failures: none on any processor")
 

@@ -10485,6 +10485,26 @@ private:
     std::uint64_t vmx_operand_failure_linear{};
     std::uint64_t vmx_operand_failure_error{};
 
+    /**
+     * `running_l2[cpu]` at the instant the operand read failed, and the
+     * guest CR3 the walk started from.
+     *
+     * `translate_guest_linear` passes each page-table physical address
+     * through `l2_physical_to_l1`, which returns it unchanged when this
+     * flag is clear and walks EPT12 when it is set. The level above
+     * executes VMX instructions in ITS root operation, where its page
+     * tables are level-one physical - so a set flag here means the walk
+     * translated hvix64's own tables as though they were its guest's,
+     * and would fail for that reason alone rather than because the page
+     * is absent.
+     *
+     * One word, and it decides between "inject #PF, the page really is
+     * gone" and "this VMM walked with the wrong translation" - which
+     * want opposite fixes.
+     */
+    std::uint64_t vmx_operand_failure_running_l2{};
+    std::uint64_t vmx_operand_failure_cr3{};
+
     void note_vmx_operand_failure(std::size_t cpu,
                                   bool read_half,
                                   std::uint64_t rip,
@@ -10504,6 +10524,9 @@ private:
         this->vmx_operand_failure_reason = rip;
         this->vmx_operand_failure_linear = linear;
         this->vmx_operand_failure_error = error;
+        this->vmx_operand_failure_running_l2 =
+            (cpu < max_cpus) ? (this->running_l2[cpu] ? 1 : 0) : 2;
+        this->vmx_operand_failure_cr3 = this->vmcs.guest_cr3();
     }
     /**
      * @}
