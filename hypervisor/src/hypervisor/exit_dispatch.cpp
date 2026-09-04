@@ -3247,6 +3247,32 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // disagrees with its own write. The disagreement is moot in
             // practice: with FIXED1 = 0xffffffff the two rules differ
             // over no bit below 32 at all.
+            // **Unconditional, application processors only.** The
+            // long-mode handler below logs when it acts, and on a
+            // two-processor boot that line appears once - for the
+            // *firmware's* AP bring-up at rip 0x7f39f05a - and never
+            // for hvix64's trampoline write at rip 0x216b, which a
+            // hardware breakpoint proves the processor reaches. Three
+            // things could explain that and a silent branch cannot say
+            // which: the write may not exit at all, it may be handled
+            // before this case (which is what the 0x76 vmcall turned
+            // out to do), or the `load_ia32_efer` guard below may be
+            // false, which today produces no output whatever.
+            //
+            // So this says "the write reached this case" before any
+            // condition is applied. cpu 0 is excluded because Windows
+            // moves CR0 on it constantly; the log's own deduplication
+            // bounds the rest.
+            if (0 != cpuid) {
+                log("cpu {} cr0 write reached the case: value {} rip {} "
+                    "guest_cr0 {} entry-controls {}",
+                    cpuid,
+                    value,
+                    vmcs.guest_rip(),
+                    vmcs.guest_cr0(),
+                    vmcs.vm_entry_controls());
+            }
+
             {
                 namespace vmx_msr = arch::x86_64::vmx::msr;
 
@@ -3442,6 +3468,21 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                     // `init_clears_efer` was added for. The fix is to
                     // build with `efer0=1`; the line below is so that a
                     // build without it says which of the two it is.
+                    // The guard's failure is silent today, in the one
+                    // handler whose entire purpose is this transition.
+                    // If it is false here the processor is entered in
+                    // 32-bit PAE paging when it asked for long mode,
+                    // and nothing says so.
+                    if (0 == (controls & entry_control::load_ia32_efer)) {
+                        log("cpu {} long-mode switch NOT applied: "
+                            "load_ia32_efer clear, controls {} cr0 {} "
+                            "rip {}",
+                            cpuid,
+                            controls,
+                            value,
+                            vmcs.guest_rip());
+                    }
+
                     if (0 != (controls & entry_control::load_ia32_efer)) {
                         auto efer = vmcs.guest_ia32_efer();
                         auto long_mode =
