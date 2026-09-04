@@ -64425,3 +64425,85 @@ and would hide the first.
 application processor becomes a working logical processor (boot 111:
 303,504 second-level entries, VTL switches, no reset). So a fix should
 be judged by many boots, not one.
+
+## The multicore reset: the page-table walk races the mapping window
+
+Root cause, proven 2026-09-05. **Not fixed** - the safe fix is not a
+one-line hoist, and the unsafe one deadlocks.
+
+**What happens.** `translate_guest_linear` walks the guest's four-level
+page table by mapping each table through the SHARED mapping window and
+reading the entry directly:
+
+```cpp
+auto * entries = static_cast<const std::uint64_t *>(
+    map_window_at(transfer_window_first_page, *reachable, 1));
+auto entry = entries[index];
+```
+
+Its own comment says "The caller holds mapping_window_lock". On the
+`read_guest_linear` path nobody does: that function calls
+`guest_linear_to_physical` (which contains the walk) and then
+`read_guest_physical` (which takes the lock) - so the lock is held
+*after* the walk, never across it. With two processors the other one
+re-points the window between `map_window_at` and `entries[index]`, and
+the read lands on whatever page the window now shows.
+
+**Measured, not inferred.** A failing 2-CPU boot records:
+
+    PAGE-TABLE WALK REFUSALS
+      cpu 1  level 0  linear 0xffffe800002dd870
+              table 0x114f86000  entry 0x0   <- PRESENT clear
+
+Level 0 is the PML4 and the table is CR3 itself. The monitor reads that
+same entry, at that same physical address, as `0x0000000101a81063` -
+present. All four levels walk cleanly by hand. **zpp reads zeros from
+memory that holds a valid entry.**
+
+**The whole failure follows from it:**
+
+    another processor re-points the shared mapping window
+      -> this processor's walk reads zeros
+        -> guest_address_not_mapped
+          -> the VMX instruction handler returns false
+            -> #UD (now #PF) injected into the guest hypervisor
+              -> hvix64 bugchecks - ANY root-mode fault is fatal there,
+                 HvpHandleHostException crash code 0x11
+                -> HvpCrashRendezvous -> HvpResetSystem
+                  -> out 0xcf9, 0x0f -> the machine stops
+
+It explains every property the failure showed: multi-processor only (one
+processor cannot race itself); a mapped page reported absent; a faulting
+RVA that moves between VMX instructions, since any instruction with a
+memory operand can be the one walking when the window moves; and a crash
+code that varies within one class (VMLAUNCH/VMRESUME take no memory
+operand, which is why 0x06 appeared once against 0x11 three times).
+
+**Why the obvious fix is wrong.** Taking `mapping_window_lock` inside
+`translate_guest_linear` deadlocks: `zpp::spin_lock` is not recursive
+and several callers already hold it - the decoder's instruction fetch
+among them. Taking it inside `guest_linear_to_physical` has the same
+problem one level up.
+
+**What a correct fix needs**, in rough order of preference:
+
+1. A per-processor mapping window. The race is only between processors,
+   and the window is one shared resource used from every exit handler.
+   This removes the class rather than one instance of it.
+2. An ownership-aware lock - record the holder and allow re-entry from
+   the same processor - which is a change to `zpp::spin_lock` and wants
+   its own test.
+3. A walk that does not use the window at all, reading each table
+   through `read_guest_physical` (which locks correctly) at the cost of
+   one lock round trip per level.
+
+Option 1 is also what removes `mapping_window_lock` from the several
+other hazards a review flagged this session: it is held across an EPT
+rendezvous in `borrow_guest_admin_queue`, and across a 2,000,000-spin
+wait in `start_application_processor`.
+
+**Note the failure is stochastic** - about 1 boot in 28 escapes it, and
+on that boot the application processor becomes a fully working logical
+processor (303,504 second-level entries, VTL switches, no reset). So a
+fix must be judged over many boots, and a single good boot proves
+nothing.
