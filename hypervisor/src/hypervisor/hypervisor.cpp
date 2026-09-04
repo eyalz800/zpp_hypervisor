@@ -3499,7 +3499,7 @@ bool hypervisor::on_io_instruction(arch::x86_64::context & context,
     //
     // A read is answered by letting the guest do it: nothing is entered
     // by reading the register back.
-    if (reset_control_port == port) {
+    if ((reset_control_port == port) || (keyboard_command_port == port)) {
         if (reading || string_form) {
             intercept_io_port(port, false);
             return true;
@@ -3526,14 +3526,16 @@ bool hypervisor::on_io_instruction(arch::x86_64::context & context,
         // the write the machine does not come back from. Everything
         // here has to be in memory by then or it is never readable.
         this->reset_request.occurred = 1;
+        this->reset_request.port = port;
         this->reset_request.value = written;
         this->reset_request.bytes = width;
         this->reset_request.processor = this->vmcs.vpid();
         this->reset_request.rip = this->vmcs.guest_rip();
         this->reset_request.count += 1;
 
-        log("RESET CONTROL PORT written: value {} width {} by vpid {} "
+        log("RESET PORT {} written: value {} width {} by vpid {} "
             "at rip {} (write number {})",
+            port,
             written,
             width,
             this->vmcs.vpid(),
@@ -7413,7 +7415,10 @@ hypervisor::main(arch::x86_64::context & caller_context)
         // See reset_request for why it is worth an exit, and why 0x64
         // is deliberately not armed alongside it.
         intercept_io_port(reset_control_port, true);
-        log("watching reset control port {}", reset_control_port);
+        intercept_io_port(keyboard_command_port, true);
+        log("watching reset ports {} and {}",
+            reset_control_port,
+            keyboard_command_port);
     }
 
     // Initialize and load the intermediate GDT, which is a copy of the

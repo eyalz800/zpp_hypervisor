@@ -11239,11 +11239,19 @@ private:
      * 2-CPU boot dies that way at about 100 s, and this is what says
      * which of the two it was, and from where.
      *
-     * 0xcf9 only. 0x64 is the other architectural way to reset a PC and
-     * is deliberately *not* armed: it is the keyboard controller command
-     * port, the guest writes it constantly, and intercepting it would
-     * add an exit to a hot path to catch an event that has never been
-     * observed to come from there.
+     * **Both 0xcf9 and 0x64.** An earlier revision armed 0xcf9 alone and
+     * reasoned that 0x64 - the 8042 command port - is written constantly
+     * by the guest and not worth an exit. That reasoning produced a
+     * false negative and is exactly the failure this file warns about
+     * elsewhere: an instrument that cannot see the event reports its
+     * absence. hvix64's `HvpResetSystem` (RVA 0x2241a2) ends in an
+     * UNCONDITIONAL `out 0x64, 0xfe`, the 8042 pulse reset, on every
+     * path through it; its ACPI/0xcf9 write above that is skipped by
+     * four separate conditions. So "0xcf9 was never written" was never
+     * evidence that Hyper-V did not reset the machine.
+     *
+     * The cost is bounded in practice: a Windows guest with USB input
+     * touches the 8042 command port rarely after initialisation.
      *
      * The write is performed by this VMM rather than released and
      * re-executed, so the port stays armed and every write is seen. The
@@ -11252,9 +11260,18 @@ private:
      * @{
      */
     static constexpr std::uint16_t reset_control_port = 0xcf9;
+    static constexpr std::uint16_t keyboard_command_port = 0x64;
 
     struct
     {
+        /**
+         * Which of the two reset ports was written - 0xcf9 or 0x64.
+         * Recorded because they mean different things: 0xcf9 is the
+         * chipset reset control, 0x64 carries both the 8042 pulse
+         * reset (0xfe) and ordinary keyboard controller commands.
+         */
+        std::uint64_t port{};
+
         /**
          * Non-zero once any write to the reset control port has been
          * seen. Check this first; the rest is meaningless until it is

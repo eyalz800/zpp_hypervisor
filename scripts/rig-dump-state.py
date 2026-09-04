@@ -7443,8 +7443,8 @@ def main():
         # occurred, port, value, sleep_type, processor, stage
         monitor.queue(instance + off["sleep_request"], 6)
     if "reset_request" in off:
-        # occurred, value, bytes, processor, rip, count
-        monitor.queue(instance + off["reset_request"], 6)
+        # occurred, port, value, bytes, processor, rip, count
+        monitor.queue(instance + off["reset_request"], 7)
     if "ap_fault" in off:
         monitor.queue(instance + off["ap_fault"], 14)
     # Eighteen words, which is every member the record has. Six was the
@@ -9530,20 +9530,26 @@ def main():
         print("\nreset request: MEMBER ABSENT from this reader - not "
               "'never'. Add it rather than reading this as a zero.")
     elif read('reset_request', 0):
-        value = read('reset_request', 1)
-        print(f"\nRESET CONTROL PORT WRITTEN - the guest reset the "
-              f"machine itself, through 0xcf9")
-        print(f"  value 0x{value:x} "
-              f"({'bit 2 SET, this is the reset' if value & 4 else 'bit 2 clear, this write did NOT reset'}) "
-              f"width {read('reset_request', 2)}")
-        print(f"  written by vpid {read('reset_request', 3)} "
-              f"at guest rip 0x{read('reset_request', 4):x}")
-        print(f"  {read('reset_request', 5)} write(s) seen in total; the "
+        rport = read('reset_request', 1)
+        value = read('reset_request', 2)
+        if rport == 0x64:
+            what = ('0xfe: the 8042 PULSE RESET - this is hvix64 '
+                    'HvpResetSystem resetting the machine'
+                    if value == 0xfe
+                    else 'an ordinary 8042 command, NOT a reset')
+        else:
+            what = ('bit 2 SET, this is the reset' if value & 4
+                    else 'bit 2 clear, this write did NOT reset')
+        print(f"\nRESET PORT WRITTEN - port 0x{rport:x}")
+        print(f"  value 0x{value:x} ({what}) width {read('reset_request', 3)}")
+        print(f"  written by vpid {read('reset_request', 4)} "
+              f"at guest rip 0x{read('reset_request', 5):x}")
+        print(f"  {read('reset_request', 6)} write(s) seen in total; the "
               f"fields describe the most recent")
-        print(f"  This is a DEVICE-MODEL RESET, not a triple fault.")
     else:
-        print("\nreset request: never - nothing wrote 0xcf9, so the stop "
-              "was NOT a guest-initiated reset through that port")
+        print("\nreset request: never - nothing wrote 0xcf9 or 0x64. Both "
+              "are armed, so this is a real negative for BOTH of "
+              "hvix64 HvpResetSystem's writes")
 
     if read('vm_entry_failure', 0):
         print(f"\nVM ENTRY FAILURE - a processor was refused entry")
