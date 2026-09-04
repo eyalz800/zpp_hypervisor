@@ -594,6 +594,38 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
 
         // Ask `vmptrst` on the next few resumes of this processor.
         this->vmptrst_owed[here - 1] = 6;
+
+        // **Arm the exception trap here, not in the CR0 handler.**
+        //
+        // `trap_ap_faults` arms inside the long-mode CR0 case, which is
+        // reached only if that write exits - and on this failure it
+        // never does, so the trap that exists for exactly this phase has
+        // never been armed for it. Armed here it covers hvix64's
+        // trampoline from its first instruction.
+        //
+        // What it answers: the application processor arrives at the
+        // long-mode `mov cr0` (hardware breakpoint) and the write does
+        // not retire (`exit_reason_counts[1][28]` stays at the two
+        // firmware writes). An instruction that does not retire faulted,
+        // and with no IDT loaded yet that fault is otherwise invisible -
+        // it escalates to a triple fault carrying no vector, no error
+        // code and no address. This catches it at the first delivery
+        // instead, with all three.
+        //
+        // Application processors only, once, and the capture disarms it.
+        if constexpr (nested_vmx::trap_ap_faults) {
+            if (auto cpu = here - 1;
+                (0 != cpu) && (0 == this->ap_fault.occurred)) {
+                vmcs.exception_bitmap(nested_vmx::ap_fault_vectors);
+
+                this->ap_fault.armed_on_cpu = cpu;
+                this->ap_fault.armed_at_rip = vmcs.guest_rip();
+
+                log("cpu {} ap-fault trap armed at start-up, vectors {}",
+                    cpu,
+                    nested_vmx::ap_fault_vectors);
+            }
+        }
     }
 
     using segment_descriptor = arch::x86_64::segment_descriptor;
