@@ -986,6 +986,20 @@ void poison_vmcs(std::size_t cpu)
     vmcs.vm_entry_controls(
         zpp::arch::x86_64::vmx::vm_entry_controls::ia_32e_mode_guest |
         zpp::arch::x86_64::vmx::vm_entry_controls::load_debug_controls);
+
+    // The registers that are *not* VMCS fields, poisoned for the same
+    // reason as everything above: SDM 25.4's guest-state area holds DR7
+    // and neither DR0-DR3 nor CR2, so VMX leaves all five carrying
+    // whatever the guest last put there and apply_start_up has to write
+    // them by hand. Zeroed from the start they could not tell "written to
+    // zero" from "never written", which is exactly how the omission
+    // survived.
+    zpp::arch::x86_64::g_dr6 = 0xcccccccc;
+    zpp::arch::x86_64::g_cr2 = 0xfffff78000000000;
+    for (std::size_t index{}; index < 4; ++index) {
+        zpp::arch::x86_64::g_debug_registers[index] =
+            0xfffff80011110000 + index;
+    }
 }
 
 /**
@@ -1107,6 +1121,36 @@ void test_apply_start_up_state()
           "DR6 is FFFF0FF0H after an INIT, written to the real register "
           "because the guest and host share it - it is not a VMCS guest "
           "field");
+
+    // The other four debug registers, which are shared for exactly the
+    // same reason and were not being written at all. SDM Table 12-1
+    // ([[PAGE 3522]]) INIT column: "DR0, DR1, DR2, DR3   00000000H", and
+    // SDM 25.4's guest-state area holds DR7 and none of these - so a
+    // breakpoint address the guest armed before its INIT survived into
+    // the processor's next life. KVM clears them on the same path,
+    // `kvm_vcpu_reset`'s `memset(vcpu->arch.db, 0, ...)` followed by
+    // `kvm_update_dr0123` (.references/kvm/x86.c).
+    //
+    // Why it matters rather than merely differing: DR7 is written as
+    // 00000400H just above, so the stale addresses are disabled and
+    // silent until the guest enables DR7 for breakpoints of its own -
+    // and it then takes a #DB at an address it never armed in this life.
+    for (std::size_t index{}; index < 4; ++index) {
+        check(0 == zpp::arch::x86_64::g_debug_registers[index],
+              "DR" + std::to_string(index) +
+                  " is 00000000H after an INIT - SDM Table 12-1, and "
+                  "it is not a VMCS guest field so nothing else clears "
+                  "it");
+    }
+
+    // CR2, from the same row as CR3 and CR4 - "CR2, CR3, CR4
+    // 00000000H" - and the only one of the three that is not a VMCS
+    // guest field. KVM zeroes it in the same function,
+    // `vcpu->arch.cr2 = 0`.
+    check(0 == zpp::arch::x86_64::g_cr2,
+          "CR2 is 00000000H after an INIT - SDM Table 12-1's "
+          "\"CR2, CR3, CR4\" row, and VMX neither saves nor restores it");
+
     check(0 == vmcs.guest_pending_debug_exceptions(),
           "the pending debug exceptions field is cleared");
 

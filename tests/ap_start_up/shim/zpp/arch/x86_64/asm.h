@@ -53,6 +53,42 @@ inline void dr6(std::uint64_t value)
 }
 
 /**
+ * DR0 through DR3, shared between guest and host exactly as DR6 is - SDM
+ * 25.4 puts DR7 in the guest-state area and none of these four - so
+ * apply_start_up writes SDM Table 12-1's after-INIT zero to the real
+ * registers. Seeded non-zero by the harness so a missing write is a
+ * failing check rather than a value that happened to be zero already.
+ */
+inline thread_local std::uint64_t g_debug_registers[4]{};
+
+inline std::uint64_t debug_register(std::uint8_t index)
+{
+    return g_debug_registers[index & 3];
+}
+
+inline void debug_register(std::uint8_t index, std::uint64_t value)
+{
+    g_debug_registers[index & 3] = value;
+}
+
+/**
+ * CR2, shared for the same reason - `write_cr2`'s own comment in the real
+ * header says VMX neither saves nor restores it, so the after-INIT zero
+ * of SDM Table 12-1's "CR2, CR3, CR4" row has to be written by hand.
+ */
+inline thread_local std::uint64_t g_cr2{};
+
+inline std::uint64_t cr2()
+{
+    return g_cr2;
+}
+
+inline void write_cr2(std::uint64_t value)
+{
+    g_cr2 = value;
+}
+
+/**
  * CPUID, which apply_start_up reads leaf 1 from for the value SDM Table
  * 12-1 puts in EDX after an INIT: the family, model and stepping.
  *

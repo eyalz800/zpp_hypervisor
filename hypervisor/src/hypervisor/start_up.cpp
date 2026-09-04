@@ -315,8 +315,8 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
             // separate every caller: "launch", "queued", "sipi exi".
             std::uint64_t packed{};
 
-            for (std::size_t i = 0; (i < 8) && (nullptr != from) &&
-                                    ('\0' != from[i]);
+            for (std::size_t i = 0;
+                 (i < 8) && (nullptr != from) && ('\0' != from[i]);
                  ++i) {
                 packed |= static_cast<std::uint64_t>(
                               static_cast<unsigned char>(from[i]))
@@ -576,6 +576,44 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // register - so the architectural value has to be written to the real
     // one while running on this processor.
     arch::x86_64::dr6(dr6_after_init);
+
+    // DR0 through DR3, for exactly the same reason and out of the same
+    // row of the same table. SDM Table 12-1 ([[PAGE 3522]]), INIT
+    // column: "DR0, DR1, DR2, DR3   00000000H". None of the four is in
+    // the guest-state area - SDM 25.4 lists DR7 and nothing else - so
+    // VMX neither saves nor restores them, and an address the guest
+    // armed before its INIT is still in the register afterwards unless
+    // something writes it. Nothing did.
+    //
+    // KVM writes them on the same INIT path that zeroes the general
+    // purpose registers a few lines above this: `kvm_vcpu_reset`
+    // (.references/kvm/x86.c) does `memset(vcpu->arch.db, 0,
+    // sizeof(vcpu->arch.db))` followed by `kvm_update_dr0123(vcpu)`.
+    //
+    // Guest-observable two ways, and the second is the one that bites. A
+    // guest can read the stale address straight back with `mov rax, dr0`.
+    // Worse, DR7 is written as 00000400H above - every breakpoint
+    // disabled - so the four addresses sit there inert until the guest
+    // enables DR7 for breakpoints of its own, and it then takes a #DB at
+    // an address it never armed in this life. Neither can happen on real
+    // hardware, because a real INIT clears the registers; here the INIT
+    // is a VM exit, and SDM 28.2 ([[PAGE 4208]]) is explicit that such an
+    // exit performs "none of the operations normally associated with
+    // these events" and does "not modify register state".
+    constexpr std::uint8_t address_debug_registers = 4;
+    for (std::uint8_t index{}; index < address_debug_registers; ++index) {
+        arch::x86_64::debug_register(index, 0);
+    }
+
+    // CR2, same table and missed for the same reason: the row reads
+    // "CR2, CR3, CR4   00000000H", and of the three only CR3 and CR4 are
+    // VMCS guest fields - both written above. CR2 is shared, and
+    // `write_cr2`'s own comment already says why: "VMX neither saves nor
+    // restores CR2 across a transition - SDM 25.4 and 25.5 list the host
+    // and guest state areas, and CR2 is in neither".
+    //
+    // KVM zeroes it in the same function, `vcpu->arch.cr2 = 0`.
+    arch::x86_64::write_cr2(0);
 
     // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with a
     // hardware reset", and the same paragraph describes INIT as the method
