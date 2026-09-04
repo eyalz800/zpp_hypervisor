@@ -761,6 +761,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             vmcs.guest_rip());
     }
 
+    // **Keyed on the RIP, not on the processor index.** The census
+    // above is gated on `cpuid != 0`, and every conclusion drawn from
+    // its silence assumes this VMM knows which processor it is on. If
+    // an INIT-SIPI leaves the application processor identified as cpu
+    // 0, the gate never opens, the exits land in cpu 0's half-million,
+    // and cpu 1's counters freeze - which is indistinguishable from the
+    // exits not happening, and is exactly what has been measured.
+    //
+    // hvix64's trampoline lives in one page at guest-physical 0x2000,
+    // so an exit taken anywhere in it is unambiguous whatever this VMM
+    // believes about the processor. `vpid` is printed beside `cpuid`
+    // because they are derived differently and disagreeing is the
+    // finding.
+    if (auto rip = vmcs.guest_rip(); (rip >= 0x2000) && (rip < 0x2200)) {
+        log("TRAMPOLINE exit: cpuid {} vpid {} reason {} rip {}",
+            cpuid,
+            vmcs.vpid(),
+            static_cast<std::uint64_t>(reason),
+            rip);
+    }
+
     // Which comparison this exit belongs to, for `bucket_phase_cycles`.
     // Here rather than beside the other per-exit facts above, because
     // the reason is not known until the VMCS has been read - and it has
