@@ -10524,6 +10524,27 @@ private:
      */
     std::uint64_t ap_entry_traces{};
     bool ap_entry_traced[max_cpus]{};
+
+    /**
+     * **How many entries of each application processor to trace.**
+     *
+     * `ap_entry_traced` traces the *first* entry only, which cannot
+     * answer the question the multicore failure now turns on: the
+     * start-up state written for the second start-up IPI is complete
+     * and correct - real mode, `CS base 0x2000`, `RIP 0`, IA-32e clear,
+     * activity active - and the processor is nevertheless observed at
+     * `0x7fb6b030`, the address it held *before* that write. Either the
+     * entry never happens, or it happens with the older state.
+     *
+     * A first-entry-only trace fires long before that, on the firmware's
+     * start-up, so it reports success for a processor that later fails.
+     * Tracing the first few entries separates the two: an entry with
+     * `rip 0` and `cs base 0x2000` says the write reached the processor,
+     * an entry with `rip 0x7fb6b030` says it did not, and no further
+     * entry at all says the resume never happens.
+     */
+    static constexpr std::uint64_t ap_entry_trace_limit = 6;
+    std::uint64_t ap_entry_trace_count[max_cpus]{};
     /**
      * @}
      */

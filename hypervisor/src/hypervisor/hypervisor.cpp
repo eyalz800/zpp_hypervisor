@@ -7832,10 +7832,25 @@ hypervisor::main(arch::x86_64::context & caller_context)
         if (0 == cpuid) {
             log("ap-entry instrument armed; no application processor has "
                 "been entered yet");
-        } else if ((cpuid < max_cpus) && !this->ap_entry_traced[cpuid]) {
-            this->ap_entry_traced[cpuid] = true;
-            this->ap_entry_traces = this->ap_entry_traces + 1;
-            trace_guest_state(cpuid, "ap-first-entry");
+        } else if ((cpuid < max_cpus) &&
+                   (this->ap_entry_trace_count[cpuid] <
+                    ap_entry_trace_limit)) {
+            // The first few, not only the first. See
+            // `ap_entry_trace_count`: the first entry happens on the
+            // firmware's start-up and says nothing about the operating
+            // system's, which is the one that does not take.
+            auto which = this->ap_entry_trace_count[cpuid];
+            this->ap_entry_trace_count[cpuid] = which + 1;
+
+            if (!this->ap_entry_traced[cpuid]) {
+                this->ap_entry_traced[cpuid] = true;
+                this->ap_entry_traces = this->ap_entry_traces + 1;
+            }
+
+            log("ap entry {} on cpu {}", which, cpuid);
+            trace_guest_state(cpuid,
+                              (0 == which) ? "ap-first-entry"
+                                           : "ap-entry");
         }
     }
 
