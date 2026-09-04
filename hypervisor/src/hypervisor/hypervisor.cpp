@@ -5519,6 +5519,46 @@ void hypervisor::record_entry_failure(std::uint64_t flags)
             this->entry_failure_error[slot - 1] = error;
         }
     }
+
+    // **And in the log, because a refused entry is otherwise the one
+    // failure this VMM has no channel for at all.**
+    //
+    // Everything above goes into members. Members are read by
+    // `rig-dump-state.py` against a running guest and by a debugger
+    // attached to this processor - and the processor is about to park in
+    // the `cli; hlt` loop at the bottom of the `vmresume` stub, for the
+    // rest of the boot. So on a machine nobody happens to be dumping,
+    // this event leaves no trace whatever.
+    //
+    // That absence is not neutral, it is actively misleading, and the
+    // application-processor investigation is the worked example.
+    // `on_vm_exit` carries an unconditional log of every exit an
+    // application processor takes, added to separate "the write did not
+    // exit" from "the exit was consumed earlier". There is a third state
+    // it cannot see: **the processor was never entered again**. A failed
+    // VMRESUME produces no VM exit (SDM 31.2 - it sets RFLAGS and returns
+    // to the next instruction, which is the stub's own failure path), so
+    // the log simply stops after whatever the exit handler last wrote -
+    // which reads exactly like a processor that is running and taking no
+    // exits. One line here tells the two apart.
+    //
+    // Placed after the members are written, so a fault in the log's own
+    // allocation cannot cost the record it is reporting. Safe from here:
+    // this runs in root operation on the host stack, page table and
+    // descriptor tables - `context.rsp` holds the address of the context
+    // inside this module, not a guest stack - and `on_vm_entry_failure`
+    // already logs from the same kind of place.
+    // `slot` counts from one, the way a VPID does, and is zero when GS
+    // could not name this processor - so a reader never has to guess
+    // whether "0" means the boot processor or an unanswered question.
+    log("vm entry refused on virtual processor {}, flags {}, "
+        "instruction error {} - this processor parks here and takes no "
+        "further exits",
+        slot,
+        flags,
+        (0 != slot) && (slot <= max_cpus)
+            ? this->entry_failure_error[slot - 1]
+            : std::uint64_t{});
 }
 
 void hypervisor::on_vm_entry_failure(arch::x86_64::vmx::exit_reason reason)
