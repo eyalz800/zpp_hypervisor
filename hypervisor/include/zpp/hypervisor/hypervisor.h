@@ -10290,10 +10290,17 @@ private:
      *
      * `apply_start_up` has five call sites and each passes a distinct
      * `from` literal, but the only thing that recorded it was a
-     * `trace_ap_entry` log line - and on a two-processor boot the log
-     * ring reads **empty**, so the label was unavailable exactly when
-     * it mattered. Two applications reach cpu 1's guest state and
-     * nothing said which two paths produced them.
+     * `trace_ap_entry` log line, and on the boot this was added for the
+     * ring read back with none of them. Two applications reach cpu 1's
+     * guest state and nothing said which two paths produced them.
+     *
+     * **That was written up as "on a two-processor boot the log ring
+     * reads empty", and that generalisation is withdrawn.** `e8f5d32`
+     * quotes three cpu-1 lines out of a two-processor boot, so the ring
+     * does carry application-processor lines there. These members earn
+     * their place for the ordinary reasons - a counter survives the
+     * ring wrapping and a post-mortem reads members - not because the
+     * ring is broken on two processors, which is not established.
      *
      * The pointer is stored rather than a copy: `from` is always a
      * string literal in this module, so the address is stable for the

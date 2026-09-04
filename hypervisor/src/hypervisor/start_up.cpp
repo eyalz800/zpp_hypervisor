@@ -168,16 +168,43 @@ void hypervisor::trace_guest_state(std::size_t cpu, const char * where)
             vmcs.guest_rsp(),
             vmcs.guest_rflags());
 
-        // **The masks, because they decide whether we see anything at
-        // all.** Measured: after this state is applied, cpu 1 takes
-        // ZERO exits - the unconditional log at the top of
-        // `on_vm_exit` catches none - while a hardware breakpoint
-        // proves it executes `mov cr0` with PG|PE at trampoline offset
-        // 0x216b. A CR0 write only exits if it changes a bit in the
-        // guest/host mask, so if PG is absent from cpu 1's mask the
-        // long-mode switch is invisible here and
-        // `ia_32e_mode_guest` is never brought into agreement with
-        // EFER.LMA. This prints the field rather than assuming it.
+        // **The masks and the shadows, because between them they
+        // decide whether we see anything at all - and it is the pair,
+        // not the mask alone.**
+        //
+        // This used to say "if PG is absent from cpu 1's mask the
+        // long-mode switch is invisible here". The mask was then
+        // measured and it *does* carry PG (0x80000020), at which point
+        // that reading had nothing left to offer. The missing half is
+        // the read shadow: SDM 28.1.3 (.references/sdm.txt:200760) says
+        // MOV to CR0 exits "unless the value of its source operand
+        // matches, for the position of each bit set in the CR0
+        // guest/host mask, the corresponding bit in the CR0 **read
+        // shadow**" - so the predicate is (source ^ shadow) & mask, not
+        // (source ^ CR0) & mask.
+        //
+        // With the shadow this function writes below - `ET`, 0x10 - the
+        // whole of hvix64's trampoline is then decidable with no
+        // further measurement, and both answers are what the rig sees:
+        //
+        //   `mov cr0, 1`          at +0xdc:  (1 ^ 0x10) & mask == 0
+        //                                    -> no exit, correctly
+        //   `mov cr0, 0x80000001` at +0x16b: (0x80000001 ^ 0x10) & mask
+        //                                    == 0x80000000 -> MUST exit
+        //
+        // So "cpu 1 takes zero exits" is the *expected* value up to and
+        // including *arriving* at 0x216b: every instruction between the
+        // two is non-exiting under this VMCS. And the hardware
+        // breakpoint that appeared to prove the second write executed
+        // proves only arrival - an instruction breakpoint is fault
+        // class and is taken "before it executes the target
+        // instruction" (SDM 18.3.1.1,
+        // .references/sdm.txt:182727). The open question is therefore
+        // whether that write ever retired, and `exit_reason_counts[cpu]
+        // [28]` answers it without this instrument at all.
+        //
+        // The shadow is printed two lines down for the same reason the
+        // mask is: it is half the predicate.
         log("zpp-state {} cpu {}: cr0 mask {} cr4 mask {}",
             where,
             cpu + 1,
@@ -536,6 +563,19 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
             // and a label it cannot fetch reads as absent, which is the
             // failure this member exists to avoid. Eight characters
             // separate every caller: "launch", "queued", "sipi exi".
+            //
+            // **The "reads empty" premise above is withdrawn as a
+            // general claim.** `e8f5d32` quotes three log lines naming
+            // cpu 1 out of a two-processor boot, so the ring does carry
+            // application-processor lines there. Whatever produced an
+            // empty read was a property of that run or that reader, not
+            // of two-processor boots. These members are kept all the
+            // same - they are counters rather than text, they survive
+            // the ring wrapping, and a member is the right home for
+            // something a post-mortem has to read. But do not use "the
+            // ring is empty on two processors" to discount a log-based
+            // negative: it is not established, and one investigation
+            // has already believed the ring and distrusted it at once.
             std::uint64_t packed{};
 
             for (std::size_t i = 0;
@@ -759,6 +799,17 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     vmcs.guest_tr_limit(real_mode_segment_limit);
     vmcs.guest_tr_access_rights(tr_access_rights);
 
+    // **These two are why the duplicate guard above has teeth.**
+    // hvix64's AP trampoline executes `lgdt` at page offset +0xcd, in
+    // real mode, installing a GDT of its own at `tramp_pa + 0x34` with
+    // limit 0x3f - and its long-mode far jump at +0x16e loads selector
+    // 0x10 out of it. A second application of the start-up state
+    // anywhere between those two instructions replaces that with
+    // {base 0, limit 0xffff}, and the far jump then reads a descriptor
+    // that is not there: #GP with no IDT loaded (hvix64's `lidt` is at
+    // its RVA 0x3a6740, after the jump), which is a triple fault
+    // carrying no vector and no address. `start_up_declined[cpu]` is
+    // the counter that says the guard fired.
     vmcs.guest_gdtr_base(0);
     vmcs.guest_gdtr_limit(descriptor_table_limit_after_init);
     vmcs.guest_idtr_base(0);

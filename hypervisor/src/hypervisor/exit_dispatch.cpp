@@ -751,6 +751,30 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // by `on_l2_exit` (6a1d0d2). Both produce the same silence further
     // down, and only a log *above* `on_l2_exit` separates them.
     //
+    // **There is a third reading, and it is the cheapest of the
+    // three: the write never retired.** The hardware breakpoint that
+    // appeared to prove it executed is an *instruction* breakpoint, and
+    // SDM 18.3.1.1 (.references/sdm.txt:182727) says the processor
+    // "generates a fault-class, debug exception (#DB) before it
+    // executes the target instruction". So the stop at `0x216b` proves
+    // arrival, not execution - and every instruction from `0x2000` up
+    // to it is non-exiting under this VMCS, so silence up to that point
+    // is the value the architecture predicts rather than an anomaly.
+    // See `trace_guest_state` for the arithmetic.
+    //
+    // The first of the two original readings is also the weakest: it
+    // needs `cr0_guest_host_mask` to lack PG on one processor, and the
+    // field is written once per processor by `setup_vmcs` and by
+    // nothing on the start-up path. The measured value on cpu 1 is
+    // 0x80000020, which carries it.
+    //
+    // **Do not settle any of the three from this log line.** It is text
+    // in a ring; `exit_reason_counts[cpu][28]` is a counter incremented
+    // from `resume_guest`, which no handler and no reflection can
+    // bypass, and `ap_fault.armed_at_rip` is written only from inside
+    // the paging-transition branch of the control-register case. Either
+    // separates the readings without trusting the ring.
+    //
     // Application processors only. cpu 0 takes half a million exits a
     // boot; cpu 1 takes about two hundred, and the log's own
     // deduplication collapses the repeats, so this is bounded.
@@ -3352,6 +3376,27 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             auto paging_now =
                 0 != (value & arch::x86_64::cr0_bits::paging);
 
+            // **This statement is the only thing in the tree that
+            // re-synchronises the read shadow, and the AP's long-mode
+            // switch depends on it being late rather than early.**
+            //
+            // A MOV to CR0 that does *not* exit "leaves unmodified any
+            // bit in CR0 corresponding to a bit set in the CR0
+            // guest/host mask" (SDM 28.1.4,
+            // .references/sdm.txt:201088) and writes the rest into the
+            // real register - but the read shadow is a VM-execution
+            // control field (SDM 25.6), and no processor operation
+            // writes it. So it goes stale on every silent write.
+            //
+            // That staleness is load bearing. hvix64's AP trampoline
+            // sets CR0.PE alone at page offset +0xdc, which does not
+            // exit because neither masked bit changes against the
+            // post-INIT shadow of `ET`; the shadow therefore still
+            // reads PG=0 when the same stub writes PG|PE at +0x16b, and
+            // *that* is what makes the second write exit and the
+            // long-mode transition below visible at all. Seed the
+            // shadow from a running guest's CR0 anywhere on the INIT
+            // path and the transition goes silent.
             vmcs.cr0_read_shadow(value);
             vmcs.guest_cr0(value | arch::x86_64::cr0_bits::numeric_error);
 
