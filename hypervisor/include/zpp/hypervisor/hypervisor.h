@@ -10545,6 +10545,29 @@ private:
      */
     static constexpr std::uint64_t ap_entry_trace_limit = 6;
     std::uint64_t ap_entry_trace_count[max_cpus]{};
+
+    /**
+     * **The RIP each processor was last resumed with, and how often.**
+     *
+     * The `ap_entry_trace_*` pair above is in `vm_launch`, so it fires
+     * once per processor by construction and its silence afterwards
+     * says nothing - a mistake this file's history records, because I
+     * made it. `resume_guest` is the other side: `[[noreturn]]`, two
+     * call sites, and its own comment says "no exit reaches the guest
+     * without passing through here once". A counter here therefore
+     * counts every resume, and the RIP beside it says what the
+     * processor was sent to.
+     *
+     * What it settles for the multicore failure: after the second
+     * start-up is applied to cpu 1 with `rip 0` and `cs base 0x2000`,
+     * `last_resume_rip` is **0** if the processor really was resumed
+     * into the trampoline, and the previous guest address if it was
+     * resumed with stale state. If `resume_count` stops moving
+     * altogether, it was not resumed at all - and unlike the launch
+     * trace, this one is on the path where that would show.
+     */
+    std::uint64_t resume_count[max_cpus]{};
+    std::uint64_t last_resume_rip[max_cpus]{};
     /**
      * @}
      */

@@ -3976,7 +3976,8 @@ def dump_ap_census(args, elf, instance):
                # A member absent from here reads as zero, which is
                # indistinguishable from a counter that never moved -
                # the exact failure these two exist to expose.
-               "start_up_declined", "start_up_from"]
+               "start_up_declined", "start_up_from",
+               "resume_count", "last_resume_rip"]
     off = gdb_offsets(elf, members, optional=True)
     if "cpuid_leaf_counts" not in off:
         print("\n[ap census skipped: the deployed ELF has no "
@@ -4005,6 +4006,11 @@ def dump_ap_census(args, elf, instance):
         reader.queue(instance + off["started_by_start_up_ipi"],
                      (args.cpus + 7) // 8)
     # Four slots per processor, packed ASCII of the applying caller.
+    for _m in ("resume_count", "last_resume_rip"):
+        if _m in off:
+            reader.queue(instance + off[_m], args.cpus)
+        else:
+            print(f"  [{_m} ABSENT from the deployed ELF]")
     for _m in ("start_up_declined", "start_up_from"):
         if _m in off:
             reader.queue(instance + off[_m],
@@ -4143,6 +4149,11 @@ def dump_ap_census(args, elf, instance):
               f"started_by_start_up_ipi {started}  launch_error {error}")
         print(f"    of those, DECLINED as a repeat start-up {declined}, "
               f"so {real} actually reached the guest state")
+        rc = word("resume_count", cpu)
+        rr = word("last_resume_rip", cpu)
+        if rc is not None:
+            print(f"    resumes {rc:,}, last resumed with rip "
+                  f"0x{(rr or 0):x}")
         # Which caller applied each one, in order. The `from` literals
         # live in the module, so read the bytes at the recorded address.
         # A zero slot is "no such application"; a non-zero address whose

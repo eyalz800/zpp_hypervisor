@@ -607,6 +607,14 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // exit reaches the guest without passing through here once.
     mark_phase(cpuid, 26);
 
+    // Every resume, and what it is resuming to. See `resume_count`:
+    // this is the counterpart to the launch-path trace, which fires
+    // once per processor and cannot report a missing ordinary resume.
+    if (cpuid < max_cpus) {
+        this->resume_count[cpuid] = this->resume_count[cpuid] + 1;
+        this->last_resume_rip[cpuid] = vmcs.guest_rip();
+    }
+
     // The activity state, read at most once and only where something
     // asks for it.
     //
