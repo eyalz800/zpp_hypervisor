@@ -1297,6 +1297,43 @@ inline constexpr bool watch_ap_page_table =
 inline constexpr bool apply_queued_start_up =
     (0 != ZPP_APPLY_QUEUED_START_UP);
 
+#ifndef ZPP_RESET_APIC_ON_INIT
+#define ZPP_RESET_APIC_ON_INIT 1
+#endif
+
+/**
+ * Whether the writable half of the target processor's local APIC is reset
+ * when `apply_start_up` applies the INIT state.
+ *
+ * **It was not reset at all, and the architecture says it must be.** SDM
+ * 13.4.7.3 (`.references/sdm.txt:170737`): on an INIT "the processor
+ * responds by beginning the initialization process of the processor core
+ * *and the local APIC*", and "the state of the local APIC following an
+ * INIT reset is the same as it is after a power-up or hardware reset,
+ * except that the APIC ID and arbitration ID registers are not affected."
+ * SDM 28.2 (`.references/sdm.txt:200947`) puts the work here rather than
+ * in the processor: "a logical processor performs none of the operations
+ * normally associated with these events". So an INIT this VMM emulates
+ * left the guest's own local APIC holding everything the previous
+ * occupant of that processor had programmed - every LVT, its task
+ * priority, its spurious vector, its timer.
+ *
+ * KVM does the same work in `kvm_lapic_reset(vcpu, true)`, reached from
+ * `kvm_vcpu_reset`; `.references/kvm/lapic.c:2726`.
+ *
+ * **On costs nothing on the one-processor configuration**, which is the
+ * stable one: `apply_start_up` is reached only from a launch out of the
+ * trampoline, a start-up-IPI exit or an emulated INIT, and a
+ * single-processor guest produces none of the three. So this is on by
+ * default and the only boot it can perturb is the multiprocessor one it
+ * is aimed at.
+ *
+ * Off is the negative control, and it is a switch rather than a revert
+ * because a run cannot be compared with another until it is known which
+ * way this was built - the whole argument for `zpp switches:`.
+ */
+inline constexpr bool reset_apic_on_init = (0 != ZPP_RESET_APIC_ON_INIT);
+
 /**
  * Watch writes to the second-level guest's VP assist page.
  *

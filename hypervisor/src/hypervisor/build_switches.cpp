@@ -125,6 +125,16 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         digit(nested_vmx::drop_watch_on_start_up),
         ' ', 'a', 'p', 't', 'w', '=',
         digit(nested_vmx::watch_ap_page_table),
+        // Correctness, not tuning: on, the target processor's own local
+        // APIC is reset when the INIT state is applied to it - every LVT
+        // masked, the spurious vector back to 0xff, the task priority and
+        // the timer zeroed - which is what SDM 13.4.7.3 says an INIT does
+        // and what the INIT-signal VM exit does not do for us. A run with
+        // it off hands a restarted processor an APIC still holding what
+        // the previous occupant programmed, so the two are not
+        // comparable.
+        ' ', 'a', 'p', 'i', 'c', 'r', 's', 't', '=',
+        digit(nested_vmx::reset_apic_on_init),
         ' ', 'a', 'p', 'i', 'c', '=',
         digit(nested_vmx::intercept_apic),
         // Correctness again, not tuning: on, a processor that starts after

@@ -137,6 +137,10 @@ option(ZPP_WATCH_AP_PAGE_TABLE
        "Watch the page table entry mapping an application processor's descriptor table"
        OFF)
 
+option(ZPP_RESET_APIC_ON_INIT
+       "Reset the writable half of the local APIC when the INIT state is applied"
+       ON)
+
 option(ZPP_APPLY_QUEUED_START_UP
     "Apply a start-up IPI that arrived before its target was waiting."
     ON)
@@ -414,6 +418,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_STEP_AP_WATCHED_WRITES=$<BOOL:${ZPP_STEP_AP_WATCHED_WRITES}>
     -DZPP_DROP_WATCH_ON_START_UP=$<BOOL:${ZPP_DROP_WATCH_ON_START_UP}>
     -DZPP_WATCH_AP_PAGE_TABLE=$<BOOL:${ZPP_WATCH_AP_PAGE_TABLE}>
+    -DZPP_RESET_APIC_ON_INIT=$<BOOL:${ZPP_RESET_APIC_ON_INIT}>
     -DZPP_APPLY_QUEUED_START_UP=$<BOOL:${ZPP_APPLY_QUEUED_START_UP}>
     -DZPP_EVMCS=$<BOOL:${ZPP_EVMCS}>
     -DZPP_DEFER_GUEST_STATE=$<BOOL:${ZPP_DEFER_GUEST_STATE}>

@@ -287,6 +287,229 @@ void hypervisor::trace_guest_state(std::size_t cpu, const char * where)
     }
 }
 
+void hypervisor::reset_local_apic_after_init()
+{
+    // The xAPIC page offsets, which double as the x2APIC MSR numbers.
+    // SDM Table 13-6 (`.references/sdm.txt:172145`) lists every x2APIC
+    // MSR beside the MMIO offset of the same register, and the pairing
+    // is `msr = 0x800 + (offset >> 4)` for all of them - "the MSR
+    // address space is compressed", one MSR per 128-bit boundary.
+    constexpr std::uint64_t version_register = 0x30;
+    constexpr std::uint64_t task_priority = 0x80;
+    constexpr std::uint64_t logical_destination = 0xd0;
+    constexpr std::uint64_t destination_format = 0xe0;
+    constexpr std::uint64_t spurious_vector = 0xf0;
+    constexpr std::uint64_t error_status = 0x280;
+    constexpr std::uint64_t lvt_cmci = 0x2f0;
+    constexpr std::uint64_t lvt_timer = 0x320;
+    constexpr std::uint64_t timer_initial_count = 0x380;
+    constexpr std::uint64_t timer_divide = 0x3e0;
+    constexpr std::uint32_t x2apic_msr_base = 0x800;
+
+    // Which mode, asked of this processor now rather than assumed, and
+    // an INIT is not allowed to change the answer underneath: SDM
+    // 13.12.5 (`.references/sdm.txt:172339`) - "An INIT in this state
+    // keeps the x2APIC in the x2APIC mode ... However, all the other
+    // APIC registers are initialized as a result of the INIT transition"
+    // - and the paragraph above it says an INIT taken in xAPIC mode
+    // "places the APIC in the state with EN=1, EXTD=0".
+    //
+    // The two spellings are not interchangeable and picking the wrong
+    // one is not a degradation: a WRMSR in 0x800-0x8ff while the APIC is
+    // in xAPIC mode is #GP, in the host, where this VMM has no recovery
+    // point. That is `2685265` one register over, and it is why
+    // `send_start_up_ipi` branches on the same question.
+    auto extended = x2apic_enabled();
+
+    std::uint64_t base{};
+
+    if (!extended) {
+        // The same mask and the same guard as `watch_local_apic`. The
+        // host page table maps exactly one local APIC page, read from
+        // IA32_APIC_BASE before any guest ran, and a guest may relocate
+        // its APIC by writing that MSR. Writing through an address this
+        // table does not map is a #PF in root mode with nothing left to
+        // unwind to, so a relocated APIC is left alone and said out loud
+        // instead - the same trade `watch_local_apic` records at length.
+        constexpr std::uint64_t base_mask = 0xffffff000ull;
+        base = arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+               base_mask;
+
+        if (base != this->mapped_apic_page) {
+            log("cpu {} init: not resetting a relocated local apic at "
+                "{}, this vmm maps {}",
+                this->vmcs.vpid(),
+                base,
+                this->mapped_apic_page);
+            return;
+        }
+    }
+
+    auto read = [&](std::uint64_t offset) {
+        if (extended) {
+            return static_cast<std::uint32_t>(
+                arch::x86_64::rdmsr(static_cast<std::uint32_t>(
+                    x2apic_msr_base + (offset >> 4))));
+        }
+        return arch::x86_64::read32(
+            reinterpret_cast<volatile std::uint8_t *>(base) + offset);
+    };
+
+    auto write = [&](std::uint64_t offset, std::uint32_t value) {
+        if (extended) {
+            arch::x86_64::wrmsr(static_cast<std::uint32_t>(
+                                    x2apic_msr_base + (offset >> 4)),
+                                value);
+            return;
+        }
+        arch::x86_64::write32(
+            reinterpret_cast<volatile std::uint8_t *>(base) + offset,
+            value);
+    };
+
+    // Every local vector table entry masked. SDM 13.4.7.1
+    // (`.references/sdm.txt:170707`): "The LVT register is reset to 0s
+    // except for the mask bits; these are set to 1s", and the mask is
+    // bit 16 - SDM 13.5.1, Figure 13-8, `.references/sdm.txt:170829`.
+    // KVM writes the identical value over the identical set,
+    // `.references/kvm/lapic.c:2753`.
+    //
+    // **How many there are is this processor's to say.** The version
+    // register's "Max LVT Entry" field, bits 23:16, "shows the number of
+    // LVT entries minus 1" - SDM 13.4.8, Figure 13-7,
+    // `.references/sdm.txt:170761`. KVM asks the same question a
+    // different way (`kvm_apic_calc_nr_lvt_entries`, lapic.c:579) and
+    // for the same reason: an LVT this processor does not implement is a
+    // reserved MSR in x2APIC mode, and a WRMSR to one is #GP.
+    //
+    // The offsets are not one run. Entries 0 to 5 are the timer,
+    // thermal, performance, LINT0, LINT1 and error registers at 0x320
+    // through 0x370; entry 6 is CMCI, which sits *below* them at 0x2f0.
+    // SDM 13.5.1 lists all seven with their addresses.
+    constexpr std::uint32_t lvt_masked = 1u << 16;
+    constexpr std::uint32_t max_lvt_entry_shift = 16;
+    constexpr std::uint32_t max_lvt_entry_mask = 0xff;
+    constexpr std::uint32_t most_lvt_entries = 7;
+
+    auto entries = ((read(version_register) >> max_lvt_entry_shift) &
+                    max_lvt_entry_mask) +
+                   1;
+
+    if (entries > most_lvt_entries) {
+        entries = most_lvt_entries;
+    }
+
+    for (std::uint32_t entry{}; entry < entries; ++entry) {
+        write((most_lvt_entries - 1) == entry
+                  ? lvt_cmci
+                  : (lvt_timer + (0x10 * entry)),
+              lvt_masked);
+    }
+
+    // The destination format register to all ones, which is flat model.
+    // SDM 13.4.7.1: "The DFR register is reset to all 1s". KVM,
+    // lapic.c:2761.
+    //
+    // **xAPIC only.** "The DFR, supported at offset 0E0H in xAPIC mode,
+    // is not supported in x2APIC mode. There is no MSR with address
+    // 80EH" - SDM 13.12.1.2, `.references/sdm.txt:172126` - and an
+    // access to a reserved MSR in that range is a general-protection
+    // exception.
+    if (!extended) {
+        write(destination_format, 0xffffffff);
+    }
+
+    // The spurious interrupt vector register to 0xff: vector 0xff with
+    // bit 8, the APIC software enable, clear. SDM 13.4.7.1: "The
+    // spurious-interrupt vector register is initialized to 000000FFH. By
+    // setting bit 8 to 0, software disables the local APIC." KVM,
+    // `apic_set_spiv(apic, 0xff)`, lapic.c:2762.
+    //
+    // This is the one write here with teeth, so what it does *not* stop
+    // is worth stating. A software-disabled local APIC "will respond
+    // normally to INIT, NMI, SMI, and SIPI messages" and "can still
+    // issue IPIs" - SDM 13.4.7.2, `.references/sdm.txt:170723`. So the
+    // start-up IPI this processor is about to be given still arrives,
+    // the wake NMI `send_wake_nmi` uses for the extended-page-table
+    // rendezvous still arrives, and a processor that has to send one
+    // still can. A guest's own bring-up stub re-enables it, because on
+    // real hardware after an INIT it has to.
+    write(spurious_vector, 0xff);
+
+    // The task priority to zero. SDM 13.4.7.1 lists TPR among the
+    // registers "reset to all 0s"; KVM, lapic.c:2763.
+    write(task_priority, 0);
+
+    // The logical destination register to zero, **xAPIC only**: it is
+    // read-only in x2APIC mode, where it is derived from the x2APIC ID -
+    // SDM Table 13-6, "Read-only ... Read/write in xAPIC mode". KVM
+    // makes the same exception on the same test, lapic.c:2764-2765.
+    if (!extended) {
+        write(logical_destination, 0);
+    }
+
+    // The error status register. Zero, and only zero: "WRMSR of a
+    // non-zero value causes #GP(0)" in x2APIC mode - SDM Table 13-6 -
+    // and the value is ignored in either mode anyway, because the write
+    // is the operation: "this write clears any previously logged errors
+    // and updates the ESR with any errors detected since the last write
+    // to the ESR", SDM 13.5.3, `.references/sdm.txt:171022`. KVM,
+    // lapic.c:2766.
+    write(error_status, 0);
+
+    // The timer's divide configuration and its initial count. SDM
+    // 13.4.7.1 lists "the divide configuration register" and "timer
+    // initial count and timer current count registers" among those reset
+    // to zero; KVM, lapic.c:2773 and 2774. The second write is also what
+    // stops a timer that is running: "a write of 0 to the initial-count
+    // register effectively stops the local APIC timer, in both one-shot
+    // and periodic mode" - SDM 13.5.4, `.references/sdm.txt:171052`.
+    // Ordered after the LVT masking above, as KVM orders it.
+    write(timer_divide, 0);
+    write(timer_initial_count, 0);
+
+    // ----------------------------------------------------------------
+    // **What is deliberately not written, and why.**
+    //
+    // *The interrupt command register.* KVM zeroes it,
+    // lapic.c:2768-2771, and KVM can, because `kvm_lapic_set_reg` writes
+    // the register's *storage*. Here the register is a real one, and
+    // "the act of writing to the low doubleword of the ICR causes the
+    // IPI to be sent" - SDM 13.6.1, `.references/sdm.txt:171174`. A
+    // write of zero is therefore a fixed-mode IPI with vector 0 to APIC
+    // ID 0, which is an interrupt this VMM invented, not a clear. So the
+    // ICR keeps whatever was left in it: nothing reads it back for
+    // state, and its delivery-status bit is read-only.
+    //
+    // *IRR, ISR and TMR.* Read-only in both modes - SDM Table 13-6,
+    // `.references/sdm.txt:172145`, marks all twenty-four of their
+    // doublewords "Read-only" - so the reset KVM performs at
+    // lapic.c:2775-2779 has **no equivalent that can be executed against
+    // a passed-through local APIC at all**. This is the half of
+    // `kvm_lapic_reset` that is missing here, and it cannot be closed by
+    // writing anything.
+    //
+    // **The residual risk is a stale ISR bit.** The in-service register
+    // records the vector a processor is handling and is cleared one bit
+    // at a time by the end-of-interrupt its handler writes. An INIT this
+    // VMM emulates destroys that handler, so the bit stays set, and the
+    // processor priority it feeds then blocks every vector at or below
+    // it for the rest of that processor's life - which presents from
+    // outside as a processor that started and never checked in.
+    //
+    // The only instrument that would clear it is a blind
+    // end-of-interrupt per set bit, and that is **rejected rather than
+    // merely unimplemented**: the in-service register is readable, so it
+    // could be done, but this local APIC belongs to a machine with a
+    // passed-through NVMe on it, and "if the terminated interrupt was a
+    // level-triggered interrupt, the local APIC also sends an
+    // end-of-interrupt message to all I/O APICs" - SDM 13.8.5,
+    // `.references/sdm.txt:171777`. A reset that can de-assert a live
+    // device interrupt is worse than the stale bit it clears. If it ever
+    // has to be done, it needs the ISR read first and exactly one EOI
+    // per bit actually set, never a fixed count.
+}
+
 void hypervisor::apply_start_up(arch::x86_64::context & context,
                                 std::uint64_t vector,
                                 const char * from,
@@ -614,6 +837,32 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     //
     // KVM zeroes it in the same function, `vcpu->arch.cr2 = 0`.
     arch::x86_64::write_cr2(0);
+
+    // And the local APIC, for the same reason DR6 is written above: it is
+    // not a VMCS field, it belongs to this processor, and SDM 13.4.7.3
+    // (`.references/sdm.txt:170737`) says an INIT resets it - "the
+    // processor responds by beginning the initialization process of the
+    // processor core *and the local APIC*", to "the same as it is after a
+    // power-up or hardware reset, except that the APIC ID and arbitration
+    // ID registers are not affected". Neither of those two is touched
+    // there.
+    //
+    // Nothing did it, and nothing else could: SDM 28.2
+    // (`.references/sdm.txt:200947`) says of an INIT-signal VM exit that
+    // "a logical processor performs none of the operations normally
+    // associated with these events", so a processor the guest restarted
+    // carried the previous occupant's LVTs, task priority, spurious
+    // vector and timer straight through its own INIT.
+    //
+    // Here rather than in `emulate_init_signal`, with the rest of the
+    // INIT state, and for the reason stated above it: this is where there
+    // is time, and a processor in wait-for-SIPI takes no interrupts in
+    // between anyway. It is after the duplicate guard on purpose - a
+    // second start-up IPI to a processor that is already running is
+    // declined above and must not reset a live APIC.
+    if constexpr (nested_vmx::reset_apic_on_init) {
+        reset_local_apic_after_init();
+    }
 
     // SDM 12.1: during an INIT "the TLBs and BTB are invalidated as with a
     // hardware reset", and the same paragraph describes INIT as the method

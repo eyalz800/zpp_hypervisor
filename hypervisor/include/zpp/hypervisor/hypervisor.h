@@ -2228,6 +2228,26 @@ private:
                         bool first_launch = false);
 
     /**
+     * Resets the writable half of *this* processor's local APIC to the
+     * state SDM 13.4.7.3 says an INIT leaves it in.
+     *
+     * Must be called on the processor being restarted, because a local
+     * APIC is only addressable from the processor it belongs to: in
+     * x2APIC mode its registers are MSRs, and in xAPIC mode the one page
+     * the host page table maps answers to whichever processor
+     * dereferences it. `apply_start_up` is its only caller and it runs on
+     * the target, which is the same reason DR6 is written there.
+     *
+     * Behind `nested_vmx::reset_apic_on_init`, applied at that call site.
+     *
+     * Half of a reset, and the half that is missing is stated where it is
+     * skipped: IRR, ISR and TMR are read-only in both modes - SDM Table
+     * 13-6, `.references/sdm.txt:172145` - so a pending or in-service
+     * vector survives an INIT here where on real hardware it would not.
+     */
+    void reset_local_apic_after_init();
+
+    /**
      * Writes the whole of this processor's guest state into the log, with
      * `where` naming the moment.
      *

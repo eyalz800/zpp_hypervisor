@@ -352,6 +352,10 @@ option(ZPP_WATCH_AP_PAGE_TABLE
        "Watch the page table entry mapping an application processor's descriptor table, and name whoever writes it"
        OFF)
 
+option(ZPP_RESET_APIC_ON_INIT
+       "Reset the writable half of the target processor's local APIC when the INIT state is applied, as SDM 13.4.7.3 requires. Off is the negative control. See nested_vmx.h."
+       ON)
+
 option(ZPP_APPLY_QUEUED_START_UP
     "Apply a start-up IPI that arrived before its target reached its INIT exit, rather than only holding it. On is how the multicore boot got past its first wall; it also starts a processor twice, which hardware would not. Off is the experiment. See nested_vmx.h."
     ON)
@@ -564,6 +568,7 @@ ExternalProject_Add(hypervisor
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
         -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
+        -DZPP_RESET_APIC_ON_INIT=${ZPP_RESET_APIC_ON_INIT}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
@@ -696,6 +701,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_STEP_AP_WATCHED_WRITES=${ZPP_STEP_AP_WATCHED_WRITES}
         -DZPP_DROP_WATCH_ON_START_UP=${ZPP_DROP_WATCH_ON_START_UP}
         -DZPP_WATCH_AP_PAGE_TABLE=${ZPP_WATCH_AP_PAGE_TABLE}
+        -DZPP_RESET_APIC_ON_INIT=${ZPP_RESET_APIC_ON_INIT}
         -DZPP_APPLY_QUEUED_START_UP=${ZPP_APPLY_QUEUED_START_UP}
         -DZPP_EVMCS=${ZPP_EVMCS}
         -DZPP_DEFER_GUEST_STATE=${ZPP_DEFER_GUEST_STATE}
