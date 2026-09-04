@@ -63619,3 +63619,120 @@ let the boot past the `0x133` bugcheck - and it is also why a driver that
 never returns now **hangs silently instead of naming itself in a
 bugcheck**. The trade was right, but it removed the instrument that would
 have identified this in one stop code.
+
+## REFUTED: hvix64 does emit its AP trampoline; the ACPI-mailbox fix is wrong - 2026-09-04
+
+`7606b3f` concluded that hvix64 "most likely SKIPS the trampoline emit
+because no ACPI MP-wakeup mailbox exists - the fix is an ACPI structure,
+not an EPT change". **That is wrong, and two independent reads refute it.
+Do not build the ACPI structure.**
+
+Full decompilation, with every RVA cross-checked two ways, is in
+`.references/hyperv/hvix64-lp-trampoline-emit-decompiled.md` and
+`.references/hyperv/hvix64-add-logical-processor-decompiled.md`.
+
+**1. A skipped emit aborts hypervisor initialisation. It cannot coexist
+with a booting guest.** The gate is `HvpInitPhase(3)` at hvix64 RVA
+`0x2582e3`:
+
+    2582f2: bt    rax, 0xd          ; loaderblock+0x118 bit 13
+    2582f7: jae   0x25830d          ; CLEAR -> emit, probe never called
+    2582fc: call  0x38aebc          ; HvpProbeLpWakeResources
+    258301: movzx ebx, ax           ; <-- the probe's status, latched into BX
+    258307: jne   0x2583f9          ; failed -> epilogue
+    ...
+    2583fe: movzx eax, bx           ; ...returned as the function's status
+
+and its only caller checks it:
+
+    24857e: call 0x25802c           ; HvpInitPhase(3)
+            test ax, ax
+            jne  0x249335           ; -> init failure: HvpBugCheck(5) / int3
+
+`lp-trampoline-location.md` Addendum 5 asserted the opposite - "the emit
+gate returns success even when it skips the emit" - and the whole
+Case-alpha/Case-beta analysis, and `7606b3f`, rest on that one sentence.
+
+**2. The capture's own BSS says the emit ran.** `hvix64.bin` is VA-mapped
+(RVA == file offset; its section table's `PointerToRawData` column is the
+*on-disk* layout and is a trap - file offset `0x2b000` is all zeros) and
+it carries ~1 MB of live BSS. In it:
+
+    g_LoaderBlockDuringInit  RVA 0x0d69d8 = 0        <-- phase 3 ran to its LAST statement
+    g_LpWakeFlags            RVA 0x0d69e0 = 0        <-- the probe never succeeded
+    g_Fed20000Va / g_MailboxVa            = 0 / 0    <-- neither probe map ever ran
+    g_InitProgressMarker     RVA 0x09c040 = 0x27     <-- init went far past phase 3
+
+`g_LoaderBlockDuringInit` has exactly two writers in the whole image:
+phase 0 sets it, phase 3's last statement clears it. Every success path
+of the probe ORs `0x29` into `g_LpWakeFlags`. The only assignment
+consistent with both is **bit 13 clear, probe never called, emit ran**.
+
+**3. `0x87000` was the wrong page.** The trampoline page is
+`*(loaderblock + 0x140)`, chosen by winload **per boot**. It reads
+`0x2000` in the capture - and `lp-trampoline-location.md` Addendum 6
+already recorded, in passing, that the rig found `e9 ad` at `0x2000`,
+which is literally the emitter's first store (`0x258e9c`, `*page =
+0xade9`). The trampoline was found, at the address the loader block
+named. Reading a hardcoded `0x87000` on a later boot is the same class of
+error as a hardcoded module base. **Read `g_LpTrampolinePagePa`
+(hvix64 RVA `0x0d69d0`) per boot.**
+
+**Why the ACPI structure would make it worse, not better.** Providing a
+MADT Multiprocessor-Wakeup structure sets `g_LpWakeFlags |= 2`, which (a)
+switches `HvpEmitLpTrampolineCode` from emitting the real-mode blob to
+copying `g_LpShortStubTemplate` (RVA `0x0b528`), which reads **all zero**
+in this capture and has no writer anywhere in `.text`, and (b) switches
+`HvpWakeLp` off INIT-SIPI entirely. It changes a working configuration
+into an untested one.
+
+### What to do instead, in order
+
+1. **Confirm the emit on the rig in two reads, not a page dump.**
+   `g_LoaderBlockDuringInit` (`hvix64_base + 0xd69d8`) must be `0` and
+   `g_InitProgressMarker` (`+0x9c040`) must be `>= 0x11`. Then read
+   `g_LpTrampolinePagePa` (`+0xd69d0`) and dump *that* page.
+
+2. **Read `g_LpWakeDoorbellEnable` (`+0xd69e8`) before assuming
+   INIT-SIPI.** `HvpStartBootLps` (`0x2591cc`) sets it to 1 unconditionally
+   within its body, and its body runs whenever the loader block lists any
+   boot LPs. With it set, a runtime `HvCallAddLogicalProcessor` takes the
+   **doorbell** branch of `HvpWakeLp`, not INIT-SIPI. It is 0 in the
+   one-processor capture because that loader block listed none
+   (`g_BootLpCount` = 0). On an 8-processor guest it may well be 1, in
+   which case every hour spent on SIPI routing is aimed at a branch that
+   is not taken. (the code is proven; the multiprocessor consequence is
+   inferred from it and is one read to settle)
+
+3. **Poll `tramp_pa + 0x98`.** `HvpWakeLp` presets it to `0xF`; the
+   trampoline writes `1` in real mode and `2` in 32-bit protected mode,
+   before any hvix64 code runs. Together with `LpStartRecord[lp].State`
+   (RVA `0x1126a0`, stride `0x20`; LP 1 is `0x1126c0`) it gives a
+   five-point trace of exactly how far the AP got:
+
+   | `+0x98` | `State` | where the AP is |
+   |---|---|---|
+   | `0xF` | 1 | the SIPI never landed on the vCPU |
+   | `1` | 1 | real mode ran; the `lgdt`/PE switch or far jump failed |
+   | `2` | 1 | 32-bit ran; the long-mode far jump or `HvpLpLongModeEntry` failed |
+   | - | 2 | the AP is executing hvix64 and stalled in `HvpLpInitAndReportIn` |
+   | - | 3 | the AP passed its own init and stalled in its tail |
+   | - | 4 | the LP started |
+
+   Nothing in `scripts/` reads either field today.
+
+4. **Note the worker's real timeout shape.** The 4-second deadline in
+   `HvpAddLogicalProcessorWorker` (`0x23909c`) covers **only** the wait
+   for `State != 1`. The two later waits are `while (State == 2) {}` and
+   `while (State == 3) {}` - no timeout, no stall, no `pause`. Status
+   `0x3e` with stage `0x338` is therefore always the *first* wait, and a
+   hang in the later two is a root processor spinning at the hypercall's
+   IRQL for ever.
+
+Five names in `lp-trampoline-location.md` are corrected in the new
+documents, including: the AP body on the trampoline path is `0x247fe0`
+(reached via `HvpLpLongModeEntry` at `0x3a6690`), not `0x247500`; and the
+ICR write thunk starts at `0x257af0`, not `0x257af4` - `g_ApicIcrWrite`
+(`0x0d6cf8`) holds `0xfffff85676057af0`, and Ghidra's prologue scan
+skipped the leading `eb 02 f3 90` (`jmp +2; pause`). `functions.csv`
+carries the off-by-four; anything reading it must not.
