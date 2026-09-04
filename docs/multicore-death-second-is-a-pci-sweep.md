@@ -75,3 +75,44 @@ causes the stop or is the last thing an already-dying guest does. Both
 are testable against the same trace, which records the sweep's first
 access and everything before it - that region of the log has not been
 read yet.
+
+## What immediately precedes the sweep
+
+Located by walking back from the end of the log to the burst's first
+line (627,100 of 644,848). The 25 events before it are all this, on
+cpu 0:
+
+    memory_region_ops_read cpu 0 addr 0x608 value 0x217973 name 'acpi-tmr'
+    memory_region_ops_read cpu 0 addr 0x608 value 0x217981 name 'acpi-tmr'
+    ... 23 more, monotonically increasing
+
+That is the ACPI PM timer being polled in a tight loop - 0x217973 to
+0x217ad0 is 349 ticks of a 3.579545 MHz counter over 25 reads, about
+4 us per read and ~97 us total. **cpu 0 is in a timed stall**, which
+agrees with its post-mortem RIP sitting in hvix64's
+`HvpStallExecutionMicroseconds` on every boot.
+
+The sweep then begins cleanly at the bottom of the bus:
+
+    addr 0xe0000000 value 0x8086     size 2   (vendor id, 00:00.0)
+    addr 0xe0000000 value 0x8086     size 2
+    addr 0xe0000000 value 0x8086     size 2
+    addr 0xe0000000 value 0x29c08086 size 4   (vendor+device)
+    addr 0xe0000004 value 0x7        size 4   (command/status)
+    addr 0xe0000008 value 0x6000000  size 4   (class code)
+
+ECAM base here is 0xe0000000, so `bus = (a>>20)&0xff` etc. decode
+directly off the traced address.
+
+So the order is: cpu 0 stalls on the PM timer, then a full enumeration
+starts from 00:00.0, then everything stops.
+
+## Still open
+
+Whether the sweep is Windows/PnP re-enumerating, or firmware. Note that
+`serial.out` carried **four** `allocate_rwx` markers on these runs where
+a single boot gives two - the loader runs twice per boot - which means
+the machine went through **two** boot cycles. That is consistent with
+the expected 1->2 CPU hardware-change reboot, and it means the sweep may
+belong to a later cycle than assumed. Establish which cycle the sweep
+sits in before reading intent into it.
