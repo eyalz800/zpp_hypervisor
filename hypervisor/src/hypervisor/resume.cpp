@@ -613,6 +613,27 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     if (cpuid < max_cpus) {
         this->resume_count[cpuid] = this->resume_count[cpuid] + 1;
         this->last_resume_rip[cpuid] = vmcs.guest_rip();
+
+        // **Which VMCS is current, asked on the processor itself.**
+        // Only for the handful of resumes after a start-up, and only on
+        // application processors, so the boot processor's half-million
+        // exits pay nothing.
+        if (0 != this->vmptrst_owed[cpuid]) {
+            this->vmptrst_owed[cpuid] = this->vmptrst_owed[cpuid] - 1;
+
+            alignas(16) std::uint64_t current{};
+
+            if (arch::x86_64::vmx::vmptrst(&current)) {
+                log("cpu {} vmptrst FAILED at resume rip {}",
+                    cpuid,
+                    vmcs.guest_rip());
+            } else {
+                log("cpu {} vmptrst {} at resume rip {}",
+                    cpuid,
+                    current,
+                    vmcs.guest_rip());
+            }
+        }
     }
 
     // The activity state, read at most once and only where something

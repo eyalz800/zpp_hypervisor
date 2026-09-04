@@ -10628,6 +10628,18 @@ private:
      * altogether, it was not resumed at all - and unlike the launch
      * trace, this one is on the path where that would show.
      */
+    /**
+     * How many resumes after a start-up still owe a `vmptrst` reading.
+     *
+     * The multicore failure is narrowed to a processor that executes
+     * instructions which must trap and does not trap them - measured
+     * three independent ways - so the remaining question is not what
+     * the VMCS contains but **which VMCS is current** on it. `vmptrst`
+     * is the only instruction that answers that, and it has to be asked
+     * on the processor itself at the moment it is about to be entered.
+     */
+    std::uint64_t vmptrst_owed[max_cpus]{};
+
     std::uint64_t resume_count[max_cpus]{};
     std::uint64_t last_resume_rip[max_cpus]{};
     /**

@@ -551,6 +551,9 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
 
         this->start_up_applied[here - 1] =
             this->start_up_applied[here - 1] + 1;
+
+        // Ask `vmptrst` on the next few resumes of this processor.
+        this->vmptrst_owed[here - 1] = 6;
     }
 
     using segment_descriptor = arch::x86_64::segment_descriptor;
