@@ -126,6 +126,7 @@
 #include "zpp/hypervisor/hypervisor.h"
 #include <atomic>
 #include <cstring>
+#include <format>
 #include <print>
 #include <string>
 #include <thread>
@@ -220,7 +221,22 @@ namespace zpp::arch::x86_64
 // is the branch 2685265 is about.
 std::uint64_t rdmsr(std::uint32_t index)
 {
-    return (msr::ia32_apic_base == index) ? g_apic_base.load() : 0;
+    if (msr::ia32_apic_base == index) {
+        return g_apic_base.load();
+    }
+
+    // The x2APIC register file, 0x800-0x8ff, which is where the local
+    // APIC's registers live in that mode - SDM Table 13-6. The one this
+    // harness has to answer truthfully is the version register at 0x803:
+    // `reset_local_apic_after_init` reads its "Max LVT Entry" field to
+    // decide how many local vector table entries exist, and answering
+    // zero there says one entry, which would silently leave six of the
+    // seven untested.
+    if ((0x800 <= index) && (index <= 0x8ff)) {
+        return g_x2apic_registers[index - 0x800];
+    }
+
+    return 0;
 }
 
 // Recorded rather than performed, and the count is the point: writing the
@@ -231,6 +247,15 @@ void wrmsr(std::uint32_t index, std::uint64_t value)
     if (msr::ia32_x2apic_icr == index) {
         g_x2apic_icr_last.store(value);
         g_x2apic_icr_writes.fetch_add(1);
+    }
+
+    // And every write, whichever register, because the local APIC reset
+    // is asserted as much by what it does *not* write as by what it
+    // does. See `msr_write` in the shim.
+    auto slot = g_msr_write_count.fetch_add(1);
+    if (slot < (sizeof(g_msr_writes) / sizeof(g_msr_writes[0]))) {
+        g_msr_writes[slot] =
+            msr_write{index, value, g_msr_order.fetch_add(1) + 1};
     }
 }
 } // namespace zpp::arch::x86_64
@@ -267,6 +292,13 @@ static void reset()
     zpp::arch::x86_64::g_x2apic_icr_writes.store(0);
     zpp::arch::x86_64::g_x2apic_icr_last.store(0);
     zpp::arch::x86_64::mmio_reset();
+    zpp::arch::x86_64::msr_reset();
+
+    // `mapped_apic_page` deliberately left zero, which is *not* the frame
+    // `g_apic_base` reports - so the local APIC reset inside
+    // `apply_start_up` refuses on the relocated-page guard by default and
+    // every test that does not care about it sees no APIC traffic at all.
+    // The tests that do care set it.
 }
 
 /**
@@ -1459,6 +1491,286 @@ void test_apply_start_up_duplicate_guard()
           "already had one");
 }
 
+/**
+ * The local APIC an INIT leaves behind.
+ *
+ * **The defect this pins: nothing reset the local APIC at all.** SDM
+ * 13.4.7.3 says an INIT begins "the initialization process of the
+ * processor core *and the local APIC*", and SDM 28.2 says the
+ * INIT-signal VM exit "performs none of the operations normally
+ * associated with these events" - so a processor the guest restarted
+ * carried the previous occupant's LVTs, task priority, spurious vector
+ * and timer straight through its own INIT. KVM does this work in
+ * `kvm_lapic_reset(vcpu, true)`, `.references/kvm/lapic.c:2726`.
+ *
+ * Every check below is either a register KVM writes and a real APIC
+ * accepts, or one KVM writes that a real APIC must **not** be given -
+ * and the second group is the part a value-only test cannot state, which
+ * is why the shims record every write rather than the last one.
+ */
+void test_local_apic_reset_on_init()
+{
+    std::println("\n-- the local APIC an INIT leaves behind");
+
+    constexpr std::uint64_t apic_page = 0xfee00000;
+    constexpr std::uint64_t x2apic_extended = 1ull << 10;
+    constexpr std::uint32_t lvt_masked = 1u << 16;
+
+    // Seven local vector table entries, which is every processor since
+    // Nehalem: "Max LVT Entry ... shows the number of LVT entries minus
+    // 1", SDM 13.4.8 Figure 13-7, so six means seven.
+    constexpr std::uint32_t version_seven_entries = (6u << 16) | 0x15u;
+    constexpr std::uint32_t version_six_entries = (5u << 16) | 0x14u;
+
+    // The seven, in the order SDM 13.5.1 lists them. CMCI is entry 6 and
+    // sits *below* the other six, which is the part an "0x320 plus 0x10
+    // times the index" loop gets wrong.
+    constexpr std::uint64_t lvt_offsets[]{
+        0x320, 0x330, 0x340, 0x350, 0x360, 0x370, 0x2f0};
+
+    // Short names for the two recorders, because every assertion below
+    // is about one register and the namespace is longer than the fact.
+    auto writes = [&](std::uint64_t offset) {
+        return zpp::arch::x86_64::mmio_writes_of(apic_page + offset);
+    };
+    auto last = [&](std::uint64_t offset) {
+        return zpp::arch::x86_64::mmio_last_write_of(apic_page + offset);
+    };
+    auto msr_writes = [](std::uint32_t index) {
+        return zpp::arch::x86_64::msr_writes_of(index);
+    };
+    auto msr_last = [](std::uint32_t index) {
+        return zpp::arch::x86_64::msr_last_write_of(index);
+    };
+
+    // ---------------------------------------------------- xAPIC mode
+    reset();
+    poison_vmcs(0);
+    auto context = poisoned_context();
+    zpp::arch::x86_64::g_apic_base.store(apic_page);
+    g_vmm.mapped_apic_page = apic_page;
+    zpp::arch::x86_64::g_mmio_read_answers[0x30 / 4] =
+        version_seven_entries;
+
+    g_vmm.apply_start_up(context, 0x8, "test");
+
+    for (auto offset : lvt_offsets) {
+        check(1 == writes(offset),
+              std::format("LVT {:#x} is written once", offset));
+        check(lvt_masked == last(offset),
+              "and masked - SDM 13.4.7.1, \"the LVT register is reset to "
+              "0s except for the mask bits\", bit 16, lapic.c:2753");
+    }
+
+    check(0xffffffffu == last(0xe0),
+          "the destination format register goes to all ones, which is "
+          "flat model - SDM 13.4.7.1, lapic.c:2761");
+    check(0xffu == last(0xf0),
+          "the spurious vector register to 0x000000ff, which is vector "
+          "0xff with the software enable clear - SDM 13.4.7.1, "
+          "lapic.c:2762");
+    check((1 == writes(0x80)) && (0 == last(0x80)),
+          "the task priority to zero - lapic.c:2763");
+    check((1 == writes(0xd0)) && (0 == last(0xd0)),
+          "the logical destination to zero, which is writable in this "
+          "mode and only this one - lapic.c:2765");
+    check((1 == writes(0x280)) && (0 == last(0x280)),
+          "the error status register written, which is what clears it - "
+          "SDM 13.5.3, lapic.c:2766");
+    check((1 == writes(0x3e0)) && (0 == last(0x3e0)),
+          "the timer's divide configuration to zero - lapic.c:2773");
+    check((1 == writes(0x380)) && (0 == last(0x380)),
+          "and its initial count to zero, which is also what stops a "
+          "running timer - SDM 13.5.4, lapic.c:2774");
+
+    // **The interrupt command register is not written, and that is the
+    // one place this cannot follow KVM.** KVM zeroes it at
+    // lapic.c:2768-2771 because `kvm_lapic_set_reg` writes register
+    // storage. Here the register is a real one and "the act of writing
+    // to the low doubleword of the ICR causes the IPI to be sent" - SDM
+    // 13.6.1 - so a write of zero would send a fixed-mode interrupt,
+    // vector 0, to APIC ID 0.
+    check(0 == writes(0x300),
+          "the interrupt command register's low half is never written - "
+          "writing it is what *sends* an IPI, SDM 13.6.1, so KVM's "
+          "lapic.c:2768 has no equivalent against a real APIC");
+    check(0 == writes(0x310), "nor its high half");
+
+    // And nothing read-only. IRR, ISR and TMR are the half of
+    // kvm_lapic_reset that cannot be performed here at all - SDM Table
+    // 13-6 marks all twenty-four doublewords "Read-only" - so a write
+    // into that range would be this VMM inventing an access the
+    // architecture does not define.
+    auto read_only_writes = 0u;
+    for (std::uint64_t offset = 0x100; offset < 0x280; offset += 0x10) {
+        read_only_writes += writes(offset);
+    }
+    check(0 == read_only_writes,
+          "and no write lands in ISR, TMR or IRR, which are read-only in "
+          "both modes - SDM Table 13-6, and the residual risk this "
+          "leaves is recorded where it is skipped");
+
+    check(14 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "fourteen writes in total, so nothing else was touched either "
+          "- a count is what makes the eleven absences above complete "
+          "rather than a list somebody remembered");
+    check(0 == zpp::arch::x86_64::g_msr_write_count.load(),
+          "and not one MSR write: the x2APIC register file does not "
+          "exist in xAPIC mode and a WRMSR into 0x800-0x8ff there is a "
+          "#GP in the host, which is 2685265 one register over");
+
+    // Order. The LVT masking has to precede the spurious vector, because
+    // a software-disabled APIC ignores attempts to change an LVT mask -
+    // SDM 13.4.7.2 - and the timer's count has to follow its own LVT.
+    auto order_of = [&](std::uint64_t offset) {
+        auto order = 0u;
+        for (auto slot = 0u;
+             slot < zpp::arch::x86_64::g_mmio_write_count.load();
+             ++slot) {
+            if (zpp::arch::x86_64::g_mmio_writes[slot].address ==
+                (apic_page + offset)) {
+                order = zpp::arch::x86_64::g_mmio_writes[slot].order;
+            }
+        }
+        return order;
+    };
+
+    check(order_of(0x320) < order_of(0xf0),
+          "every LVT is masked before the spurious vector clears the "
+          "software enable - SDM 13.4.7.2, a disabled APIC ignores an "
+          "attempt to change an LVT mask, and KVM orders it the same way");
+    check(order_of(0x320) < order_of(0x380),
+          "and the timer is masked before its count is zeroed");
+
+    // ------------------------- a processor with six entries, not seven
+    reset();
+    poison_vmcs(0);
+    context = poisoned_context();
+    zpp::arch::x86_64::g_apic_base.store(apic_page);
+    g_vmm.mapped_apic_page = apic_page;
+    zpp::arch::x86_64::g_mmio_read_answers[0x30 / 4] = version_six_entries;
+
+    g_vmm.apply_start_up(context, 0x8, "test");
+
+    check(0 == writes(0x2f0),
+          "a processor whose version register reports six LVT entries is "
+          "not given a seventh - CMCI at 0x2f0 is a reserved MSR there, "
+          "and a WRMSR to one is #GP. KVM asks the same question in "
+          "kvm_apic_calc_nr_lvt_entries, lapic.c:579");
+    check(1 == writes(0x370), "and the other six are still written");
+    check(13 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "thirteen writes, one fewer than the seven-entry processor - "
+          "the count comes from the version register and not from a "
+          "constant");
+
+    // --------------------------------------------------- x2APIC mode
+    //
+    // SDM 13.12.5: "An INIT in this state keeps the x2APIC in the x2APIC
+    // mode", so the mode a processor is in *now* is the mode its
+    // registers have to be reached through. The MSR is the offset
+    // compressed: 0x800 + (offset >> 4), SDM Table 13-6.
+    reset();
+    poison_vmcs(0);
+    context = poisoned_context();
+    zpp::arch::x86_64::g_apic_base.store(apic_page | x2apic_extended);
+    g_vmm.mapped_apic_page = apic_page;
+    zpp::arch::x86_64::g_x2apic_registers[0x803 - 0x800] =
+        version_seven_entries;
+
+    g_vmm.apply_start_up(context, 0x8, "test");
+
+    for (auto offset : lvt_offsets) {
+        auto index = static_cast<std::uint32_t>(0x800 + (offset >> 4));
+        check(1 == msr_writes(index),
+              std::format("x2APIC LVT MSR {:#x} is written once", index));
+        check(lvt_masked == msr_last(index), "and masked");
+    }
+
+    check(0xffu == msr_last(0x80f),
+          "the spurious vector register through MSR 0x80f");
+    check((1 == msr_writes(0x808)) && (0 == msr_last(0x808)),
+          "the task priority through MSR 0x808");
+    check((1 == msr_writes(0x828)) && (0 == msr_last(0x828)),
+          "the error status register with **zero**, and only zero - "
+          "\"WRMSR of a non-zero value causes #GP(0)\", SDM Table 13-6");
+    check((1 == msr_writes(0x83e)) && (0 == msr_last(0x83e)),
+          "the timer's divide configuration through MSR 0x83e");
+    check((1 == msr_writes(0x838)) && (0 == msr_last(0x838)),
+          "and its initial count through MSR 0x838");
+
+    check(0 == msr_writes(0x80e),
+          "the destination format register is **not** written here - "
+          "\"there is no MSR with address 80EH\", SDM 13.12.1.2, and a "
+          "WRMSR to a reserved address in that range is #GP");
+    check(0 == msr_writes(0x80d),
+          "nor the logical destination register, which is read-only in "
+          "x2APIC mode - SDM Table 13-6, and KVM makes the same "
+          "exception at lapic.c:2764");
+    check(0 == msr_writes(0x830),
+          "nor the interrupt command register, for the reason its xAPIC "
+          "halves are not written: the write is the send");
+    check(0 == zpp::arch::x86_64::g_x2apic_icr_writes.load(),
+          "which the existing start-up-IPI counter agrees with, from the "
+          "other side");
+
+    check(12 == zpp::arch::x86_64::g_msr_write_count.load(),
+          "twelve MSR writes, two fewer than xAPIC's fourteen, and the "
+          "two are exactly the destination format and logical "
+          "destination registers that do not exist to be written there");
+    check(0 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "and nothing through the APIC page, which in this mode is not "
+          "where the registers are");
+
+    // ---------------------------------------- a relocated APIC page
+    //
+    // The same refusal `watch_local_apic` makes, and for the same
+    // reason: this VMM's own page table maps exactly one local APIC
+    // page, and a guest may move its APIC. Writing through an address
+    // that table does not map is a #PF in root mode with no recovery
+    // point.
+    reset();
+    poison_vmcs(0);
+    context = poisoned_context();
+    zpp::arch::x86_64::g_apic_base.store(0xfed00000);
+    g_vmm.mapped_apic_page = apic_page;
+    zpp::arch::x86_64::g_mmio_read_answers[0x30 / 4] =
+        version_seven_entries;
+
+    g_vmm.apply_start_up(context, 0x8, "test");
+
+    check(0 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "a local APIC the guest relocated off the page this VMM maps "
+          "is left alone rather than written through an unmapped host "
+          "address - the same refusal watch_local_apic makes");
+    check((0x8ull << 12) == g_vmm.vmcs.guest_cs_base(),
+          "and the rest of the start-up state is still applied, so the "
+          "refusal costs the APIC reset and not the processor");
+
+    // ------------------------- and a declined second start-up IPI
+    //
+    // The duplicate guard returns before any of this. It has to: the
+    // second start-up IPI of an INIT-SIPI-SIPI is aimed at a processor
+    // that is already running, and resetting a live APIC underneath it
+    // is worse than the duplicate the guard exists to swallow.
+    reset();
+    poison_vmcs(0);
+    context = poisoned_context();
+    zpp::arch::x86_64::g_apic_base.store(apic_page);
+    g_vmm.mapped_apic_page = apic_page;
+    zpp::arch::x86_64::g_mmio_read_answers[0x30 / 4] =
+        version_seven_entries;
+
+    g_vmm.apply_start_up(context, 0x8, "first sipi");
+    check(14 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "the first start-up IPI resets the APIC");
+
+    g_vmm.apply_start_up(context, 0x9, "second sipi");
+    check(14 == zpp::arch::x86_64::g_mmio_write_count.load(),
+          "and the second, which the duplicate guard declines, does not "
+          "reset it again - a running processor's APIC is not this VMM's "
+          "to clear");
+}
+
 // ------------- 7. the INIT handler publishes before it waits
 //
 // **f949649.** `start_up_processor` decides what to do with a guest's
@@ -2476,6 +2788,7 @@ int main()
     test_apply_start_up_state();
     test_apply_start_up_vectors();
     test_apply_start_up_duplicate_guard();
+    test_local_apic_reset_on_init();
     test_init_publishes_before_it_waits();
     test_handoff_race_is_exactly_once();
     test_init_chooses_and_publishes_a_handoff();

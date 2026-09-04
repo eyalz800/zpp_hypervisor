@@ -158,6 +158,84 @@ inline std::atomic<std::uint64_t> g_apic_base{};
 inline std::atomic<unsigned> g_x2apic_icr_writes{};
 inline std::atomic<std::uint64_t> g_x2apic_icr_last{};
 
+/**
+ * Every MSR write, recorded rather than performed, and the *absence* of
+ * one is as much the assertion as its value.
+ *
+ * `reset_local_apic_after_init` reaches the local APIC through MSRs
+ * 0x800-0x8ff when the processor is in x2APIC mode, and three of those
+ * registers must not be written at all: 0x80e does not exist there, 0x80d
+ * is read-only there, and 0x830 is the interrupt command register, whose
+ * low half *sends* an interrupt when written. A recorder that only kept
+ * the last write could not say any of that.
+ */
+struct msr_write
+{
+    std::uint32_t index;
+    std::uint64_t value;
+    unsigned order;
+};
+
+inline std::atomic<unsigned> g_msr_write_count{};
+inline std::atomic<unsigned> g_msr_order{};
+inline msr_write g_msr_writes[64]{};
+
+/**
+ * What an x2APIC register MSR reads back, indexed by `index - 0x800`.
+ *
+ * Here for the reason `g_mmio_read_answers` is in the mmio shim beside
+ * it: the version register at 0x803 decides how many local vector table
+ * entries get reset, and zero is a legal reading of it that happens to
+ * mean "one entry".
+ */
+inline std::uint32_t g_x2apic_registers[0x100]{};
+
+inline void msr_reset()
+{
+    g_msr_write_count.store(0);
+    g_msr_order.store(0);
+    for (auto & write : g_msr_writes) {
+        write = msr_write{};
+    }
+    for (auto & value : g_x2apic_registers) {
+        value = 0;
+    }
+}
+
+/**
+ * How many times `index` was written, and the value of the last one.
+ * Zero, and an untouched value, for a register nothing wrote.
+ */
+inline unsigned msr_writes_of(std::uint32_t index)
+{
+    auto count = 0u;
+    auto seen = g_msr_write_count.load();
+    for (auto slot = 0u;
+         (slot < seen) &&
+         (slot < (sizeof(g_msr_writes) / sizeof(g_msr_writes[0])));
+         ++slot) {
+        if (g_msr_writes[slot].index == index) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+inline std::uint64_t msr_last_write_of(std::uint32_t index)
+{
+    auto value = std::uint64_t{};
+    auto seen = g_msr_write_count.load();
+    for (auto slot = 0u;
+         (slot < seen) &&
+         (slot < (sizeof(g_msr_writes) / sizeof(g_msr_writes[0])));
+         ++slot) {
+        if (g_msr_writes[slot].index == index) {
+            value = g_msr_writes[slot].value;
+        }
+    }
+    return value;
+}
+
 // The time stamp counter. `interrupt_command.cpp` stamps every INIT and
 // start-up IPI with it, so that a long enough silence can stand in for
 // "no more processors are going to start" - see
