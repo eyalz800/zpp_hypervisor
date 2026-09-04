@@ -168,6 +168,22 @@ void hypervisor::trace_guest_state(std::size_t cpu, const char * where)
             vmcs.guest_rsp(),
             vmcs.guest_rflags());
 
+        // **The masks, because they decide whether we see anything at
+        // all.** Measured: after this state is applied, cpu 1 takes
+        // ZERO exits - the unconditional log at the top of
+        // `on_vm_exit` catches none - while a hardware breakpoint
+        // proves it executes `mov cr0` with PG|PE at trampoline offset
+        // 0x216b. A CR0 write only exits if it changes a bit in the
+        // guest/host mask, so if PG is absent from cpu 1's mask the
+        // long-mode switch is invisible here and
+        // `ia_32e_mode_guest` is never brought into agreement with
+        // EFER.LMA. This prints the field rather than assuming it.
+        log("zpp-state {} cpu {}: cr0 mask {} cr4 mask {}",
+            where,
+            cpu + 1,
+            vmcs.cr0_guest_host_mask(),
+            vmcs.cr4_guest_host_mask());
+
         log("zpp-state {} cpu {}: cr0 {} shadow {} cr3 {}",
             where,
             cpu + 1,
