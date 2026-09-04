@@ -283,6 +283,33 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
     // application processor, and this says whether it is because
     // something here keeps starting it.
     if (auto here = this->vmcs.vpid(); (0 != here) && (here <= max_cpus)) {
+        // Recorded **before** the increment, so slot 0 is the first
+        // application rather than the second. `from` is a string
+        // literal in this module, so the pointer stays valid and the
+        // reader resolves it. See `start_up_from`: the log line that
+        // used to carry this is unavailable, because the log ring reads
+        // empty on a two-processor boot.
+        if (auto slot = this->start_up_applied[here - 1];
+            slot < start_up_from_slots) {
+            // The first eight characters, packed little-endian, rather
+            // than the pointer. The reader batches its reads up front,
+            // so an address would need a second pass it does not have -
+            // and a label it cannot fetch reads as absent, which is the
+            // failure this member exists to avoid. Eight characters
+            // separate every caller: "launch", "queued", "sipi exi".
+            std::uint64_t packed{};
+
+            for (std::size_t i = 0; (i < 8) && (nullptr != from) &&
+                                    ('\0' != from[i]);
+                 ++i) {
+                packed |= static_cast<std::uint64_t>(
+                              static_cast<unsigned char>(from[i]))
+                          << (8 * i);
+            }
+
+            this->start_up_from[here - 1][slot] = packed;
+        }
+
         this->start_up_applied[here - 1] =
             this->start_up_applied[here - 1] + 1;
     }

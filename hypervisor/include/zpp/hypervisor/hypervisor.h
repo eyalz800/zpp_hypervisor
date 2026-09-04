@@ -10222,6 +10222,32 @@ private:
      */
     std::uint64_t start_up_applied[max_cpus]{};
     std::uint64_t start_up_declined[max_cpus]{};
+
+    /**
+     * **Which caller applied each start-up, by name.**
+     *
+     * `apply_start_up` has five call sites and each passes a distinct
+     * `from` literal, but the only thing that recorded it was a
+     * `trace_ap_entry` log line - and on a two-processor boot the log
+     * ring reads **empty**, so the label was unavailable exactly when
+     * it mattered. Two applications reach cpu 1's guest state and
+     * nothing said which two paths produced them.
+     *
+     * The pointer is stored rather than a copy: `from` is always a
+     * string literal in this module, so the address is stable for the
+     * life of the boot and the reader resolves it by reading the bytes
+     * at that address. Four slots because more than two applications
+     * would itself be the finding, and slot 0 is the first
+     * application, not the newest - the *order* is what distinguishes
+     * "launch then queued" from "queued then sipi exit".
+     *
+     * Zero means that application never happened. A non-zero address
+     * whose string reads empty means the reader could not fetch it,
+     * which is a different failure and must not be reported as a
+     * missing application.
+     */
+    static constexpr std::size_t start_up_from_slots = 4;
+    std::uint64_t start_up_from[max_cpus][start_up_from_slots]{};
     std::uint64_t init_emulated[max_cpus]{};
 
     void note_cpuid_leaf(std::size_t cpu, std::uint32_t leaf)

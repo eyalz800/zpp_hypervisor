@@ -3998,6 +3998,11 @@ def dump_ap_census(args, elf, instance):
     if "started_by_start_up_ipi" in off:
         reader.queue(instance + off["started_by_start_up_ipi"],
                      (args.cpus + 7) // 8)
+    # Four slots per processor, packed ASCII of the applying caller.
+    for _m in ("start_up_declined", "start_up_from"):
+        if _m in off:
+            reader.queue(instance + off[_m],
+                         args.cpus * (4 if _m == "start_up_from" else 1))
     for cpu in range(args.cpus):
         for name in ("cpuid_leaf_codes", "cpuid_leaf_counts"):
             reader.queue(instance + off[name] + cpu * slots * 8, slots)
@@ -4129,6 +4134,18 @@ def dump_ap_census(args, elf, instance):
               f"started_by_start_up_ipi {started}  launch_error {error}")
         print(f"    of those, DECLINED as a repeat start-up {declined}, "
               f"so {real} actually reached the guest state")
+        # Which caller applied each one, in order. The `from` literals
+        # live in the module, so read the bytes at the recorded address.
+        # A zero slot is "no such application"; a non-zero address whose
+        # string will not read is a READER failure and says so, rather
+        # than being reported as a missing application.
+        for slot in range(4):
+            packed = word("start_up_from", cpu * 4 + slot) or 0
+            if not packed:
+                continue
+            raw = packed.to_bytes(8, "little").split(b"\x00")[0]
+            name = raw.decode("ascii", "replace")
+            print(f"      application {slot + 1} applied by: {name}")
         if real > 1:
             print(f"    *** {real} start-up applications on one "
                   f"processor: the second sends a processor that is "
