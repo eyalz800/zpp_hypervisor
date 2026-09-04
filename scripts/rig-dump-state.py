@@ -6874,6 +6874,8 @@ def main():
                "guest_in_vmx_operation", "guest_vmxon_pointer",
                "guest_current_vmcs", "index_out_of_range",
                "index_out_of_range_last", "index_out_of_range_vpid",
+               "vmx_instructions_refused", "refused_xsetbv_count",
+               "refused_xsetbv_index", "refused_xsetbv_value",
                "recovery_field_readback",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
@@ -8866,6 +8868,44 @@ def main():
     # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
     # above it, bugchecks with HvpHandleHostException (crash code 0x11).
     # `read-channel-state.sh` prints this and this reader never did.
+    # **The direct count of #UDs this VMM handed the level above.**
+    # `exit_dispatch.cpp` calls `inject_invalid_opcode_exception()` when
+    # `on_vmx_instruction` refuses, and increments this. A guest
+    # hypervisor answers a #UD on a VMX instruction by bugchecking - it
+    # believes nothing is above it - so a single one ends the machine.
+    # The counter existed and was never printed.
+    if "vmx_instructions_refused" not in off:
+        print("\nVMX instructions refused: MEMBER ABSENT from this "
+              "reader - not zero.")
+    else:
+        vr2 = Monitor(args.rig, args.port)
+        vr2.queue(instance + off["vmx_instructions_refused"], args.cpus)
+        for _m in ("refused_xsetbv_count", "refused_xsetbv_index",
+                   "refused_xsetbv_value"):
+            if _m in off:
+                vr2.queue(instance + off[_m], 1)
+        vg2 = vr2.run()
+        rows = [(c, vg2.get(instance + off["vmx_instructions_refused"]
+                            + 8 * c, 0)) for c in range(args.cpus)]
+        rows = [r for r in rows if r[1]]
+        if rows:
+            print("\nVMX INSTRUCTIONS THIS VMM REFUSED (each one is a "
+                  "#UD to the guest hypervisor)")
+            for c, n in rows:
+                print(f"  cpu {c}  {n:,}")
+        else:
+            print("\nVMX instructions refused by this VMM: none on any "
+                  "processor")
+        if "refused_xsetbv_count" in off:
+            xn = vg2.get(instance + off["refused_xsetbv_count"], 0)
+            if xn:
+                print(f"  xsetbv refused {xn:,}  index "
+                      f"{vg2.get(instance + off.get('refused_xsetbv_index', 0), 0)}"
+                      f"  value 0x"
+                      f"{vg2.get(instance + off.get('refused_xsetbv_value', 0), 0):x}")
+            else:
+                print("  xsetbv refused: none")
+
     # The #UD branch that had no counter. `on_vmx_instruction` refuses
     # any VMX instruction from the level above when the processor index
     # is out of range, and the caller turns that into a #UD - which a
