@@ -63736,3 +63736,105 @@ ICR write thunk starts at `0x257af0`, not `0x257af4` - `g_ApicIcrWrite`
 (`0x0d6cf8`) holds `0xfffff85676057af0`, and Ghidra's prologue scan
 skipped the leading `eb 02 f3 90` (`jmp +2; pause`). `functions.csv`
 carries the off-by-four; anything reading it must not.
+
+## The far jump at `0x216e` is a mode switch or a `#GP`, and the doorbell is a two-phase protocol - 2026-09-04
+
+The rig has the failure down to two instructions: the AP hits
+`0x216b` (`mov cr0, eax`, `rax = 0x80000001`) and never reaches
+`0x2173`. Both are decoded from `hvix64.bin`'s bytes in
+`.references/hyperv/hvix64-ap-arrival-and-doorbell-decompiled.md`, which
+supersedes parts of the two documents landed in `651ec35`. Six results,
+in the order they change what to do next.
+
+**1. The trampoline is not emitted, it is copied - and the previous
+offsets are one byte off, twice.** `HvpEmitLpTrampolineCode` (`0x258e80`)
+`movaps`-copies three templates out of `.rdata` (`0x0b640` 8 bytes to
+`page+0x00`, `0x0b668` `0xdc` bytes to `page+0x28`, `0x0b750` `0x6d`
+bytes to `page+0x104`) and then `memcpy`s 11 bytes from `0x3a6be0` to
+`page+0x171`. Disassembled from those template bytes rather than from a
+reconstruction, the real-mode `mov cr0` that sets PE is at page **`+0xdc`**
+and the far jump to 32-bit is at **`+0xff`** - not `+0xdb`/`+0xfe` as
+`hvix64-lp-trampoline-emit-decompiled.md` §3.1 has them. **The rig's two
+confirmed hits at `0x20dc` and `0x20ff` are exactly these**, which is the
+independent check, and they also pin `tramp_pa = 0x2000` on the rig.
+
+**2. The far jump at `+0x16e` has no legal reading outside long mode.**
+It is `ff 6f 7a` = `jmp far dword ptr [edi+0x7a]`, an indirect `m16:32`
+through `{tramp_pa+0x171, 0x0010}`. Selector `0x10` is
+`00 00 00 00 00 9b 20 00`: base 0, **limit 0**, `L=1`, `D=0`. That was
+established by *simulating* `HvpBuildDescriptor` (`0x258dbc`) on the three
+call sites' real arguments, not by reading the descriptor table. In
+IA-32e mode the limit is ignored and `L=1` selects 64-bit mode; in legacy
+protected mode the same bytes are a one-byte 16-bit code segment and a
+jump to offset `0x2171` is **`#GP(0x10)`**.
+
+**3. Either way it is a triple fault, because there is no IDT.** `lgdt`
+runs at `+0xcd`; `lidt` does not run until `0x3a6740`, *after* the far
+jump. So between `+0xdc` and `0x3a6740` any fault escalates through `#DF`
+to a triple fault - exit reason 2, no vector, no error code, no address.
+That is the shape to expect in `exit_trace` for CPU 1, and it explains
+why nothing has ever been recorded about this.
+
+**4. The one zpp lever, and it is already half-built.** The `mov cr0` at
+`+0x16b` needs `CR4.PAE` (set at `+0x148`) and `EFER.LME` (set at
+`+0x164` as `0x100` - LME alone, **NXE clear**), and on success the
+processor enters compatibility mode with LMA=1. `ZPP_TRACK_LONG_MODE_SWITCH`
+is `ON` and does exactly KVM's `enter_lmode` - but
+`exit_dispatch.cpp:3480` only applies it when `load_ia32_efer` is set,
+and **`ZPP_INIT_CLEARS_EFER` defaults `OFF`** (`CMakeLists.txt:319`).
+With it off the handler logs `"long-mode switch NOT applied"` and the AP
+is entered in 32-bit PAE paging while about to load a `CS.L=1` limit-0
+descriptor - which is `#GP(0x10)` at `+0x16e`. **Check `efer0` in the
+`zpp switches:` manifest before anything else**, and arm
+`ZPP_TRAP_AP_FAULTS` (default OFF): its `ap_fault_vectors` covers both
+`#GP` and `#PF`, and `armed=1 occurred=0` excludes a guest exception
+outright.
+
+**5. The doorbell is not an alternative to INIT-SIPI - it is the second
+half of the same protocol.** `HvpStartBootLps` (`0x2591cc`) sends
+INIT-SIPI-SIPI to every boot LP *itself*, from inside `HvpInitPhase(3)`,
+and writes `g_LpWakeDoorbellEnable = 1` at `0x2593a5` **after** the loop -
+so those wakes take branch [1]. The woken LP runs the trampoline, reaches
+`HvpLpLongModeEntry`, finds `g_LpRegImage.Flags` bit 0 set and takes a
+**third** exit at `0x3a684d` that nobody had decoded: read own APIC id,
+`lock inc [0x0d69f0]`, then park spinning on `[0x0d69ec]`. A later
+`HvCallAddLogicalProcessor` writes that word (branch [3]), the parked LP
+bumps `[0x0d69f4]` and **jumps back to `0x3a6735`** into the normal path.
+So the trampoline runs once per LP per boot either way, and the previous
+entry's item 2 - "every hour spent on SIPI routing is aimed at a branch
+that is not taken" - is **withdrawn**. SIPI routing is still load-bearing;
+it just may happen at hypervisor-init time rather than at hypercall time.
+
+**6. Both configurations still fit every rig observation, and one read
+separates them.** With `g_BootLpCount = 0` the SIPI comes from
+`HvCall 0x76`, one AP at a time; with it non-zero it came from hypervisor
+init, all seven at once, before Windows ran. **Both leave
+`LpStartRecord[1].State == 1` and an AP dead at `0x216b`.** Read
+`*(u8 *)(hvix64_base + 0x0d69e8)`; corroborate with `g_BootLpCount`
+(`+0x09c5a8`), `g_LpArrivalCount` (`+0x0d69f0`, incremented only by an AP
+that *survived* the far jump) and `g_LpWakeDoorbellApicId` (`+0x0d69ec`).
+`hvix64_base` is already resident - `nested_vtd.cpp:377` finds it and
+`:544` logs it - so this is four `translate_guest_linear` calls in the
+VMM, not a monitor page walk. Do not hardcode it; it is KASLR.
+
+**And the previous entry's item 3 is withdrawn as written.**
+`tramp_pa + 0x98` is **one dword shared by every LP** - seven APs write
+`1` then `2` to it while the BSP presets it to `0xF` for each - so it is
+racy except one-LP-at-a-time. Worse, `HvpWakeLp` presets it on *every*
+branch including the doorbell, and a doorbell-woken LP never runs the
+trampoline again, so once the doorbell is armed it reads `0xF` for ever
+and `0xF` stops meaning "the SIPI never landed". This is the same class as
+the instruments in CLAUDE.md's "An instrument that cannot report its own
+failure": a marker that is frozen for a reason unrelated to what it
+measures.
+
+Nine further corrections to the `651ec35` documents are tabulated in the
+new file's §8. The ones most likely to be acted on: `LP_START_RECORD+0x08`
+is the hypercall's **ApicId**, not a `Context` pointer (it is compared
+against a read of the local APIC ID register at `0x25a440`, and a mismatch
+fails the AP immediately with status `0x1001`, stage `0x538`); `0x25a3e0`
+is that APIC-id check plus LDR/DFR programming, **not** `HvpLpEnableVmx`;
+there is an **`sti` at `0x24811b`** the previous decompilation omitted
+entirely; and `LpStartRecord[lp].State` is written `2` at `0x248014` -
+the fourth instruction of `HvpLpInitAndReportIn`, after nothing but an
+`iretq` thunk - and `3` at `0x248100`.
