@@ -64050,3 +64050,149 @@ limit `0` and `long = 1` (`xor r9d,r9d` at `0x2590e5`, `mov byte
 [rsp+0x28], 1` at `0x2590e8`), and `r12 = 0x30` follows from the
 template's own hardcoded `mov ax, 0x20` at `+0xfa` against the emitter's
 `edx = r12 - 0x10` for that same descriptor.
+
+## Hyper-V has three ways to reset the machine from a VM exit, and INIT is unconditional - 2026-09-04
+
+Full working, with every RVA and the disassembly it came from, in
+`docs/hyperv-ap-timeout-and-reset-paths.md`. Tracked rather than left in
+`.references/`, which is gitignored and does not survive a clone.
+
+The question this was aimed at: something stops the whole VM at a
+definite instant ~100 s into a 2-CPU boot - every KVM counter freezing
+together, `halt_exits == 0`, `blocking == 0`, `paused (shutdown)` - and
+"Hyper-V gave up on an AP" was the leading candidate. **It is not the
+four-second AP timeout, and the reason is one instruction.**
+
+### The 4 s AP wait behind hypercall 0x76 does not reset anything
+
+`HvpAddLogicalProcessorWorker` (`0x23909c`) waits 4,000,000 us at
+`0x2394b0` for `LpStartRecord[lp].State` to leave `1`, and on timeout
+sets status `0x3e` / stage `0x338` and **returns**. Its own failure tail
+then writes `rec->State = 0`, frees the LP block and hands the status
+back to Windows.
+
+So `lp_state[1] == 1` post-mortem - the observation this theory rested
+on - is **evidence against** it. Wait A cannot have fired, because
+firing would have zeroed the word. `State == 1` means the worker was
+still inside the wait, or the machine stopped before four seconds
+elapsed.
+
+**And Windows does nothing drastic with the failure either.**
+`HvlpStartLogicalProcessor` (ntoskrnl `0x582898`) retries only on
+`HV_STATUS_INSUFFICIENT_MEMORY` and turns every other non-zero status
+into `STATUS_UNSUCCESSFUL`; `HvlStartBootLogicalProcessors` (`0x580d28`)
+then `break`s out of its add loop and boots on with fewer logical
+processors. No bugcheck, no retry, no reset. So the `0x76` timeout is
+ruled out on **both** sides of the interface, not just ours.
+
+### There is a second 4 s AP wait, and that one does reset
+
+Found by scanning the raw image for the immediate `00 09 3d 00` rather
+than by reading any decompilation - four sites, and only two are AP
+waits. `HvpRestartAllLogicalProcessors` (`0x23e1f0`, 276 bytes, decoded
+in full) walks `LpStartRecord[1..0x7ff]`, re-wakes every record with
+`State == 4`, waits 4,000,000 us, and on timeout calls
+`HvpCrashRendezvous(1)` - which resets the machine. It is reachable only
+from the power/resume entry `HvpLpPowerEntry` (`0x247b20`), which also
+calls the rendezvous on any of its three internal failures.
+
+### Three VM exits are fatal to the machine, and one of them is INIT
+
+`hv_dispatch_vmexit` (`0x35e1b0`) falls through to
+`HvpHandleRareVmExit` (`0x35d3e0`) for the cold reasons. Three cases
+there end in a reset:
+
+| exit reason | handler | outcome |
+|---|---|---|
+| **3 - INIT** | `0x2c9524`, 32 bytes | `"[%d]: Received INIT; rebooting."` then `HvpCrashRendezvous(0)`. **No condition of any kind** |
+| **2 - triple fault** | `HvpHandleTripleFault` `0x2c7da4` | root VP on a multi-VP partition -> `HvpBugCheck(0x26)`; otherwise -> `HvpVpShutdown`, which reboots for a root VP |
+| **bit 31 - any VM-entry failure** | `HvpHandleVmEntryFailure` `0x35b9a0` | reflect to the level above if there is one, else `HvpVpFatal` (`0x2c53e4`) - and `HvpVpFatal` on a **root** VP is an unconditional `HvpCrashRendezvous(0)` |
+
+The third is the one that should worry us most: `0x35b9a0` writes the
+literal `0x80000021` into vmcs12 when it *can* reflect, which is how the
+function was identified - and `0x80000021` is exactly the exit reason
+this tree already records in `vm_entry_failure`. Anything that makes
+hvix64's own `VMLAUNCH`/`VMRESUME` of its L2 fail lands here, and for a
+root VP the answer is a machine reset with no bugcheck at all.
+
+The INIT case is the one closest to our code. zpp emulates INIT/SIPI for
+the guest's APs, and hvix64 issues INIT-SIPI-SIPI through
+`HvpApicIcrWrite` as part of `HvpWakeLp`. An INIT delivered to, or
+reflected into, a processor that is in VMX non-root operation under
+hvix64 produces exit reason 3, and hvix64 reboots. **That hvix64 reboots
+on an INIT is proven from the bytes; that an INIT is what happened here
+is a hypothesis.**
+
+### Why it presents as `paused (shutdown)` and not as a crash
+
+Every one of the above funnels into `HvpCrashRendezvous` (`0x21f65c`),
+which ends - after a barrier over the other LPs with its own 25.0 s
+deadline (250,000,000 units of a clock proven to be 100 ns by
+`0x2563dc`'s compare against 10,000,000) - in `HvpResetSystem`
+(`0x2240bc`) and its `out 0xCF9, 0x0F`. Under QEMU that port is the
+chipset reset control register, so the write is a machine reset:
+counters freeze together, no halt exits, `paused (shutdown)` with memory
+intact. **Mechanism, not measurement** - the falsifiable half is that
+`hvix64 + 0xd42a8` must read `0x0CF9` and `+0xd42a2` must read `0x0F`.
+
+### Two reads that settle it, and neither has ever been taken
+
+`HvpCrashRendezvous` latches the identity of the first processor to
+reach it, with a `cmpxchg` against `-1`, in a global that is
+`0xffffffff` in the on-disk image:
+
+- **`hvix64 + 0x235e8` (u32) `g_FirstCrashedLpId`.** Still `-1` means
+  hvix64 never entered the rendezvous and none of the above happened -
+  the reset came from somewhere else entirely. Any other value names the
+  LP that started it.
+- **`hvix64 + 0xa8628` (qword) `g_CrashedLpBitmap`.** One bit means the
+  other LP never took the `0xff` crash IPI, so the reset went out
+  through the 25 s `HvpResetSystemDirect` path; both bits means the
+  rendezvous completed.
+
+Then `0xa8610` / `0x112660`: both zero *with* `0x235e8` set is the
+signature of the INIT or VP-shutdown path specifically, because neither
+of those goes through `HvpBugCheck`. A non-zero code names the cause -
+`0x26` root triple fault, `0x06` VM-entry failure, and `N + 0x33` for an
+exit reason `N` hvix64 did not expect at all (`lea ecx, [rdx+0x33]` at
+`0x35e148`).
+
+### Corrections carried in this round
+
+- `LP_START_RECORD + 0x08` is the **APIC id**, not a context pointer.
+  Proven twice: `HvpAllocLpSlot`'s duplicate scan compares it against
+  the incoming APIC id, and `HvpRestartAllLogicalProcessors` passes it
+  as `HvpWakeLp`'s first argument. `+0x18` is the context-table index.
+- `HvpAllocLpSlot` returns `0x19` (`OBJECT_IN_USE`) if *any* record with
+  `State == 4` already holds the requested APIC id - so a retry after a
+  successful start fails rather than restarting anything.
+- `HvpBugCheckReset` does `lock dec g_StartedLpCount` in each parking
+  LP; the earlier note omitted it and thereby made the BSP's wait look
+  like a deadlock on a 2-CPU guest. It is not.
+- The ACPI `out` is at `0x224178`, not `0x224179` - there are `nop`s
+  either side, and `0x224179` is the address an I/O exit reports.
+- On the AP's long-mode entry (`0x3a6690`) hvix64 sets **`CR0.CD` and
+  `CR0.NW` and executes `wbinvd` twice** before any C function runs,
+  because the trampoline's `+0xa8` byte is `0` on this rig. An AP that
+  dies there leaves `State == 1`, which is the state we are reading.
+- The `0x76` handler's two guards **do** return a status - `0x06` and
+  `0x41` in `EAX` - so the note that a refused call leaves the caller
+  reading a stale output buffer is wrong.
+- The hypercall input is `0x10` bytes, four dwords, not `0x0c`; the
+  third is Windows' proximity domain id and the fourth (`0x80000001`)
+  is never read by hvix64.
+- `HvpLpInitAndReportIn` (`0x247fe0`) is **not** among the sixteen
+  callers of the crash rendezvous. Only the *resume* body
+  `HvpLpPowerEntry` (`0x247b20`) is. A first start reports a status; a
+  resume resets the machine.
+
+### Method note that produced all of it
+
+Ghidra's `FUN_fffff856760xxxxx` names are full VAs. `FUN_fffff856760563dc`
+is RVA `0x2563dc`, not `0x563dc` - and `0x563dc` is zero-filled in this
+image, so the mistake disassembles to nothing and reads as a dead end
+rather than an error. Equally: `llvm-objdump` over a raw slice prints
+meaningless `#` annotations, because the blob has no base. Every global
+address above was recomputed as `next_insn_rva + disp32` by hand, and
+two addresses in the existing notes are wrong precisely because that was
+not done.
