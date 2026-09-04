@@ -5,12 +5,68 @@
 
 namespace zpp::arch::x86_64::vmx
 {
+/**
+ * **Every wrapper here tests `jbe`, and none of them tests `jc`.**
+ *
+ * The argument is already written out in full above `vmread` below, where
+ * it was found and fixed for two instructions. It applies unchanged to
+ * every VMX instruction that reports through the flags, and the rest of
+ * them were left on `jc` - so this note is here, at the top, rather than
+ * repeated seven times.
+ *
+ * SDM 33.2 (`.references/sdm.txt:207415-207450`) defines the three
+ * outcomes and the flags each sets:
+ *
+ *     VMsucceed:      CF := 0 ... ZF := 0 ...
+ *     VMfailInvalid:  CF := 1 ... ZF := 0 ...
+ *     VMfailValid(n): CF := 0 ... ZF := 1 ...  and sets the error field
+ *
+ * and `VMfail(n)` is "VMfailValid if the VMCS pointer is valid, else
+ * VMfailInvalid". So `jc` tests for exactly one of the two failures, and
+ * the one it misses is the one that happens **whenever a VMCS is
+ * current** - which, in an exit handler, is always.
+ *
+ * What each of these can therefore return as success while having failed:
+ *
+ * - `vmptrld_raw`: `VMfail(VMPTRLD with invalid physical address)`,
+ *   `VMfail(VMPTRLD with VMXON pointer)`, `VMfail(VMPTRLD with incorrect
+ *   VMCS revision identifier)` - SDM 33.3, `sdm.txt:208043-208050`. The
+ *   caller then believes a region is current that is not, and every
+ *   VMREAD and VMWRITE after it addresses **the region that still is**.
+ *   The shadow-VMCS copies in `nested_shadow_vmcs.cpp` are the live
+ *   instance: they `vmptrld` the shadow with vmcs01 or vmcs02 current,
+ *   so a refusal there is a VMfailValid by construction, and
+ *   `copy_vmcs12_to_shadow` would then write the guest hypervisor's
+ *   field values over the VMCS this VMM is about to enter - including
+ *   `cr0_guest_host_mask` and `cr0_read_shadow`, which decide which of a
+ *   guest's control-register writes exit at all.
+ * - `vmclear_raw`: `VMfail(VMCLEAR with invalid physical address)` and
+ *   `VMfail(VMCLEAR with VMXON pointer)`, `sdm.txt:207813-207815`. A
+ *   missed failure here leaves a launch state the caller believes is
+ *   clear, and `VMLAUNCH` then refuses.
+ * - `vmxon`: `VMfail("VMXON executed in VMX root operation")`,
+ *   `sdm.txt:208484` - the one failure that says this processor was
+ *   already virtualized, reported as a fresh success.
+ * - `invept` / `invvpid`: `VMfail(Invalid operand to INVEPT/INVVPID)`,
+ *   `sdm.txt:207508` and `:207627`. This is the failure the parameter
+ *   type above `invept` was changed to prevent, and with `jc` it could
+ *   not have been detected even after it started happening again.
+ * - `vmxoff`: `VMfail` under the dual-monitor treatment of SMIs.
+ * - `vmptrst` has no `VMfail` at all, so the test cannot fire; it is
+ *   spelled the same way so that "not VMsucceed" is one idiom here.
+ *
+ * KVM treats these as failures the same way, and reads the error field to
+ * report them - which only exists for VMfailValid: `vmclear_error` and
+ * `vmptrld_error` (`.references/kvm/vmx.c:468` and `:474`) both print
+ * `vmcs_read32(VM_INSTRUCTION_ERROR)`, as do `invvpid_error` (`:482`) and
+ * `invept_error` (`:488`).
+ */
 inline int __attribute__((naked)) vmxon(void *)
 {
     asm(R"!!(
         .intel_syntax noprefix
         vmxon [rdi]
-        jc vmxon_fail
+        jbe vmxon_fail
         mov eax, 0
         ret
     vmxon_fail:
@@ -82,7 +138,7 @@ inline int __attribute__((naked)) vmxoff()
     asm(R"!!(
         .intel_syntax noprefix
         vmxoff
-        jc vmxoff_fail
+        jbe vmxoff_fail
         mov eax, 0
         ret
     vmxoff_fail:
@@ -105,7 +161,7 @@ inline int __attribute__((naked)) vmptrld_raw(void *)
     asm(R"!!(
         .intel_syntax noprefix
         vmptrld [rdi]
-        jc vmptrld_raw_fail
+        jbe vmptrld_raw_fail
         mov eax, 0
         ret
     vmptrld_raw_fail:
@@ -119,7 +175,7 @@ inline int __attribute__((naked)) vmptrst(void *)
     asm(R"!!(
         .intel_syntax noprefix
         vmptrst [rdi]
-        jc vmptrst_fail
+        jbe vmptrst_fail
         mov eax, 0
         ret
     vmptrst_fail:
@@ -142,7 +198,7 @@ inline int __attribute__((naked)) vmclear_raw(void *)
     asm(R"!!(
         .intel_syntax noprefix
         vmclear [rdi]
-        jc vmclear_raw_fail
+        jbe vmclear_raw_fail
         mov eax, 0
         ret
     vmclear_raw_fail:
@@ -232,7 +288,7 @@ inline int __attribute__((naked)) invept(std::uint64_t, void *)
     asm(R"!!(
         .intel_syntax noprefix
         invept rdi, [rsi]
-        jc invept_fail
+        jbe invept_fail
         mov eax, 0
         ret
     invept_fail:
@@ -246,7 +302,7 @@ inline int __attribute__((naked)) invvpid(std::uint64_t, void *)
     asm(R"!!(
         .intel_syntax noprefix
         invvpid rdi, [rsi]
-        jc invvpid_fail
+        jbe invvpid_fail
         mov eax, 0
         ret
     invvpid_fail:

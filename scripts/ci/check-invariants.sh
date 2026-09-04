@@ -104,4 +104,60 @@ else
     fi
 fi
 
+# 5. Every VMX instruction that reports through the flags is tested with
+#    `jbe`, never `jc`.
+#
+#    SDM 33.2 (.references/sdm.txt:207415-207450) gives three outcomes:
+#    VMsucceed clears both CF and ZF, VMfailInvalid sets CF, and
+#    VMfailValid sets **ZF with CF clear** - and `VMfail(n)` resolves to
+#    VMfailValid whenever a VMCS is current, which inside an exit handler
+#    is always. So `jc` reports the commonest failure of every one of
+#    these instructions as success.
+#
+#    Checked on the artifact rather than in the source, because that is
+#    the only place the mnemonic that ran can be read. It has already been
+#    got wrong once for `vmread`/`vmwrite`, where the consequence was a
+#    VMWRITE that never happened and a VMREAD whose destination register
+#    kept the second-level guest's value; the same defect was still in
+#    `vmxon`, `vmxoff`, `vmptrld`, `vmptrst`, `vmclear`, `invept` and
+#    `invvpid` afterwards, which is what this check exists to stop.
+objdump="${OBJDUMP:-llvm-objdump}"
+if ! command -v "$objdump" >/dev/null 2>&1; then
+    echo "WARN: $objdump not found, VMX flag-test invariant unchecked" >&2
+else
+#    The test is for a *carry-only* branch after the instruction rather
+#    than for `jbe` specifically. Not every one of these is followed by a
+#    branch at all - the `vmread` inside the `vmlaunch` stub reports the
+#    instruction error into a global and then parks, and has no caller to
+#    answer - and demanding one there would be a second rule with no
+#    defect behind it. What must never appear is a branch that looks at
+#    CF and not at ZF.
+    bad=$("$objdump" -d --no-show-raw-insn "$elf" 2>/dev/null | awk '
+        # A carry-only branch after one of these misses VMfailValid.
+        watching {
+            if ($2 ~ /^(jb|jc|jnae|jae|jnb|jnc)$/) {
+                print instruction " at " address " followed by " $2
+            }
+            watching = 0
+        }
+        $2 ~ /^(vmxon|vmxoff|vmptrld|vmptrst|vmclear|invept|invvpid)$/ ||
+        $2 ~ /^(vmread|vmwrite)[bwlq]?$/ {
+            watching = 1
+            instruction = $2
+            address = $1
+        }
+    ')
+
+    if [ -n "$bad" ]; then
+        echo "FAIL: a VMX instruction is tested on the carry flag alone:" >&2
+        echo "$bad" >&2
+        echo "      jc tests CF alone and misses VMfailValid, which sets" >&2
+        echo "      ZF with CF clear - SDM 33.2. Every such failure is" >&2
+        echo "      then reported to the caller as success. Use jbe." >&2
+        status=1
+    else
+        echo "ok: no VMX instruction is tested on the carry flag alone"
+    fi
+fi
+
 exit "$status"
