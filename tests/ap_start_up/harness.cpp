@@ -180,6 +180,25 @@ void hypervisor::watch_local_apic(bool)
 }
 
 /**
+ * Where the local APIC page is. The real one lives in
+ * local_apic_write.cpp, which this harness does not compile; it is
+ * reached here by `send_start_up_ipi`'s xAPIC branch, which
+ * `test_start_up_ipi_follows_the_apic_mode` checks writes to the frame
+ * IA32_APIC_BASE names "rather than to a constant" - so this must
+ * actually read the MSR, not answer zero.
+ *
+ * The real one masks to bits MAXAPICADDR-1:12; the harness's frames are
+ * page aligned already, so the page offset is the whole of the mask
+ * that matters here. The MAXAPICADDR half is tested where it decides
+ * something, in tests/watched_page's `test_relocated_apic_is_refused`.
+ */
+std::uint64_t hypervisor::local_apic_base()
+{
+    return arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+           ~0xfffull;
+}
+
+/**
  * The cached VMX capability MSRs, reached only by `monitor_trap_flag`,
  * which this harness compiles and asks nothing of. One slot, shared by
  * every index: nothing here reads it back.

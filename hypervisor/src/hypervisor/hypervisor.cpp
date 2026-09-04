@@ -283,10 +283,7 @@ void hypervisor::initialize_host_page_table()
     // Unconditional, and only one page. A guest in x2APIC mode never
     // takes the path that reads it, but establishing the mapping costs a
     // single entry and removes the ordering question entirely.
-    constexpr std::uint64_t apic_base_mask = 0xffffff000ull;
-    auto apic_base =
-        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
-        apic_base_mask;
+    auto apic_base = local_apic_base();
     this->host_page_table.map_from(
         apic_base,
         page_size,

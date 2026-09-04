@@ -2757,6 +2757,48 @@ private:
     std::uint64_t physical_address_bits();
 
     /**
+     * Where this processor's local APIC page is: IA32_APIC_BASE,
+     * masked to the field the architecture puts there.
+     *
+     * The field is **MAXAPICADDR-1:12**, not 35:12. SDM 13.4.4
+     * ([[PAGE 3577]]): "APIC Base field, bits MAXAPICADDR-1:12 ...
+     * Bits 7:0, bits 10:9, and bits 63:MAXAPICADDR ... are
+     * reserved", with the footnote "MAXAPICADDR is normally
+     * CPUID.80000008H:EAX[7:0] for processors that support
+     * CPUID.80000008H and 36 otherwise". That is exactly the field
+     * `physical_address_bits` already reads and already falls back
+     * to 36 for, so the two are the same number and must not be
+     * two numbers.
+     *
+     * **Four copies of `0xffffff000` used to stand in for this**,
+     * which is the 36-bit fallback applied unconditionally - a 64
+     * GB ceiling on a processor reporting 39, 46 or 52. The
+     * consequence is not that a base reads short; it is that the
+     * *guard against* a relocated APIC stops working.
+     * `watch_local_apic` refuses to arm unless the base equals
+     * `mapped_apic_page`, and with both sides truncated a
+     * relocation that moves only bits at or above 36 compares
+     * **equal** - so instead of the refusal that path is written to
+     * produce, the watch is armed on the page the APIC no longer
+     * decodes, every interrupt-command write goes unintercepted,
+     * and no start-up IPI is ever seen. A guest reaches that with
+     * one WRMSR; nothing here validates the value it forwards.
+     *
+     * KVM does not truncate at all. `kvm_set_apic_base`
+     * (.references/kvm/x86.c) rejects a base carrying any bit above
+     * the guest's MAXPHYADDR with `#GP` - `reserved_bits =
+     * kvm_vcpu_reserved_gpa_bits_raw(vcpu) | 0x2ff` - and only then
+     * does `kvm_lapic_set_base` mask off bits 11:0. Rejecting is
+     * better than either; this VMM forwards the write to hardware,
+     * so the least it can do is read back what hardware holds.
+     *
+     * Latent on this rig, where the base is the reset default
+     * `0xfee00000` and masks identically either way. Windows and
+     * Linux do not relocate the local APIC.
+     */
+    std::uint64_t local_apic_base();
+
+    /**
      * Whether execute-only translations are offered to a guest hypervisor,
      * which is IA32_VMX_EPT_VPID_CAP bit 0 (SDM A.10).
      *

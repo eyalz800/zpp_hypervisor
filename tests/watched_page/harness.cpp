@@ -92,11 +92,25 @@ static std::uint64_t g_command_rewrite_to = 0;
  */
 static bool g_roster_fully_adopted = false;
 
+/**
+ * What IA32_APIC_BASE reads, and how wide this processor's physical
+ * addresses are - the two inputs to `local_apic_base`.
+ *
+ * Both are knobs because the pair is what `watch_local_apic`'s refusal
+ * to arm on a relocated APIC page turns on, and a relocation above the
+ * 36-bit fallback is the case that used to slip through it.
+ */
+static std::uint64_t g_apic_base_msr = 0;
+static std::uint64_t g_physical_address_bits = 39;
+
 // ------------------------------------------------------- shim defintions
 namespace zpp::arch::x86_64
 {
-std::uint64_t rdmsr(std::uint32_t)
+std::uint64_t rdmsr(std::uint32_t index)
 {
+    if (msr::ia32_apic_base == index) {
+        return g_apic_base_msr;
+    }
     return 0;
 }
 
@@ -189,6 +203,21 @@ hypervisor::on_interrupt_command(std::uint64_t command)
 bool hypervisor::every_platform_processor_adopted()
 {
     return g_roster_fully_adopted;
+}
+
+/**
+ * The processor's physical-address width, which the real
+ * `local_apic_base` masks IA32_APIC_BASE down to. The real one lives in
+ * nested_ept.cpp and reads CPUID.80000008H:EAX[7:0]; this harness runs
+ * on arm64 as often as not, so it is a knob.
+ *
+ * Thirty-nine by default rather than thirty-six, because thirty-six is
+ * the fallback that made the four masks this replaced look correct -
+ * a default of 36 would let the bug back in without a failing check.
+ */
+std::uint64_t hypervisor::physical_address_bits()
+{
+    return g_physical_address_bits;
 }
 
 } // namespace zpp::hypervisor
@@ -2821,14 +2850,13 @@ static void test_epte_bound()
 
     // Through the real `watch_guest_page_writes`, so the refusal is the
     // one a caller actually gets rather than the predicate on its own.
-    auto beyond = hv().watch_guest_page_writes(
-        hypervisor_t::ept_identity_limit,
-        &hypervisor_t::on_local_apic_write,
-        &hv(),
-        page_watch::mode::notify);
+    auto beyond =
+        hv().watch_guest_page_writes(hypervisor_t::ept_identity_limit,
+                                     &hypervisor_t::on_local_apic_write,
+                                     &hv(),
+                                     page_watch::mode::notify);
 
-    check(!beyond.has_value(),
-          "arming a watch at the limit is refused");
+    check(!beyond.has_value(), "arming a watch at the limit is refused");
     check(!beyond.has_value() &&
               (hypervisor_t::error::physical_address_beyond_ept ==
                static_cast<hypervisor_t::error>(beyond.error().code())),
@@ -2854,6 +2882,75 @@ static void test_epte_bound()
     check(within.has_value(),
           "a watch one page below the limit is still armed");
 
+    reset();
+}
+
+/**
+ * `watch_local_apic` must refuse to arm on an APIC that has moved, and
+ * the mask it compares through is what decides whether it can tell.
+ *
+ * The refusal exists because `filter_local_apic_write` and
+ * `on_local_apic_write` reach the page by dereferencing `page << 12` as
+ * a **host virtual address**, and the host page table maps exactly one
+ * local APIC page - the one read from IA32_APIC_BASE before any guest
+ * ran. Arming on any other page is either a #PF in the exit handler or,
+ * where the old page is still mapped, a watch on a page the APIC no
+ * longer decodes - so every interrupt-command write goes unintercepted
+ * and no start-up IPI is ever seen.
+ *
+ * The field is IA32_APIC_BASE[MAXAPICADDR-1:12] - SDM 13.4.4
+ * ([[PAGE 3577]]), with MAXAPICADDR "normally CPUID.80000008H:EAX[7:0]
+ * ... and 36 otherwise". Four hard-coded `0xffffff000` masks applied
+ * the 36-bit fallback unconditionally, so on a processor reporting more
+ * than 36 bits **both sides of the comparison were truncated** and a
+ * relocation that moved only the bits above 36 compared equal. This is
+ * that case, and it is reachable by a guest with one WRMSR - nothing in
+ * this VMM validates the value it forwards to hardware.
+ */
+static void test_relocated_apic_is_refused()
+{
+    reset();
+
+    constexpr std::uint64_t mapped = 0xfee00000;
+    constexpr std::uint64_t enabled = 0x800;
+
+    g_physical_address_bits = 39;
+    hv().mapped_apic_page = mapped;
+
+    // The negative control first, and it has to be first: if arming at
+    // the mapped page did not work, the refusals below would prove
+    // nothing about the mask.
+    g_apic_base_msr = mapped | enabled;
+    hv().watch_local_apic(true);
+    check(mapped == hv().watched_apic_page,
+          "the APIC page this VMM maps is armed - the control, without "
+          "which a refusal proves nothing");
+
+    // Relocated by one bit *above* the 36-bit fallback, and nothing
+    // else changed. Truncated to 36 bits this is byte-for-byte the
+    // control above, which is exactly why it used to be accepted.
+    g_apic_base_msr = (1ull << 36) | mapped | enabled;
+    hv().watch_local_apic(true);
+    check(0 == hv().watched_apic_page,
+          "an APIC relocated above the 36-bit fallback is refused - the "
+          "bits that moved are inside IA32_APIC_BASE's field on any "
+          "processor reporting more than 36 physical address bits");
+
+    // And the same value on a processor that really does report 36,
+    // where those bits are reserved and hardware would have faulted the
+    // write. The mask then genuinely is `0xffffff000`, the base reads
+    // back as the mapped page, and arming is correct.
+    g_physical_address_bits = 36;
+    hv().watch_local_apic(true);
+    check(mapped == hv().watched_apic_page,
+          "on a processor reporting 36 bits the same MSR value names "
+          "the mapped page, because bit 36 is reserved there - so the "
+          "mask follows MAXAPICADDR rather than refusing everything");
+
+    g_physical_address_bits = 39;
+    g_apic_base_msr = 0;
+    hv().watch_local_apic(false);
+    hv().mapped_apic_page = 0;
     reset();
 }
 
@@ -2885,6 +2982,7 @@ int main()
     test_roster_drops_the_watch();
     test_apic_timer();
     test_epte_bound();
+    test_relocated_apic_is_refused();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
 

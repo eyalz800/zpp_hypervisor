@@ -433,14 +433,26 @@ void hypervisor::on_local_apic_write(void * context,
                               static_cast<std::uint32_t>(*issue));
     }
 }
+std::uint64_t hypervisor::local_apic_base()
+{
+    // Bits MAXAPICADDR-1:12 of IA32_APIC_BASE, and MAXAPICADDR is the
+    // same CPUID.80000008H:EAX[7:0] that `physical_address_bits` reads,
+    // with the same fallback of 36. See the declaration for what the
+    // four hard-coded 36-bit masks this replaces were costing.
+    constexpr std::uint64_t page_offset_bits = 12;
+    auto width = physical_address_bits();
+    auto mask = (((1ull << width) - 1) >> page_offset_bits)
+                << page_offset_bits;
+
+    return arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & mask;
+}
+
 void hypervisor::watch_local_apic(bool watch)
 {
     // Where the page is, from the guest's own view of it. The base is
     // not architecturally fixed - IA32_APIC_BASE can relocate it - so it
     // is read rather than assumed to be 0xfee00000.
-    constexpr std::uint64_t base_mask = 0xffffff000ull;
-    auto base =
-        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+    auto base = local_apic_base();
 
     if (!watch) {
         if (this->watched_apic_page) {
@@ -464,7 +476,11 @@ void hypervisor::watch_local_apic(bool watch)
     // page by dereferencing `page << 12` as a **host virtual address**,
     // and the host page table maps exactly one local APIC page - read
     // from IA32_APIC_BASE once, before any guest ran. Relocating the
-    // local APIC is a guest's to do: IA32_APIC_BASE[35:12] is writable
+    // local APIC is a guest's to do: IA32_APIC_BASE[MAXAPICADDR-1:12]
+    // is writable - and it is that field rather than [35:12], which is
+    // what `local_apic_base` exists to get right; with both sides of
+    // the comparison below truncated to 36 bits a move that changed
+    // only the bits above compared equal and this refusal never fired
     // and `note_apic_mode` follows the move, so before this the watch
     // was armed on the new page and the guest's next interrupt-command
     // store took an EPT violation into a filter that read an unmapped

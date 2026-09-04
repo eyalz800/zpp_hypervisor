@@ -84,6 +84,23 @@ void wrmsr(std::uint32_t, std::uint64_t)
 }
 } // namespace zpp::arch::x86_64
 
+namespace zpp::hypervisor
+{
+/**
+ * Where the local APIC page is. The real one lives in
+ * local_apic_write.cpp - which this harness does not compile - and
+ * masks IA32_APIC_BASE to bits MAXAPICADDR-1:12. Here the shim's
+ * variable is already a page-aligned frame, so the page offset is the
+ * whole of the mask; what this harness checks is the register offsets
+ * `send_wake_nmi` adds to it, not the masking.
+ */
+std::uint64_t hypervisor::local_apic_base()
+{
+    return arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) &
+           ~0xfffull;
+}
+} // namespace zpp::hypervisor
+
 // ------------------------------------------------------------- helpers
 /**
  * One hypervisor, reset between tests. Too big for a stack.

@@ -1635,9 +1635,7 @@ void hypervisor::send_start_up_ipi(std::uint64_t apic,
     // it. The destination half is written first: writing the low half is
     // what sends the interrupt, so a destination written after it would
     // be written after the thing that used it.
-    constexpr std::uint64_t base_mask = 0xffffff000ull;
-    auto base =
-        arch::x86_64::rdmsr(arch::x86_64::msr::ia32_apic_base) & base_mask;
+    auto base = local_apic_base();
 
     constexpr std::uint64_t interrupt_command_low = 0x300;
     constexpr std::uint64_t interrupt_command_high = 0x310;
