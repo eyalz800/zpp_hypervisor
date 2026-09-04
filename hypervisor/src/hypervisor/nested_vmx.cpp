@@ -560,6 +560,19 @@ bool hypervisor::on_vmx_instruction(std::size_t cpu,
     // executes - so the answer to "which processor am I" was itself a
     // VMREAD, on the path whose whole cost is VMREADs.
     if (cpu >= max_cpus) {
+        // Recorded rather than silently refused. The caller turns this
+        // into a #UD, and a guest hypervisor answers a #UD on a VMX
+        // instruction by bugchecking, since it believes nothing is above
+        // it - so this branch, taken once, ends the machine. It had no
+        // counter at all.
+        //
+        // The VPID is read here and only here. This path is by
+        // construction not hot, and the whole point of the comment above
+        // is that the index and the VPID are two spellings of one
+        // identity; if they ever disagree, this is where it shows.
+        this->index_out_of_range += 1;
+        this->index_out_of_range_last = cpu;
+        this->index_out_of_range_vpid = vmcs.vpid();
         return false;
     }
 

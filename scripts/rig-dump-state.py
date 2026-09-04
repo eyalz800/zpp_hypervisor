@@ -6872,7 +6872,8 @@ def main():
                "nested_entry_refusals", "entry_refusals",
                "l2_vp_assist", "l2_vp_assist_eptp",
                "guest_in_vmx_operation", "guest_vmxon_pointer",
-               "guest_current_vmcs",
+               "guest_current_vmcs", "index_out_of_range",
+               "index_out_of_range_last", "index_out_of_range_vpid",
                "recovery_field_readback",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
@@ -8865,6 +8866,33 @@ def main():
     # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
     # above it, bugchecks with HvpHandleHostException (crash code 0x11).
     # `read-channel-state.sh` prints this and this reader never did.
+    # The #UD branch that had no counter. `on_vmx_instruction` refuses
+    # any VMX instruction from the level above when the processor index
+    # is out of range, and the caller turns that into a #UD - which a
+    # guest hypervisor answers by bugchecking. Once is enough to end the
+    # machine.
+    if "index_out_of_range" not in off:
+        print("\nindex out of range: MEMBER ABSENT from this reader - "
+              "not zero.")
+    else:
+        ir = Monitor(args.rig, args.port)
+        for _m in ("index_out_of_range", "index_out_of_range_last",
+                   "index_out_of_range_vpid"):
+            if _m in off:
+                ir.queue(instance + off[_m], 1)
+        ig = ir.run()
+        n = ig.get(instance + off["index_out_of_range"], 0)
+        if n:
+            print(f"\nVMX INSTRUCTIONS REFUSED FOR AN OUT-OF-RANGE "
+                  f"PROCESSOR INDEX: {n:,}")
+            print(f"  last index {ig.get(instance + off['index_out_of_range_last'], 0)}"
+                  f"  vpid at that moment "
+                  f"{ig.get(instance + off['index_out_of_range_vpid'], 0)}"
+                  f"   <- each one is a #UD to the guest hypervisor")
+        else:
+            print("\nVMX instructions refused for an out-of-range "
+                  "processor index: none")
+
     if "guest_in_vmx_operation" not in off:
         print("\nnested VMX state per processor: MEMBER ABSENT from "
               "this reader - not 'clear'.")

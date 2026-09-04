@@ -10369,6 +10369,34 @@ private:
     std::uint64_t entry_refusals[max_cpus][static_cast<std::size_t>(
         entry_refusal::count)]{};
 
+    /**
+     * How many VMX instructions from the level above were refused with
+     * #UD because the processor index was out of range, and the last
+     * index that did it.
+     *
+     * `on_vmx_instruction` opens with `if (cpu >= max_cpus) return
+     * false;`, and the caller turns that false into a #UD. There was no
+     * counter, so a refusal on that branch was invisible - and it is
+     * the branch that survives once the other #UD site is eliminated.
+     *
+     * Why it matters here rather than in general: hvix64 answers a
+     * refused VMX instruction by bugchecking, since it believes nothing
+     * is above it. `HvpHandleHostException` records crash code 0x11 and
+     * the machine resets. Which instruction it happens to be executing
+     * decides which code appears, which is why a fixed wall produced a
+     * varying crash code.
+     *
+     * `index_out_of_range_last` is the offending value, not a slot, so
+     * it is deliberately not bounded by max_cpus.
+     * @{
+     */
+    std::uint64_t index_out_of_range{};
+    std::uint64_t index_out_of_range_last{};
+    std::uint64_t index_out_of_range_vpid{};
+    /**
+     * @}
+     */
+
     void note_entry_refusal(std::size_t cpu, entry_refusal which)
     {
         auto index = static_cast<std::size_t>(which);
