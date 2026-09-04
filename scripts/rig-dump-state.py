@@ -6863,7 +6863,8 @@ def main():
                # 0x5a5a12345a5a1234 where the layer below keeps
                # CR3-target value 0 and 0 where it discards it, which is
                # what made every refusal a dead processor.
-               "nested_entry_refusals", "recovery_field_readback",
+               "nested_entry_refusals", "entry_refusals",
+               "recovery_field_readback",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
                "quiet_samples", "quiet_overflow",
@@ -8815,6 +8816,41 @@ def main():
     # was ABSENT FROM THIS READER, so the two cases - rescued and truly
     # gone - printed identically. Fifth member in this tree recorded
     # faithfully and never read out.
+    # **Per processor and per reason, which the aggregate cannot say.**
+    # `nested_entry_refusals` counts them all together, and a refusal of
+    # `resume_not_launched` is the one Hyper-V answers by bugchecking:
+    # it reports VMfailValid with VM-instruction error 5, "VMRESUME with
+    # non-launched VMCS", through HvpBugCheckVmEntryFailure - crash code
+    # 0x06, which is what a failing 2-CPU boot leaves in hvix64's crash
+    # record. So which reason, on which processor, is the whole question
+    # and the array has been carrying the answer all along.
+    if "entry_refusals" in off:
+        REFUSALS = ["no_current_vmcs", "launch_not_clear",
+                    "resume_not_launched", "control_or_host_state"]
+        rr = Monitor(args.rig, args.port)
+        rr.queue(instance + off["entry_refusals"], args.cpus * len(REFUSALS))
+        rg = rr.run()
+        rows = []
+        for cpu in range(args.cpus):
+            for i, name in enumerate(REFUSALS):
+                n = rg.get(instance + off["entry_refusals"]
+                           + 8 * (cpu * len(REFUSALS) + i), 0)
+                if n:
+                    rows.append((cpu, name, n))
+        if rows:
+            print("\nsecond-level entries REFUSED by this VMM, "
+                  "per processor and reason")
+            for cpu, name, n in rows:
+                mark = ("   <- Hyper-V answers this with "
+                        "HvpBugCheckVmEntryFailure, crash code 0x06"
+                        if name == "resume_not_launched" else "")
+                print(f"  cpu {cpu}  {name:22s} {n:>10,}{mark}")
+        else:
+            print("\nsecond-level entries refused: none on any processor")
+    else:
+        print("\nentry_refusals: MEMBER ABSENT from this reader - not "
+              "zero. Add it rather than reading this as none.")
+
     if "pending_event_lost" in off:
         print("\ncpu  held events seen by reflect_l2_exit  "
               "first          last           at reason")
