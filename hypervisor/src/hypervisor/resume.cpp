@@ -635,6 +635,29 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                 // control field, and if it is rewritten on the way in
                 // then the CR0 writes that "must trap" simply do not
                 // have to.
+                // **Re-write the mask, then read it back.**
+                //
+                // cpu 1's own CR0 writes DID exit earlier in the boot -
+                // two `cr-access` exits at firmware RIPs `0x7ef5a28f`
+                // and `0x7f39f05a` - and stop exiting after the second
+                // INIT-SIPI. So the mask works on this processor and
+                // then ceases to, which is a much sharper statement
+                // than "it never worked".
+                //
+                // This machine is nested: what this VMM writes is a
+                // vmcs12 that the layer below merges into the vmcs02 it
+                // actually runs. If that merge is stale for a processor
+                // it has just handled an INIT-SIPI for, re-writing the
+                // field here marks it dirty again and the merge must
+                // redo it. Same value, so on correct hardware this is a
+                // no-op and costs one VMWRITE on six entries per
+                // processor per boot.
+                //
+                // Diagnostic and candidate fix at once: if the CR0
+                // writes start exiting after this, the mask was not
+                // reaching the hardware and that is the bug.
+                vmcs.cr0_guest_host_mask(vmcs.cr0_guest_host_mask());
+
                 log("cpu {} vmptrst {} at resume rip {} cr0mask {} "
                     "entryctl {}",
                     cpuid,
