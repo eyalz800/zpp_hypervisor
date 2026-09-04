@@ -3970,7 +3970,13 @@ def dump_ap_census(args, elf, instance):
                "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_raw",
                "cpuid_leaf0_rip", "l1_gs_base", "l1_gs_index",
                "l1_gs_index_taken", "start_up_applied", "init_emulated",
-               "started_by_start_up_ipi", "launch_error"]
+               "started_by_start_up_ipi", "launch_error",
+               # `off` is a CURATED list, not every DWARF member, and
+               # the queue below skips silently on `if name in off`.
+               # A member absent from here reads as zero, which is
+               # indistinguishable from a counter that never moved -
+               # the exact failure these two exist to expose.
+               "start_up_declined", "start_up_from"]
     off = gdb_offsets(elf, members, optional=True)
     if "cpuid_leaf_counts" not in off:
         print("\n[ap census skipped: the deployed ELF has no "
@@ -4003,6 +4009,9 @@ def dump_ap_census(args, elf, instance):
         if _m in off:
             reader.queue(instance + off[_m],
                          args.cpus * (4 if _m == "start_up_from" else 1))
+        else:
+            print(f"  [{_m} ABSENT from the deployed ELF - the lines "
+                  f"below that need it are missing, not zero]")
     for cpu in range(args.cpus):
         for name in ("cpuid_leaf_codes", "cpuid_leaf_counts"):
             reader.queue(instance + off[name] + cpu * slots * 8, slots)
