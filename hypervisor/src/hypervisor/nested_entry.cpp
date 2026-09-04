@@ -10502,7 +10502,18 @@ hypervisor::on_l2_exit(std::size_t cpu,
             this->vmcall_max_code = static_cast<std::uint16_t>(code);
         }
 
-        if ((0x82 == code) || ((code >= 0xb1) && (code <= 0xb6))) {
+        // **0x76 joins them: `HvCallAddLogicalProcessor`.** It is the
+        // last exit before every two-processor boot resets, and the
+        // open question is precisely what this mechanism answers -
+        // whether the guest hypervisor's handler *returns*. If it does,
+        // `attach_captured` increments and `attach_status` holds the
+        // hypercall status it produced; if it does not, `attach_pending`
+        // is still set at the end and nothing was captured. Measured so
+        // far: no `vmresume` follows that exit, which suggests the
+        // handler never completes - this turns the suggestion into a
+        // reading, and gives the status if it is wrong.
+        if ((0x82 == code) || (0x76 == code) ||
+            ((code >= 0xb1) && (code <= 0xb6))) {
             this->attach_pending[cpu] = 1;
             this->attach_pending_rip[cpu] = this->vmcs.guest_rip();
             this->attach_call_code[cpu] = static_cast<std::uint16_t>(code);

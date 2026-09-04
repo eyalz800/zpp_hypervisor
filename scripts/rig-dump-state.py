@@ -3978,7 +3978,9 @@ def dump_ap_census(args, elf, instance):
                # the exact failure these two exist to expose.
                "start_up_declined", "start_up_from",
                "resume_count", "last_resume_rip",
-               "vmcall_seen", "vmcall_max_code", "vmcall_code_bitmap"]
+               "vmcall_seen", "vmcall_max_code", "vmcall_code_bitmap",
+               "attach_pending", "attach_captured", "attach_status",
+               "attach_call_code", "attach_pending_rip"]
     off = gdb_offsets(elf, members, optional=True)
     if "cpuid_leaf_counts" not in off:
         print("\n[ap census skipped: the deployed ELF has no "
@@ -4007,6 +4009,10 @@ def dump_ap_census(args, elf, instance):
         reader.queue(instance + off["started_by_start_up_ipi"],
                      (args.cpus + 7) // 8)
     # Four slots per processor, packed ASCII of the applying caller.
+    for _m in ("attach_pending", "attach_captured", "attach_status",
+               "attach_call_code", "attach_pending_rip"):
+        if _m in off:
+            reader.queue(instance + off[_m], args.cpus)
     for _m in ("vmcall_seen", "vmcall_max_code"):
         if _m in off:
             reader.queue(instance + off[_m], 1)
@@ -4171,6 +4177,20 @@ def dump_ap_census(args, elf, instance):
               f"started_by_start_up_ipi {started}  launch_error {error}")
         print(f"    of those, DECLINED as a repeat start-up {declined}, "
               f"so {real} actually reached the guest state")
+        # Did the tracked hypercall RETURN? `pending` still set with
+        # `captured` zero means the guest hypervisor's handler never
+        # completed - which is the whole question for code 0x76.
+        ap = word("attach_pending", cpu)
+        if ap is not None:
+            cap = word("attach_captured", cpu) or 0
+            stt = (word("attach_status", cpu) or 0) & 0xffff
+            cod = (word("attach_call_code", cpu) or 0) & 0xffff
+            rip = word("attach_pending_rip", cpu) or 0
+            verdict = ("STILL PENDING - the handler did not return"
+                       if (ap & 0xff) else "returned")
+            print(f"    tracked hypercall: code 0x{cod:x} "
+                  f"pending {ap & 0xff} captured {cap} status 0x{stt:x} "
+                  f"rip 0x{rip:x}  <- {verdict}")
         rc = word("resume_count", cpu)
         rr = word("last_resume_rip", cpu)
         if rc is not None:
