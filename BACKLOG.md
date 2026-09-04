@@ -1,125 +1,124 @@
 # Known defects
 
-## "The AP's CR0 write does not exit" has a third reading nobody instrumented: it was never entered again - 2026-09-04
+## Auditing the AP path: three defects, and one silent state the ring cannot report - 2026-09-04
 
-Static audit of the application-processor path against the SDM and KVM.
-No rig. Three commits landed; the reading of the existing evidence is
-what matters most here.
+Static audit against the SDM and KVM, no rig, done in parallel with the
+work above and rebased onto it afterwards.
 
-**The architecture agrees with the framing, so the inference stands.**
-SDM 28.1.3, `.references/sdm.txt:200761`: "MOV to CR0 ... causes a VM
-exit unless the value of its source operand matches, for the position of
-each bit set in the CR0 guest/host mask, the corresponding bit in the
-CR0 read shadow." There is no unrestricted-guest exemption from that
-rule - the exemption unrestricted guest grants is from the *fixed bits*,
-which is a different paragraph. With `cr0_guest_host_mask` = `0x80000020`
-(PG|NE) and a post-INIT read shadow whose PG is 0, `mov cr0, 0x80000001`
-must exit. So "the mask is right, the processor is in non-root under that
-VMCS, and the write does not exit" really are inconsistent.
+**Its original framing is superseded by `9392d8b` and `6e0d3db`, which
+landed first.** This section was written to the older question - "the
+mask carries PG and the write does not exit, which is impossible" - and
+that question is dissolved: the exit predicate is against the read
+shadow, and a hardware instruction breakpoint fires *before* the target
+executes. Nothing below re-argues it. What survives is three defects
+found on the way and one instrument gap.
 
-**But one of the three facts is weaker than it reads.** "Executes as far
-as `mov %rax,%cr0` and never reaches the next instruction" is *precisely*
-what a successful control-register exit looks like from a breakpoint: a
-CR-access exit is fault-like, RIP is left on the MOV, and the instruction
-never retires. That observation is therefore evidence *for* the exit
-happening, not against it. What is genuinely unexplained is the pair
-"the exit happened" and "`on_vm_exit`'s unconditional AP log did not
-fire".
+### A refused VM entry on this VMM's own VMCS was silent in the log
 
-**And there is a third state neither instrument can see: the processor
-was never entered again.** A failed VMRESUME produces no VM exit at all
-(SDM 31.2 - it sets RFLAGS and continues at the next instruction), so
-`on_vm_exit` never runs; `record_entry_failure` wrote **members only and
-no log line**; and the `vmresume` stub then parks the processor in
-`cli; hlt` for the rest of the boot. The observable signature of that is,
-exactly:
+`record_entry_failure` wrote members and no log line, and the `vmresume`
+stub then parks the processor in `cli; hlt` for the rest of the boot. A
+failed VMRESUME produces no VM exit (SDM 31.2 - it sets RFLAGS and
+continues at the next instruction, which is the stub's failure path), so
+`on_vm_exit` never runs either. The observable result is: the log stops
+wherever the last handler left it, and that processor takes zero exits
+for ever - which is **indistinguishable from a processor that is running
+and simply not exiting**, the exact distinction three sessions of this
+investigation turned on.
 
-- the log's newest records are `start-up applied on cpu 0x2` and its
-  state trace, with nothing after them,
-- cpu 1 takes zero exits from then on, permanently,
-- the mask printed in that trace is correct, because it was read before
-  the entry that never happened.
+It is *not* what happened here - `9392d8b` establishes that the AP
+arrives at `0x216b` and that `exit_reason_counts[1]` holds 192 exits, and
+a processor parked by a refused entry has none. The hole is worth
+closing anyway, because nothing could have reported it. There is now a
+log line, and the members that discriminate it were being written all
+along: `entry_failures_seen`, `last_entry_failure_flags` (which carries a
+validity bit so absence and zero are distinguishable),
+`entry_failure_flags[cpu]` and `entry_failure_error[cpu]`.
 
-Which is the evidence as recorded. It is not a claim that this *is* what
-happened - it is a claim that the evidence does not distinguish it from
-"the CR0 write does not exit", and that the hardware breakpoint hit would
-then belong to an earlier application of the start-up state
-(`start_up_applied[1]` counts them, and hvix64 retries).
+### `jc` instead of `jbe` on seven VMX instructions
 
-**The discriminator costs no rebuild and no boot**, because the members
-were being written all along - `entry_failures_seen`,
-`last_entry_failure_flags` (which carries a validity bit precisely so
-that absence and zero can be told apart), `entry_failure_flags[1]` and
-`entry_failure_error[1]`. Read those four from the next dump before
-anything else. `record_entry_failure` now also writes a log line, so a
-future run says it in the ring.
+SDM 33.2 (`.references/sdm.txt:207415-207450`): only VMfailInvalid sets
+CF; **VMfailValid sets ZF with CF clear**, and `VMfail(n)` resolves to
+VMfailValid whenever a VMCS is current - always, inside an exit handler.
+`vmptrld`, `vmclear`, `vmxon`, `vmxoff`, `invept`, `invvpid` and
+`vmptrst` all reported that as success. The argument was already written
+out above `vmread` in the same file, where it was found and fixed for two
+instructions; the other seven were left behind.
 
-### What was audited and found sound
+The sharpest consequence is `nested_shadow_vmcs.cpp`, whose two copies
+`vmptrld` the shadow region *with vmcs01 or vmcs02 current* - so a
+refusal there is a VMfailValid by construction. A silently refused load
+leaves the previous VMCS current, and `copy_vmcs12_to_shadow` then writes
+the guest hypervisor's field values over the VMCS about to be entered.
+`cr0_guest_host_mask` and `cr0_read_shadow` are both in
+`shadow_read_write_fields`, so that is a mechanism by which a mask read
+correct at one instant is wrong at the next, with nothing to say so.
 
-- **VMCS currency on an adopted AP.** `enter_root_mode` derives both
-  region addresses from the slot and does VMXON, VMCLEAR, VMPTRLD with
-  no current VMCS, so every failure there is VMfailInvalid and is caught.
-  `setup_vmcs` writes `vpid(cpu + 1)`, so `vmcs.vpid() - 1` is the slot
-  by construction, and `cpuid` reaching `on_vm_exit` is
-  `caller_context.rdi`, which `start_up_on_this_processor` sets to the
-  same slot. Nothing on the AP's INIT/SIPI path rewrites
-  `cr0_guest_host_mask`, `cr0_read_shadow` or `msr_bitmap` on vmcs01
-  between `apply_start_up` and the entry.
-- **`launched` bookkeeping.** vmcs01: VMCLEAR in `enter_root_mode`,
-  VMLAUNCH once, VMRESUME after; vmcs02: VMCLEAR exactly once in
-  `setup_vmcs`, so it really is launched for the rest of the boot and
-  `vmcs02_launched` staying true is right. An INIT-SIPI on an
-  already-adopted processor changes neither launch state, which is
-  correct - INIT emulation is a VMCS rewrite, not a VMCLEAR.
-- **The VMCS field cache is off** in the default build (`vcache=0` in the
-  manifest), so a stale cached mask cannot be the reading. Check the
-  manifest of the binary that actually ran before dismissing it there.
+`scripts/ci/check-invariants.sh` now disassembles the built hypervisor
+and fails on a carry-only branch after any of these. It tests for
+`jb`/`jc`/`jae` rather than demanding `jbe`, because the `vmread` inside
+the `vmlaunch` stub deliberately has no branch after it. Negative control
+run both ways.
 
-### Where zpp differs from KVM, structurally
+### `relaunch_after_sleep` was spent on a second-level entry
 
-`vmx_vcpu_load_vmcs` (`.references/kvm/vmx.c:1445`) keeps
-`per_cpu(current_vmcs, cpu)` and updates it *in the same statement pair*
-as `vmcs_load`, and `__loaded_vmcs_clear` (`vmx.c:804-805`) sets
-`loaded_vmcs->cpu = -1; loaded_vmcs->launched = 0;` together - so the
-"which VMCS" and "is it launched" records cannot drift from the
-instructions that changed them. This tree keeps `vmcs02_launched` in
-`on_l2_exit` and clears it only in `setup_vmcs`, which is correct today
-only because vmcs02 is VMCLEARed exactly once. If a second VMCLEAR of
-vmcs02 is ever added, the flag has to be cleared beside it.
+The flag means "vmcs01 must be launched, not resumed" - the sleep
+quiesce leaves VMX operation and `enter_root_mode` VMCLEARs on the way
+back in. `resume_guest` read and cleared it before asking whether the
+entry was into the second-level guest, which picks its instruction from
+vmcs02's launch state and ignores the flag. The requirement was
+therefore thrown away and the next vmcs01 entry executed VMRESUME on a
+non-launched VMCS: `vm_instruction_error` 5, out of the stub that
+produces no exit and parks the processor.
 
-### Three defects fixed on the way
+The identical defect on the enlightened mark two branches below was
+measured (`evmcs_mark_set` 1, `evmcs_mark_seen` 1, beside
+`vm_instruction_error` 5) and guarded with `!entering_l2` at the time;
+the flag beside it was not. Reachable because `on_l2_exit` answers an I/O
+exit neither level intercepts with `deferred`, so the sleep-control-port
+handler can run with `running_l2` set. `tests/resume_guest` covers it,
+negative control run both ways.
 
-1. **`jc` instead of `jbe` on seven VMX instructions.** SDM 33.2: only
-   VMfailInvalid sets CF; VMfailValid sets ZF with CF clear, and
-   `VMfail(n)` resolves to VMfailValid whenever a VMCS is current -
-   always, inside an exit handler. `vmptrld`, `vmclear`, `vmxon`,
-   `vmxoff`, `invept`, `invvpid` and `vmptrst` all reported that as
-   success. The sharpest consequence is `nested_shadow_vmcs.cpp`, whose
-   two copies `vmptrld` the shadow region *with vmcs01 or vmcs02
-   current*: a silently refused load leaves the previous VMCS current and
-   `copy_vmcs12_to_shadow` then writes the guest hypervisor's field
-   values over the VMCS about to be entered - `cr0_guest_host_mask` and
-   `cr0_read_shadow` are both in `shadow_read_write_fields`. That is a
-   mechanism by which an AP's mask could be wrong at the instant it
-   matters while reading correct a moment earlier, and it is now
-   detectable. `scripts/ci/check-invariants.sh` fails on a carry-only
-   branch after any of these, checked on the disassembled artifact.
-2. **A refused VM entry wrote no log line.** Above.
-3. **`relaunch_after_sleep` was consumed on a second-level entry**,
-   which throws away "vmcs01 must be launched", exactly as the
-   enlightened mark beside it once did. `tests/resume_guest` covers it,
-   negative control run both ways.
+### What the audit found sound
 
-### What is not settled
+- `enter_root_mode` derives both region addresses from the slot and runs
+  VMXON, VMCLEAR, VMPTRLD with no current VMCS, so every failure there is
+  VMfailInvalid and was caught even before the fix above.
+- `setup_vmcs` writes `vpid(cpu + 1)` and `cpuid` reaching `on_vm_exit`
+  is `caller_context.rdi`, which `start_up_on_this_processor` sets to the
+  same slot - so the two identities cannot disagree by construction.
+- Nothing on the AP's INIT/SIPI path rewrites `cr0_guest_host_mask`,
+  `cr0_read_shadow` or `msr_bitmap` on vmcs01 between `apply_start_up`
+  and the entry.
+- The VMCS field cache is off in the default build (`vcache=0`), so a
+  stale cached mask is not a candidate - but read the manifest of the
+  binary that ran before saying so of any particular run.
+- vmcs02 is VMCLEARed exactly once, in `setup_vmcs`, so `vmcs02_launched`
+  staying true after the first nested entry is correct.
 
-Whether the CR0 exit reaches KVM and is not reflected. KVM's decision
-uses `vmcs12->cr0_guest_host_mask` and `vmcs12->cr0_read_shadow` from its
-own struct (`nested_vmx_exit_handled_cr`, `.references/kvm/nested.c:6200`),
-and `nested_vmx_run` calls `copy_shadow_to_vmcs12` before every entry
-(`nested.c:3703`), so a stale copy is not the explanation *if* our
-VMWRITEs reach that struct. That is checkable from the host with the KVM
-statistics - a run where cpu 1 is wedged should show whether L0 is taking
-CR-access exits at all - and has not been done.
+### Where this tree differs from KVM structurally
+
+`vmx_vcpu_load_vmcs` (`.references/kvm/vmx.c:1445`) updates
+`per_cpu(current_vmcs, cpu)` in the same statement pair as `vmcs_load`,
+and `__loaded_vmcs_clear` (`vmx.c:804-805`) sets `loaded_vmcs->cpu = -1;
+loaded_vmcs->launched = 0;` together - so "which VMCS is current" and "is
+it launched" cannot drift from the instructions that changed them. Here
+`vmcs02_launched` is set in `on_l2_exit` and cleared only in
+`setup_vmcs`. That is correct today only because vmcs02 is cleared once.
+**If a second VMCLEAR of vmcs02 is ever added, the flag has to be
+cleared beside it.**
+
+### One caution about the breakpoint measurements
+
+`9392d8b` is right that a fault-class instruction breakpoint proves
+arrival rather than execution. The other half is worth stating: the
+breakpoint is also *sufficient on its own* to stop the write retiring,
+because the `#DB` is intercepted by L0 and the processor is held there.
+So "the long-mode write never retires", measured with a breakpoint on
+that instruction, cannot be evidence about a run without one. The
+counters that settle it - `exit_reason_counts[1][28]`,
+`exit_reason_counts[1][2]` - have to come from a boot with nothing
+attached, which is the same rule CLAUDE.md already states for a reset
+that appears under gdb, applied to a non-event.
 
 ## The HVCI copy path issues NO per-page TB-flush when SkmiFlags bit 23 is clear - 2026-09-03
 
