@@ -10522,7 +10522,16 @@ private:
         }
 
         this->vmx_operand_failure_reason = rip;
-        this->vmx_operand_failure_linear = linear;
+        // **Only when the caller has one.** The vmcs-pointer path
+        // records the address itself, inside `read_guest_vmcs_pointer`,
+        // which is the only scope that holds it - and then returns an
+        // error to a caller that passes zero here. Overwriting
+        // unconditionally clobbered the one useful field with the one
+        // value that means "not known", and the dump printed
+        // `linear 0x0` for every failure on that path.
+        if (0 != linear) {
+            this->vmx_operand_failure_linear = linear;
+        }
         this->vmx_operand_failure_error = error;
         this->vmx_operand_failure_running_l2 =
             (cpu < max_cpus) ? (this->running_l2[cpu] ? 1 : 0) : 2;

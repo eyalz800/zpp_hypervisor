@@ -1003,6 +1003,14 @@ hypervisor::read_guest_vmcs_pointer(const arch::x86_64::context & context)
         // only scope that still has the linear address - the callers
         // receive an error and nothing else, which is why they could
         // only ever have produced the wrong fault.
+        // Recorded here because this is the only scope that has it.
+        // The callers pass zero for the linear address - they receive
+        // an error and nothing else - so the dump has been printing
+        // `linear 0x0` for every failure on this path, which is the
+        // instrument's limitation and not a reading. Without the
+        // address there is no way to ask why a page on the level
+        // above's own stack is not mapped in its own tables.
+        this->vmx_operand_failure_linear = *linear;
         inject_page_fault(*linear, 0);
         return std::unexpected(read.error());
     }
