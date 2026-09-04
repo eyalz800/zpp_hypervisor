@@ -6653,6 +6653,16 @@ def main():
                "running_l2", "events_requeued", "events_deferred",
                "pending_event", "unhandled_exit", "ap_fault",
                "vm_entry_failure",
+               # `on_sleep_request` has recorded these since it was
+               # written and NOTHING has ever printed them - the member
+               # resolves in the ELF and was simply absent from this
+               # list, which is the same way `start_up_declined` read
+               # as a plausible zero for three boots. It is the one
+               # field that separates "the guest asked the platform to
+               # power off" from a triple fault and from a device-model
+               # reset, all three of which end in `paused (shutdown)`
+               # and are otherwise indistinguishable by run state.
+               "sleep_request",
                # Recorded by exit_dispatch.cpp since the nesting work and
                # never read out. The exit ring of four consecutive resets
                # ends on one of these.
@@ -7429,6 +7439,9 @@ def main():
     # on stopping at `guest_cs_selector`. tests/python_layout counts
     # the members out of the header and fails when the two disagree.
     monitor.queue(instance + off["unhandled_exit"], 19)
+    if "sleep_request" in off:
+        # occurred, port, value, sleep_type, processor, stage
+        monitor.queue(instance + off["sleep_request"], 6)
     if "ap_fault" in off:
         monitor.queue(instance + off["ap_fault"], 14)
     # Eighteen words, which is every member the record has. Six was the
@@ -9492,6 +9505,23 @@ def main():
               f"rsp 0x{read('unhandled_exit', 18):x}")
     elif u_reason is not None:
         print("\nunhandled exit: never - no processor stopped on one")
+
+    if "sleep_request" not in off:
+        print("\nsleep request: MEMBER ABSENT from this reader - not "
+              "'never'. Add it rather than reading this as a zero.")
+    elif read('sleep_request', 0):
+        print(f"\nSLEEP REQUEST - the guest asked the platform to sleep "
+              f"or power off, and this is why the machine stopped")
+        print(f"  port 0x{read('sleep_request', 1):x} "
+              f"value 0x{read('sleep_request', 2):x} "
+              f"slp_typ {read('sleep_request', 3)}")
+        print(f"  seen by vpid {read('sleep_request', 4)}, "
+              f"quiesce reached stage {read('sleep_request', 5)}")
+        print(f"  This is NOT a triple fault and NOT a device-model "
+              f"reset - the guest wrote PM1_CNT with SLP_EN itself.")
+    else:
+        print("\nsleep request: never - no processor saw a PM1_CNT write "
+              "with SLP_EN, so the stop was NOT a guest ACPI sleep")
 
     if read('vm_entry_failure', 0):
         print(f"\nVM ENTRY FAILURE - a processor was refused entry")
