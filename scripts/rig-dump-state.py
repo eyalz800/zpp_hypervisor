@@ -6884,6 +6884,8 @@ def main():
                "vmx_operand_failure_reason", "vmx_operand_failure_linear",
                "vmx_operand_failure_error",
                "vmx_operand_failure_running_l2", "vmx_operand_failure_cr3",
+               "walk_refusal_level", "walk_refusal_entry",
+               "walk_refusal_table", "walk_refusal_linear",
                "vmx_instructions_refused", "refused_xsetbv_count",
                "refused_xsetbv_index", "refused_xsetbv_value",
                "recovery_field_readback",
@@ -8934,6 +8936,44 @@ def main():
                   f"   <- if these disagree, THIS is the refusal")
         else:
             print("\nVMX instructions refused on mode / cr4.vmxe: none")
+
+    # **The page-table walk's own account of why it refused.** Recorded
+    # at the one place in `guest_linear_to_physical` that returns
+    # `guest_address_not_mapped` after actually walking - level, the
+    # entry it stopped on, the table it read it from, and the linear
+    # address. It has existed all along and was never printed.
+    if "walk_refusal_level" not in off:
+        print("\nwalk refusals: MEMBER ABSENT from this reader.")
+    else:
+        wr = Monitor(args.rig, args.port)
+        for _m in ("walk_refusal_level", "walk_refusal_entry",
+                   "walk_refusal_table", "walk_refusal_linear"):
+            if _m in off:
+                wr.queue(instance + off[_m], args.cpus)
+        wg = wr.run()
+        shown = False
+        for cpu in range(args.cpus):
+            lin = wg.get(instance + off.get("walk_refusal_linear", 0)
+                         + 8 * cpu, 0)
+            ent = wg.get(instance + off.get("walk_refusal_entry", 0)
+                         + 8 * cpu, 0)
+            tab = wg.get(instance + off.get("walk_refusal_table", 0)
+                         + 8 * cpu, 0)
+            lvl = wg.get(instance + off.get("walk_refusal_level", 0)
+                         + 8 * cpu, 0)
+            if not (lin or ent or tab):
+                continue
+            if not shown:
+                print("\nPAGE-TABLE WALK REFUSALS (why this VMM said "
+                      "'not mapped')")
+                shown = True
+            print(f"  cpu {cpu}  level {lvl}  linear 0x{lin:x}")
+            print(f"          table 0x{tab:x}  entry 0x{ent:x}"
+                  + ("   <- entry has PRESENT clear" if not (ent & 1)
+                     else "   <- entry IS present, so the refusal is "
+                          "not absence"))
+        if not shown:
+            print("\npage-table walk refusals: none on any processor")
 
     # **WHY** a VMX instruction was refused, split by half. The caller
     # answers a false with #UD, which is the wrong fault for a memory
