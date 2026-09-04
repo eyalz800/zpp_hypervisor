@@ -2440,8 +2440,14 @@ def dump_synthetic_msrs(args, elf, instance):
         def v(m):
             return vg.get(instance + vp[m], 0)
 
-        if v("vp_assist_l2_physical"):
-            print(f"\ncpu {cpu} VP assist page")
+        # **Not per processor, and the heading used to say it was.**
+        # `vp_assist_l2_physical` and its siblings are plain scalars in
+        # the header - one machine-wide probe, written by whichever
+        # processor last ran it. Printed once per cpu they read as eight
+        # processors agreeing on one page, which is a different and much
+        # more alarming statement than "one probe, printed once".
+        if v("vp_assist_l2_physical") and 0 == cpu:
+            print(f"\nVP assist page probe (machine-wide, NOT per cpu)")
             print(f"  L2 physical (what Windows wrote) "
                   f"0x{v('vp_assist_l2_physical'):x}")
             print(f"  via the guest hypervisor's own EPT "
@@ -3633,8 +3639,13 @@ def dump_vtl(args, elf, instance):
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_assist[0][0]"])[0]
     reader.queue(instance + off["vtl_assist"],
                  kinds * 2 * assist_size // 8)
-    reader.queue(instance + off["l2_vp_assist"], 2)
-    reader.queue(instance + off["l2_vp_assist_eptp"], 2)
+    # **max_cpus * 2, not 2.** These are `[max_cpus][2]` in the
+    # header and were queued as if they were `[2]`, so every processor
+    # printed cpu 0's value - eight identical lines that read as "every
+    # virtual processor shares one VP assist page", which is a finding
+    # if true and was not.
+    reader.queue(instance + off["l2_vp_assist"], args.cpus * 2)
+    reader.queue(instance + off["l2_vp_assist_eptp"], args.cpus * 2)
     for member in ("vtl_assist_read", "vtl_assist_error",
                    "vtl_assist_first"):
         reader.queue(instance + off[member], kinds * 2)
@@ -3701,7 +3712,7 @@ def dump_vtl(args, elf, instance):
         # and a full hex dump of two 512 byte pages per side buries the
         # handful of fields that carry anything.
         for level in range(2):
-            msr = word("l2_vp_assist", level)
+            msr = word("l2_vp_assist", k * 2 + level)
             base = ((k * 2) + level) * assist_size // 8
             live = [(i * 8, word("vtl_assist", base + i))
                     for i in range(assist_size // 8)
@@ -3710,7 +3721,7 @@ def dump_vtl(args, elf, instance):
                     or word("vtl_assist_error", k * 2 + level)):
                 continue
             print(f"  vp assist level {level}: msr 0x{msr:x} "
-                  f"eptp 0x{word('l2_vp_assist_eptp', level):x} "
+                  f"eptp 0x{word('l2_vp_assist_eptp', k * 2 + level):x} "
                   f"read {word('vtl_assist_read', k * 2 + level)} bytes "
                   f"err 0x{word('vtl_assist_error', k * 2 + level):x} "
                   f"first 0x{word('vtl_assist_first', k * 2 + level):x}")
