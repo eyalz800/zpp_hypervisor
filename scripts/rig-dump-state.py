@@ -6670,6 +6670,7 @@ def main():
                # nvtd=1 this VMM absorbs the guest hypervisor's VT-d
                # traffic, so these say whether it is touching the unit
                # at all, and how much got past.
+               "pending_event_handed_over",
                "dmar_reads", "dmar_writes", "dmar_qi_descriptors",
                "dmar_qi_waits_completed", "dmar_register_page",
                # Recorded by exit_dispatch.cpp since the nesting work and
@@ -7341,7 +7342,8 @@ def main():
     monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
     monitor.queue(instance + off["guest_nmis_reinjected"], 1)
     for _m in ("pending_event_lost", "pending_event_lost_first",
-               "pending_event_lost_last", "pending_event_lost_reason"):
+               "pending_event_lost_last", "pending_event_lost_reason",
+               "pending_event_handed_over"):
         if _m in off:
             monitor.queue(instance + off[_m], scalar_cpus)
     # Two slots per processor each, keyed by the extended-page-table
@@ -8792,12 +8794,18 @@ def main():
     print(f"\nNMIs re-injected into a guest rather than reflected: "
           f"{words.get(instance + off['guest_nmis_reinjected'], 0):,}")
 
-    # A held event destroyed by reflect_l2_exit. Non-zero means the
-    # fifth thing that can happen to an interrupted event is happening,
-    # and an interrupt the second-level guest was owed is simply gone.
-    # See `pending_event_lost` in hypervisor.h for why the path exists.
+    # A held event reflect_l2_exit found. **This counts DETECTIONS, not
+    # losses**, and the label used to say "destroyed", which asserts
+    # something it cannot see: `hand_over_pending_event` (hand=1 in the
+    # switch manifest) rescues the event by rebuilding vmcs12's
+    # IDT-vectoring field from software state, exactly as KVM's
+    # `vmcs12_save_pending_event` does, and it counts that in
+    # `pending_event_handed_over`. That member existed in the binary and
+    # was ABSENT FROM THIS READER, so the two cases - rescued and truly
+    # gone - printed identically. Fifth member in this tree recorded
+    # faithfully and never read out.
     if "pending_event_lost" in off:
-        print("\ncpu  events destroyed by reflect_l2_exit  "
+        print("\ncpu  held events seen by reflect_l2_exit  "
               "first          last           at reason")
         for cpu in range(args.cpus):
             n = read("pending_event_lost", cpu)
@@ -8809,6 +8817,19 @@ def main():
             print(f"{cpu:3d}  {n:-36,d}  0x{first:08x}     "
                   f"0x{last:08x}     {name_reason(why & 0xffff)}"
                   f" (0x{why:x})")
+            if "pending_event_handed_over" not in off:
+                print("     handed over: MEMBER ABSENT from this reader "
+                      "- cannot say whether these were rescued or lost")
+            else:
+                given = read("pending_event_handed_over", cpu)
+                if given >= n:
+                    print(f"     handed over {given:,} of {n:,} - RESCUED, "
+                          f"vmcs12 got the event in its IDT-vectoring "
+                          f"field; nothing was destroyed")
+                else:
+                    print(f"     handed over {given:,} of {n:,} - "
+                          f"{n - given:,} GENUINELY LOST, and an event the "
+                          f"second-level guest was owed is gone")
             print(f"     first vector 0x{first & 0xff:02x}, "
                   f"last vector 0x{last & 0xff:02x}")
         if all(0 == read("pending_event_lost", c)
