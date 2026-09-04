@@ -10568,16 +10568,6 @@ private:
      */
     std::uint64_t resume_count[max_cpus]{};
     std::uint64_t last_resume_rip[max_cpus]{};
-
-    /**
-     * How many times `HvCallAddLogicalProcessor` was answered.
-     *
-     * Zero on a one-processor boot, and zero on a two-processor boot
-     * that never reaches the logical-processor addition - which is
-     * what separates "the fix did not run" from "the fix ran and did
-     * not help", the distinction this tree has lost twice today.
-     */
-    std::uint64_t add_logical_processor_answered{};
     /**
      * @}
      */
