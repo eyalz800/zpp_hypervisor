@@ -628,10 +628,20 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                     cpuid,
                     vmcs.guest_rip());
             } else {
-                log("cpu {} vmptrst {} at resume rip {}",
+                // The mask **at entry**, not at start-up time. Every
+                // reading of it so far was taken in `apply_start_up`,
+                // and everything between there and here - the nested
+                // entry path included - is unexamined. It is a VMCS
+                // control field, and if it is rewritten on the way in
+                // then the CR0 writes that "must trap" simply do not
+                // have to.
+                log("cpu {} vmptrst {} at resume rip {} cr0mask {} "
+                    "entryctl {}",
                     cpuid,
                     current,
-                    vmcs.guest_rip());
+                    vmcs.guest_rip(),
+                    vmcs.cr0_guest_host_mask(),
+                    vmcs.vm_entry_controls());
             }
         }
     }
