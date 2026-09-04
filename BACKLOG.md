@@ -64250,70 +64250,61 @@ stack; and `on_host_exception` reaches `this_processor()` through
 `gs:[0]` without gating on CR4.VMXE, in a window where GS is not this
 VMM's - which recurses until it faults through its own stack.
 
-## The reference TSC page publishes an UNVALIDATED fitted scale
+## The reference TSC page skips its own check - but the scale is RIGHT
 
-Found 2026-09-04 while chasing the multicore wall. Not fixed - the fix
-needs a runtime TSC frequency measurement this tree does not have, and
-that is too large a change to land unverified at the end of a session.
+Found and then largely refuted, 2026-09-04. Recorded with the
+refutation attached, because the first half on its own reads like a bug
+worth chasing and it is not.
 
-`publish_reference_tsc_page` (`nested_entry.cpp:7542`):
+**The gap is real.** `publish_reference_tsc_page`
+(`nested_entry.cpp:7542`) falls back to the empirically fitted scale
+when CPUID.15H yields no frequency, and skips the check that would
+validate it for the same reason - both are guarded on `tsc_hz != 0`:
 
 ```cpp
-auto tsc_hz = this->reference_tsc_frequency[cpu];
-if (0 == tsc_hz) {
-    tsc_hz = nominal_tsc_frequency();     // CPUID.15H
-    this->reference_tsc_frequency[cpu] = tsc_hz;
-}
-auto computed = reference_tsc::scale_for(tsc_hz);
-auto scale = (0 != computed) ? computed : fitted;   // <- falls back to the FIT
+auto scale = (0 != computed) ? computed : fitted;   // falls back to the FIT
 ...
-if (0 != tsc_hz) {                                  // <- and the CHECK is skipped
+if (0 != tsc_hz) {                                  // and the CHECK is skipped
     this->reference_implied_hz[cpu]     = implied_frequency(scale,  tsc_hz);
     this->reference_fit_implied_hz[cpu] = implied_frequency(fitted, tsc_hz);
 }
 ```
 
-`nominal_tsc_frequency` returns **0** whenever CPUID leaf 0x15 does not
-yield both a ratio and a crystal, which is the case on this rig - the
-guest census shows leaf 0x15 queried and the published record logs it:
+`nominal_tsc_frequency` returns 0 whenever CPUID leaf 0x15 lacks either
+the ratio or the crystal, which is this rig - zpp's own published record
+reads `tsc_hz 0x0 implied_hz 0x0 fit_implied_hz 0x0`. So nothing ever
+validates the scale the guest's clock runs on.
 
-    published reference tsc page ... scale 0x148ff2bc5f44012
-      tsc_hz 0x0 implied_hz 0x0 fit_implied_hz 0x0
+**But the scale is correct, measured.** Push the published value through
+the page's own arithmetic against the tree's measured 1.992 GHz:
 
-So on this machine the guest's clock is governed by the **empirically
-fitted** scale, and the diagnostic that would catch a wrong fit is
-disabled by the same zero that caused the fallback. `reference_tsc.h`
-states the invariant the check exists for: "If this is not ~10,000,000
-the scale is wrong, and a guest reading that page believes a different
-second from the one it is living in." Memory records a fitted scale
-measured 3.59x too large.
+    published scale                  0x148ff2bc5f44012
+    implied reference rate           10,000,023 Hz   (2.3 ppm high)
+    closed form for 1.992 GHz        0x148fef8cd9f5b80
+    ratio published / correct        1.0000
 
-`rig-dump-state.py` already substitutes a measured 1,992,000,000 Hz for
-display, labelled as a fallback - so the tree knows the real frequency
-and the hypervisor does not use it.
+So the fit is right to a couple of parts per million, and **memory's
+note about a fitted scale measuring 3.59x too large does not apply to
+this build**. Anyone re-reading that note against this code should stop
+here.
 
-**Why this is worth fixing rather than filing.** It is the `reftsc`
-fork's most likely mechanism. With `reftsc=1` the application processor
-becomes a Hyper-V logical processor and the machine resets; with
-`reftsc=0` the machine lives and the AP never works. An unvalidated
-scale is exactly the sort of thing that works well enough for one
-processor and not for two, because hvix64 converts stall durations
-through it (`hvix64.bin` RVA 0x255afd onward: compare the frequency
-against 10,000,000, else scale by a stored ratio, then spin on `rdtsc`).
+**Consequences, stated so the next reader does not repeat the chase:**
 
-**The fix**, in order of preference:
-
-1. Measure the TSC frequency at start-up against a clock this VMM can
-   already reach - the ACPI PM timer, whose port is in the FADT the
-   loader hands over beside `sleep_control_port`, and which the guest
-   itself reads at 0x608 on this rig. Then `scale_for` has a real
-   argument, the closed form is used instead of the fit, and the check
-   runs.
-2. Failing that, run the check against the *fitted* scale's own implied
-   frequency using the measured value, and log loudly when it is not
-   within a percent or so of 10,000,000. That is diagnosis rather than a
-   fix, but it would have caught this.
-
-Do NOT simply hardcode 1.992 GHz in the hypervisor. It is this rig's
-number, measured offline, and a constant substituted for a reading is
-how three unit slips in this tree happened.
+- This is NOT the mechanism behind the `reftsc` fork. `reftsc=1` starts
+  the application processor and the machine resets; `reftsc=0` keeps the
+  machine alive and the AP never works. A scale accurate to 2.3 ppm does
+  not explain either half.
+- What remains is a missing self-check, which is a diagnostic hole
+  rather than a defect. Worth closing cheaply: compute
+  `implied_frequency` against a measured frequency and log loudly when
+  it is not within a percent of 10,000,000. `rig-dump-state.py` already
+  does exactly this for display, substituting 1,992,000,000 Hz and
+  labelling it a fallback.
+- Do NOT hardcode 1.992 GHz in the hypervisor. It is this rig's number,
+  measured offline, and a constant substituted for a reading is how
+  three unit slips in this tree happened. A real fix measures the TSC at
+  start-up against a clock this VMM can reach.
+- CPUID.16H is NOT an SDM-sanctioned substitute. SDM 22.7.3 gives the
+  nominal TSC frequency from CPUID.15H or `MSR_PLATFORM_INFO[15:8]`
+  times a bus speed; leaf 0x16 is the processor *base* frequency, which
+  is a P-state property and only incidentally equal.
