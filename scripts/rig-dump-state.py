@@ -6870,6 +6870,9 @@ def main():
                # CR3-target value 0 and 0 where it discards it, which is
                # what made every refusal a dead processor.
                "nested_entry_refusals", "entry_refusals",
+               "l2_vp_assist", "l2_vp_assist_eptp",
+               "guest_in_vmx_operation", "guest_vmxon_pointer",
+               "guest_current_vmcs",
                "recovery_field_readback",
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
@@ -8833,7 +8836,11 @@ def main():
     # The per-PROCESSOR VP assist pages, in a per-processor section,
     # because that is how they are indexed. Kept apart from the per-kind
     # probe results above for the reason recorded there.
-    if "l2_vp_assist" in off:
+    if "l2_vp_assist" not in off:
+        print("\nVP assist per processor: MEMBER ABSENT from this "
+              "reader - not 'none'. Add it rather than reading the "
+              "silence as an answer.")
+    else:
         printed_any = False
         for cpu in range(args.cpus):
             for level in range(2):
@@ -8851,6 +8858,44 @@ def main():
                       f"eptp 0x{eptp:x}")
         if not printed_any:
             print("\nVP assist page: no processor has registered one")
+
+    # **The two fields a refused VMX instruction turns on.** hvix64
+    # executes VMPTRLD on every VP context switch; zpp answers it with
+    # #UD from exactly two places - `cpu >= max_cpus`, or
+    # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
+    # above it, bugchecks with HvpHandleHostException (crash code 0x11).
+    # `read-channel-state.sh` prints this and this reader never did.
+    if "guest_in_vmx_operation" not in off:
+        print("\nnested VMX state per processor: MEMBER ABSENT from "
+              "this reader - not 'clear'.")
+    else:
+        gr = Monitor(args.rig, args.port)
+        # **`guest_in_vmx_operation` is `bool[max_cpus]` - ONE BYTE per
+        # processor.** The whole array is eight bytes, so it is a single
+        # quadword and each processor is a byte within it. Queued as
+        # `args.cpus` quadwords it reads seven words past the array and
+        # reports processors that do not exist as being in VMX
+        # operation, which is what the first revision of this code did.
+        # The two pointers beside it really are `uint64_t[max_cpus]`.
+        gr.queue(instance + off["guest_in_vmx_operation"], 1)
+        for _m in ("guest_vmxon_pointer", "guest_current_vmcs"):
+            if _m in off:
+                gr.queue(instance + off[_m], args.cpus)
+        gg = gr.run()
+        inop_word = gg.get(instance + off["guest_in_vmx_operation"], 0)
+        print("\nnested VMX state per processor "
+              "(a clear in_vmx_operation is a #UD to the level above)")
+        for cpu in range(args.cpus):
+            inop = (inop_word >> (8 * cpu)) & 0xff
+            vxon = gg.get(instance + off.get("guest_vmxon_pointer", 0)
+                          + 8 * cpu, 0) if "guest_vmxon_pointer" in off else 0
+            curr = gg.get(instance + off.get("guest_current_vmcs", 0)
+                          + 8 * cpu, 0) if "guest_current_vmcs" in off else 0
+            if not (inop or vxon or curr):
+                continue
+            mark = "" if inop else "   <- CLEAR: VMX instructions get #UD"
+            print(f"  cpu {cpu}  in_vmx_operation {inop}  "
+                  f"vmxon 0x{vxon:x}  current_vmcs 0x{curr:x}{mark}")
 
     if "entry_refusals" in off:
         REFUSALS = ["no_current_vmcs", "launch_not_clear",
