@@ -1597,7 +1597,54 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 
     // The mirror of the launch: the guest's registers are put back
     // and the last thing executed in host mode is the resume itself.
+    //
+    // **RSP is put back too, and that is a fix rather than a
+    // tidy-up.** `restore_context` ends in `iretq`, which pops
+    // `context.rsp` into RSP - so this field is not guest state on
+    // this path, it is the *host* stack the entry instruction runs
+    // on. The exit stub wrote it: `zpp_x86_64_capture_context_into
+    // _stack` stores `lea rcx, [rbp+0x18]` into `context->rsp`, which
+    // is the address of the context structure itself, and
+    // `exit_dispatch.cpp`'s decoder case already records that ("
+    // `context.rsp` holds the address of the context structure").
+    //
+    // `apply_start_up` overwrites it with zero. It has to on the
+    // launch path - `vm_launch` seeds `vmcs.guest_rsp` from this
+    // field - and its comment says "on the VM exit path both are
+    // overwritten again before the resume". **Only `rip` is.**
+    // Verified on the artifact rather than by reading: in
+    // `out/debug/x86_64/zpp_hypervisor`, `apply_start_up` carries
+    // `movq $0x0, 0x20(%rax)` at `0x8a1a5`, and `resume_guest` has
+    // exactly one store into the context before `restore_context`,
+    // `movq %rcx, 0x80(%rax)` at `0x888a2` - offset 0x80 is `rip`,
+    // and nothing writes offset 0x20.
+    //
+    // What that costs, and it is only visible when something else has
+    // already gone wrong: a refused VM entry sets RFLAGS.ZF and
+    // passes control to the next instruction rather than taking a VM
+    // exit (SDM 29.1 and 29.2, `.references/sdm.txt:202031` and the
+    // paragraph closing 29.2), and the next instruction is the
+    // `vmresume` stub's `pushfq; pop rdi; call zpp_vmx_entry_failed`.
+    // With RSP zero that `pushfq` writes to linear address -8, every
+    // host IDT gate is built with `interrupt_stack_table(0)`, and the
+    // fault has no stack to be delivered on either - so the reporter
+    // that exists precisely to name a refused entry takes the
+    // processor down instead of writing the error number.
+    // `record_entry_failure`'s own comment asserts the opposite
+    // ("`context.rsp` holds the address of the context inside this
+    // module, not a guest stack"), and on the one path that applies
+    // application-processor start-up state that was false.
+    //
+    // Restored here rather than in `apply_start_up` on purpose: this
+    // is the only place that decides what the entry runs on, it is
+    // reached by every exit, and it re-establishes the invariant
+    // whoever scribbled on the field. The `vmlaunch` stub survives
+    // the same window only because its reporter is stack-free by
+    // construction - it stores the instruction error RIP-relatively -
+    // which is an asymmetry worth keeping in mind rather than
+    // relying on.
     context.rip = reinterpret_cast<std::uint64_t>(entry);
+    context.rsp = reinterpret_cast<std::uint64_t>(&context);
     arch::x86_64::restore_context(&context);
     std::unreachable();
 }

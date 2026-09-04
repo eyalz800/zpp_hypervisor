@@ -1737,6 +1737,57 @@ void the_entry_is_chosen_by_launch_state()
 }
 
 /**
+ * What the entry instruction runs on, which is not guest state at all.
+ *
+ * `restore_context` ends in `iretq`, so `context.rsp` is popped into RSP
+ * and the VMRESUME executes on it. The exit stub writes the invariant:
+ * `zpp_x86_64_capture_context_into_stack` stores `lea rcx, [rbp+0x18]`
+ * into `context->rsp`, which is the address of the context structure
+ * itself - the same fact `exit_dispatch.cpp`'s `mov` decoder already
+ * records for a different reason.
+ *
+ * The negative control below is the case that made this a fix rather
+ * than an assertion. `apply_start_up` writes `context.rsp = 0`, which is
+ * required on the launch path - `vm_launch` seeds `vmcs.guest_rsp` from
+ * this field - and its comment claims "on the VM exit path both are
+ * overwritten again before the resume". Only `rip` was. Verified on the
+ * artifact: `movq $0x0, 0x20(%rax)` inside `apply_start_up`, and
+ * `resume_guest` storing only to offset 0x80.
+ *
+ * A zero here is invisible while entries succeed, because VM entry loads
+ * the guest's own RSP from the VMCS. It costs the one case that matters:
+ * a refused entry sets RFLAGS.ZF and passes control to the next
+ * instruction rather than taking a VM exit (SDM 29.1 and 29.2,
+ * `.references/sdm.txt:202031`), and the next instruction is the
+ * `vmresume` stub's `pushfq`, which then writes to linear address -8
+ * with every host IDT gate built at `interrupt_stack_table(0)`. The
+ * reporter for a refused entry cannot run on the one path that applies
+ * application-processor start-up state.
+ */
+void the_entry_runs_on_the_host_stack()
+{
+    auto built = make();
+    built.context.rsp = reinterpret_cast<std::uint64_t>(&built.context);
+    resume(built);
+    check_equal(reinterpret_cast<std::uint64_t>(&built.context),
+                zpp::arch::x86_64::g_restored_context.rsp,
+                "the entry runs on the stack the exit stub recorded, "
+                "which is the address of the context itself");
+
+    // The control, and it is the state `apply_start_up` really leaves:
+    // zero. Without the restore in `resume_guest` this check reports
+    // zero and the reporter behind a refused entry has no stack.
+    auto scribbled = make();
+    scribbled.context.rsp = 0;
+    resume(scribbled);
+    check_equal(reinterpret_cast<std::uint64_t>(&scribbled.context),
+                zpp::arch::x86_64::g_restored_context.rsp,
+                "and it is put back even when a handler zeroed it, "
+                "which is what apply_start_up does on every start-up "
+                "IPI an application processor takes");
+}
+
+/**
  * What the resume records for a debugger, which is the only channel there
  * is once a guest is running.
  */
@@ -1924,6 +1975,7 @@ int main()
     a_second_level_guests_own_interrupt_window_is_left_alone();
     the_queue_ignores_a_slot_it_does_not_have();
     the_entry_is_chosen_by_launch_state();
+    the_entry_runs_on_the_host_stack();
     the_resume_records_where_it_left_the_guest();
     the_dilated_counter_never_runs_backwards();
     one_exit_is_charged_once();
