@@ -6984,6 +6984,32 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
     // the loader's return address.
     guest_context.rax = 0;
 
+    // NOTE, and deliberately not acted on here - see BACKLOG.md.
+    //
+    // `restore_context` ends in `iretq`, so `guest_context.rsp` is the
+    // stack VMLAUNCH itself executes on, exactly as it was on the
+    // resume path before resume.cpp:1647 fixed it there. The guest's
+    // own RSP is already in `vmcs.guest_rsp` above, so this field is
+    // not guest state at this point. On a trampoline-started processor
+    // `apply_start_up` has set it to zero.
+    //
+    // The obvious symmetric fix - assign a host address here - is NOT
+    // applied, because the two paths are not actually symmetric and the
+    // difference decides which address is correct. At VMLAUNCH this
+    // processor is still on the *loader's* CR3 and stack: the host page
+    // table only becomes current on VM exit, through `vmcs.host_cr3`.
+    // So the address this needs is one valid in whatever address space
+    // is current here, which is not the same requirement `resume_guest`
+    // has, and differs between the boot processor and a processor the
+    // trampoline started. `&guest_context` is the caller's context and
+    // is on the loader's stack; `host_vm_launch_stack` is a local whose
+    // mapping depends on which of the two got here.
+    //
+    // Settle that before changing it, and gate it on a test the way
+    // `tests/resume_guest` gates the resume path. Single-processor boots
+    // reach the login screen through this exact line, so an unverified
+    // change here risks the one configuration that works.
+
     // restore_context is the launch - RIP was pointed at vmlaunch above.
     arch::x86_64::restore_context(&guest_context);
 }
