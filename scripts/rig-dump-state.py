@@ -3712,7 +3712,14 @@ def dump_vtl(args, elf, instance):
         # and a full hex dump of two 512 byte pages per side buries the
         # handful of fields that carry anything.
         for level in range(2):
-            msr = word("l2_vp_assist", k * 2 + level)
+            # **No `l2_vp_assist` here.** This loop is over VTL KINDS
+            # (k = 0..2, the call sites), not processors, while
+            # `l2_vp_assist` is `[max_cpus][2]`. Indexing it by `k` mixes
+            # two index spaces on one line - which is what the previous
+            # two revisions of this code each did differently, and what
+            # made a `HvCallVtlReturn` call site read as "cpu 1". The
+            # per-processor MSR is printed in its own section below.
+            msr = word("vtl_assist_first", k * 2 + level)
             base = ((k * 2) + level) * assist_size // 8
             live = [(i * 8, word("vtl_assist", base + i))
                     for i in range(assist_size // 8)
@@ -3720,8 +3727,7 @@ def dump_vtl(args, elf, instance):
             if not (msr or live
                     or word("vtl_assist_error", k * 2 + level)):
                 continue
-            print(f"  vp assist level {level}: msr 0x{msr:x} "
-                  f"eptp 0x{word('l2_vp_assist_eptp', k * 2 + level):x} "
+            print(f"  vp assist level {level}: page 0x{msr:x} "
                   f"read {word('vtl_assist_read', k * 2 + level)} bytes "
                   f"err 0x{word('vtl_assist_error', k * 2 + level):x} "
                   f"first 0x{word('vtl_assist_first', k * 2 + level):x}")
@@ -8824,6 +8830,28 @@ def main():
     # 0x06, which is what a failing 2-CPU boot leaves in hvix64's crash
     # record. So which reason, on which processor, is the whole question
     # and the array has been carrying the answer all along.
+    # The per-PROCESSOR VP assist pages, in a per-processor section,
+    # because that is how they are indexed. Kept apart from the per-kind
+    # probe results above for the reason recorded there.
+    if "l2_vp_assist" in off:
+        printed_any = False
+        for cpu in range(args.cpus):
+            for level in range(2):
+                msr = words.get(instance + off["l2_vp_assist"]
+                                + 8 * (cpu * 2 + level), 0)
+                if not msr:
+                    continue
+                if not printed_any:
+                    print("\nVP assist page each processor registered, "
+                          "as Windows wrote the MSR")
+                    printed_any = True
+                eptp = words.get(instance + off["l2_vp_assist_eptp"]
+                                 + 8 * (cpu * 2 + level), 0)
+                print(f"  cpu {cpu} level {level}: msr 0x{msr:x} "
+                      f"eptp 0x{eptp:x}")
+        if not printed_any:
+            print("\nVP assist page: no processor has registered one")
+
     if "entry_refusals" in off:
         REFUSALS = ["no_current_vmcs", "launch_not_clear",
                     "resume_not_launched", "control_or_host_state"]
