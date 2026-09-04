@@ -2986,14 +2986,44 @@ hypervisor::translate_guest_linear(std::size_t cpu, std::uint64_t linear)
             return {};
         }
 
-        auto * entries = static_cast<const std::uint64_t *>(
-            map_window_at(transfer_window_first_page, *reachable, 1));
-        if (!entries) {
+        // **Read through `read_guest_physical`, not through the window
+        // directly.** This was `map_window_at` followed by
+        // `entries[index]`, which is a use of the shared window with no
+        // lock held - and the window is one address every processor
+        // maps through. The reasoning that made it safe is written
+        // above this function's callers: "The fetch still happens after
+        // both translations, so the shared window is never re-pointed
+        // under a walk." That holds for ONE processor. With two, the
+        // other one re-points the window between the `map_window_at`
+        // and the read.
+        //
+        // Measured, on a two-processor boot: the walk stopped at level
+        // 0 - the PML4, table = CR3 - with `entry 0x0`, while the
+        // monitor read that same entry at that same physical address as
+        // `0x101a81063`, present, and all four levels walked cleanly by
+        // hand. This VMM read zeros out of memory holding a valid
+        // entry, called the page unmapped, and answered the guest
+        // hypervisor's VMX instruction with a fault it cannot survive -
+        // which is how a 2-CPU boot ends in `out 0xcf9, 0x0f`.
+        //
+        // `read_guest_physical` takes `mapping_window_lock` for itself,
+        // which is why this cannot be fixed by holding the lock here
+        // instead: nothing above holds it across a walk, deliberately -
+        // the comment at the decoder's instruction fetch records that
+        // holding it there self-deadlocked and was measured doing so.
+        // Routing through the self-serialising helper is the one shape
+        // that is correct for both processors and deadlocks for
+        // neither.
+        auto index = (linear >> levels[level].shift) & 0x1ff;
+
+        std::uint64_t entry{};
+        if (auto got = read_guest_physical(
+                *reachable + (index * sizeof(entry)),
+                std::span(reinterpret_cast<std::byte *>(&entry),
+                          sizeof(entry)));
+            !got) {
             return {};
         }
-
-        auto index = (linear >> levels[level].shift) & 0x1ff;
-        auto entry = entries[index];
 
         if (!(entry & present)) {
             return {};

@@ -10990,6 +10990,79 @@ private:
      */
     spin_lock mapping_window_lock{};
 
+    /**
+     * Which processor holds `mapping_window_lock`, plus one, or zero
+     * for nobody.
+     *
+     * The window is one address shared by every processor and the lock
+     * above says so - "held across the whole use, not just the mapping,
+     * because the point of the window is the bytes reached through it".
+     * `translate_guest_linear` did not hold it: it maps each page table
+     * through the window and reads the entry directly, while
+     * `read_guest_linear` takes the lock only afterwards, inside
+     * `read_guest_physical`. So with two processors the other one
+     * re-pointed the window between the mapping and the read.
+     *
+     * **Measured**: a two-processor boot recorded the walk stopping at
+     * level 0 - the PML4, table = CR3 - with `entry 0x0`, while the
+     * monitor read that same entry at that same physical address as
+     * `0x101a81063`, present, and all four levels walked cleanly by
+     * hand. This VMM read zeros out of memory holding a valid entry,
+     * and answered the guest hypervisor's VMX instruction with a fault
+     * it cannot survive.
+     *
+     * Ownership rather than a per-processor window: a slot per
+     * processor was tried before and reverted, and the comment on
+     * `instruction_window_first_page` records why - it needs the window
+     * to span seventy-two pages, and enlarging it coincided with this
+     * VMM no longer initialising on the real machine. Ownership leaves
+     * the window exactly the size that argument was made about.
+     *
+     * Re-entry is what makes it usable: several callers already hold
+     * the lock across a walk - the decoder's instruction fetch among
+     * them - and `zpp::spin_lock` is not recursive, so taking it
+     * unconditionally inside the walk would replace an intermittent
+     * reset with a hang.
+     */
+    std::uint64_t mapping_window_owner{};
+
+    /**
+     * Takes `mapping_window_lock` unless this processor already holds
+     * it, and releases it only if it was the one that took it.
+     */
+    class window_guard
+    {
+    public:
+        window_guard(hypervisor & self, std::size_t cpu) : m_self(&self)
+        {
+            auto me = cpu + 1;
+            if (self.mapping_window_owner == me) {
+                return;
+            }
+
+            self.mapping_window_lock.lock();
+            self.mapping_window_owner = me;
+            m_taken = true;
+        }
+
+        ~window_guard()
+        {
+            if (!m_taken) {
+                return;
+            }
+
+            m_self->mapping_window_owner = 0;
+            m_self->mapping_window_lock.unlock();
+        }
+
+        window_guard(const window_guard &) = delete;
+        window_guard & operator=(const window_guard &) = delete;
+
+    private:
+        hypervisor * m_self{};
+        bool m_taken{};
+    };
+
 
     /**
      * What the window self check found: 0 not run, 1 correct, 2 wrong.
