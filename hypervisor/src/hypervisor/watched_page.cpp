@@ -1002,9 +1002,46 @@ bool hypervisor::on_monitor_trap_flag(std::size_t cpu,
 
     // Close the page again before the handler runs, so that a handler
     // which arms or disarms watches cannot observe a half open state.
-    if (auto entry = epte_for(page << 12)) {
-        (*entry)->write(false);
-        invalidate_ept();
+    //
+    // **Unless another processor is still stepping the same page.** The
+    // window this closes is partition-wide - the EPT entry is shared by
+    // every processor - while the state above it is per processor. Two
+    // processors stepping writes to one page therefore used to close it
+    // under each other: cpu 0 opens the page and arms the monitor trap
+    // flag, cpu 1 closes it after its own step, cpu 0's instruction
+    // faults again instead of retiring, and neither makes progress.
+    //
+    // Measured with the local APIC page watch kept armed past adoption
+    // (`ZPP_KEEP_APIC_WATCH`), which is the configuration that reaches
+    // it: the local APIC page is the one page both processors write
+    // constantly. zpp's counters were identical 100 s apart, and from
+    // underneath - KVM's own per-VM statistics - `nested_run` was
+    // frozen while `exits` climbed at about 600 a second, which is host
+    // timer preemption of two spinning threads rather than exits either
+    // processor takes.
+    //
+    // Checked against the other processors' own state rather than a new
+    // counter, because that state already says exactly this and a
+    // counter would have to be kept in step with it. The read races
+    // with those processors, and both outcomes are safe: seeing a step
+    // that has just ended leaves the page open one step longer, which
+    // is a missed observation and the direction this file already
+    // treats as safe; missing a step that has just begun closes the
+    // page under it, which is the behaviour before this change.
+    auto still_stepping = false;
+    for (std::size_t other{}; other < max_cpus; ++other) {
+        if ((other != cpu) && this->stepping_watch[other] &&
+            (this->stepping_page[other] == page)) {
+            still_stepping = true;
+            break;
+        }
+    }
+
+    if (!still_stepping) {
+        if (auto entry = epte_for(page << 12)) {
+            (*entry)->write(false);
+            invalidate_ept();
+        }
     }
 
     // Whether the instruction actually ran.
