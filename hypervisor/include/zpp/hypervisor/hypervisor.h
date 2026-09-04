@@ -11265,19 +11265,26 @@ private:
     struct
     {
         /**
+         * Non-zero once any write to a reset port has been seen. Check
+         * this first; the rest is meaningless until it is set.
+         *
+         * FIRST in this structure deliberately. It was second for one
+         * commit, behind `port`, and the reader - which reads by index
+         * from the top - then printed `occurred` under the heading
+         * "port" and reported `port 0x1` for a write that was really to
+         * 0xcf9. Every other field lined up, which is what made it
+         * plausible. A record whose first member is not the validity
+         * flag invites exactly that.
+         */
+        std::uint64_t occurred{};
+
+        /**
          * Which of the two reset ports was written - 0xcf9 or 0x64.
          * Recorded because they mean different things: 0xcf9 is the
          * chipset reset control, 0x64 carries both the 8042 pulse
          * reset (0xfe) and ordinary keyboard controller commands.
          */
         std::uint64_t port{};
-
-        /**
-         * Non-zero once any write to the reset control port has been
-         * seen. Check this first; the rest is meaningless until it is
-         * set.
-         */
-        std::uint64_t occurred{};
 
         /**
          * The value written, and how wide the access was.
