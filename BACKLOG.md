@@ -64355,3 +64355,73 @@ than a patch.
 Related and unfixed: `watches[]` is scanned and claimed from any
 processor's exit handler with no mutual exclusion (`watched_page.cpp`
 ~1127-1212, eight call sites).
+
+## The multicore reset, traced end to end - zpp #UDs an INVVPID it cannot read
+
+Located 2026-09-05 after ~30 two-processor boots. **Not fixed**: the
+final step - why the read fails - is not settled, and guessing at it
+would undo a chain every link of which is measured.
+
+**The chain, from the outside in:**
+
+1. hvix64 executes `invvpid (%rdx), %rcx` at RVA `0x3a7420`, from the
+   flush executor `HvCallModifyVtlProtectionMask` drains into. INVVPID
+   exits unconditionally to us (SDM 28.1.2).
+2. `on_guest_invvpid` calls `read_guest_linear` for the 16-byte
+   descriptor. It fails: `error 16 = guest_address_not_mapped`, at
+   linear `0xffffe70000205c80`.
+3. The handler `return false`s. `exit_dispatch.cpp` turns that into
+   `inject_invalid_opcode_exception()` - **#UD**.
+4. hvix64 takes a #UD on a VMX instruction, believes nothing is above
+   it, and bugchecks: `HvpHandleHostException` -> crash code **0x11** in
+   `hvix64 + 0x112660` -> `HvpCrashRendezvous` -> `HvpResetSystem`
+   (RVA 0x224178) -> `out 0xcf9, 0x0f`.
+5. QEMU stops the VM. `-no-reboot -no-shutdown` makes that
+   `paused (shutdown)`.
+
+**Every link is measured**, not inferred: the RVA and crash code from
+hvix64's own record read through gdb; the read failure, address and
+error from `vmx_operand_read_failures[cpu]`, added for this; the #UD
+count from `vmx_instructions_refused[cpu]`, which reads exactly **1, on
+cpu 1**.
+
+**The address is hvix64's own root-mode stack.** `0xffffe70000205c80`
+sits between the trap-frame and register-save pointers hvix64 recorded
+in the same crash record (`0xffffe70000205c70`, `0xffffe70000205b60`).
+An INVVPID descriptor is built on the stack, so this is where it should
+be - and this VMM cannot read it.
+
+**This tree predicted it, for VMREAD, before the investigation began**
+(`nested_vmx.cpp`): "the caller answers a false with #UD. That is the
+wrong fault for a memory access that did not work ... on a
+multi-processor boot exactly one of these fires, on the second
+processor". Exactly one fired, on the second processor.
+
+**Seven other refusal paths were eliminated by measurement** and should
+not be re-audited: the index check, the mode check, CR4.VMXE, CPL,
+VMFUNC, the `default:` arm, and the operand DECODE half. All read zero
+on the boot where the read half read one.
+
+**What is not settled: why the read fails.** The candidate worth
+checking first is `translate_guest_linear` (`hypervisor.cpp:2922`): it
+takes `vmcs.guest_cr3()` and passes each table's physical address
+through `l2_physical_to_l1`, which returns the address unchanged when
+`!running_l2[cpu]` and walks **EPT12** when it is set. If `running_l2`
+is set while the level above is executing, hvix64's own page tables get
+translated as though they were second-level physical addresses, and the
+walk fails exactly like this. `running_l2` is set at
+`nested_vmx.cpp:2484`, cleared at `nested_entry.cpp:5907` (reflect) and
+`hypervisor.cpp:6271` (setup_vmcs) - an L2 exit this VMM handles itself
+correctly leaves it set, so the question is whether any path reaches L1
+without clearing it.
+
+**Do not "fix" this by injecting #PF instead of #UD without settling
+that.** If the address is genuinely unmapped, #PF is right and
+`on_guest_vmwrite`'s not-writable path is the model. If this VMM is
+walking with the wrong translation, #PF would be a second wrong answer
+and would hide the first.
+
+**Note the failure is stochastic**: ~1 boot in 28 passes this and the
+application processor becomes a working logical processor (boot 111:
+303,504 second-level entries, VTL switches, no reset). So a fix should
+be judged by many boots, not one.
