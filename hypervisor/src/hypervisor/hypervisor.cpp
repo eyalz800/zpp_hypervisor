@@ -1205,9 +1205,36 @@ hypervisor::epte_for(std::uint64_t physical_address)
     // Point the epde at the table. The memory type must be cleared for
     // the reason given at the same three lines in initialize_ept: those
     // bits are reserved in an entry that references a page table.
-    epde.large(false);
-    epde.type({});
-    epde.page_number(host_page_table.virtual_to_physical(ept) >> 12);
+    //
+    // **Composed in a local and published with ONE store.** It was three
+    // separate load-modify-stores of this same live entry, and that is
+    // only safe while nothing else can walk it. With a second processor
+    // it is not: each setter rewrites the whole qword, so a walker on
+    // the other processor could observe either intermediate state, and
+    // both are illegal rather than merely stale.
+    //
+    // - after `large(false)` alone the entry references a PAGE TABLE
+    //   while the memory-type bits are still set, and those bits are
+    //   reserved in that form - which is the very reason the comment
+    //   above clears them. That is an EPT misconfiguration, not a
+    //   violation, and nothing in this tree handles one.
+    // - after `type({})` as well, it still carries the OLD 2 MB frame's
+    //   address in the page-number field, so the processor is pointed
+    //   at guest memory and walks it as if it were an EPT page table.
+    //
+    // Measured rather than only reasoned: a 2-CPU boot records
+    // `reflected-misconfig 1` in the second-level fault census, and a
+    // single-processor boot cannot produce this window at all. KVM
+    // publishes an SPTE with a single store for the same reason -
+    // `mmu_spte_set`/`__set_spte`, and `cmpxchg64` in the TDP MMU.
+    //
+    // The 512-entry loop above needs no such care: that table is not
+    // reachable by any walker until the store below publishes it.
+    auto published = epde;
+    published.large(false);
+    published.type({});
+    published.page_number(host_page_table.virtual_to_physical(ept) >> 12);
+    epde = published;
 
     return &ept[(physical_address >> 12) & 0x1ff];
 }
