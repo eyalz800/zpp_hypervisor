@@ -85,9 +85,18 @@ public:
      */
     constexpr void type(memory_type value)
     {
+        // **0x7, not 0xf.** The field is bits 5:3 - three bits - and
+        // the clear mask above has always said so. The set mask said
+        // four, so a value of 8 or more would have set bit 6 as well,
+        // which is "ignore PAT" in a leaf entry and RESERVED in one
+        // that references another table (SDM Table 31-6). Unreachable
+        // today because every memory type in this tree is 0..6 and
+        // `mtrr_state::valid_or_uncachable` clamps anything else, but a
+        // setter whose two masks disagree is a trap rather than a
+        // constraint.
         m_value =
             ((m_value & ~(0x7ull << 3)) |
-             ((std::underlying_type_t<decltype(value)>(value) & 0xfull)
+             ((std::underlying_type_t<decltype(value)>(value) & 0x7ull)
               << 3));
     }
 

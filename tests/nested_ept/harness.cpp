@@ -473,11 +473,34 @@ void test_permissions()
                 zpp::arch::x86_64::vmx::ept_permissions().present());
 
     // SDM 31.3.2: "An EPT paging-structure entry is present if any of bits
-    // 2:0 is 1", with the note that mode-based execute control adds bit
-    // 10. So every non-empty set is present and only the empty one is not.
+    // 2:0 is 1; otherwise, the entry is not present", with the note that
+    // follows: "If the 'mode-based execute control for EPT' VM-execution
+    // control is 1, an EPT paging-structure entry is present if any of
+    // bits 2:0 or bit 10 is 1."
+    //
+    // **The condition is load-bearing and this test used to drop it.** It
+    // read the note as "mode-based execute control adds bit 10" and then
+    // concluded "every non-empty set is present", which is true only when
+    // that control is 1. It never is here - MBEC is not in
+    // `supported_secondary_controls`, so the guest hypervisor cannot ask
+    // for it and vmcs02 runs with it clear. The old assertion therefore
+    // pinned the wrong rule, and `ept_permissions::present` matched it
+    // while contradicting its own SDM quotation.
+    //
+    // What that cost: an entry in the guest hypervisor's EPT with bits
+    // 2:0 clear and bit 10 set is NOT PRESENT to the processor - an
+    // ordinary EPT violation - but was present-and-misconfigured here,
+    // which synthesises exit reason 49 into vmcs12 and tells Hyper-V its
+    // own paging structures are corrupt. KVM agrees with the processor:
+    // `FNAME(is_present_gpte)` for `PTTYPE_EPT` is `pte & 7`.
+    //
+    // So: present iff any of bits 2:0. Bit 10 alone is index 8, and that
+    // one case is the whole point of the loop.
+    constexpr unsigned execute_user_bit = 8;
     for (unsigned index{}; index < permission_combinations; ++index) {
         auto permissions = permissions_of_index(index);
-        if (permissions.present() != (0 != index)) {
+        auto expected = (0 != (index & ~execute_user_bit));
+        if (permissions.present() != expected) {
             // The index cannot be the sentinel, so this can only report a
             // failure - a failure path whose two arguments could ever be
             // equal is a failure that passes.
@@ -485,6 +508,12 @@ void test_permissions()
         }
     }
     check_true("permissions.present_is_any_bit_set", true);
+
+    // The case the loop above exists for, pinned by name so a regression
+    // says what it broke rather than printing an index.
+    check_false(
+        "permissions.execute_user_alone_is_absent_without_mbec",
+        permissions_of_index(execute_user_bit).present());
 
     // `of` and `apply_to` are the two ends of the same conversion, so a
     // round trip through an entry has to be the identity. A drift here

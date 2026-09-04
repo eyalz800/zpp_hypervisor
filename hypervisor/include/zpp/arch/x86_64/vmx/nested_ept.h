@@ -84,10 +84,35 @@ public:
      * This is why an empty intersection needs no special case anywhere: no
      * permissions means not present, and not present means the guest takes
      * an EPT violation, which is exactly the wanted answer.
+     *
+     * **Bit 10 is deliberately NOT counted, and this used to count it.**
+     * The quotation above states the condition - bit 10 contributes only
+     * when the "mode-based execute control for EPT" VM-execution control
+     * is 1 - and the code contradicted its own citation. That control is
+     * never 1 here: it is not in `supported_secondary_controls`, so the
+     * guest hypervisor cannot ask for it, and vmcs02 therefore runs with
+     * MBEC clear.
+     *
+     * What counting it cost: an entry in the guest hypervisor's own EPT
+     * with bits 2:0 clear and bit 10 set is, to the processor, NOT
+     * PRESENT - an ordinary EPT violation. To this walker it was present,
+     * and then misconfigured by the rule below, which synthesises exit
+     * reason 49 into vmcs12. That hands Hyper-V a fault about a table it
+     * knows is fine, and there is no good outcome from telling a guest
+     * hypervisor its own paging structures are corrupt.
+     *
+     * KVM agrees with the processor rather than with the old code here:
+     * `FNAME(is_present_gpte)` for `PTTYPE_EPT` is `pte & 7`
+     * (.references/kvm/paging_tmpl.h), and `__reset_rsvds_bits_mask_ept`'s
+     * `bad_mt_xwr` covers only bits 5:0 - bit 10 appears nowhere in its
+     * nested EPT walker.
+     *
+     * If MBEC is ever offered, this needs the control threaded in rather
+     * than the bit added back unconditionally.
      */
     constexpr bool present() const
     {
-        return m_read || m_write || m_execute || m_execute_user;
+        return m_read || m_write || m_execute;
     }
 
     /**
