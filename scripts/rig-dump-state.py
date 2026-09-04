@@ -6663,6 +6663,15 @@ def main():
                # reset, all three of which end in `paused (shutdown)`
                # and are otherwise indistinguishable by run state.
                "sleep_request", "reset_request",
+               # The VT-d instruments. They exist in the binary, are
+               # incremented by dmar_register_read/write, and had never
+               # been printed for any failure - the fourth member in
+               # this tree to be recorded and never read out. With
+               # nvtd=1 this VMM absorbs the guest hypervisor's VT-d
+               # traffic, so these say whether it is touching the unit
+               # at all, and how much got past.
+               "dmar_reads", "dmar_writes", "dmar_qi_descriptors",
+               "dmar_qi_waits_completed", "dmar_register_page",
                # Recorded by exit_dispatch.cpp since the nesting work and
                # never read out. The exit ring of four consecutive resets
                # ends on one of these.
@@ -7445,6 +7454,12 @@ def main():
     if "reset_request" in off:
         # occurred, port, value, bytes, processor, rip, count
         monitor.queue(instance + off["reset_request"], 7)
+    for _m in ("dmar_reads", "dmar_writes", "dmar_qi_descriptors",
+               "dmar_qi_waits_completed"):
+        if _m in off:
+            monitor.queue(instance + off[_m], 8)
+    if "dmar_register_page" in off:
+        monitor.queue(instance + off["dmar_register_page"], 1)
     if "ap_fault" in off:
         monitor.queue(instance + off["ap_fault"], 14)
     # Eighteen words, which is every member the record has. Six was the
@@ -9525,6 +9540,31 @@ def main():
     else:
         print("\nsleep request: never - no processor saw a PM1_CNT write "
               "with SLP_EN, so the stop was NOT a guest ACPI sleep")
+
+    _dmar = [m for m in ("dmar_reads", "dmar_writes",
+                         "dmar_qi_descriptors",
+                         "dmar_qi_waits_completed") if m in off]
+    if not _dmar:
+        print("\nVT-d: MEMBERS ABSENT from this reader - not zero.")
+    else:
+        page = read('dmar_register_page', 0) if "dmar_register_page" in off else 0
+        print(f"\nVT-d (DMAR) traffic this VMM absorbed, register page "
+              f"0x{page:x}")
+        if not page:
+            print("  register page is 0 - the unit was never found, so "
+                  "every count below is zero for that reason and not "
+                  "because the guest hypervisor left VT-d alone")
+        _tot = 0
+        for cpu in range(8):
+            vals = [read(m, cpu) for m in _dmar]
+            _tot += sum(vals)
+            if any(vals):
+                print("  cpu %d  %s" % (cpu, "  ".join(
+                    f"{m.replace('dmar_','')} {v:,}"
+                    for m, v in zip(_dmar, vals))))
+        if not _tot:
+            print("  nothing on any processor - the guest hypervisor "
+                  "never touched the VT-d registers through us")
 
     if "reset_request" not in off:
         print("\nreset request: MEMBER ABSENT from this reader - not "
