@@ -6984,31 +6984,54 @@ void hypervisor::vm_launch(arch::x86_64::context & guest_context,
     // the loader's return address.
     guest_context.rax = 0;
 
-    // NOTE, and deliberately not acted on here - see BACKLOG.md.
+    // The stack VMLAUNCH itself runs on, which is not guest state.
     //
-    // `restore_context` ends in `iretq`, so `guest_context.rsp` is the
-    // stack VMLAUNCH itself executes on, exactly as it was on the
-    // resume path before resume.cpp:1647 fixed it there. The guest's
-    // own RSP is already in `vmcs.guest_rsp` above, so this field is
-    // not guest state at this point. On a trampoline-started processor
-    // `apply_start_up` has set it to zero.
+    // `restore_context` ends in `iretq`, so this field is popped into
+    // RSP and the entry instruction executes on it. Without this the
+    // launch runs on whatever the caller had, and on both paths that is
+    // an address the host page table does not map:
     //
-    // The obvious symmetric fix - assign a host address here - is NOT
-    // applied, because the two paths are not actually symmetric and the
-    // difference decides which address is correct. At VMLAUNCH this
-    // processor is still on the *loader's* CR3 and stack: the host page
-    // table only becomes current on VM exit, through `vmcs.host_cr3`.
-    // So the address this needs is one valid in whatever address space
-    // is current here, which is not the same requirement `resume_guest`
-    // has, and differs between the boot processor and a processor the
-    // trampoline started. `&guest_context` is the caller's context and
-    // is on the loader's stack; `host_vm_launch_stack` is a local whose
-    // mapping depends on which of the two got here.
+    // - `0` on a processor the trampoline started, because
+    //   `apply_start_up` writes `context.rsp = 0` (start_up.cpp) and
+    //   `main` calls it before reaching here;
+    // - the loader's own stack on the boot processor.
     //
-    // Settle that before changing it, and gate it on a test the way
-    // `tests/resume_guest` gates the resume path. Single-processor boots
-    // reach the login screen through this exact line, so an unverified
-    // change here risks the one configuration that works.
+    // This is the same defect `resume_guest` carried until resume.cpp
+    // fixed it, and the paths turn out to be symmetric after all - only
+    // the wrong value differs. An earlier revision of this comment
+    // claimed they were not, on the grounds that the loader's CR3 is
+    // still current here. **That was wrong, and both halves of it were
+    // checked before this line was written rather than argued:**
+    // `main` executes `arch::x86_64::cr3(this->host_cr3)`
+    // unconditionally before every path that reaches `vm_launch`, and
+    // its `scope_exit` restore cannot run because `vm_launch` never
+    // returns; and `launch_on_cpu` *copies* the caller's context to the
+    // top of `this->stack[claimed]`, which is a member of the singleton
+    // and therefore module `.bss`, so `guest_context` is not on the
+    // loader's stack either. The trampoline path loads `host_cr3` in
+    // `ap_start_up.S` before it enters C++ at all.
+    //
+    // `host_rsp` rather than `&guest_context`, though both are mapped:
+    // pushes below `host_rsp` land in the unused remainder of
+    // `host_vm_launch_stack`, where pushes below `&guest_context` would
+    // walk into `main`'s and this function's live frames.
+    //
+    // Safe on a successful launch by construction: `vmcs.guest_rsp`
+    // consumed this field ~90 lines above, VM entry loads the guest's
+    // RSP from the VMCS, and so this value only ever governs what the
+    // `vmlaunch` stub runs on. It is the same ordering `guest_context.
+    // rip` already relies on, seeded into the VMCS above and then
+    // overwritten with the stub's address.
+    //
+    // What it buys is the asynchronous case only. The stub survives a
+    // *synchronous* refusal either way, because its reporter is
+    // stack-free by construction (vmx/asm.h: `vmread` into a register,
+    // RIP-relative stores). But a processor that fails entry parks at
+    // `cli; hlt` for ever, `hlt` does not mask NMI, and every host IDT
+    // gate is `interrupt_stack_table(0)` - so one NMI there was #PF on
+    // the push, then #DF on the same unusable stack, then a triple
+    // fault with nothing recorded anywhere.
+    guest_context.rsp = host_rsp;
 
     // restore_context is the launch - RIP was pointed at vmlaunch above.
     arch::x86_64::restore_context(&guest_context);

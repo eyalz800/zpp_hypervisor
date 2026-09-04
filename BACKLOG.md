@@ -64197,47 +64197,51 @@ address above was recomputed as `next_insn_rva + disp32` by hand, and
 two addresses in the existing notes are wrong precisely because that was
 not done.
 
-## VMLAUNCH runs on the caller's RSP, and on an AP that RSP is zero
+## VMLAUNCH ran on the caller's RSP - FIXED, after the first analysis was wrong
 
-Found by the KVM-review agent, 2026-09-04, while enumerating root-mode
-triple faults. **Not fixed - the obvious fix is wrong, and why it is
-wrong is the useful part.**
-
+Found by the KVM-review agent while enumerating root-mode triple faults.
 `hypervisor::vm_launch` seeds `vmcs.guest_rsp(guest_context.rsp)` and
-then enters through `restore_context`, which ends in `iretq` and pops
-that same field into RSP. So `VMLAUNCH` executes on it, and it is not
-guest state at that point - the guest's RSP is already in the VMCS.
-`apply_start_up` sets `context.rsp = 0`, and `main` calls it before
-reaching `vm_launch`, so on a trampoline-started processor the entry
-instruction runs with **RSP = 0**.
+then enters through `restore_context`, whose `iretq` pops that same
+field into RSP - so `VMLAUNCH` executed on it, and it is not guest
+state at that point. On a trampoline-started processor `apply_start_up`
+sets it to zero; on the boot processor it is the loader's stack. Same
+defect `resume.cpp` fixed on the resume path.
 
-This is the same defect `resume.cpp:1647` fixed on the resume path, and
-`6803c36` records that fix. The `vmlaunch` stub survives a *synchronous*
-refusal either way, because its reporter is stack-free by construction
-(`vmx/asm.h`: `vmread` into a register, RIP-relative stores, `cli; hlt`).
-What it does not survive is an asynchronous event, and the park makes it
-worse: a processor that fails entry sits at `cli; hlt` for ever, `hlt`
-does not mask NMI, and every host IDT gate is `interrupt_stack_table(0)`
-- so one NMI is #PF, then #DF on the same unusable stack, then a triple
-fault with nothing logged. `send_wake_nmi` filters on
-`start_up_launched`, which `main` sets true before calling `vm_launch`,
-and the probe path is not behind a diagnostic switch.
+**This entry first said the symmetric fix was wrong and must not be
+applied. That was itself wrong, and the correction is the useful part.**
+The claim was that the loader's CR3 and stack are still current at
+VMLAUNCH, so the right address differs between the two paths. Both
+halves are false, and both were checkable in one grep each:
 
-**Why the symmetric one-line fix was written and then withdrawn.** At
-`VMLAUNCH` the processor is still on the *loader's* CR3 and stack - the
-host page table only becomes current on VM exit, via `vmcs.host_cr3`.
-So the address needed here is one valid in the address space that is
-current *at that point*, which is a different requirement from
-`resume_guest`'s, and it differs between the boot processor and a
-processor the trampoline started. `&guest_context` is the caller's
-context, on the loader's stack; `host_vm_launch_stack` is a local of
-`vm_launch` whose mapping depends on which processor got there.
+- `main` executes `arch::x86_64::cr3(this->host_cr3)` unconditionally
+  before every path that reaches `vm_launch`, and the `scope_exit` that
+  would restore it cannot run, because `vm_launch` never returns. The
+  trampoline path loads `host_cr3` in `ap_start_up.S` before entering
+  C++ at all. So the host page table is current on both.
+- `launch_on_cpu` **copies** the caller's context to the top of
+  `this->stack[claimed]`, a member of the singleton and therefore module
+  `.bss`. So `guest_context` is not on the loader's stack either.
 
-Settle which address is correct for both, and gate it with a test the
-way `tests/resume_guest` gates the resume path. Single-processor boots
-reach the login screen through this line, so an unverified change risks
-the one configuration that works - which is why this is a backlog item
-and not a commit.
+Both candidate addresses are mapped. `guest_context.rsp = host_rsp` is
+the fix, taking `host_rsp` rather than `&guest_context` so pushes land
+in the unused remainder of `host_vm_launch_stack` instead of walking
+into `main`'s and `vm_launch`'s live frames. It is safe on a successful
+launch by construction: `vmcs.guest_rsp` consumed the field ~90 lines
+earlier and VM entry loads guest RSP from the VMCS, so the value only
+governs what the `vmlaunch` stub runs on.
+
+The lesson worth keeping over the bug: **a premise that withdraws a fix
+deserves the same standard of proof as the fix.** Two greps would have
+settled this either way, and instead it cost a commit arguing not to
+act.
+
+Still wanted: a `tests/vm_launch` gate, which needs `vm_launch` split
+into its own translation unit the way `ept_rendezvous.cpp` and
+`resume.cpp` were, for the same reason. The controls that matter are a
+negative one - set `context.rsp = 0` and check the restored RSP is the
+host stack - and an ordering one: `vmcs.guest_rsp()` must still equal
+what the caller passed, since an assignment placed too early would pass
+every other check and silently start the guest on the host stack.
 
 Two more root-mode triple-fault paths from the same audit, also unfixed:
 the nested-entry recovery stub (`vmx/asm.h:453-497`) parks at `cli; hlt`
