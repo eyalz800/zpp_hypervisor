@@ -10390,6 +10390,110 @@ private:
      * it is deliberately not bounded by max_cpus.
      * @{
      */
+    /**
+     * Why a VMX instruction from the level above was answered with #UD.
+     *
+     * Seven of the per-instruction handlers return false when they
+     * cannot get at the instruction's MEMORY OPERAND, and the caller
+     * turns a false into `inject_invalid_opcode_exception`. So a guest
+     * hypervisor whose operand this VMM could not read is told the
+     * instruction does not exist - and answers that by bugchecking,
+     * since it believes nothing is above it.
+     *
+     * `nested_vmx.cpp` already says this about VMREAD alone: "the
+     * caller answers a false with #UD. That is the wrong fault for a
+     * memory access that did not work ... on a multi-processor boot
+     * exactly one of these fires, on the second processor". Measured on
+     * boot 107: `vmx_instructions_refused` reads exactly 1, on cpu 1.
+     *
+     * Split by half because the fix differs. A decode failure is a
+     * defect in this VMM's operand decoder. A read failure is either a
+     * genuine #PF that should be injected as one - `on_guest_vmwrite`
+     * already does that where the page is not writable - or this VMM's
+     * own mapping window failing, which is a different bug entirely.
+     * @{
+     */
+    /**
+     * Which of `on_vmx_instruction`'s remaining refusals fired.
+     *
+     * Slot 0 is the MODE CHECK - real mode, virtual-8086, or IA-32e
+     * mode with a code segment that is not 64-bit. Slot 1 is VMXON
+     * without CR4.VMXE in the read shadow. Neither had a counter, and
+     * with the operand halves and the index check both measuring zero
+     * against a `vmx_instructions_refused` of exactly one, the refusal
+     * is in here.
+     *
+     * The mode check is worth suspecting on its own merits. **KVM
+     * declines to make it**: `handle_vmxon` says "Rely on hardware for
+     * the other pre-VM-Exit checks, CR0.PE=1, !VM86 and !COMPATIBILITY
+     * modes." zpp re-derives it in software from
+     * `vm_entry_controls().ia_32e_mode_guest` and the code segment's
+     * long-mode bit - and `ia_32e_mode_guest` is exactly the field
+     * `apply_start_up` clears, on the application processor only. A
+     * disagreement between those two spellings of "is this processor in
+     * long mode" refuses every VMX instruction the level above issues,
+     * which it answers by bugchecking.
+     *
+     * The three inputs are recorded beside the count, because a bare
+     * count could not say which of the three conditions was true.
+     * @{
+     */
+    /**
+     * The last of `on_vmx_instruction`'s five refusals, and the only
+     * one that does NOT produce a #UD - it injects #GP and returns
+     * false, and the caller declines to overwrite that. It still
+     * increments `vmx_instructions_refused`, which is why that counter
+     * reading one while every #UD path reads zero points here.
+     *
+     * SDM 28.1.1 puts faults based on privilege level above VM exits,
+     * so a processor that applied that rule never delivers this exit
+     * from CPL != 0 at all - which makes a hit here evidence about the
+     * SS access rights this VMM is reading, not about the guest.
+     */
+    std::uint64_t vmx_refusal_cpl[max_cpus]{};
+    std::uint64_t vmx_refusal_ss_rights{};
+
+    std::uint64_t vmx_refusal_mode[max_cpus]{};
+    std::uint64_t vmx_refusal_vmxe[max_cpus]{};
+    std::uint64_t vmx_refusal_cr0{};
+    std::uint64_t vmx_refusal_rflags{};
+    std::uint64_t vmx_refusal_entry_controls{};
+    std::uint64_t vmx_refusal_cs_rights{};
+    /**
+     * @}
+     */
+
+    std::uint64_t vmx_operand_decode_failures[max_cpus]{};
+    std::uint64_t vmx_operand_read_failures[max_cpus]{};
+    /** The guest RIP of the instruction whose operand failed. */
+    std::uint64_t vmx_operand_failure_reason{};
+    std::uint64_t vmx_operand_failure_linear{};
+    std::uint64_t vmx_operand_failure_error{};
+
+    void note_vmx_operand_failure(std::size_t cpu,
+                                  bool read_half,
+                                  std::uint64_t rip,
+                                  std::uint64_t linear,
+                                  std::uint64_t error)
+    {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        if (read_half) {
+            this->vmx_operand_read_failures[cpu] += 1;
+        } else {
+            this->vmx_operand_decode_failures[cpu] += 1;
+        }
+
+        this->vmx_operand_failure_reason = rip;
+        this->vmx_operand_failure_linear = linear;
+        this->vmx_operand_failure_error = error;
+    }
+    /**
+     * @}
+     */
+
     std::uint64_t index_out_of_range{};
     std::uint64_t index_out_of_range_last{};
     std::uint64_t index_out_of_range_vpid{};

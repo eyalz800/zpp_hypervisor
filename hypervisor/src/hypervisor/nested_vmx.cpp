@@ -601,6 +601,17 @@ bool hypervisor::on_vmx_instruction(std::size_t cpu,
     if ((0 == (vmcs.guest_cr0() & cr0_pe)) ||
         (0 != (vmcs.guest_rflags() & rflags_virtual_8086)) ||
         (in_ia32e_mode && !cs_64_bit)) {
+        // Counted, with all four inputs, because the caller turns this
+        // into a #UD and the level above answers a #UD by bugchecking.
+        // KVM does not make this check at all - see the member's
+        // declaration - so a disagreement here is this VMM's alone.
+        if (cpu < max_cpus) {
+            this->vmx_refusal_mode[cpu] += 1;
+        }
+        this->vmx_refusal_cr0 = vmcs.guest_cr0();
+        this->vmx_refusal_rflags = vmcs.guest_rflags();
+        this->vmx_refusal_entry_controls = vmcs.vm_entry_controls();
+        this->vmx_refusal_cs_rights = vmcs.guest_cs_access_rights();
         return false;
     }
 
@@ -618,6 +629,9 @@ bool hypervisor::on_vmx_instruction(std::size_t cpu,
             return false;
         }
     } else if (0 == (vmcs.cr4_read_shadow() & cr4_vmxe)) {
+        if (cpu < max_cpus) {
+            this->vmx_refusal_vmxe[cpu] += 1;
+        }
         return false;
     }
 
@@ -631,6 +645,10 @@ bool hypervisor::on_vmx_instruction(std::size_t cpu,
     auto cpl =
         (vmcs.guest_ss_access_rights() >> access_rights_dpl_shift) & 0x3;
     if (0 != cpl) {
+        if (cpu < max_cpus) {
+            this->vmx_refusal_cpl[cpu] += 1;
+        }
+        this->vmx_refusal_ss_rights = vmcs.guest_ss_access_rights();
         inject_general_protection_fault();
         return false;
     }
@@ -1145,6 +1163,17 @@ bool hypervisor::on_guest_vmclear(std::size_t cpu,
 {
     auto pointer = read_guest_vmcs_pointer(context);
     if (!pointer) {
+        // The VMCS-pointer operand could not be read. Counted as a
+        // guest-read failure, because that is what it is - the caller
+        // answers it with #UD, which tells the level above the
+        // instruction does not exist when the truth is that this VMM
+        // could not fetch its operand.
+        note_vmx_operand_failure(cpu,
+                                 true,
+                                 this->vmcs.guest_rip(),
+                                 0,
+                                 static_cast<std::uint64_t>(
+                                     pointer.error().code()));
         return false;
     }
 
@@ -1216,6 +1245,17 @@ bool hypervisor::on_guest_vmptrld(std::size_t cpu,
 {
     auto pointer = read_guest_vmcs_pointer(context);
     if (!pointer) {
+        // The VMCS-pointer operand could not be read. Counted as a
+        // guest-read failure, because that is what it is - the caller
+        // answers it with #UD, which tells the level above the
+        // instruction does not exist when the truth is that this VMM
+        // could not fetch its operand.
+        note_vmx_operand_failure(cpu,
+                                 true,
+                                 this->vmcs.guest_rip(),
+                                 0,
+                                 static_cast<std::uint64_t>(
+                                     pointer.error().code()));
         return false;
     }
 
@@ -1431,6 +1471,15 @@ bool hypervisor::on_guest_vmptrst(std::size_t cpu,
     // there is nothing to special case.
     auto linear = vmx_operand_linear_address(context);
     if (!linear) {
+        // Counted, because the caller turns this false into a #UD and
+        // a guest hypervisor bugchecks on that. See
+        // `note_vmx_operand_failure`.
+        note_vmx_operand_failure(cpu,
+                                 false,
+                                 this->vmcs.guest_rip(),
+                                 0,
+                                 static_cast<std::uint64_t>(
+                                     linear.error().code()));
         return false;
     }
 
@@ -1882,6 +1931,15 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
     // memory operand is still decoded and a bad address is still a fault.
     auto linear = vmx_operand_linear_address(context);
     if (!linear) {
+        // Counted, because the caller turns this false into a #UD and
+        // a guest hypervisor bugchecks on that. See
+        // `note_vmx_operand_failure`.
+        note_vmx_operand_failure(cpu,
+                                 false,
+                                 this->vmcs.guest_rip(),
+                                 0,
+                                 static_cast<std::uint64_t>(
+                                     linear.error().code()));
         return false;
     }
 
@@ -1896,6 +1954,15 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
         std::span(reinterpret_cast<std::byte *>(&operand_value),
                   sizeof(operand_value)));
     if (!read) {
+        // Counted for the same reason, and separately: this half is a
+        // memory access that did not work, which is not "no such
+        // instruction". See `note_vmx_operand_failure`.
+        note_vmx_operand_failure(cpu,
+                                 true,
+                                 this->vmcs.guest_rip(),
+                                 *linear,
+                                 static_cast<std::uint64_t>(
+                                     read.error().code()));
         return false;
     }
 
@@ -2066,6 +2133,15 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
 
     auto linear = vmx_operand_linear_address(context);
     if (!linear) {
+        // Counted, because the caller turns this false into a #UD and
+        // a guest hypervisor bugchecks on that. See
+        // `note_vmx_operand_failure`.
+        note_vmx_operand_failure(cpu,
+                                 false,
+                                 this->vmcs.guest_rip(),
+                                 0,
+                                 static_cast<std::uint64_t>(
+                                     linear.error().code()));
         return false;
     }
 
@@ -2080,6 +2156,15 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
         std::span(reinterpret_cast<std::byte *>(&operand_value),
                   sizeof(operand_value)));
     if (!read) {
+        // Counted for the same reason, and separately: this half is a
+        // memory access that did not work, which is not "no such
+        // instruction". See `note_vmx_operand_failure`.
+        note_vmx_operand_failure(cpu,
+                                 true,
+                                 this->vmcs.guest_rip(),
+                                 *linear,
+                                 static_cast<std::uint64_t>(
+                                     read.error().code()));
         return false;
     }
 

@@ -6874,6 +6874,13 @@ def main():
                "guest_in_vmx_operation", "guest_vmxon_pointer",
                "guest_current_vmcs", "index_out_of_range",
                "index_out_of_range_last", "index_out_of_range_vpid",
+               "vmx_refusal_cpl", "vmx_refusal_ss_rights",
+               "vmx_refusal_mode", "vmx_refusal_vmxe", "vmx_refusal_cr0",
+               "vmx_refusal_rflags", "vmx_refusal_entry_controls",
+               "vmx_refusal_cs_rights",
+               "vmx_operand_decode_failures", "vmx_operand_read_failures",
+               "vmx_operand_failure_reason", "vmx_operand_failure_linear",
+               "vmx_operand_failure_error",
                "vmx_instructions_refused", "refused_xsetbv_count",
                "refused_xsetbv_index", "refused_xsetbv_value",
                "recovery_field_readback",
@@ -8868,6 +8875,100 @@ def main():
     # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
     # above it, bugchecks with HvpHandleHostException (crash code 0x11).
     # `read-channel-state.sh` prints this and this reader never did.
+    # The two refusals in `on_vmx_instruction` that had no counter: the
+    # MODE check (real mode / v86 / IA-32e with a non-64-bit CS) and
+    # VMXON without CR4.VMXE in the read shadow. KVM makes neither in
+    # software; zpp re-derives the first from `ia_32e_mode_guest`, which
+    # is the field `apply_start_up` clears on the AP only.
+    if "vmx_refusal_mode" not in off:
+        print("\nVMX mode refusals: MEMBER ABSENT from this reader.")
+    else:
+        mm = Monitor(args.rig, args.port)
+        for _m in ("vmx_refusal_mode", "vmx_refusal_vmxe",
+                   "vmx_refusal_cpl"):
+            if _m in off:
+                mm.queue(instance + off[_m], args.cpus)
+        if "vmx_refusal_ss_rights" in off:
+            mm.queue(instance + off["vmx_refusal_ss_rights"], 1)
+        for _m in ("vmx_refusal_cr0", "vmx_refusal_rflags",
+                   "vmx_refusal_entry_controls", "vmx_refusal_cs_rights"):
+            if _m in off:
+                mm.queue(instance + off[_m], 1)
+        mg = mm.run()
+        hit = False
+        for cpu in range(args.cpus):
+            md = mg.get(instance + off["vmx_refusal_mode"] + 8 * cpu, 0)
+            vx = mg.get(instance + off["vmx_refusal_vmxe"] + 8 * cpu, 0)
+            cp = (mg.get(instance + off["vmx_refusal_cpl"] + 8 * cpu, 0)
+                  if "vmx_refusal_cpl" in off else 0)
+            if md or vx or cp:
+                if not hit:
+                    print("\nVMX INSTRUCTIONS REFUSED ON MODE / VMXE "
+                          "(each is a #UD to the guest hypervisor)")
+                    hit = True
+                print(f"  cpu {cpu}  mode {md:,}  cr4.vmxe {vx:,}  "
+                      f"cpl!=0 {cp:,}"
+                      + ("   <- injects #GP, not #UD" if cp else ""))
+                if cp and "vmx_refusal_ss_rights" in off:
+                    ssr = mg.get(instance + off["vmx_refusal_ss_rights"], 0)
+                    print(f"        ss access rights 0x{ssr:x}, "
+                          f"dpl {(ssr >> 5) & 3}")
+        if hit:
+            ec = mg.get(instance + off.get("vmx_refusal_entry_controls", 0), 0)
+            cs = mg.get(instance + off.get("vmx_refusal_cs_rights", 0), 0)
+            print(f"  last: cr0 0x"
+                  f"{mg.get(instance + off.get('vmx_refusal_cr0', 0), 0):x}"
+                  f"  rflags 0x"
+                  f"{mg.get(instance + off.get('vmx_refusal_rflags', 0), 0):x}"
+                  f"  entry_controls 0x{ec:x}  cs_rights 0x{cs:x}")
+            print(f"        ia32e_mode_guest {1 if ec & (1 << 9) else 0}"
+                  f"  cs.L {1 if cs & (1 << 13) else 0}"
+                  f"   <- if these disagree, THIS is the refusal")
+        else:
+            print("\nVMX instructions refused on mode / cr4.vmxe: none")
+
+    # **WHY** a VMX instruction was refused, split by half. The caller
+    # answers a false with #UD, which is the wrong fault for a memory
+    # access that did not work - `nested_vmx.cpp` says exactly that
+    # about VMREAD and predicts "on a multi-processor boot exactly one
+    # of these fires, on the second processor".
+    if "vmx_operand_decode_failures" not in off:
+        print("\nVMX operand failures: MEMBER ABSENT from this reader - "
+              "not zero.")
+    else:
+        om = Monitor(args.rig, args.port)
+        for _m in ("vmx_operand_decode_failures",
+                   "vmx_operand_read_failures"):
+            om.queue(instance + off[_m], args.cpus)
+        for _m in ("vmx_operand_failure_reason",
+                   "vmx_operand_failure_linear",
+                   "vmx_operand_failure_error"):
+            if _m in off:
+                om.queue(instance + off[_m], 1)
+        og = om.run()
+        any_row = False
+        for cpu in range(args.cpus):
+            d = og.get(instance + off["vmx_operand_decode_failures"]
+                       + 8 * cpu, 0)
+            r = og.get(instance + off["vmx_operand_read_failures"]
+                       + 8 * cpu, 0)
+            if not (d or r):
+                continue
+            if not any_row:
+                print("\nVMX OPERAND FAILURES (each becomes a #UD to the "
+                      "guest hypervisor)")
+                any_row = True
+            print(f"  cpu {cpu}  decode {d:,}  guest-read {r:,}")
+        if any_row:
+            print(f"  last: rip 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_reason', 0), 0):x}"
+                  f"  linear 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_linear', 0), 0):x}"
+                  f"  error "
+                  f"{og.get(instance + off.get('vmx_operand_failure_error', 0), 0)}")
+        else:
+            print("\nVMX operand failures: none on any processor")
+
     # **The direct count of #UDs this VMM handed the level above.**
     # `exit_dispatch.cpp` calls `inject_invalid_opcode_exception()` when
     # `on_vmx_instruction` refuses, and increments this. A guest
