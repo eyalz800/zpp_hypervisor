@@ -358,6 +358,9 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // so a run with it on describes a different machine.
         ' ', 'n', 'o', 's', 'd', 'm', 'a', '=',
         digit(nested_vmx::force_no_secure_dma),
+        // Keep the local APIC page watch armed after adoption.
+        ' ', 'k', 'e', 'e', 'p', 'a', 'p', 'i', 'c', '=',
+        digit(nested_vmx::keep_apic_watch),
         // Hand a held second-level event to vmcs12 rather than
         // destroying it when an unrelated exit reflects.
         ' ', 'h', 'a', 'n', 'd', '=',

@@ -113,6 +113,10 @@ option(ZPP_TRAP_AP_FAULTS
        "Diagnostic. Record an application processor's first exception after it enables paging instead of letting it arrive as a bare triple fault. See the root CMakeLists and nested_vmx.h."
        OFF)
 
+option(ZPP_KEEP_APIC_WATCH
+       "Keep the local APIC page watch armed after adoption."
+       OFF)
+
 option(ZPP_PROBE_APS
        "Diagnostic. Probe silent application processors with a non-maskable interrupt and record what answered. See the root CMakeLists and nested_vmx.h."
        OFF)
@@ -350,6 +354,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
     -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
     -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
+    -DZPP_KEEP_APIC_WATCH=$<BOOL:${ZPP_KEEP_APIC_WATCH}>
     -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
     -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
     -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>

@@ -2605,6 +2605,30 @@ inline constexpr bool deliver_external = (0 != ZPP_DELIVER_EXTERNAL);
 #define ZPP_FORCE_NO_SECURE_DMA 0
 #endif
 
+/**
+ * Keep the local APIC page watch armed after every platform processor
+ * has been adopted, instead of dropping it.
+ *
+ * Off reproduces the historical behaviour. `watched_page.cpp` drops the
+ * watch the moment `every_platform_processor_adopted()` turns true, on
+ * the argument that no start-up IPI can then be missed for a processor
+ * this VMM does not own. That argument is about START-UP IPIs, and the
+ * watch sees every xAPIC interrupt command, not only those.
+ *
+ * With one processor the drop happens at boot and costs nothing
+ * measurable. With two it happens MID-BOOT, at the instant Hyper-V
+ * adopts the application processor - and the multicore failure is a
+ * fixed point. After it, the state dump reads "local apic page watched
+ * at 0x0 <- NOT WATCHED: no xAPIC interrupt command reaches this VMM",
+ * while the trust-level traffic at the wall is ~96%
+ * HvCallFlushVirtualAddressSpace, which is inter-processor work.
+ */
+#ifndef ZPP_KEEP_APIC_WATCH
+#define ZPP_KEEP_APIC_WATCH 0
+#endif
+
+inline constexpr bool keep_apic_watch = (0 != ZPP_KEEP_APIC_WATCH);
+
 inline constexpr bool force_no_secure_dma = (0 != ZPP_FORCE_NO_SECURE_DMA);
 
 /**

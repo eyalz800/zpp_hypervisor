@@ -354,10 +354,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
     // Carried out on any of the three, and the return is what makes it
     // safe - see the paragraph above about `unhandled_exit` reason 0x30.
-    if (this->all_processors_started.load(std::memory_order_relaxed) &&
-        (0 != this->watched_apic_page)) {
-        watch_local_apic(false);
-        return true;
+    if constexpr (!nested_vmx::keep_apic_watch) {
+        if (this->all_processors_started.load(std::memory_order_relaxed) &&
+            (0 != this->watched_apic_page)) {
+            watch_local_apic(false);
+            return true;
+        }
     }
 
     for (auto & watch : this->watches) {

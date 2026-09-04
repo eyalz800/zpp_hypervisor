@@ -120,6 +120,14 @@ option(ZPP_SUPPRESS_VINA
 # nested hvix64 cannot create - there is no physical IOMMU here. A deliberate
 # degrade to the nested reality (device DMA already VFIO-constrained), not a
 # defect fix, so it is a switch.
+option(ZPP_KEEP_APIC_WATCH
+       "Keep the local APIC page watch armed after every platform \
+processor has been adopted. Off by default, which drops it - see \
+watched_page.cpp. With two processors the drop happens mid-boot, at the \
+instant Hyper-V adopts the application processor, and after it no xAPIC \
+interrupt command reaches this VMM at all."
+       OFF)
+
 option(ZPP_FORCE_NO_SECURE_DMA
     "Force the securekernel secure-PCI enable off so VBS skips secure DMA"
     OFF)
@@ -509,6 +517,7 @@ ExternalProject_Add(hypervisor
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
+        -DZPP_KEEP_APIC_WATCH=$<BOOL:${ZPP_KEEP_APIC_WATCH}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
         -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
@@ -715,6 +724,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_VMCS_CACHE=$<BOOL:${ZPP_VMCS_CACHE}>
         -DZPP_NESTED_VID=$<BOOL:${ZPP_NESTED_VID}>
         -DZPP_SUPPRESS_VINA=$<BOOL:${ZPP_SUPPRESS_VINA}>
+        -DZPP_KEEP_APIC_WATCH=$<BOOL:${ZPP_KEEP_APIC_WATCH}>
         -DZPP_FORCE_NO_SECURE_DMA=$<BOOL:${ZPP_FORCE_NO_SECURE_DMA}>
         -DZPP_NESTED_VTD=$<BOOL:${ZPP_NESTED_VTD}>
         -DZPP_USE_UNDERLYING_EVMCS=$<BOOL:${ZPP_USE_UNDERLYING_EVMCS}>
