@@ -4116,8 +4116,24 @@ def dump_ap_census(args, elf, instance):
         inits = word("init_emulated", cpu) or 0
         started = byte("started_by_start_up_ipi", cpu)
         error = word("launch_error", cpu) or 0
+        # `start_up_applied` counts ENTRIES to apply_start_up, not
+        # applications - the increment is above the second-SIPI guard.
+        # `start_up_declined` is the difference, and the header member's
+        # own comment says so: without the pair, "start-ups applied 2"
+        # against one start-up-IPI exit has no consistent reading. It
+        # was never printed, so the ambiguous number was the only one a
+        # dump ever showed.
+        declined = word("start_up_declined", cpu) or 0
+        real = applied - declined
         print(f"  start-ups applied {applied}  inits emulated {inits}  "
               f"started_by_start_up_ipi {started}  launch_error {error}")
+        print(f"    of those, DECLINED as a repeat start-up {declined}, "
+              f"so {real} actually reached the guest state")
+        if real > 1:
+            print(f"    *** {real} start-up applications on one "
+                  f"processor: the second sends a processor that is "
+                  f"already running back to its entry point, which "
+                  f"wedges it exactly like never having started ***")
 
 
 # Windows' own enumerations, read out of the PDB rather than recalled.
