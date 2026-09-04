@@ -743,6 +743,24 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
 
     reason = full_reason.basic();
 
+    // **Every application-processor exit, before anything can consume
+    // it.** e8f5d32 measured that the AP's long-mode CR0 write at
+    // `rip 0x216b` never reaches the control-register case, and left
+    // two readings: the write does not exit at all, or it exits and is
+    // handled before that case - the way the `0x76` vmcall is swallowed
+    // by `on_l2_exit` (6a1d0d2). Both produce the same silence further
+    // down, and only a log *above* `on_l2_exit` separates them.
+    //
+    // Application processors only. cpu 0 takes half a million exits a
+    // boot; cpu 1 takes about two hundred, and the log's own
+    // deduplication collapses the repeats, so this is bounded.
+    if (0 != cpuid) {
+        log("cpu {} exit reason {} rip {}",
+            cpuid,
+            static_cast<std::uint64_t>(reason),
+            vmcs.guest_rip());
+    }
+
     // Which comparison this exit belongs to, for `bucket_phase_cycles`.
     // Here rather than beside the other per-exit facts above, because
     // the reason is not known until the VMCS has been read - and it has
