@@ -64308,3 +64308,50 @@ here.
   nominal TSC frequency from CPUID.15H or `MSR_PLATFORM_INFO[15:8]`
   times a bus speed; leaf 0x16 is the processor *base* frequency, which
   is a P-state property and only incidentally equal.
+
+## The stepped-write window is partition-wide, the step state is per-CPU
+
+Found 2026-09-04 by measurement, after `ZPP_KEEP_APIC_WATCH=ON`
+livelocked a 2-CPU boot. Not fixed: the obvious fix holds a lock across
+a VM entry, which is its own hazard, and the switch that exposes it is
+OFF by default so nothing shipped reaches this today.
+
+`watched_page.cpp` steps a write it cannot decode by opening the page,
+letting one instruction retire under the monitor trap flag, and closing
+it again:
+
+    open   (*entry)->write(true);  invalidate_ept();   // ~line 908
+    close  (*entry)->write(false); invalidate_ept();   // ~line 1005
+
+The EPT entry is **shared by every processor**. The step state beside it
+- `stepping_rip[cpu]`, `stepping_page[cpu]`, `stepping_watch[cpu]` - is
+**per processor**. With two processors stepping writes to the same page:
+
+- cpu 0 opens the page, arms MTF, resumes to retire one instruction;
+- cpu 1 closes the page after its own step;
+- cpu 0's instruction faults again instead of retiring;
+- neither makes progress.
+
+**Measured**, boot 99 with the APIC watch kept armed past adoption:
+zpp's counters identical 100 s apart, and from L0 `nested_run` frozen at
+571,666 while `exits` climbed ~600/s. That rate is host timer
+preemption of two spinning vCPU threads, not exits either processor
+takes - both are in a `pause` loop in root operation, which is what this
+livelock looks like from underneath.
+
+The local APIC page is the one page both processors write often (every
+interrupt command), so it is where this bites first, and it needs the
+watch to still be armed - which is why it has never been seen.
+
+**Why the obvious fix is not applied.** Serialising with a `zpp::spin_lock`
+from open to close means holding it across a VM entry and an MTF round
+trip, with the other processor spinning in root operation meanwhile.
+That is the shape `mapping_window_lock` is already criticised for. A
+better fix probably makes the window not partition-wide at all - a
+per-processor EPT root for the stepped page, or an emulated write where
+the decoder currently refuses - and either is a design change rather
+than a patch.
+
+Related and unfixed: `watches[]` is scanned and claimed from any
+processor's exit handler with no mutual exclusion (`watched_page.cpp`
+~1127-1212, eight call sites).
