@@ -981,6 +981,29 @@ hypervisor::read_guest_vmcs_pointer(const arch::x86_64::context & context)
         std::span(reinterpret_cast<std::byte *>(&pointer),
                   sizeof(pointer)));
     if (!read) {
+        // **#PF here, where the linear address still exists.** Every
+        // caller of this turns a failure into a bare `return false`,
+        // which the exit dispatcher answers with
+        // `inject_invalid_opcode_exception` - telling the level above
+        // that VMPTRLD or VMCLEAR does not exist. A guest hypervisor
+        // answers a #UD on a VMX instruction by bugchecking, and that
+        // is what ends the machine: hvix64 records
+        // HvpHandleHostException, crash code 0x11, and resets through
+        // `out 0xcf9, 0x0f`.
+        //
+        // Measured rather than supposed: the operand's page is
+        // genuinely absent. `running_l2` reads clear at the failure, so
+        // the walk was a plain four-level walk of the level above's own
+        // tables with its own CR3 rather than a mistranslation through
+        // EPT12. #PF with CR2 set is what a processor delivers for
+        // that, and the guest hypervisor then pages the operand in and
+        // re-executes the instruction.
+        //
+        // Injected here rather than in the callers because this is the
+        // only scope that still has the linear address - the callers
+        // receive an error and nothing else, which is why they could
+        // only ever have produced the wrong fault.
+        inject_page_fault(*linear, 0);
         return std::unexpected(read.error());
     }
 
@@ -1975,6 +1998,28 @@ bool hypervisor::on_guest_invept(std::size_t cpu,
                                  *linear,
                                  static_cast<std::uint64_t>(
                                      read.error().code()));
+
+        // **#PF, not #UD.** The caller answers a bare false with
+        // `inject_invalid_opcode_exception`, which tells the level above
+        // that this instruction does not exist - and a guest hypervisor
+        // answers a #UD on a VMX instruction by bugchecking, because it
+        // believes nothing is above it. That is measured, not supposed:
+        // hvix64 records HvpHandleHostException with crash code 0x11 and
+        // resets the machine through `out 0xcf9, 0x0f`.
+        //
+        // The operand's page is genuinely absent, which was measured
+        // rather than assumed - `running_l2` reads clear at the failure,
+        // so the walk was a plain four-level walk of the level above's
+        // own tables with its own CR3, not a mistranslation through
+        // EPT12. A processor delivers #PF for that, with CR2 set, and
+        // the guest hypervisor pages the operand in and re-executes.
+        //
+        // Error code zero: not present, a read, from supervisor mode.
+        // `on_guest_vmwrite` is the model - it already injects #PF where
+        // the page is not writable, and its comment records that a false
+        // return keeps RIP on the instruction and that the caller will
+        // not overwrite an injection already staged.
+        inject_page_fault(*linear, 0);
         return false;
     }
 
@@ -2177,6 +2222,28 @@ bool hypervisor::on_guest_invvpid(std::size_t cpu,
                                  *linear,
                                  static_cast<std::uint64_t>(
                                      read.error().code()));
+
+        // **#PF, not #UD.** The caller answers a bare false with
+        // `inject_invalid_opcode_exception`, which tells the level above
+        // that this instruction does not exist - and a guest hypervisor
+        // answers a #UD on a VMX instruction by bugchecking, because it
+        // believes nothing is above it. That is measured, not supposed:
+        // hvix64 records HvpHandleHostException with crash code 0x11 and
+        // resets the machine through `out 0xcf9, 0x0f`.
+        //
+        // The operand's page is genuinely absent, which was measured
+        // rather than assumed - `running_l2` reads clear at the failure,
+        // so the walk was a plain four-level walk of the level above's
+        // own tables with its own CR3, not a mistranslation through
+        // EPT12. A processor delivers #PF for that, with CR2 set, and
+        // the guest hypervisor pages the operand in and re-executes.
+        //
+        // Error code zero: not present, a read, from supervisor mode.
+        // `on_guest_vmwrite` is the model - it already injects #PF where
+        // the page is not writable, and its comment records that a false
+        // return keeps RIP on the instruction and that the caller will
+        // not overwrite an injection already staged.
+        inject_page_fault(*linear, 0);
         return false;
     }
 
