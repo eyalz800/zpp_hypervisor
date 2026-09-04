@@ -309,7 +309,32 @@ void hypervisor::apply_start_up(arch::x86_64::context & context,
         // failing per boot, a different one each time, with
         // "cpu N start-up already applied, not applying again, asked by
         // launch" immediately before it.
-        if (this->started_by_start_up_ipi[cpu] && !first_launch) {
+        // **`first_launch` is not sufficient, measured.** A two-processor
+        // boot reached `start-ups applied 2, declined 0` on cpu 1 - both
+        // applications got through, so the second arrived with
+        // `first_launch` set and the exemption above swallowed exactly
+        // the case this guard exists for. The consequence is the whole
+        // multicore wedge: the second application resets CS:base to the
+        // start-up vector's page and RIP to 0, and that page
+        // (`0x87000` on this guest, read as all zeros on a *live* guest)
+        // no longer holds the trampoline, so the processor is thrown
+        // back into the firmware's `AsmRelocateApLoop` MWAIT park loop
+        // and Hyper-V's `HvCallAddLogicalProcessor` never completes.
+        //
+        // So the test is what the architecture actually specifies: a
+        // start-up IPI is ignored by a processor **not in the
+        // wait-for-SIPI state** (SDM Vol. 3A, 10.4.7.3 / Table 12-1's
+        // INIT column; KVM does the same in `kvm_apic_accept_events`,
+        // which acts on `KVM_APIC_SIPI` only while `mp_state ==
+        // KVM_MP_STATE_INIT_RECEIVED`). A processor that has taken even
+        // one exit has executed guest code and is therefore running,
+        // whatever route brought us here - and a processor coming out of
+        // the trampoline has taken none, so the launch path this
+        // exemption was written for is untouched.
+        auto already_running = (0 != this->handler_exits[cpu]);
+
+        if (this->started_by_start_up_ipi[cpu] &&
+            (!first_launch || already_running)) {
             // Said out loud, because returning here leaves the guest
             // state as whoever built it last, and on a processor coming
             // out of the trampoline that state is this VMM's own C frame
