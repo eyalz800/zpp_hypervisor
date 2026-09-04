@@ -10024,9 +10024,19 @@ def main():
             reason, qual, activity, cs, rip, phys, repeat, value, \
                 detail, rip_owner = (words.get(a + 8 * k, 0)
                                      for k in range(10))
+            # A zero detail is printed for the reasons that always carry
+            # one, and suppressed for the rest. Without this, CPUID leaf
+            # 0 - a common leaf - is indistinguishable from "no leaf was
+            # recorded", which is the two-meanings-for-zero trap that
+            # has cost this tree several readings.
+            basic = reason & 0xffff
+            carries_detail = basic in (10, 18, 31, 32)   # cpuid vmcall
+            carries_value = basic in (10, 31, 32)        # rdmsr wrmsr
             extra = f" phys=0x{phys:x}" if phys else ""
-            extra += f" detail=0x{detail:x}" if detail else ""
-            extra += f" value=0x{value:x}" if value else ""
+            extra += (f" detail=0x{detail:x}"
+                      if (detail or carries_detail) else "")
+            extra += (f" value=0x{value:x}"
+                      if (value or carries_value) else "")
             extra += RIP_OWNER.get(rip_owner, "")
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
@@ -10061,9 +10071,19 @@ def main():
                 detail, rip_owner = (got.get(a + 8 * k, 0)
                                      for k in range(10))
             times = f" x{repeat}" if repeat > 1 else ""
+            # A zero detail is printed for the reasons that always carry
+            # one, and suppressed for the rest. Without this, CPUID leaf
+            # 0 - a common leaf - is indistinguishable from "no leaf was
+            # recorded", which is the two-meanings-for-zero trap that
+            # has cost this tree several readings.
+            basic = reason & 0xffff
+            carries_detail = basic in (10, 18, 31, 32)   # cpuid vmcall
+            carries_value = basic in (10, 31, 32)        # rdmsr wrmsr
             extra = f" phys=0x{phys:x}" if phys else ""
-            extra += f" detail=0x{detail:x}" if detail else ""
-            extra += f" value=0x{value:x}" if value else ""
+            extra += (f" detail=0x{detail:x}"
+                      if (detail or carries_detail) else "")
+            extra += (f" value=0x{value:x}"
+                      if (value or carries_value) else "")
             extra += RIP_OWNER.get(rip_owner, "")
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "

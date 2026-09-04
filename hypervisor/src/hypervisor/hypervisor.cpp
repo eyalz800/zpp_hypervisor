@@ -5170,6 +5170,7 @@ void hypervisor::record_exit(std::size_t cpu,
     // costs a compare and a move on the three reasons it applies to and
     // nothing at all on the rest. See exit_trace_entry::detail for what
     // each packing means and why VMCALL needs two registers.
+    constexpr std::uint64_t cpuid = 10;
     constexpr std::uint64_t vmcall = 18;
     constexpr std::uint64_t rdmsr = 31;
     constexpr std::uint64_t wrmsr = 32;
@@ -5188,6 +5189,27 @@ void hypervisor::record_exit(std::size_t cpu,
         recorded.detail =
             ((context.rax & low_half_mask) << high_half_shift) |
             (context.rcx & low_half_mask);
+    } else if (cpuid == basic) {
+        // The leaf, and the sub-leaf beside it.
+        //
+        // Added because an application processor spinning on `cpuid`
+        // could not be told apart from any other: the ring showed
+        // `cpuid x3` and nothing else, and three *different* leaves in
+        // a row merged into that one entry - the deduplication keys on
+        // `detail`, which `cpuid` never set. So the leaves were not
+        // merely unrecorded, they were actively collapsed, and the
+        // repeat count read as evidence of a tight loop when it was
+        // evidence of three distinct questions.
+        //
+        // That is the same family as the log ring's `[times=N]`: a
+        // merge is only safe when the key covers what distinguishes
+        // the records. Here it did not.
+        //
+        // EAX is the leaf and ECX the sub-leaf (SDM Vol. 2A, CPUID);
+        // both are read from the saved context rather than the VMCS,
+        // so this costs one compare on every other exit reason.
+        recorded.detail = context.rax & low_half_mask;
+        recorded.detail_value = context.rcx & low_half_mask;
     }
 
     // Counted before the ring is touched, because this is the count that
