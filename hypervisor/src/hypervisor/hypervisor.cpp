@@ -3490,6 +3490,77 @@ bool hypervisor::on_io_instruction(arch::x86_64::context & context,
     auto string_form = 0 != (qualification & (1ull << 4));
     auto size = qualification & 7;
 
+    // The reset control register, which is how a PC resets itself and
+    // is otherwise invisible here - it is not one of the sleep ports, so
+    // before this it reached the device model without ever being an exit
+    // in this VMM. A device-model reset and a triple fault both leave the
+    // machine stopped and cannot be told apart from outside, and every
+    // 2-CPU boot dies that way at about 100 s.
+    //
+    // A read is answered by letting the guest do it: nothing is entered
+    // by reading the register back.
+    if (reset_control_port == port) {
+        if (reading || string_form) {
+            intercept_io_port(port, false);
+            return true;
+        }
+
+        std::uint32_t written{};
+        std::uint8_t width{};
+        switch (size) {
+        case 0:
+            written = static_cast<std::uint8_t>(context.rax);
+            width = 1;
+            break;
+        case 1:
+            written = static_cast<std::uint16_t>(context.rax);
+            width = 2;
+            break;
+        default:
+            written = static_cast<std::uint32_t>(context.rax);
+            width = 4;
+            break;
+        }
+
+        // Recorded *before* the write is issued, because bit 2 set is
+        // the write the machine does not come back from. Everything
+        // here has to be in memory by then or it is never readable.
+        this->reset_request.occurred = 1;
+        this->reset_request.value = written;
+        this->reset_request.bytes = width;
+        this->reset_request.processor = this->vmcs.vpid();
+        this->reset_request.rip = this->vmcs.guest_rip();
+        this->reset_request.count += 1;
+
+        log("RESET CONTROL PORT written: value {} width {} by vpid {} "
+            "at rip {} (write number {})",
+            written,
+            width,
+            this->vmcs.vpid(),
+            this->vmcs.guest_rip(),
+            this->reset_request.count);
+
+        // Performed here rather than released and re-executed, so the
+        // port stays armed and a second write is seen too.
+        switch (width) {
+        case 1:
+            arch::x86_64::out8(port, static_cast<std::uint8_t>(written));
+            break;
+        case 2:
+            arch::x86_64::out16(port,
+                                static_cast<std::uint16_t>(written));
+            break;
+        default:
+            arch::x86_64::out32(port, written);
+            break;
+        }
+
+        // The access has had its effect, so the guest must not run its
+        // own instruction again.
+        re_execute = false;
+        return true;
+    }
+
     if ((0 == this->sleep_control_port) ||
         ((port != this->sleep_control_port) &&
          (port != this->sleep_control_port_secondary))) {
@@ -7286,6 +7357,14 @@ hypervisor::main(arch::x86_64::context & caller_context)
             log("watching sleep control port {}",
                 this->sleep_control_port);
         }
+
+        // Armed unconditionally rather than beside the sleep ports,
+        // which are discovered from the platform's own tables - this
+        // one is architectural and is at the same place on every PC.
+        // See reset_request for why it is worth an exit, and why 0x64
+        // is deliberately not armed alongside it.
+        intercept_io_port(reset_control_port, true);
+        log("watching reset control port {}", reset_control_port);
     }
 
     // Initialize and load the intermediate GDT, which is a copy of the

@@ -6662,7 +6662,7 @@ def main():
                # power off" from a triple fault and from a device-model
                # reset, all three of which end in `paused (shutdown)`
                # and are otherwise indistinguishable by run state.
-               "sleep_request",
+               "sleep_request", "reset_request",
                # Recorded by exit_dispatch.cpp since the nesting work and
                # never read out. The exit ring of four consecutive resets
                # ends on one of these.
@@ -7442,6 +7442,9 @@ def main():
     if "sleep_request" in off:
         # occurred, port, value, sleep_type, processor, stage
         monitor.queue(instance + off["sleep_request"], 6)
+    if "reset_request" in off:
+        # occurred, value, bytes, processor, rip, count
+        monitor.queue(instance + off["reset_request"], 6)
     if "ap_fault" in off:
         monitor.queue(instance + off["ap_fault"], 14)
     # Eighteen words, which is every member the record has. Six was the
@@ -9522,6 +9525,25 @@ def main():
     else:
         print("\nsleep request: never - no processor saw a PM1_CNT write "
               "with SLP_EN, so the stop was NOT a guest ACPI sleep")
+
+    if "reset_request" not in off:
+        print("\nreset request: MEMBER ABSENT from this reader - not "
+              "'never'. Add it rather than reading this as a zero.")
+    elif read('reset_request', 0):
+        value = read('reset_request', 1)
+        print(f"\nRESET CONTROL PORT WRITTEN - the guest reset the "
+              f"machine itself, through 0xcf9")
+        print(f"  value 0x{value:x} "
+              f"({'bit 2 SET, this is the reset' if value & 4 else 'bit 2 clear, this write did NOT reset'}) "
+              f"width {read('reset_request', 2)}")
+        print(f"  written by vpid {read('reset_request', 3)} "
+              f"at guest rip 0x{read('reset_request', 4):x}")
+        print(f"  {read('reset_request', 5)} write(s) seen in total; the "
+              f"fields describe the most recent")
+        print(f"  This is a DEVICE-MODEL RESET, not a triple fault.")
+    else:
+        print("\nreset request: never - nothing wrote 0xcf9, so the stop "
+              "was NOT a guest-initiated reset through that port")
 
     if read('vm_entry_failure', 0):
         print(f"\nVM ENTRY FAILURE - a processor was refused entry")

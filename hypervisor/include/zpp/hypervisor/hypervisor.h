@@ -11227,6 +11227,82 @@ private:
     } sleep_request{};
 
     /**
+     * The port a PC resets itself through, and what a write to it is
+     * recorded in.
+     *
+     * This exists because of a measured gap rather than for completeness.
+     * The I/O bitmap was armed for the two sleep control ports and
+     * nothing else, so a guest write to the reset control register
+     * reached the device model without ever being an exit here - and a
+     * device-model reset and a triple fault both end with the machine
+     * stopped and are otherwise indistinguishable from outside. Every
+     * 2-CPU boot dies that way at about 100 s, and this is what says
+     * which of the two it was, and from where.
+     *
+     * 0xcf9 only. 0x64 is the other architectural way to reset a PC and
+     * is deliberately *not* armed: it is the keyboard controller command
+     * port, the guest writes it constantly, and intercepting it would
+     * add an exit to a hot path to catch an event that has never been
+     * observed to come from there.
+     *
+     * The write is performed by this VMM rather than released and
+     * re-executed, so the port stays armed and every write is seen. The
+     * record is written before the OUT is issued, because the OUT may be
+     * the one that stops the machine.
+     * @{
+     */
+    static constexpr std::uint16_t reset_control_port = 0xcf9;
+
+    struct
+    {
+        /**
+         * Non-zero once any write to the reset control port has been
+         * seen. Check this first; the rest is meaningless until it is
+         * set.
+         */
+        std::uint64_t occurred{};
+
+        /**
+         * The value written, and how wide the access was.
+         *
+         * Bit 2 is the one that resets - a value with it clear is a
+         * write to the register that did *not* reset the machine, which
+         * is why the value is recorded rather than just the fact.
+         * @{
+         */
+        std::uint64_t value{};
+        std::uint64_t bytes{};
+        /**
+         * @}
+         */
+
+        /**
+         * Which processor wrote it, as a VPID, and the guest RIP of the
+         * instruction that did - so the write can be attributed to code
+         * rather than only to a processor.
+         * @{
+         */
+        std::uint64_t processor{};
+        std::uint64_t rip{};
+        /**
+         * @}
+         */
+
+        /**
+         * How many writes have been seen in total.
+         *
+         * Every field above describes the *most recent* write rather
+         * than the first, because the interesting one is the write the
+         * machine did not come back from. The count is what says
+         * whether there were earlier, harmless ones.
+         */
+        std::uint64_t count{};
+    } reset_request{};
+    /**
+     * @}
+     */
+
+    /**
      * The steps on_sleep_request records in sleep_request.stage, in the
      * order it reaches them. A machine that suspends and never resumes
      * leaves the last one it got past.
