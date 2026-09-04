@@ -1067,6 +1067,44 @@ For streaming tracepoints rather than counters, the `trace-kvm` skill's
 FIFO recipe still applies and its warnings still stand: `trace_pipe`
 only, never `trace`, and never as an ssh child.
 
+**There are per-vCPU directories too, and `guest_mode` is the one
+instrument in this tree that can see a processor from *underneath*
+zpp.** `/sys/kernel/debug/kvm/<pid>-<fd>/vcpu<N>/guest_mode` is KVM's
+`is_guest_mode(vcpu)`: 1 when that vCPU is running *zpp's* guest
+nested, 0 when it is running zpp itself. Every other instrument for
+"is this processor executing" lives inside zpp and therefore cannot
+report its own absence; this one does not.
+
+Sampling it settled a question sixteen boots of internal instruments
+could not (2-CPU boot 74, zpp resident, poll every 2 s):
+
+    samples 0-32   gm0=1 gm1=1   nested_run +10-12k per 2 s
+    sample  33     gm1 -> 0, nested_run frozen at 538,972
+    samples 33-134 unchanged for 100 consecutive samples (200 s)
+
+**cpu 1 runs zpp's guest, nested and healthy, for over a minute.** The
+multicore failure is not an AP that never starts - it is the *whole VM
+stopping* at a definite instant. See
+[[multicore-ap-never-leaves-firmware-park-loop]] for the four
+conclusions that reframing withdrew.
+
+Three traps, each of which produced a wrong answer here first:
+
+- **One sample at a freeze is not a measurement.** Read post-mortem,
+  `vcpu1/guest_mode` is 0 and reads as "the AP never entered guest
+  mode" - the exact opposite of what 135 samples show. Sample across
+  the run, or do not quote it.
+- **`glob` through `sudo ls -d .../*/` expands as the unprivileged
+  user** and comes back empty, which is indistinguishable from "KVM
+  exposes no per-VM directory". `sudo find /sys/kernel/debug/kvm
+  -maxdepth 1 -mindepth 1 -type d` instead. debugfs is *mounted* on
+  this rig; only reading it needs root.
+- **The serial log is `~/zpp/serial.out`, not `~/serial.out`.** A
+  residency check pointed at the wrong path with stderr suppressed
+  prints nothing and reads exactly like "no `allocate_rwx` marker,
+  this was bare Windows". Always print the marker *count*, so a
+  missing file and a genuine zero look different.
+
 ### Use hardware breakpoints only
 
 **Always `hbreak`, never `break`.** This is not a preference, it is a correctness
