@@ -1220,13 +1220,44 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
         this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
     }
 
+    // Whether this processor is about to enter the *second-level* guest
+    // rather than its own VMCS. Asked first, because both of the marks
+    // below say something about **vmcs01's** launch state and neither may
+    // be spent on an entry that does not touch vmcs01.
+    auto entering_l2 = false;
+
+    if constexpr (nested_vmx::enabled) {
+        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
+            entering_l2 = this->running_l2[slot - 1];
+        }
+    }
+
     // Whether this processor has been out of VMX operation and back
     // since the last entry, which only the sleep quiesce does. Its
     // return leaves the launch state clear, and VMRESUME requires
     // launched (SDM 27.1) - so that one case has to leave through
     // VMLAUNCH instead. Consumed here, so the next exit resumes.
+    //
+    // **Not consumed on a second-level entry, and that is the same
+    // defect the enlightened mark below carries a paragraph about.** The
+    // flag means "vmcs01 must be launched, not resumed". A second-level
+    // entry picks its instruction from vmcs02's launch state a few lines
+    // down and ignores `relaunch` entirely - so reading and clearing it
+    // here threw it away, and the *next* vmcs01 entry then executed
+    // VMRESUME on a VMCS that `enter_root_mode`'s VMCLEAR had left
+    // non-launched. That is `vm_instruction_error` 5 out of the plain
+    // `vmresume` stub, which produces no VM exit at all and parks the
+    // processor.
+    //
+    // Reachable rather than theoretical: the flag is set by
+    // `quiesce_and_sleep`'s caller, which is the I/O exit for the sleep
+    // control port, and `on_l2_exit` answers an I/O exit that neither
+    // level intercepts with `deferred` - so that handler can run with
+    // `running_l2` set. Held instead of dropped, because the requirement
+    // is still true and the next entry into vmcs01 is where it applies.
     auto relaunch = false;
-    if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
+    if (auto slot = (cpuid + 1);
+        (0 != slot) && (slot <= max_cpus) && !entering_l2) {
         relaunch = this->relaunch_after_sleep[slot - 1];
         this->relaunch_after_sleep[slot - 1] = false;
     }
@@ -1258,17 +1289,9 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // the 5 was read - is only called from the plain `vmresume` stub,
     // which is this entry. Three fixes were aimed at the wrong VM entry
     // because two reporters were assumed to be one.
-    // Whether this processor is about to enter the *second-level* guest
-    // rather than its own VMCS, which the mark below must not be spent
-    // on. Computed here because the branch that acts on it is further
-    // down and the mark is consumed above it.
-    auto entering_l2 = false;
-
-    if constexpr (nested_vmx::enabled) {
-        if (auto slot = (cpuid + 1); (0 != slot) && (slot <= max_cpus)) {
-            entering_l2 = this->running_l2[slot - 1];
-        }
-    }
+    //
+    // `entering_l2` is computed above, beside the sleep relaunch, which
+    // needs it for the same reason and had the same defect.
 
     if constexpr (nested_vmx::evmcs_to_kvm) {
         // **Not on a second-level entry.** The mark says "this VMM's own

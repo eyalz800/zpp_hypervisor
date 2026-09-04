@@ -1700,6 +1700,39 @@ void the_entry_is_chosen_by_launch_state()
                         &zpp::arch::x86_64::vmx::nested_vmresume),
                     zpp::arch::x86_64::g_restored_context.rip,
                     "and one that has, with VMRESUME");
+
+        // **The sleep mark is not spent on a second-level entry.**
+        //
+        // `relaunch_after_sleep` says "vmcs01 must be launched, not
+        // resumed", and a second-level entry picks its instruction from
+        // vmcs02's own launch state and ignores it. Reading and clearing
+        // it here threw the requirement away, and the next entry into
+        // vmcs01 then executed VMRESUME on a VMCS that
+        // `enter_root_mode`'s VMCLEAR had left non-launched - which is
+        // `vm_instruction_error` 5, out of a stub that produces no VM
+        // exit and parks the processor.
+        //
+        // The identical defect on the enlightened mark two branches
+        // below was measured rather than reasoned: `evmcs_mark_set` 1
+        // and `evmcs_mark_seen` 1 beside `vm_instruction_error` 5. This
+        // is the same shape on the flag beside it, and the reason it is
+        // reachable is that `on_l2_exit` answers an I/O exit neither
+        // level intercepts with `deferred` - so the sleep-control-port
+        // handler, which is what sets this flag, can run with
+        // `running_l2` set.
+        auto asleep_into_l2 = make();
+        asleep_into_l2.state->relaunch_after_sleep[cpu] = true;
+        asleep_into_l2.state->running_l2[cpu] = true;
+        asleep_into_l2.state->vmcs02_launched[cpu] = true;
+        resume(asleep_into_l2);
+        check_equal(reinterpret_cast<std::uint64_t>(
+                        &zpp::arch::x86_64::vmx::nested_vmresume),
+                    zpp::arch::x86_64::g_restored_context.rip,
+                    "a second-level entry is chosen by vmcs02's launch "
+                    "state even with the sleep relaunch pending");
+        check(asleep_into_l2.state->relaunch_after_sleep[cpu],
+              "and the sleep relaunch survives it, because vmcs01 has "
+              "still not been launched since the VMCLEAR");
     }
 }
 
