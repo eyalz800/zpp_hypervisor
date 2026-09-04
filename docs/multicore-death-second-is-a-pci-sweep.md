@@ -126,3 +126,41 @@ Four from the first sample and never changing, so the loader simply
 emits four in this configuration and the machine boots **once**. The
 sweep belongs to that single boot. The run also brackets the death
 between 105 s and 135 s.
+
+## Where the guest actually is at the wall (named, 2026-09-04)
+
+The wall is a fixed point at ~21,25x `HvCallVtlCall` (21,251 / 21,248 /
+21,255 over three boots) while cpu 0's exits vary 14% and cpu 1's
+second-level entries vary sevenfold. So it is a guest-side milestone.
+
+The dump already walks the second-level call stack and had never been
+read at THIS wall - only at the single-processor one. Symbolised through
+`scripts/guest-securekernel-syms.py` against `ntkrnlmp.pdb` with the
+kernel base out of zpp's own log:
+
+    KiSystemStartup+0x283
+      KiInitializeKernel+0x805
+        InitBootProcessor+0x127
+          ExpRevokeBootLoaderPagePrivileges+0x50
+            KeSetPagePrivilege+0x2c
+              VslRemoveProtectedPage+0x5c
+                VslpEnterIumSecureMode+0x3a8
+                  HvlSwitchToVsmVtl1+0xab        <- current
+
+`KiSelectIdealProcessorSetForGroup+0x112` also appears in the walk,
+which is processor-topology work that only exists above one CPU.
+
+**The guest is revoking the boot loader's page privileges**, one trust
+level switch per page, inside `InitBootProcessor` - very early kernel
+initialisation, long before anything a login screen needs. A loop over a
+fixed number of pages is exactly why the VTL count is reproducible to
+0.03%: it is counting pages, not time.
+
+Note the shape rivals the single-processor wall recorded in memory
+("~37,15x VTL calls and exactly 12,387 copies"), which is also a
+page-count loop. This one is EARLIER and different.
+
+Frame-walk caveat: the walk is a raw stack scan, so it carries stale
+values too - `KiIdleLoop`, `wil_details_FeatureReporting_*` and repeated
+`+0xfd25c0` entries are noise. The chain quoted above is the part that
+is self-consistent, and it is consistent across the run.
