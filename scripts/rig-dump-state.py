@@ -10037,6 +10037,15 @@ def main():
                       if (detail or carries_detail) else "")
             extra += (f" value=0x{value:x}"
                       if (value or carries_value) else "")
+            # CPUID packs all four answered registers; split them, and
+            # name the two that identify a processor, since that is what
+            # a starting AP polls for.
+            if basic == 10:
+                eax, ebx = detail & 0xffffffff, detail >> 32
+                ecx, edx = value & 0xffffffff, value >> 32
+                extra = (f" eax=0x{eax:x} ebx=0x{ebx:x}"
+                         f" ecx=0x{ecx:x} edx=0x{edx:x}"
+                         f" apicid={ebx >> 24}")
             extra += RIP_OWNER.get(rip_owner, "")
             times = f" x{repeat}" if repeat > 1 else ""
             print(f"  [{i:6d}] {name_reason(reason):<16} "
@@ -10084,6 +10093,15 @@ def main():
                       if (detail or carries_detail) else "")
             extra += (f" value=0x{value:x}"
                       if (value or carries_value) else "")
+            # CPUID packs all four answered registers; split them, and
+            # name the two that identify a processor, since that is what
+            # a starting AP polls for.
+            if basic == 10:
+                eax, ebx = detail & 0xffffffff, detail >> 32
+                ecx, edx = value & 0xffffffff, value >> 32
+                extra = (f" eax=0x{eax:x} ebx=0x{ebx:x}"
+                         f" ecx=0x{ecx:x} edx=0x{edx:x}"
+                         f" apicid={ebx >> 24}")
             extra += RIP_OWNER.get(rip_owner, "")
             print(f"  [{i:6d}] {name_reason(reason):<16} "
                   f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "

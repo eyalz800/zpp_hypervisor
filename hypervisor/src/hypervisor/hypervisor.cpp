@@ -5205,11 +5205,24 @@ void hypervisor::record_exit(std::size_t cpu,
         // merge is only safe when the key covers what distinguishes
         // the records. Here it did not.
         //
-        // EAX is the leaf and ECX the sub-leaf (SDM Vol. 2A, CPUID);
-        // both are read from the saved context rather than the VMCS,
-        // so this costs one compare on every other exit reason.
-        recorded.detail = context.rax & low_half_mask;
-        recorded.detail_value = context.rcx & low_half_mask;
+        // **All four registers, packed**, and the reason is the whole
+        // point of the instrument: this runs *after* the handler, so
+        // RAX..RDX hold what was **answered**, not the leaf asked. The
+        // identity a starting processor is looking for lives in the two
+        // registers a naive EAX/ECX capture drops - `EBX[31:24]` is the
+        // initial APIC ID on leaf 1, and `EDX` is the x2APIC ID on leaf
+        // 0x0b (SDM Vol. 2A, CPUID). Capturing EAX and ECX alone showed
+        // family/stepping and feature bits, which is precisely the part
+        // nobody was asking about.
+        //
+        //   detail       = EAX | (EBX << 32)
+        //   detail_value = ECX | (EDX << 32)
+        recorded.detail = (context.rax & low_half_mask) |
+                          ((context.rbx & low_half_mask)
+                           << high_half_shift);
+        recorded.detail_value = (context.rcx & low_half_mask) |
+                                ((context.rdx & low_half_mask)
+                                 << high_half_shift);
     }
 
     // Counted before the ring is touched, because this is the count that
