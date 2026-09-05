@@ -66371,3 +66371,25 @@ It also means the multicore wedge, at this level, looks identical to the
 single-core root cause already recorded: a driver's `DriverEntry` holding
 phase 1 in a timer-resolution path. What multicore changes is how often it
 happens, not what it is.
+
+### Direct confirmation: the removes are front-loaded, as the retraction said
+
+Boot 175, sampled early (walk at 683/s, still climbing fast):
+
+    VslRemoveProtectedPage (0x0f3)   3,010   55.1%
+    VslCopyProtectedPage   (0x0f4)   1,249   22.9%
+
+**Removes lead copies by better than two to one at this point in the
+boot**, and the final wedged values are the other way round - about 3,955
+removes against 10,200-10,900 copies. So the remove count is largely
+spent *before* the copy count gets going, which is exactly what a Phase-0
+sweep predicts: `ExpRevokeBootLoaderPagePrivileges` runs from
+`KiInitializeKernel` before any driver loads and issues one 0x0f3 per
+MemoryType-4 loader page, blind.
+
+That is direct evidence for the retraction in `9bd4c31`, obtained without
+another experiment: the 1.3% spread across six boots is the spread of a
+**machine constant reached early**, not of a limit hit at the moment of
+the wedge. A counter that is nearly saturated before the interesting phase
+begins is the least informative coordinate available, not the most causal -
+which is the opposite of how it was first read.
