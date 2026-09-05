@@ -65354,3 +65354,38 @@ exits. Two dead ends closed:
   build. Answering it is "answer part of an interface" in its purest
   form, and zpp's own `own_msr_intercepted` already records that claiming
   these MSRs was a past bug.
+
+## Six boots wedge in a 6.8%-wide band of copy calls
+
+    boot   drivers   copy calls   outcome
+    166      78        10,172     wedged
+    169      78        10,172     wedged, identical to 166
+    170      89        10,701     wedged
+    171      86        10,743     wedged
+    167      91        10,863     wedged
+    168     148           -       bugchecked 0x9F (the only outlier)
+
+Five of the six stop between **10,172 and 10,863 `VslCopyProtectedPage`
+calls - a 6.8% spread** - and two of those land on the same value
+exactly. The driver odometer spreads wider (78 to 91) than the copy count
+does, which says the copy count is the better-conditioned coordinate: the
+boots stop at roughly the same amount of *page-copy work*, not after the
+same number of *drivers*.
+
+That is a much stronger constraint than "the freeze point moves", which is
+how this was first written up when only two data points existed. It is not
+one bad page (the exact value varies) and it is not uniformly random (the
+band is narrow). It is consistent with a resource that is exhausted or a
+structure that becomes contended after a roughly fixed amount of copy
+work.
+
+Boot 168 reaching 148 drivers is the one case that escaped the band, and
+it is also the only boot that had a power IRP outstanding - so it did not
+escape the wedge, it merely died of the 600 s watchdog somewhere later.
+
+**What this does not yet say.** Nothing here identifies *what* is
+exhausted or contended. The candidates worth separating are the slab
+allocator behind `VslSetPlaceholderPages` (which tracks the copies at
+roughly 0.8x throughout), the control-area path where 26 threads park in
+`MiReferenceControlArea`, and the secure kernel's own page pool. The
+copy count being the tight coordinate is a hint toward the first two.
