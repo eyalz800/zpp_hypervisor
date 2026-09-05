@@ -64507,3 +64507,82 @@ on that boot the application processor becomes a fully working logical
 processor (303,504 second-level entries, VTL switches, no reset). So a
 fix must be judged over many boots, and a single good boot proves
 nothing.
+
+## The multicore wedge, as of boot 139: where the cost actually is
+
+The application processor now boots. That is a change from the entry
+above and from the memory note it cites: on boots 136-139 cpu 1 takes
+over a million VM exits, has its own registered `KiProcessorBlock[1]`
+KPRCB, and runs a thread whose start address symbolises to
+`Phase1Initialization`. "The AP never leaves the firmware park loop" is
+no longer the failure.
+
+**The barrier, agreed by instruments on both sides of the boundary.**
+Windows' own PRCB for cpu 1, read by walking `KiProcessorBlock[1]`
+(`nt+0xfc8c80`) through the guest page tables, against the same fields
+that killed this framing for cpu 0:
+
+    field               cpu 0    cpu 1
+    DpcQueueDepth           0        1
+    DpcRequestSummary       0     0x22
+    DpcWatchdogCount        3   17,743 and climbing
+
+Windows zeroes `DpcWatchdogCount` on every clock tick taken *below*
+DISPATCH, so a climbing value means that never happens. This VMM's own
+census agrees independently: cpu 1's task priority is at DISPATCH or
+above on **99.96%** of 529,127 entries, reaching PASSIVE 205 times.
+Vector `0x2f` is priority class 2, and SDM 12.8.4 admits a vector only
+when its class strictly exceeds the task priority's - so it is refused
+at `0xd0` (13) **and at `0x20` (2)**. Only PASSIVE admits it.
+
+**Four classes of fix are closed by measurement. Do not retry them.**
+
+| class | how it was closed |
+|---|---|
+| routing | hvix64 decodes the shorthand (`shrl $0x12`/`andl $0x3` at 0x2fec24); SELF branches to 0x2ff02b and loads the *sender's* id from `VP+0x164`. The vector reaches cpu 1 correctly. |
+| notification | `ZPP_DELIVER_ON_DROP` is ON by default and already arms the threshold the level above leaves at zero. It runs - 88,079 armed, 5,786 drops - and cannot help, because there is almost no drop to report. |
+| injection | Every path that hands over a vector the level above did not stage freezes the machine: `deliver_self_ipi` twice (incl. boot 137) and `force_dispatch_once`. Signature: `hlt` at the L1 rip, then no exits at all. |
+| withholding | Boot 139. `ZPP_WINDOW_ON_TPR` withheld 524/3,143 windows **with its own arming proven working** (threshold failed to reach vmcs02 0 and 1 times), and cpu 0 froze at 594,795 exits regardless. The window is this VMM's delivery mechanism for every vector; take it from an idle processor and it halts, and a halted processor takes none of the threshold exits meant to rescue it. |
+
+**Where the remaining cost is, which is not where the previous note in
+this file said.** An earlier commit pointed the next work at the
+interrupt-window storm - 118,695 exits on cpu 1, tracking the guest's
+ICR/EOI/EOM loop at 1.02 to 1. Removing that storm **entirely** is worth
+10.3%. The budget, boot 138, cpu 1, 1,149,778 exits:
+
+    vmresume     542,650   47.2%
+    wrmsr        361,009   31.4%
+    int-window   118,695   10.3%     <- the storm: a 10% ceiling
+    vmread        62,789    5.5%
+    ext-int       62,682    5.5%
+
+The synthetic MSR reflect path is **~62.8%**: each guest write of EOM,
+EOI or ICR costs one `wrmsr` exit plus the paired `vmresume` when the
+level above re-enters, and the loop makes three of them per iteration
+over about 116,213 iterations. That is where the headroom is, and any
+work aimed at the window storm is aimed at a sixth of it.
+
+Note the constraint that makes this hard rather than merely large: the
+obvious way to cut the MSR path is to answer EOI and EOM locally instead
+of reflecting them, and that is the `intercept_self_ipi` family, which
+is inside the injection class closed above. Answering them without
+waking the level above desynchronises its APIC model. So this is an
+architectural change to the reflect path, not a switch.
+
+**Two traps this investigation fell into, recorded because both produced
+confident wrong answers that survived several commits.**
+
+- **A counter guarded by an `if constexpr` reads zero when that switch
+  is off, and zero looks like a measurement.** `window_threshold_arm_entries`
+  lives inside the `ZPP_DELIVER_ON_DROP` block, and a static assertion
+  forbids that switch alongside `ZPP_WINDOW_ON_TPR` - so in a
+  `windowtpr=1` build it *cannot* be non-zero, and reading it as "no
+  threshold was armed" produced a structural conclusion that was false.
+  Check which block a counter is compiled into before quoting it
+  against a different configuration.
+- **A ratio is meaningless without the mode.** Cpu 1 appeared to take
+  23.8 clock interrupts per timer arm against cpu 0's 1.07, which
+  explained every other symptom and matched an independent figure to
+  three digits. It is periodic versus one-shot: `STIMER0_CONFIG` was
+  written 13 times on cpu 1 and 4,485 times on cpu 0. The mode was one
+  line above in the same census.
