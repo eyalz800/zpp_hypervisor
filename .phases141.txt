@@ -1,0 +1,416 @@
+module base 0x67060000, singleton 0x68550000
+
+taking sample A, then waiting 150.0 s, then sample B ...
+
+====================================================================
+DELTA over a MEASURED 151.861 s window (asked for 150.0 s)
+====================================================================
+  Every number below is the change between two samples, not a total.
+  read window: sample A took 1.78 s, sample B took 1.92 s
+               <- the span is measured midpoint to midpoint; these are its error bar
+  span: 302,592,191,829 ticks / 151.861 s
+  frequency: 1,992,561,865 Hz  (MEASURED in this window: tick span / wall span)
+  fingerprint module base: unchanged (0x67060000)
+  fingerprint handler_first_tsc: unchanged (0x28006e7a9/0x354247203)
+
+counters that MOVED in the window (82 of 141)
+  member                              cpu    delta        per second
+  stimer_given_cycles                   0 7,240,187,290   47,676,448.64   cycles from arm to the answering vector
+  stimer_given_cycles                   1 139,552,064      918,946.78   cycles from arm to the answering vector
+  stimer_asked_units                    0 25,891,200      170,492.89   periodic units asked (x100ns)
+  guest_state_writes_skipped            0 12,995,649       85,576.02   guest-state writes skipped
+  guest_state_writes_skipped            1  9,942,020       65,467.95   guest-state writes skipped
+  control_writes_skipped                0  6,125,873       40,338.72   control writes skipped
+  control_writes_skipped                1  4,314,706       28,412.23   control writes skipped
+  hot_state_writes_skipped              0  1,196,435        7,878.49   hot-state writes skipped
+  hot_state_writes_skipped              1    981,051        6,460.20   hot-state writes skipped
+  guest_state_writes_done               0    964,109        6,348.63   guest-state writes done
+  handler_exits                         0    868,316        5,717.84   handler spans closed
+  exit_total                            0    866,315        5,704.66   exits taken
+  resumes_reached                       0    866,314        5,704.66   handlers left
+  exit_trace_count                      0    862,820        5,681.65   exit-ring slots written (NOT exits)
+  handler_exits                         1    519,033        3,417.82   handler spans closed
+  resumes_reached                       1    513,603        3,382.06   handlers left
+  exit_total                            1    513,599        3,382.04   exits taken
+  exit_trace_count                      1    508,849        3,350.76   exit-ring slots written (NOT exits)
+  shadow_ept_cache_hits                 0    494,461        3,256.01   shadow EPT cache hits
+  stimer_asked_units                    1    486,850        3,205.89   periodic units asked (x100ns)
+  quiet_samples                         -    380,457        2,505.30   quiet samples
+  vmcs_shadow_stores                    0    326,909        2,152.69   shadow VMCS stores
+  vmcs_shadow_loads                     0    326,907        2,152.67   shadow VMCS loads
+  hot_state_writes_done                 0    319,839        2,106.13   hot-state writes done
+  l2_exit_trace_count                   0    302,311        1,990.71   l2 ring slots written (NOT l2 exits)
+  l2_entries                            0    302,307        1,990.68   second-level entries
+  shadow_ept_cache_hits                 1    244,985        1,613.22   shadow EPT cache hits
+  vmcs_shadow_stores                    1    226,192        1,489.47   shadow VMCS stores
+  vmcs_shadow_loads                     1    226,189        1,489.45   shadow VMCS loads
+  l2_exit_trace_count                   1    218,500        1,438.82   l2 ring slots written (NOT l2 exits)
+  l2_entries                            1    218,498        1,438.80   second-level entries
+  shadow_ept_leaves_filled              0    199,582        1,314.24   leaves installed
+  guest_state_writes_done               1    172,184        1,133.83   guest-state writes done
+  interrupted_samples                   -    145,842          960.37   interrupted-context samples
+  control_writes_done                   0    144,045          948.53   control writes done
+  stimer_arm_count                      0    140,867          927.61   STIMER0 writes + clock injections (NOT arms)
+  control_writes_done                   1    130,265          857.79   control writes done
+  hot_state_writes_done                 1    116,973          770.26   hot-state writes done
+  stimer_arm_count                      1     77,718          511.77   STIMER0 writes + clock injections (NOT arms)
+  synthetic_msr_writes               (0, 177)     67,602          445.16   HV_X64_MSR_STIMER0_COUNT written (one-shot re-armed)
+  l2_working_trace_count                0     55,782          367.32   working-ring slots written
+  synthetic_msr_writes               (1, 112)     50,319          331.35   HV_X64_MSR_EOI written
+  synthetic_msr_writes               (0, 112)     49,117          323.43   HV_X64_MSR_EOI written
+  last_hypercall_count                  0     35,846          236.04   second-level hypercalls
+  l2_working_trace_count                1     30,198          198.85   working-ring slots written
+  shadow_ept_leaves_filled              1     27,052          178.14   leaves installed
+  synthetic_msr_writes               (1, 177)     20,089          132.29   HV_X64_MSR_STIMER0_COUNT written (one-shot re-armed)
+  hlt_reflect_count                     0     16,653          109.66   second-level HLTs reflected (idle, NOT spin)
+  vtl_protect_count                     0     14,985           98.68   protection-mask calls
+  events_requeued                       0     12,105           79.71   events requeued
+  vtl_code0_count                       0     10,222           67.31   call-class-0 blocks seen
+  vtl_fresh_calls                       0      9,867           64.97   fresh trust-level calls
+  shadow_ept_builds                     0      8,200           54.00   shadow EPT builds
+  shadow_ept_rebuild_new_root           0      8,200           54.00   rebuilds for a new root
+  l2_invept_single_context              0      8,187           53.91   INVEPT single-context
+  synthetic_msr_writes               (0, 132)      7,897           52.00   HV_X64_MSR_EOM written (SynIC backpressure acknowledged)
+  vtl_copy_calls                        0      5,490           36.15   copy calls
+  hlt_reflect_count                     1      5,097           33.56   second-level HLTs reflected (idle, NOT spin)
+  last_hypercall_count                  1      4,683           30.84   second-level hypercalls
+  events_requeued                       1      3,863           25.44   events requeued
+  synthetic_msr_writes               (0, 176)      3,016           19.86   HV_X64_MSR_STIMER0_CONFIG written
+  synthetic_msr_writes               (1, 132)      2,799           18.43   HV_X64_MSR_EOM written (SynIC backpressure acknowledged)
+  stimer_asked_arms                     0      1,487            9.79   periodic arms asked
+  stimer_given_arms                     0      1,479            9.74   synthetic timer arms answered
+  vtl_protect_count                     1      1,402            9.23   protection-mask calls
+  vtl_code0_count                       1      1,356            8.93   call-class-0 blocks seen
+  vtl_fresh_calls                       1      1,341            8.83   fresh trust-level calls
+  shadow_ept_builds                     1      1,010            6.65   shadow EPT builds
+  shadow_ept_rebuild_new_root           1      1,010            6.65   rebuilds for a new root
+  l2_invept_single_context              1      1,010            6.65   INVEPT single-context
+  vtl_reentries                         0        355            2.34   trust-level re-entries
+  guest_thread_refreshes                -         76            0.50   guest thread-state refreshes
+  synthetic_msr_writes               (1, 176)         43            0.28   HV_X64_MSR_STIMER0_CONFIG written
+  stimer_asked_arms                     1         20            0.13   periodic arms asked
+  stimer_given_arms                     1         20            0.13   synthetic timer arms answered
+  vtl_reentries                         1         15            0.10   trust-level re-entries
+  stimer_unanswered                     0         10            0.07   arms displaced before an answer
+  reference_read_count                  1          2            0.01   reference-counter RDMSRs
+  guest_thread_list_walked              -          2            0.01   guest thread-list walks
+  synthetic_msr_writes               (1, 131)          2            0.01   HV_X64_MSR_SIMP written (message page named)
+  synthetic_msr_writes               (1, 147)          2            0.01   HV_X64_MSR_SINT3 written (the vector the timer posts on)
+  synthetic_msr_writes               (0, 147)          1            0.01   HV_X64_MSR_SINT3 written (the vector the timer posts on)
+
+counters with a total that did NOT move (3)
+  This is the half a cumulative dump cannot show: a large total here means
+  it happened and has STOPPED, which is the opposite reading from a large
+  total that is still climbing. The two are identical in the default dump.
+  reference_read_count                  0        256 total, +0 in this window   reference-counter RDMSRs
+  cpuid_hypervisor_leaves_asked         -        182 total, +0 in this window   hypervisor CPUID leaves asked
+  synthetic_msr_writes               (0, 131)          2 total, +0 in this window   HV_X64_MSR_SIMP written (message page named)
+  (56 more read zero in both samples and are not listed)
+
+where the time went, as a fraction of the measured tick span
+  (a ratio of two tick counts - no frequency enters this column)
+  cpu 0  l2_run_cycles         10.44%   in the second-level guest
+  cpu 1  l2_run_cycles          7.89%   in the second-level guest
+  cpu 0  l1_run_cycles         19.14%   in the first-level guest
+  cpu 1  l1_run_cycles         97.12%   in the first-level guest
+  cpu 0  handler_cycles        70.42%   inside this VMM's handler
+  cpu 1  handler_cycles        37.64%   inside this VMM's handler
+
+the tick account IN THIS WINDOW: asked against given
+  cpu 0  asked 1,487 arms, answered 1,479, displaced 10
+    asked     17,411.7 x100ns per arm (1.741 ms, 574.3 Hz)
+    given     24,568.0 x100ns per arm (2.457 ms, 407.0 Hz) at 1.993 GHz (MEASURED in this window: tick span / wall span)
+    ratio        0.709x  LATE by 1.411x
+  cpu 1  asked 20 arms, answered 20, displaced 0
+    asked     24,342.5 x100ns per arm (2.434 ms, 410.8 Hz)
+    given     35,018.3 x100ns per arm (3.502 ms, 285.6 Hz) at 1.993 GHz (MEASURED in this window: tick span / wall span)
+    ratio        0.695x  LATE by 1.439x
+
+cpu 0 exit reasons IN THIS WINDOW (868,896, 5,721.7/s)
+  vmresume                304,958   35.1%      2,008.14/s
+  ept-violation           197,647   22.7%      1,301.50/s
+  wrmsr                   169,661   19.5%      1,117.21/s
+  int-window               54,166    6.2%        356.68/s
+  vmcall                   35,610    4.1%        234.49/s
+  vmread                   26,519    3.1%        174.63/s
+  ext-int                  25,945    3.0%        170.85/s
+  vmptrld                  23,399    2.7%        154.08/s
+  hlt                      16,653    1.9%        109.66/s
+  invept                    8,100    0.9%         53.34/s
+  tpr-below                 4,125    0.5%         27.16/s
+  invvpid                   1,957    0.2%         12.89/s
+  rdmsr                        80    0.0%          0.53/s
+  cpuid                        62    0.0%          0.41/s
+  vmwrite                       5    0.0%          0.03/s
+  gdtr-idtr                     4    0.0%          0.03/s
+  cr-access                     3    0.0%          0.02/s
+  dr-access                     1    0.0%          0.01/s
+  xsetbv                        1    0.0%          0.01/s
+
+cpu 0 second-level fault dispositions IN THIS WINDOW (197,647, 1,301.5/s)
+  generation              197,516   99.9%      1,300.64/s
+  replayed                    131    0.1%          0.86/s
+
+cpu 0 gaps between stagings of vector 0xd1 into vmcs02 IN THIS WINDOW (71,068, 468.0/s)
+  2^21 (   1.052 ms)       51,784   72.9%        341.00/s
+  2^20 (   0.526 ms)       12,869   18.1%         84.74/s
+  2^22 (   2.105 ms)        2,393    3.4%         15.76/s
+  2^24 (   8.420 ms)        2,075    2.9%         13.66/s
+  2^25 (  16.840 ms)        1,120    1.6%          7.38/s
+  2^23 (   4.210 ms)          664    0.9%          4.37/s
+  2^26 (  33.680 ms)          159    0.2%          1.05/s
+  2^28 ( 134.719 ms)            4    0.0%          0.03/s
+
+cpu 1 exit reasons IN THIS WINDOW (520,788, 3,429.4/s)
+  vmresume                221,794   42.6%      1,460.51/s
+  wrmsr                    91,334   17.5%        601.43/s
+  int-window               80,951   15.5%        533.06/s
+  tpr-below                40,892    7.9%        269.27/s
+  ept-violation            27,106    5.2%        178.49/s
+  vmread                   19,048    3.7%        125.43/s
+  ext-int                  18,844    3.6%        124.09/s
+  vmptrld                   6,620    1.3%         43.59/s
+  hlt                       5,097    1.0%         33.56/s
+  vmcall                    4,683    0.9%         30.84/s
+  cpuid                     1,491    0.3%          9.82/s
+  invvpid                   1,269    0.2%          8.36/s
+  invept                    1,012    0.2%          6.66/s
+  vmwrite                     533    0.1%          3.51/s
+  rdmsr                        74    0.0%          0.49/s
+  gdtr-idtr                    11    0.0%          0.07/s
+  cr-access                     7    0.0%          0.05/s
+  vmclear                       4    0.0%          0.03/s
+  ldtr-tr                       4    0.0%          0.03/s
+  xsetbv                        4    0.0%          0.03/s
+  vmlaunch                      3    0.0%          0.02/s
+  io                            3    0.0%          0.02/s
+  init                          1    0.0%          0.01/s
+  sipi                          1    0.0%          0.01/s
+  vmon                          1    0.0%          0.01/s
+  dr-access                     1    0.0%          0.01/s
+
+cpu 1 second-level fault dispositions IN THIS WINDOW (27,106, 178.5/s)
+  generation               27,104  100.0%        178.48/s
+  replayed                      2    0.0%          0.01/s
+
+cpu 1 gaps between stagings of vector 0xd1 into vmcs02 IN THIS WINDOW (57,966, 381.7/s)
+  2^21 (   1.052 ms)       31,879   55.0%        209.92/s
+  2^20 (   0.526 ms)       20,677   35.7%        136.16/s
+  2^22 (   2.105 ms)        4,165    7.2%         27.43/s
+  2^23 (   4.210 ms)        1,223    2.1%          8.05/s
+  2^24 (   8.420 ms)           11    0.0%          0.07/s
+  2^19 (   0.263 ms)            5    0.0%          0.03/s
+  2^25 (  16.840 ms)            3    0.0%          0.02/s
+  2^28 ( 134.719 ms)            2    0.0%          0.01/s
+  2^27 (  67.359 ms)            1    0.0%          0.01/s
+
+what this mode REFUSED to difference, and why
+  ring buffers:
+    exit_trace, l2_exit_trace, l2_working_trace, cpuid_trace, vtl_code0_ring, vtl_reentry_ring, guest_stack_trace, guest_interrupted_trace, interrupted_contexts, vtl_step_rip
+    -> a slot is overwritten in place, so the same slot in two samples holds two unrelated records and their difference is not a count of anything
+  last-value fields:
+    nested_last_vmfail, ipi_last_command, last_hypercall_code/rcx/rdx/r8/tsc, vtl_protect_last_*, vtl_copy_last_pfn, ap_probe_rip/cs, host_exception*, profile_code_*
+    -> these hold the most recent value, not a running total; subtracting two addresses gives a distance, which is not a rate. Read them as moved / did not move
+  current-state fields:
+    l2_activity_state, pending_event, running_l2, shadow_ept_current_slot, resume_activity_state, processor_virtualized, l1_own_cr3, l2_exit_cr3, host_page_table, guest_kernel_base, vtl_block_page, watched_apic_page
+    -> a state is not an event count; the difference of two states is meaningless even when both readings are correct
+  min/max accumulators:
+    vtl_code0_min_pfn, vtl_code0_max_pfn, vtl_copy_min_pfn, vtl_copy_max_pfn, vtl_code0_run_longest
+    -> monotonic in one direction but not counts - a max that grew by 4096 saw one page further out, not 4096 events
+  open ends of a bracket, not accumulators:
+    phase_mark, handler_entry_tsc, handler_entry_reads, handler_entry_writes, handler_was_l2, reason_bucket
+    -> each holds where the CURRENT span started, replaced at every exit, so two samples hold two unrelated instants and their difference is a distance between them. `phase_mark` climbs like a counter because it is an RDTSC, and its delta looks exactly like a cycle count. The closed halves - phase_cycles, phase_calls, handler_reason_cycles/reads/writes - are differenced, and they are the only halves that are sums
+  composite records:
+    unhandled_exit, vm_entry_failure, ap_fault, vtl_call_block
+    -> one struct mixing a flag, a reason and several addresses; there is no single quantity to difference
+  state histograms:
+    cpl_seen, guest_leaf_permissions, shadow_leaf_permissions, vtl_protect_host_perms, vtl_protect_guest_perms, vtl_protect_pfn_perm_seen
+    -> buckets of what a permission *is*, not of events; a bucket that grew says a sample landed there, and the samples are not counted
+  event histograms not sampled here:
+    vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_counts, vtl_service_calls, hypercall_code_counts, l2_injected_vector, l2_entry_vector, l2_synthetic_msr_writes, l2_msr_write_counts, bucket_phase_cycles, bucket_phase_reads, bucket_phase_writes, bucket_calls, vmcs02_split_cycles
+    -> differenceable in principle and deliberately left out: every member added widens the read window, and the read window is this measurement's own error bar. The five phase members at the end are the sub-splits of phases the tree above already covers, so the cheap reading is taken first and these are what to add when it points at their parent
+  synthetic_msr_writes - a SIX-INDEX SLICE, not the census:
+    0x70 EOI, 0x83 SIMP, 0x84 EOM, 0x93 SINT3, 0xb0 STIMER0_CONFIG, 0xb1 STIMER0_COUNT, per processor
+    -> the other 314 indices per processor are still refused for the reason above. Do not read the five as a distribution - they are five named counters that happen to live in one array, and their sum is not the synthetic-MSR total
+
+cpus sampled: 2. Every number above is a change over the measured span,
+except the one column headed `total`.
+
+*** IMPOSSIBLE: a SUBSET exceeds its superset ***
+    ext-int: from_l2 44,841 of 44,791 exits
+    int-window: from_l2 135,287 of 135,115 exits
+    wrmsr: from_l2 261,217 of 260,978 exits
+    tpr-below: from_l2 45,067 of 45,017 exits
+    `handler_reason_from_l2` is incremented only inside the `if` that
+    increments `handler_reason_exits` (resume.cpp:1388-1394), so it cannot
+    exceed it. One of the two was read at the wrong stride, or the two
+    samples are from different binaries. Nothing below is printed.
+
+*** IMPOSSIBLE: the split is LARGER than what it splits ***
+    handler_reason_cycles summed  327,342,105,905
+    handler_cycles summed over cpus 326,995,061,243
+    Both are closed in `resume_guest` from the same pair of reads, so the
+    first cannot exceed the second. One of: the two were read from
+    different binaries, or handler_cycles was summed over the wrong set of
+    processors. Nothing below is printed.
+
+cpu 0 phase tree IN THIS WINDOW (302,307 round trips, 704,869 handler cycles a round trip)
+     phase                                     calls  calls/RT     cyc/call      cyc/RT   self/RT   %vmm
+   25  exit: prologue                            869,144     2.88       11,851      34,072    34,072    4.8
+   26  exit: dispatch                            869,144     2.88      216,329     621,955   192,409   88.2
+    1    reflect_l2_exit                         305,367     1.01      167,745     169,443      -943   24.0
+    0      save_l2_state                         305,367     1.01       49,564      50,067    50,067    7.1
+    4      copy_vmcs12_to_shadow                 328,688     1.09       26,714      29,046       302    4.1
+   40        copy out: vmptrst                   328,688     1.09          478         520       520    0.1
+   41        copy out: vmptrld shadow            328,688     1.09        6,010       6,535     6,535    0.9
+   42        copy out: field writes              328,688     1.09       10,039      10,915    10,915    1.5
+   43        copy out: vmclear                   328,688     1.09        4,580       4,980     4,980    0.7
+   44        copy out: vmptrld back              328,688     1.09        5,329       5,794     5,794    0.8
+    7      vmptrld->vmcs01                       305,367     1.01        7,419       7,494     7,494    1.1
+   12      load_l1_host_state                    305,367     1.01       45,573      46,034    46,034    6.5
+   13      exit information                      305,367     1.01       21,427      21,644    21,644    3.1
+   31      reflect: exit ring                    305,367     1.01        9,964      10,065    10,065    1.4
+   32      reflect: msr store                    305,367     1.01          370         375       375    0.1
+   33      reflect: msr load + invvpid           305,367     1.01        5,532       5,588     5,588    0.8
+   34      reflect: evmcs store                  305,367     1.01           72          73        73    0.0
+    9    on_l2_ept_fault                         197,130     0.65      101,941      66,475    66,475    9.4
+   20    vmptrld: whole call                      23,321     0.08      269,321      20,776       510    2.9
+   16      vmptrld: read region                   23,321     0.08        8,827         681       681    0.1
+   17      vmptrld: flush old                     23,321     0.08      213,077      16,438     4,185    2.3
+   24        materialise: whole                   21,169     0.07      174,975      12,253        10    1.7
+   21          materialise: vmptrld in            21,169     0.07        6,859         480       480    0.1
+   22          materialise: field loop            21,169     0.07      163,291      11,434    11,434    1.6
+   23          materialise: vmptrld out           21,169     0.07        4,676         327       327    0.0
+   18      vmptrld: assign                        23,321     0.08        4,695         362       362    0.1
+   19      vmptrld: shadow publish                23,321     0.08       36,109       2,786     2,786    0.4
+   36    on_guest_vmlaunch                       305,368     1.01      171,118     172,851    59,883   24.5
+    2      build_vmcs02                          305,367     1.01      101,927     102,959       316   14.6
+    6        vmptrld->vmcs02                     305,367     1.01        6,612       6,679     6,679    0.9
+   14        build: before vmptrld               305,367     1.01       23,977      24,220     4,311    3.4
+    8          merge_nested_bitmaps              305,367     1.01       19,709      19,909     8,460    2.8
+   10            merge: guest page read          916,101     3.03        3,778      11,449    11,449    1.6
+   15        build: after vmptrld                305,367     1.01       71,025      71,744    71,744   10.2
+   35      enter_or_park_l2                      305,368     1.01        9,909      10,009    10,009    1.4
+   27  resume: events                            869,144     2.88        5,220      15,008    15,008    2.1
+   28  resume: diag and rip                      869,144     2.88        1,014       2,915     2,915    0.4
+   29  resume: record_exit                       869,144     2.88        1,623       4,669     4,669    0.7
+   30  resume: entry census                      869,144     2.88        9,068      26,073    26,073    3.7
+       --- the adjacent intervals                                                  704,692            100.0
+       --- handler_cycles delta                                                    704,870            100.0
+       --- outside the split                                                           178              0.0
+       cross-cutting - each is already inside one of the rows above and is
+       NOT subtracted from that row's self, because it has more than one
+       caller. Do not add them to the tree.
+    3    shadow_ept_pointer_for                  502,366     1.66          575         957       957    0.1
+    5    copy_shadow_to_vmcs12                   328,688     1.09       55,551      60,399       282    8.6
+   45      copy in: vmptrst                      328,688     1.09          698         760       760    0.1
+   46      copy in: vmptrld shadow               328,688     1.09        7,119       7,741     7,741    1.1
+   47      copy in: field reads                  328,688     1.09       37,620      40,903    40,903    5.8
+   48      copy in: vmclear                      328,688     1.09        4,547       4,944     4,944    0.7
+   49      copy in: vmptrld back                 328,688     1.09        5,306       5,770     5,770    0.8
+   38    guest read: whole call               49,632,749   164.18          701     115,207    66,063   16.3
+   11      guest read: map_window             49,632,914   164.18          299      49,144    49,144    7.0
+   39    guest write: whole call                 330,414     1.09        1,556       1,701     1,172    0.2
+   37      guest write: map_window               330,414     1.09          484         529       529    0.1
+       the windowed cost agrees with the boot-wide mean (0.78x, under
+       the 0.25 drift that would be called out).
+
+cpu 1 phase tree IN THIS WINDOW (218,498 round trips, 521,322 handler cycles a round trip)
+     phase                                     calls  calls/RT     cyc/call      cyc/RT   self/RT   %vmm
+   25  exit: prologue                            521,969     2.39       12,521      29,914    29,914    5.7
+   26  exit: dispatch                            521,968     2.39      188,587     450,515    68,343   86.4
+    1    reflect_l2_exit                         222,351     1.02      183,078     186,307        71   35.7
+    0      save_l2_state                         222,352     1.02       52,826      53,758    53,758   10.3
+    4      copy_vmcs12_to_shadow                 228,972     1.05       29,009      30,400       287    5.8
+   40        copy out: vmptrst                   228,972     1.05          483         507       507    0.1
+   41        copy out: vmptrld shadow            228,972     1.05        6,248       6,548     6,548    1.3
+   42        copy out: field writes              228,972     1.05       11,702      12,264    12,264    2.4
+   43        copy out: vmclear                   228,972     1.05        4,808       5,039     5,039    1.0
+   44        copy out: vmptrld back              228,972     1.05        5,491       5,755     5,755    1.1
+    7      vmptrld->vmcs01                       222,352     1.02        7,857       7,996     7,996    1.5
+   12      load_l1_host_state                    222,352     1.02       53,093      54,030    54,030   10.4
+   13      exit information                      222,352     1.02       22,389      22,785    22,785    4.4
+   31      reflect: exit ring                    222,352     1.02       10,841      11,033    11,033    2.1
+   32      reflect: msr store                    222,352     1.02          399         407       407    0.1
+   33      reflect: msr load + invvpid           222,352     1.02        5,650       5,750     5,750    1.1
+   34      reflect: evmcs store                  222,352     1.02           77          79        79    0.0
+    9    on_l2_ept_fault                          27,106     0.12      110,127      13,662    13,662    2.6
+   20    vmptrld: whole call                       6,620     0.03      263,740       7,991       241    1.5
+   16      vmptrld: read region                    6,620     0.03       11,866         360       360    0.1
+   17      vmptrld: flush old                      6,620     0.03      191,787       5,811     2,031    1.1
+   24        materialise: whole                    3,856     0.02      214,164       3,780         5    0.7
+   21          materialise: vmptrld in             3,856     0.02        9,383         166       166    0.0
+   22          materialise: field loop             3,856     0.02      197,688       3,489     3,489    0.7
+   23          materialise: vmptrld out            3,856     0.02        6,787         120       120    0.0
+   18      vmptrld: assign                         6,620     0.03        6,391         194       194    0.0
+   19      vmptrld: shadow publish                 6,620     0.03       45,744       1,386     1,386    0.3
+   36    on_guest_vmlaunch                       222,353     1.02      171,191     174,212    62,994   33.4
+    2      build_vmcs02                          222,352     1.02       98,427     100,164       320   19.2
+    6        vmptrld->vmcs02                     222,352     1.02        7,207       7,335     7,335    1.4
+   14        build: before vmptrld               222,352     1.02       24,611      25,045     4,579    4.8
+    8          merge_nested_bitmaps              222,352     1.02       20,111      20,467     8,502    3.9
+   10            merge: guest page read          667,005     3.05        3,919      11,965    11,965    2.3
+   15        build: after vmptrld                222,352     1.02       66,294      67,464    67,464   12.9
+   35      enter_or_park_l2                      222,353     1.02       10,863      11,055    11,055    2.1
+   27  resume: events                            521,968     2.39        6,020      14,383    14,383    2.8
+   28  resume: diag and rip                      521,968     2.39        1,336       3,194     3,194    0.6
+   29  resume: record_exit                       521,968     2.39        1,269       3,033     3,033    0.6
+   30  resume: entry census                      521,968     2.39        9,288      22,190    22,190    4.3
+       --- the adjacent intervals                                                  523,229            100.4
+       --- handler_cycles delta                                                    521,323            100.0
+       --- outside the split                                                        -1,906             -0.4
+       cross-cutting - each is already inside one of the rows above and is
+       NOT subtracted from that row's self, because it has more than one
+       caller. Do not add them to the tree.
+    3    shadow_ept_pointer_for                  249,439     1.14          529         605       605    0.1
+    5    copy_shadow_to_vmcs12                   228,971     1.05       57,915      60,692       274   11.6
+   45      copy in: vmptrst                      228,972     1.05          751         787       787    0.2
+   46      copy in: vmptrld shadow               228,972     1.05        7,423       7,780     7,780    1.5
+   47      copy in: field reads                  228,972     1.05       39,179      41,057    41,057    7.9
+   48      copy in: vmclear                      228,972     1.05        4,782       5,012     5,012    1.0
+   49      copy in: vmptrld back                 228,972     1.05        5,517       5,782     5,782    1.1
+   38    guest read: whole call                6,170,810    28.24        1,148      32,441    22,042    6.2
+   11      guest read: map_window              6,170,804    28.24          368      10,399    10,399    2.0
+   39    guest write: whole call                 230,908     1.06        1,589       1,680     1,102    0.3
+   37      guest write: map_window               230,908     1.06          547         578       578    0.1
+       the windowed cost agrees with the boot-wide mean (1.00x, under
+       the 0.25 drift that would be called out).
+
+synthetic interrupt controller, per processor (state, NOT differenced)
+  cpu 0
+    SINT3 (0x40000093) 0x00000000000000d1  vector 0xd1  masked 0  auto_eoi 0
+      -> AGREES with clock_gap_vector
+    STIMER0_CONFIG (0x400000b0) 0x0000000000030008
+      enable 0  periodic 0  lazy 0  auto_enable 1
+      direct_mode 0  sintx 3  apic_vector 0x00
+      -> message mode to SINT3: every expiry posts a message into slot 3, so the message
+         rate and the interrupt rate are the same quantity and must agree.
+      -> one-shot, so STIMER0_COUNT below is an ABSOLUTE reference-time deadline,
+         not a period - and the guest computed it from its own clock.
+    SIMP  0x0000000117a56001  enabled 1  page 0x117a56000
+      header  xp /2xw 0x117a56300       type, then payload_size|flags|reserved
+      expiry  xp /1xg 0x117a56318       <- compare with STIMER0_COUNT below
+      posted  xp /1xg 0x117a56320       when the controller wrote it
+    last STIMER0_COUNT written  0x81f281b7 (2,180,153,783)
+    last EOM written at tsc 0x680b6c8137  (age unavailable)
+  cpu 1
+    SINT3 (0x40000093) 0x00000000000000d1  vector 0xd1  masked 0  auto_eoi 0
+      -> AGREES with clock_gap_vector
+    STIMER0_CONFIG (0x400000b0) 0x000000000003000a
+      enable 0  periodic 1  lazy 0  auto_enable 1
+      direct_mode 0  sintx 3  apic_vector 0x00
+      -> message mode to SINT3: every expiry posts a message into slot 3, so the message
+         rate and the interrupt rate are the same quantity and must agree.
+    SIMP  0x0000000114fc8001  enabled 1  page 0x114fc8000
+      header  xp /2xw 0x114fc8300       type, then payload_size|flags|reserved
+      expiry  xp /1xg 0x114fc8318       <- compare with STIMER0_COUNT below
+      posted  xp /1xg 0x114fc8320       when the controller wrote it
+    last STIMER0_COUNT written  0x43f8 (17,400)
+    last EOM written at tsc 0x67adcfb314  (age unavailable)
+  The SIMP recorded here is whatever last wrote 0x40000083 *on this processor*, and that array does not distinguish trust levels: VTL0's kernel and VTL1's secure kernel each run their own controller with their own page, and both write the same MSR. A page read from here is not attributed to a VTL by this reader.
+  delivery_time - expiration_time is only a latency if both fields are on the same
+  clock. For a one-shot arm expiration_time is the deadline the GUEST computed and
+  delivery_time is the level above's reference counter; this VMM publishes its own
+  reference-TSC page to the guest, so they need not share an epoch. Sample the pair
+  twice a minute apart: constant = epoch skew, growing = rate divergence, jittering
+  = a real latency. A value stable to four decimals is NOT a latency.

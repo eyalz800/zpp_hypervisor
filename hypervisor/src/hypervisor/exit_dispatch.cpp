@@ -775,10 +775,46 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // the paging-transition branch of the control-register case. Either
     // separates the readings without trusting the ring.
     //
-    // Application processors only. cpu 0 takes half a million exits a
-    // boot; cpu 1 takes about two hundred, and the log's own
-    // deduplication collapses the repeats, so this is bounded.
-    if (0 != cpuid) {
+    // Application processors only, **and bounded by a count rather than
+    // by an assumption about how many exits they take.**
+    //
+    // This used to read "cpu 0 takes half a million exits a boot; cpu 1
+    // takes about two hundred, and the log's own deduplication collapses
+    // the repeats, so this is bounded." That was true when it was
+    // written, and it stopped being true the moment the application
+    // processor started working: the boot it describes is the one where
+    // cpu 1 never left the firmware park loop. On boot 140 cpu 1 took
+    // **1,075,838 exits**, and this logged on every one of them.
+    //
+    // The cost is not the formatting. `log_storage::append` takes a
+    // partition-wide lock and holds it across a `push_back` that
+    // allocates from the global heap, and the deduplication compares
+    // against the previous line, so every exit on an application
+    // processor paid a lock, an allocation and a string compare - and
+    // `vmcs.guest_rip()` is a VMCS read taken only to build the message.
+    //
+    // Measured, boot 140, `--delta 150 --delta-phases` over 151.780 s:
+    //
+    //     phase                cpu 0 cyc/call   cpu 1 cyc/call
+    //     25 exit: prologue        10,229          451,893    <- 44x
+    //     26 exit: dispatch       155,704          146,343    <- same
+    //
+    //     cpu 0  handler_cycles  3.39%   l2_run 0.43%
+    //     cpu 1  handler_cycles 90.27%   l2_run 2.72%
+    //
+    // The dispatch - which is all the real work - costs the same on both
+    // processors. Only the prologue differs, and this call is the only
+    // thing in it gated on `0 != cpuid`. **Cpu 1 was spending 90% of its
+    // wall clock inside this VMM and 2.72% executing Windows**, which is
+    // why it never reached PASSIVE, never drained its deferred-call
+    // queue and never finished `Phase1Initialization`.
+    //
+    // Bounded the same way the GDT-reachability bracket above is, and
+    // for the same stated reason - "because it is a page walk per exit".
+    // The first exits are where the diagnostic value is; the millionth
+    // says nothing the first five hundred did not.
+    if ((0 != cpuid) && (cpuid < max_cpus) &&
+        (this->exit_total[cpuid] < 512)) {
         log("cpu {} exit reason {} rip {}",
             cpuid,
             static_cast<std::uint64_t>(reason),
