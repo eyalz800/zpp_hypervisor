@@ -67091,3 +67091,44 @@ Every boot measured this way so far has ended in the livelock. Whether a
 successful boot skips the transient, passes through it faster, or exits
 the livelock is unknown, and it is exactly the comparison that would say
 what "escaping" consists of.
+
+## All five addresses of the documented loop, now measured on the control
+
+Boot 180's final window (398,286 control samples added, walk at 0.0/s,
+`x13.1 threshold`) contains an address boot 179's window did not:
+
+    HvlEndSystemInterrupt+0x1e            33.3%   rva 0x6a768e
+    HvlWriteApicCommandRegister+0x1d      24.7%   rva 0x42890d
+    HalpHvTimerAcknowledgeInterrupt+0x46  18.8%   rva 0x3100e6   <- new
+    KiInterruptDispatchNoLockNoEtw+0x7c   16.1%   rva 0x6aeb0c
+    KiDpcInterruptBypass+0x12             13.5%   rva 0x6b3692
+
+**That is CLAUDE.md's loop, complete.** Its recorded sequence is
+
+    HvlWriteApicCommandRegister+0x1d (writes ICR 0x2f)
+      -> int-window
+      -> KiDpcInterruptBypass+0x12
+      -> EOM
+      -> HalpHvTimerAcknowledgeInterrupt+0x46
+      -> EOI
+      -> HvlEndSystemInterrupt+0x1e
+      -> ICR -> repeat
+
+and every named address now appears in a differenced control measurement,
+on a boot whose walk rate is zero. The loop was described in this tree
+from an earlier investigation; what is new is that it is measured on the
+instrument that cannot be confounded by injection permission, with the
+healthy and transient stages differenced away.
+
+Boot 179's final window lacked `HalpHvTimerAcknowledgeInterrupt` and
+carried `KiInterruptDispatchNoLockNoEtw` at 20.3% instead - so the
+five rows trade share between boots while the *set* stays the same. Not
+surprising for a cycle: which member a sampler catches depends on the
+relative cost of each leg, and the legs are not equal.
+
+**The shares are not equal and that is informative.** A pure cycle visited
+once per iteration would give five equal shares. 33.3 / 24.7 / 18.8 / 16.1
+/ 13.5 says the legs cost different amounts, with the EOI path
+(`HvlEndSystemInterrupt`) the most expensive - which is consistent with
+the earlier exit-budget finding that the synthetic EOI costs one full
+reflection per tick and the lazy-EOI grant is denied 100% of the time.
