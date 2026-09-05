@@ -65250,3 +65250,107 @@ clock, so the correct threshold in guest seconds is not yet known - but
 comparing wall times across boots whose overhead differs is comparing two
 different quantities, and that is worth fixing before another boot is
 killed early.
+
+## The anonymous 23.5% of exits is the DPC self-IPI, and it is asked at CLOCK_LEVEL
+
+**The exit budget closes exactly.** On the wedged trace, non-`vmresume`
+exits sum to 362,130 against 362,162 `vmresume` - agreement to 0.009%,
+and it holds per processor. So **every exit is either an L2 event zpp
+reflected or the `VMRESUME` hvix64 executed to get back**: two exits per
+reflection, no third population. zpp claims nothing for itself, which is
+what `int_window_stale` = 0 already implied.
+
+Per `0xd1` delivered on cpu 1 the cycle is exactly **4 reflections, 8
+exits**, at 574.7 Hz: external interrupt -> interrupt window -> the
+injection -> the EOI, each 1.000 per delivery. One `wrmsr` per delivery
+was left over and unnamed.
+
+**It is `HV_X64_MSR_ICR` (0x40000071), value `0x4002f` - a SELF-shorthand
+self-IPI of vector `0x2f`, the DPC/dispatch interrupt.** From the full
+256-entry census on wedged boot 170:
+
+    cpu 0   EOI 212,679 (40.5%)   ICR 167,045 (31.8%)   EOM 101,875
+    cpu 1   EOI 167,768 (44.9%)   ICR 162,280 (43.4%)   EOM  26,467
+
+**It was anonymous only because of a six-slot instrument.**
+`DELTA_SYNTHETIC_SLOTS` holds `0x70, 0x83, 0x84, 0x93, 0xb0, 0xb1` and
+`--delta` refuses the other 314 indices by name, so a differenced run
+reports EOI/EOM/STIMER and *cannot* report the third of the three
+highest-frequency writes. The cumulative dump prints all 256 and had the
+answer all along. This is "a top-N cut hides exactly the thing a census
+exists to find", again, on the largest single unexplained cost on the
+machine.
+
+### And the priority census says it cannot be delivered when asked
+
+    vectors the guest asked for (165,746)
+      0x2f    165,736   100.0%
+
+    task priority when it asked (165,743)
+      0xd0    164,365    99.2%     <- CLOCK_LEVEL, class 13
+      0x20      1,137     0.7%     <- DISPATCH,   class 2
+
+    vectors vmcs02 actually carried
+      0x2f      3,968     1.5%
+
+`0x2f` is class 2 (`vector >> 4`). SDM 13.8.3.1: a vector is delivered
+only when its class **strictly exceeds** the processor-priority class. So
+**99.2% of the requests are issued at a priority that cannot deliver
+them** - the guest is self-IPIing the dispatch interrupt from inside its
+own clock ISR.
+
+**That is not by itself a defect, and must not be quoted as one.**
+Requesting a DPC from an ISR is exactly what `KeInsertQueueDpc` does; the
+request is meant to be *latched* and delivered when IRQL drops. A 2.4%
+ask-to-deliver ratio is not a 97.6% loss, because Windows re-requests
+whenever it queues a DPC. What the census establishes is only that the
+overwhelming majority of asks happen at CLOCK_LEVEL.
+
+**What makes it load-bearing is the lazy-EOI measurement beside it.**
+`HvlEndSystemInterrupt` (ntoskrnl `0x6a7670`) issues the explicit
+`wrmsr 0x40000070` **only when hvix64 did not grant lazy EOI**. Measured:
+**1.000 explicit EOI per `0xd1` delivery on cpu 0 and 0.998 on cpu 1 - the
+grant is denied 100% of the time.** One of `HvpApicDeliverHighestIrr`'s
+grant filters is "another interrupt is queued" (`A0+0x5ec != 0`), and a
+chronically pending `0x2f` would deny the grant on every interrupt. If
+that is the filter firing, one mechanism explains all three observations
+at once: the anonymous MSR, the permanently denied lazy EOI (2,684
+exits/s, 23.5% of the machine), and DPCs not running.
+
+**Inferred, not measured:** that filter (c) is the one denying the grant.
+It needs a read of hvix64's APIC block (`A0 = *(VP+0x148) + 0x80`, then
+`A0+0x5ec`, `A0+0x5e0`, `A0+0x522`). Until that is read, the causal chain
+is a hypothesis with three consistent measurements behind it.
+
+### This wedge is NOT an interrupt-delivery failure
+
+Worth stating because four interventions have already been aimed at
+delivery. In this trace the interrupt window is granted on the **first**
+ask every time (1.000 window per delivery) and there is **one**
+`tpr-below` exit in 63 seconds. Contrast the earlier wedge, which had a
+3:1 window-to-delivery ratio and 450/s of `tpr-below`: hvix64 asking
+three times and being refused. Here hvix64 asks once, is granted, and
+injects. Delivery is working. What is not happening is anything *above*
+the ISR.
+
+### Nothing on this path is available to zpp
+
+Every reflection in the cycle is required by the same rule KVM applies -
+`nested_vmx_l0_wants_exit` claims no MSR at all (`nested.c:6330-6402`),
+and the synthetic MSRs lie outside both bitmap ranges so they exit
+unconditionally. The `VMRESUME` half is SDM 28.1.2 and is 50% of all
+exits. Two dead ends closed:
+
+- **`ZPP_NESTED_VID` would not help even if APICv were available.**
+  `HV_X64_MSR_EOI` is a *synthetic MSR*, not an APIC register access; no
+  APIC-virtualisation feature in the architecture can accelerate it.
+  KVM only passes through the architectural x2APIC EOI, and only under
+  VID.
+- **zpp cannot answer the synthetic EOI itself.** KVM completes it at L0
+  (`kvm_hv_set_msr` -> `apic_set_eoi`) *because KVM owns the APIC state
+  the MSR mutates*. Here that state is hvix64's private software vAPIC -
+  an ISR **stack** at `A0+0x5e0`, a lazy-EOI grant flag, a re-evaluation
+  bridge - at reverse-engineered offsets that move with every hvix64
+  build. Answering it is "answer part of an interface" in its purest
+  form, and zpp's own `own_msr_intercepted` already records that claiming
+  these MSRs was a past bug.
