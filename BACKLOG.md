@@ -68498,3 +68498,68 @@ That also disposes of the last framing in which `IdleHalt = 1` looked like
 a contradiction. The escape this tree documented - idle thread runs,
 `IdleHalt` set, interrupt loop gated off - **does happen on cpu 1**, and it
 does not help, because the block is downstream of it.
+
+## The holder is ExpUpdateTimerConfigurationWorker, and it is being re-interrupted forever
+
+`8138e79` said settling (L) tick-saturation vs (D) stopped-handler needed
+an instrument whose population is asynchronous entries, and called it the
+blocking measurement. **That instrument already exists and is printed in
+every dump: `interrupted_rip` - "where the guest was when an interrupt
+landed on it" - is by construction a census OF interrupt landings.** I
+had ruled it out for its known bias (it records the first architecturally
+interruptible instruction after a window opens) and thereby talked myself
+out of the one census that answers the question. The bias affects *which
+instruction* is named, not *which region* the processor is in.
+
+Differenced over the same 150 s window, wedged boot 187:
+
+    cpu 0  delta 430,187
+      46.3%  ExpUpdateTimerConfigurationWorker+0x1c5   +199,121  GROWING
+      39.4%  KiDpcInterruptBypass+0x12                 +169,555
+      10.1%  KiDowngradeIsolationUnitLockHandle+0x0     +43,242  GROWING
+       0.6%  KiDispatchInterrupt+0x86
+       0.4%  HalpInterruptSendIpi+0x9a
+
+    cpu 1  delta 253,204
+      84.8%  HalProcessorIdle+0xf                      +214,691
+      14.5%  KiQuantumEnd+0x538                         +36,604
+
+**cpu 0 takes 46.3% of its interrupt landings at ONE instruction in
+`ExpUpdateTimerConfigurationWorker`, and the count grows by 199,121 in 150
+seconds.** It is re-entered, interrupted at the same place, and never gets
+past it. That is (L) - tick saturation of the lock holder - measured
+rather than inferred, and (D) is refuted: a processor that had left VTL0
+or stopped in a handler would not be taking 1,327 clock landings a second
+in ntoskrnl.
+
+**`KiDowngradeIsolationUnitLockHandle` at 10.1% and growing** puts cpu 0
+provably in isolation-unit lock code - the same lock family cpu 1 spins
+for. This is the first evidence tying the holder to the lock from cpu 0's
+own side rather than by elimination.
+
+### cpu 1 is mostly HALTED, not burning a processor
+
+84.8% of cpu 1's landings are at `HalProcessorIdle+0xf`, the `retq` after
+`hlt`. So cpu 1 is not a busy spinner: it halts, wakes on the clock, does
+a little quantum-end work, fails to get the lock, and halts again. Only
+14.5% of its landings are in the spin.
+
+That corrects the mental picture carried since `4fc1d2a`, where cpu 1 was
+"spinning forever" and cpu 0 was the mystery. **It is the reverse.** cpu 1
+is idle and healthy-looking; **cpu 0 is the saturated one**, and cpu 0 is
+the one holding the lock.
+
+### What this makes actionable
+
+The chain is now closed end to end and every link is measured:
+
+    cpu 0 enters ExpUpdateTimerConfigurationWorker holding isolation-unit
+    locks -> the clock interrupts it at 1,327/s -> at zpp's per-exit cost
+    it retires too little between ticks to reach the release -> cpu 1's
+    idle-loop quantum-end work can never acquire -> no progress
+
+**Per-tick cost is therefore CAUSAL, not cosmetic**, which is exactly what
+`8138e79` said was undecided. The VMREAD-removal work in flight is aimed
+at the one link in that chain zpp controls. `b711510`'s negative result
+does not contradict this: it measured throughput, not whether a holder
+completes its critical section between two ticks.
