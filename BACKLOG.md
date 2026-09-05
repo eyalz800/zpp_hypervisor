@@ -65601,3 +65601,49 @@ unaffected: it is read with `xp_q` throughout and proved structurally.
 
 All three scripts now filter to data rows (`^[0-9a-f]{6,}: `) before
 matching.
+
+## EXONERATED: the image-copy path is not where the guest is stuck
+
+Boot 172, **wedged** (`0x101` frozen at 8,754, `x12.1 threshold`, 0.0/s,
+`VM status: running`, zpp resident), read with
+`scripts/guest-loading-driver.py`, reader proven:
+
+    mssmbios.sys          size 0x11000   Flags 0x49106180
+    hvsocketcontrol.sys   size  0xe000   Flags 0x49106180
+    hvsocket.sys          size 0x2d000   Flags 0x4d106180
+    dfsc.sys              size 0x30000   Flags 0x49106180   <<< TAIL
+
+**The tail's `Flags & 0x2000` is SET**, so `MiCompleteSecureDriverLoad`
+already ran for it and **no image was mid-load at the moment of the
+wedge.** `MmLoadSystemImageEx` appends its entry before imports, before
+the copy loop and before the secure-driver-load call, so a completed tail
+means the copy loop is not where anything is sitting.
+
+That retires the whole `MiCreateNewSection` -> `MiValidateSectionCreate`
+-> `MiWalkEntireImage` -> `MiReplaceTransitionPage` -> `MiCopyPage` chain
+as the location of the wedge, including both of its unbounded retry arms
+and the `MiPrefetchControlArea` storage theory. The chain is real and was
+correctly traced; the guest is simply not in it.
+
+**And driver loading continued well past `VBoxSup.sys`.** When boot 172
+was still healthy the tail was `VBoxSup.sys`; by the time it wedged, four
+more drivers had loaded behind it. So VBoxSup's `DriverEntry` did **not**
+block the load path - which weakens, on this boot, the reading that
+VBoxSup stops phase 1 by holding the loader. Whatever it does, drivers
+kept loading afterwards.
+
+## The removes hypothesis holds at five samples
+
+    boot   166     167     170     171     172
+    0x0f3  3,919   3,958   3,970   3,965   3,963
+
+Mean 3,955, full range 51, **spread 1.3%** - and the last four agree to
+0.3%. Against the same five boots, copies spread 6.5% and the driver
+odometer 15%. `VslRemoveProtectedPage` remains by a wide margin the
+best-conditioned coordinate of the wedge, and a fifth sample landing
+inside the band is no longer a coincidence of small numbers.
+
+So the boots stop after a nearly fixed number of page **un-protections**,
+with no image mid-load and no power IRP outstanding. The three facts
+together point away from anything in the *load* path and toward the
+release path - what happens to a frame as it is freed or de-verified.
