@@ -68333,3 +68333,63 @@ presence as evidence of the wedge - only its *persistence* is.
 `KeMaximumIncrement / 16`, and `rdx = 0xd2` = 210. Recorded unread; they
 are not needed for anything yet and are noted only so a later reader knows
 they were seen and not interpreted.
+
+## Boot 187 reproduces boot 185 exactly - the wedge is deterministic
+
+Third consecutive 2-vCPU boot, zpp resident, `VM status: running`. Healthy
+for ~15 minutes (`vtl_fresh_calls` 81.12/s and 31.69/s), then wedged.
+
+    stall coordinate     boot 185   boot 186   boot 187   spread
+    cpu 0 vtl_fresh       26,570     26,944     26,192     2.8%
+    cpu 0 vtl_copy        10,677     10,782     10,602     1.7%
+    cpu 1 vtl_fresh/s       +0       0.76-0.82   0.57      the VTL1 tick
+
+Census shape, uncut, wedged:
+
+    cpu 1  29.0% HvlEndSystemInterrupt+0x1e
+           28.7% HvlWriteApicCommandRegister+0x1d
+           13.7% KiQuantumEnd+0x538          <- THE SPINNER, 62,204 samples
+    cpu 0  26.6% HvlEndSystemInterrupt+0x1e
+           18.7% HvlWriteApicCommandRegister+0x1d
+           12.8% KiDpcInterruptBypass+0x12
+           10.9% HalpHvTimerAcknowledgeInterrupt+0x46
+            8.4% KiInterruptDispatchNoLockNoEtw+0x7c
+
+**`KiQuantumEnd+0x543..0x54f` - where the spin loop acquires and advances -
+is ABSENT again**, now on the third boot and out of 454,819 samples. The
+loop never acquires. And `KiQuantumEnd+0x518` carries 430 samples in the
+interrupted ring beside it.
+
+### A negative that clears zpp of a specific suspicion
+
+`KiEndInterruptCycleAccumulation+0x25c` (`0x35eb6c`) is **absent on both
+processors.** That address is only reached when the DPC-bypass guard
+`cmpb $2,%r15b ; jae return 0` is *passed*, which the disassembly says is
+impossible at `PreviousIrql = 2`. Had it appeared, the guest would be
+seeing a CR8/TPR value that disagrees with what zpp thinks it set - a zpp
+bug, and a serious one. It does not appear. **The interrupt-priority state
+zpp presents is correct here**, and the self-deadlock route stays closed.
+
+### (L) versus (D) is NOT settled, and the reason is a known instrument bias
+
+The test was to look for the ISR round trip in the holder's sampled
+census. Result on cpu 0: `HalPerformEndOfInterrupt` 8 samples,
+`KiInterruptDispatch+0x7c` 8, `KiUpdateThreadQosGroupingSummaries+0x1b`
+**10**, `KiIsrLinkage` absent, `KiEndInterruptCycleAccumulation+0x23b/246/
+256` absent. Ten samples in 808,546.
+
+**That is not evidence against (L), and it is not evidence for it -
+the instrument cannot answer this question.** `quiet_rip` counts entries
+that stage *nothing*; an entry that delivers the clock to the holder
+stages an event and is routed to `interrupted_rip` instead. So the
+population is biased against exactly the landings (L) predicts. This is
+the same defect recorded for `interrupted_rip` in
+[[read-the-control-and-difference-everything]], pointing the other way,
+and I walked into it having written the rule down.
+
+What the ten samples do establish is weaker and still worth having: the
+holder site is **real on this boot too**, not an artifact of boot 185.
+
+Settling (L) vs (D) needs an instrument whose population is *asynchronous
+entries*, which is precisely the design already worked out and not built.
+That is now the blocking measurement rather than a speculative nicety.
