@@ -66951,3 +66951,40 @@ other ends still transacting with the hypervisor while making no progress.
 That distinction is worth more than the original: 178's profile says the
 guest is *not* starved of ticks and *is* getting VTL calls through, so
 whatever stops it there is upstream of interrupt delivery entirely.
+
+## HalpHvTimerArm's share is a LEADING indicator of which end state a boot reaches
+
+Measured on the control (`quiet_rip`), differenced between consecutive
+windows of one boot. Boot 179:
+
+    window          walk rate   HalpHvTimerArm+0x7a
+    baseline->2nd      605/s          15.8%
+    2nd->3rd            93/s          56.6%
+
+It more than triples while the walk rate falls by 85%, and it does so
+**while the guest is still progressing** - the first window was taken at
+605/s, near full speed.
+
+Against the two known end states:
+
+    boot 177   clock livelock          HalpHvTimerArm  2.6%
+    boot 178   timer-arm / VTL stall   HalpHvTimerArm 40.6%
+    boot 179   heading for 178's shape rising 15.8% -> 56.6%
+
+So the share separates the two outcomes *and* rises before the outcome
+arrives. That is the first predictive measurement this investigation has
+had: every other instrument - process count, walk rate, VTL counters,
+driver odometer - only distinguishes states after the fact.
+
+`HalpHvTimerArm` is the routine that programs the Hyper-V synthetic timer.
+A rising share means the guest spends an increasing fraction of its
+non-staging entries *arming its next tick*, which is consistent with the
+`ExSetTimerResolution` chain already found on the phase-1 stack: a driver
+asked for a finer resolution, and the cost of re-arming grows until it
+crowds out the work.
+
+**Caveat, stated because the whole session has turned on this class of
+error:** three windows on two boots is a trend, not a law. It needs a boot
+that reaches the login screen to show the share *not* rising, which no
+sample yet provides. Until then this is a hypothesis with a clear
+refutation condition rather than an established indicator.
