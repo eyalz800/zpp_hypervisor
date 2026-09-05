@@ -67965,3 +67965,77 @@ against 574.7 Hz from `KeQuantumEndTimerIncrement = 17,400` - a 21%
 discrepancy. Either a fourth exit per tick, another interrupt source, or
 the tick is not 574.7 Hz on this boot. **Do not quote "one interrupt per
 tick" until this is reconciled.**
+
+## The lock HOLDER is named too, and it is frozen as well - KiUpdateThreadQosGroupingSummaries
+
+`interrupted_contexts` reads the interrupted thread's own RIP out of the
+`_KTRAP_FRAME`, not the ISR's, so unlike `sample_guest_stack` it is **not a
+scan and not fossil-prone**. On the held boot-185 specimen it carries three
+interleaved contexts, and the printer verdicts each separately:
+
+    rip                                        irql  rcx                 samples
+    KiQuantumEnd+0x538                            2  0x2                    7  EVERY field identical
+    KiUpdateThreadQosGroupingSummaries+0x1b       2  0xfffff8006e9eb180     8  EVERY field identical
+    KiCheckForThreadDispatch+0x7f                 0  0xffffe50ee0494040     1
+
+**Two different contexts, both at IRQL 2, both frozen** - "EVERY field
+identical" is the printer's own verdict, meaning no register moved across
+all samples.
+
+### The spinner's registers match the disassembly exactly
+
+Two independent confirmations that the `KiQuantumEnd` reading is right, from
+registers nothing in the analysis had seen:
+
+    rcx = 2                      <- `+0x4ee movzbl (%rax),%ecx`, the PRCB
+                                    count in the isolation unit. There are
+                                    two processors. EXACT.
+    rsi = 0xfffff8006e9f52a0     <- `+0x4f1 leaq 0x8(%rax),%rsi`, the PRCB
+                                    array base = descriptor 0x...5298 + 8.
+                                    EXACT.
+
+### The other frozen context is holding KPRCB[0]
+
+`KiUpdateThreadQosGroupingSummaries+0x1b` with **`rcx = 0xfffff8006e9eb180`,
+which is `KPRCB[0]` itself** - the same pointer `guest-dpc-state.py` proved
+via `KPRCB.Number == 0`. A routine updating per-processor QoS grouping
+summaries, taking a PRCB as its argument, is exactly the cross-processor
+scheduler state the PrcbLock exists to protect.
+
+So the shape is: **one processor frozen inside a lock-holding region
+operating on `KPRCB[0]`, the other spinning in `KiQuantumEnd`'s inlined
+acquire for that same lock.** That is reading (b) of `4fc1d2a`, and it is
+now evidenced rather than inferred.
+
+**But the holder is frozen too, and that is the part that is not yet
+explained.** It is not merely slow: its RIP does not move across 8 samples.
+Being preempted at 574.7 Hz would slow a routine down, not pin it to one
+instruction - between ticks a processor retires millions of instructions.
+So `+0x1b` is most likely **itself a wait**, and the scanned call stack
+beside it contains `KiAcquireThreadStateLockForWrite+0xc4`, which would
+make this a **second lock** and the whole thing a two-lock cycle rather
+than a starved holder.
+
+**That stack frame is from `sample_guest_stack`, which is a scan, and this
+tree has already been burned once by treating a coherent scanned frame as
+live (`f899fe2`).** So it is a lead, not a finding. What settles it is
+disassembling `KiUpdateThreadQosGroupingSummaries` around `+0x1b` and
+asking whether it is a spin - the same method that settled `+0x538`.
+
+### The exit ring shows the cycle in the raw, and proves the 0x2f self-IPI
+
+    int-window                       -> vmresume rip=KiQuantumEnd+0x538
+    ext-int                          -> vmresume rip=KiQuantumEnd+0x538
+    wrmsr 0x40000070 value=0x0       -> vmresume rip=HvlEndSystemInterrupt+0x1e
+    wrmsr 0x40000071 value=0x4002f   -> vmresume rip=HvlWriteApicCommandReg+0x1d
+
+repeating without variation for thousands of entries. `0x4002f` is
+destination-shorthand-self with **vector 0x2f** - the DPC software
+interrupt, written to the synthetic ICR every cycle and, per `4fc1d2a`,
+masked by the processor's own CR8 = 2. **The guest asks for the DPC
+interrupt it can never receive, once per tick, for ever.** This is the
+first direct observation of that write's value rather than an inference
+from its address.
+
+Four exits per cycle, three of which land in the quiet census - which is
+what makes the census's three equal thirds equal.
