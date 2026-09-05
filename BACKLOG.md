@@ -65766,3 +65766,55 @@ vector *still* is not taken. A vector that is top of the IRR with an empty
 ISR stack (`depth 0`, measured in 5 of 6 wedged samples) and is still not
 delivered is not being out-prioritised by anything in hvix64's own APIC
 state.
+
+## ZPP_STALL_BREAKER re-proposed and re-refused - do not raise it a fourth time
+
+A fresh analysis of the wedge arrived at `KiDpcInterrupt+0x392` - the
+instruction after the `sti` - and recommended enabling `ZPP_STALL_BREAKER`
+as "aimed at the right instruction for the first time". It is a good
+inference from the exit-rate evidence alone, and it is **already dead**.
+Recorded here beside today's evidence so the next reader meets the
+refutation at the same time as the idea.
+
+The 2026-08-23 entry above tried it three ways and all three failed
+fatally:
+
+1. **Clear the valid bit** - the event is *dropped*, not deferred. One
+   withhold and the guest never took another exit: 1,168,110 exits,
+   byte-identical ten minutes later. The level-asserted reasoning was
+   wrong; hvix64 writes the event into vmcs12 and considers it delivered.
+2. **Hold and re-stage** - VM-entry failure `0x80000021`, invalid guest
+   state, and **hvix64 answered by executing VMXOFF**. SDM 27.2.1.1:
+   blocking-by-STI and blocking-by-MOV-SS must both be 0 when injecting an
+   external interrupt, so re-staging means choosing the moment.
+3. **Honour that check** - still dies at the first withhold, at 240,518
+   exits, during the guest hypervisor's own start-up, with
+   `stall_restage_blocked` 0 so the check never even fired.
+
+**The withhold itself is fatal, not the re-stage.** An event the level
+above staged belongs to a sequence it is tracking, and removing one breaks
+it even when it is handed back on the next entry.
+
+### The durable conclusion, which today's evidence strengthens
+
+> Any fix has to change what the level above **decides**, not what this
+> VMM does with the decision.
+
+Everything measured today points the same way and independently:
+
+- The exit budget closes to 0.009% with two exits per reflection, so zpp
+  claims nothing for itself on this path.
+- `int_window_stale` is 0 across 3,055,183 window requests.
+- The interrupt window is granted on the *first* ask every time, with one
+  `tpr-below` exit in 63 s - delivery is not failing.
+- The lazy-EOI denial is chronic in **both** healthy and wedged states, so
+  it is a standing cost rather than the wedge.
+- Virtual-interrupt delivery, the one architectural lever that would move
+  the decision, is unavailable because the rig's KVM has
+  `enable_apicv=N`.
+
+So the set of things zpp can change on the interrupt path is, as far as
+every measurement this session can see, **empty**. That is worth stating
+plainly rather than being rediscovered: the remaining leverage is on what
+hvix64 is asked to do, or on why vector `0x2f` is never taken by the
+guest - not on how zpp forwards it.
