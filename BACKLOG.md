@@ -66343,3 +66343,31 @@ Also unresolved: which driver. `PnpCallDriverEntry`'s argument would name
 it; the `PsLoadedModuleList` tail at the moment of the wedge is
 `dfsc.sys`, but that is the last *completed* load and the entry being run
 may be an earlier one.
+
+### Refuted: no cross-processor migration is required
+
+The obvious reading of that stack is a deadlock -
+`KeGenericProcessorCallback` wanting to run its worker on the *other*
+processor, `KeSetSystemGroupAffinityThread` trying to migrate there, and
+cpu 1 being idle and never taking it. **Measured on wedged boot 174, it is
+not that:**
+
+    KiClockTimerOwner (rva 0xf217a4) = 0
+    the spinning thread is ON cpu 0
+
+`ExpUpdateTimerConfiguration` builds its processor bitmap from
+`table[KiClockTimerOwner]`, so the callback targets **cpu 0 - the
+processor the thread is already running on**. No migration is needed, none
+is pending, and cpu 1 being idle is irrelevant to it.
+
+So the thread is spinning on the correct processor, inside
+`KeGenericProcessorCallback` or the worker it invokes, with nothing to
+wait for from the other processor. That removes the last cross-processor
+explanation and makes this a single-processor loop that simply does not
+terminate - which is also why it generates no exits, no hypercalls and no
+faults.
+
+It also means the multicore wedge, at this level, looks identical to the
+single-core root cause already recorded: a driver's `DriverEntry` holding
+phase 1 in a timer-resolution path. What multicore changes is how often it
+happens, not what it is.
