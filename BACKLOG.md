@@ -66988,3 +66988,56 @@ error:** three windows on two boots is a trend, not a law. It needs a boot
 that reaches the login screen to show the share *not* rising, which no
 sample yet provides. Until then this is a hypothesis with a clear
 refutation condition rather than an established indicator.
+
+## RETRACTED TWICE: there is ONE end state, and a transient on the way to it
+
+`cd773fa` proposed `HalpHvTimerArm`'s rising share as a leading indicator
+of which end state a boot reaches. **The next reading of the same boot
+refutes it.**
+
+Boot 179's control across its whole life, each window differenced:
+
+    walk rate   HalpHvTimerArm   HvlEndSystemInterrupt  KiDpcInterruptBypass
+      605/s         15.8%              ~0                    ~0
+       93/s         56.6%             6.0%                   ~0
+      0.0/s          0.2%            33.0%                 30.9%   (19.8M samples)
+
+`HalpHvTimerArm` rose to 56.6% and then **collapsed to 0.2%**, while the
+boot settled into exactly boot 177's profile - `HvlEndSystemInterrupt`,
+`KiDpcInterruptBypass`, `KiInterruptDispatchNoLockNoEtw`,
+`HvlWriteApicCommandRegister`. The clock livelock.
+
+**So the two-profile claim collapses too.** Boot 178's "timer-arm stall"
+was sampled at 7.1/s with `HalpHvTimerArm` at 40.6% - which is now
+recognisable as the *transient*, not an end state. Boot 179 passed through
+the same shape at 56.6% and kept going. Boot 178 was very probably caught
+mid-transition and would have reached the clock livelock too, given more
+time.
+
+The honest picture, and it is simpler than anything claimed in the last
+several entries:
+
+> **One end state: the documented clock livelock. One transient on the way
+> in, during which the guest spends most of its non-staging entries
+> arming its synthetic timer.**
+
+That also explains why boot 179 needed 19.8M control samples to resolve
+while boot 178 was called at 161,935: **the end state is only visible
+after the transient burns out**, and the transient can dominate a shorter
+observation completely.
+
+### What this run of retractions is really about
+
+Four claims in a row - "84.7% in two instructions", "two wedge profiles",
+"one spins and one goes idle", "HalpHvTimerArm predicts the outcome" -
+each built on a real measurement, each refuted by the next measurement of
+the same thing. The common fault is not any single instrument. It is
+**quoting a transient as a steady state**, over and over, on a system
+whose transients last minutes and whose end state takes tens of millions
+of samples to emerge.
+
+The rule that would have prevented all four: **do not characterise an end
+state until the census stops changing shape.** A window that differs from
+the window before it is not yet the answer - it is the approach. Boot
+179's 605/s, 93/s and 0.0/s windows disagree with each other completely,
+and only the last one is the wedge.
