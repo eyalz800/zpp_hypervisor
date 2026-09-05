@@ -65389,3 +65389,40 @@ allocator behind `VslSetPlaceholderPages` (which tracks the copies at
 roughly 0.8x throughout), the control-area path where 26 threads park in
 `MiReferenceControlArea`, and the secure kernel's own page pool. The
 copy count being the tight coordinate is a hint toward the first two.
+
+## The 26/14 thread split is a POOL SIZE, not a signature - the reason varies
+
+Two wedged boots, the same partition of `System`'s 40 listed threads,
+different wait reasons:
+
+    boot 166   26 WrVirtualMemory (18)   14 WrLpcReply (17)
+    boot 171   26 WrPageOut       (19)   14 WrLpcReply (17)
+
+**26 and 14 both times, exactly.** So the split is structural - a fixed
+pool, blocked in its entirety - and *which* wait it is blocked on is not
+invariant.
+
+That corrects an emphasis introduced when only boot 166 had been read.
+"26 System threads in `WrVirtualMemory`" was written as though the wait
+reason were the finding, and a whole line of analysis followed it into
+`MiReferenceControlArea`'s stack-local KGATE, which is a
+`WrVirtualMemory` site. On boot 171 the same 26 threads are in
+`WrPageOut`, which is a different site entirely. **The invariant is that
+the pool is entirely blocked, not what it is blocked on.**
+
+Consequences worth carrying:
+
+- The `MiReferenceControlArea` / control-area-gate account is still a
+  candidate for boot 166 specifically, but it cannot be the general
+  mechanism, because boot 171 wedged the same way without it.
+- Anything keyed on wait reason 18 alone will miss half these boots. A
+  census must report the whole distribution, not test for one value -
+  the same lesson as the top-N cut, in a different instrument.
+- The next question is what *both* reasons have upstream of them.
+  `WrVirtualMemory` (18) and `WrPageOut` (19) are both memory-manager
+  waits, which is consistent with the copy-call band pointing at a
+  resource exhausted after a roughly fixed amount of page-copy work.
+
+Method note: read as `WaitReason` alone this would have looked like two
+different failures. Counting the *distribution* rather than grepping for
+one reason is what showed the counts were identical.
