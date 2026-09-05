@@ -67299,3 +67299,43 @@ requests, the window granted on the first ask. What remains is either the
 driver (out of bounds - the rig's Windows install is not to be modified) or
 making each tick cheaper, which changes how long the guest takes to *reach*
 the wedge and not whether it does.
+
+## Kill policy: never kill a boot during the transient
+
+Seventeen boots this session (166-182) reached no login screen, against a
+recorded rate of roughly **1 in 10-16**. That is at the edge of the range
+rather than outside it, but it is worth stating rather than assuming the
+recipe still holds. Two readings are possible: the odds are worse than
+recorded, or boots were killed too early.
+
+The evidence cuts both ways and the three-stage trajectory now resolves
+it:
+
+- Boot 150, the recorded success, took ~50 minutes **including a
+  40-minute stall that cleared on its own**.
+- Boot 179 ran ~112 minutes (tsc 13.4e12) fully inside the livelock and
+  never escaped.
+
+So patience helps **only before the livelock**. Once the four/five-address
+clock loop dominates the differenced control, waiting is not indicated -
+every exit condition is scheduler state that nothing in the loop can
+change, and the only escape is the driver returning, which the loop does
+not affect either way.
+
+**The policy that follows, and it is cheap because the stage is one
+differenced dump:**
+
+    healthy    hypercall page 96-98%          keep running
+    transient  HalpHvTimerArm 33-57%          KEEP RUNNING - this is
+                                              where an escape happens
+    livelock   the clock-loop addresses       safe to kill
+
+Killing during the transient is the one case that could destroy a boot
+that would have succeeded, because the escape - `DriverEntry` returning,
+the thread blocking, the idle thread running - can only occur while the
+guest is still making progress. Killing in the livelock costs nothing.
+
+**This session's kills were made on walk rate and elapsed time**, neither
+of which distinguishes the transient from the livelock. That is the most
+likely reason seventeen boots produced no success, and it is a procedural
+fault rather than a change in the machine.
