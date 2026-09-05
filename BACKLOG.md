@@ -68106,3 +68106,44 @@ zpp tells hvix64. So advertising the recommendation to hvix64 does not
 obviously reach Windows, and whether hvix64 forwards it is unknown and
 must be checked before any of this is built. Recorded as a lead with that
 condition attached, not as a plan.
+
+## The spinlock-enlightenment lever is CLOSED - hvix64 does not forward our answer
+
+`8400d24` recorded advertising Hyper-V's spinlock enlightenment as the one
+new lever, conditional on hvix64 forwarding it. **Checked, and it does
+not.** Three facts, each cheap:
+
+1. **zpp answers `0x40000004` with recommendations zero.** The CPUID
+   handler's own comment at `exit_dispatch.cpp` says "Version, features and
+   recommendations, all zero, and hypercall legal. Nothing is recommended",
+   with the single exception of the enlightened-VMCS bit behind
+   `evmcs_offered`. So the spinlock retry count zpp reports is **0**.
+2. **hvix64 does ask us.** The CPUID census on boot 185 carries
+   `0x40000004   6   0.1%  hv recommendations`, and the per-processor
+   census shows it twice and once. The leaf reaches zpp.
+3. **Windows reads `0xffffffff`.** `HvlLongSpinCountMask` on the live
+   guest is `0xffffffff`, the TLFS "never notify" sentinel for CPUID
+   `0x40000004` EBX.
+
+**0 in, 0xffffffff out. hvix64 synthesizes its own recommendations for
+VTL0 rather than forwarding ours**, which is what a hypervisor presenting
+its own Hyper-V interface would do. Nothing zpp writes in that leaf can
+reach `HvlLongSpinCountMask`.
+
+The point of recording this rather than just dropping it: the lever was
+*plausible* and the check cost three greps and a census row. Had it not
+been checked, "advertise the spinlock enlightenment" would have been
+re-proposed, built, and produced a boot that changed nothing - the exact
+failure mode CLAUDE.md's rule about recording rejected alternatives
+exists to prevent.
+
+**What would reopen it**: evidence that hvix64 passes any part of leaf
+`0x40000004` through. The test is one boot with a nonzero recommendation
+bit set in zpp's answer and a re-read of Windows' `HvlEnlightenments` -
+if a bit we set appears there, forwarding happens and the whole approach
+is live again. That is a single-variable experiment and it is cheap; it
+is just not worth doing until something else motivates it, because the
+0-in/0xffffffff-out pair already answers the specific question.
+
+Note also `HvlEnlightenments` bit 6 is clear independently, so **two**
+gates would have to be opened, not one.
