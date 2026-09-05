@@ -4088,7 +4088,8 @@ def dump_ap_census(args, elf, instance):
     reader = Monitor(args.rig, args.port)
     for name in ("exit_total", "exit_trace_count", "cpuid_total",
                  "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_rip",
-                 "l1_gs_base", "l1_gs_index_taken", "start_up_applied",
+                 "l1_gs_base", "l1_own_cr3",
+                 "l1_gs_index_taken", "start_up_applied",
                  "init_emulated", "launch_error"):
         if name in off:
             reader.queue(instance + off[name], args.cpus)

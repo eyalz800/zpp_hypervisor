@@ -65647,3 +65647,52 @@ So the boots stop after a nearly fixed number of page **un-protections**,
 with no image mid-load and no power IRP outstanding. The three facts
 together point away from anything in the *load* path and toward the
 release path - what happens to a frame as it is freed or de-verified.
+
+## CONFIRMED: vector 0x2f is chronically pending, and it denies the lazy EOI
+
+`scripts/guest-hv-vapic.py` reads hvix64's private software vAPIC from
+outside. Six consecutive samples on boot 173 - **healthy and
+progressing**, walk at ~666/s:
+
+    ApicLazyEoiGranted     0     6 of 6
+    vector 0x2f pending    1     6 of 6      (IRR word0 bit 47)
+    SECOND pending (0x5ec) 0x2f  3 of 6, else 0x20
+    IRR word0  0x0000800100000000  -> vectors 0x2f AND 0x20 both latched
+
+`A0+0x5ec` is not a boolean "another interrupt is queued" - it is the
+**second-highest pending IRR vector**, written as the high half of one
+qword with the highest at `A0+0x5e8`. One of `HvpApicDeliverHighestIrr`'s
+grant filters refuses the lazy EOI when it is non-zero. So a permanently
+latched `0x2f` denies the grant on **every** interrupt, and
+`HvlEndSystemInterrupt` must then issue the explicit synthetic-EOI
+`wrmsr` - one reflection, every tick, for ever.
+
+That closes the loop opened by the exit-budget analysis: the anonymous
+`0x40000071` self-IPI, the 165,736 asks for `0x2f` at task priority
+`0xd0`, the 100% explicit-EOI rate and the 2,684 exits/s of denied lazy
+EOI are **one mechanism**, now measured rather than inferred.
+
+**But it is the steady state, not the wedge.** These six samples come from
+a healthy boot that was making progress at the time. So the denial - and
+its 23.5%-of-all-exits cost - is paid always. It explains the *cost* and
+does not by itself explain the *stall*. The wedge-versus-healthy
+comparison still has to be made on a wedged boot.
+
+### The route had to be corrected, and the proofs earned their keep
+
+The documented walk was `GS -> *(GS+0) = LP -> *(LP+0x2c770) = VP`, proved
+by `*(LP+0x2c778) == cpu`. **That hop does not hold here**: `*(GS+0)` is a
+self-pointer and `*(LP+0x2c778)` reads `0xffffffff`. The walk refused
+there rather than producing plausible addresses - which is the whole point
+of building a proof into each hop.
+
+What works is `VP = *(GS+0x358)`, with `GS+0x368` holding the same pointer
+as a free cross-check, and `*(VP+0x18)` reading `0xfee00300` - the APIC
+ICR address - as corroboration.
+
+**And `*(VP+8)` is not a stable processor index.** It read 0, then 1, then
+2 across samples of the same VP address, so `GS+0x358` follows *dispatch*
+rather than naming this processor's VP. The script derives and reports the
+index instead of asserting it; asserting it made a working walk look
+broken. The proofs that survive are the ones chance cannot satisfy:
+`*(VTL0) == VP` and the VTL-number byte reading 0.
