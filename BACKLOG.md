@@ -65221,9 +65221,14 @@ repeat of 78:
     boot   drivers   copy calls
     166      78        10,172
     169      78        10,172
-    170      84        10,701
+    170      89        10,701   <- 84 when first read; it was still moving
     167      91        10,863
     168     148           -      (bugchecked at the 600 s watchdog)
+
+Boot 170's row is a warning about the odometer itself: read at 84 it
+looked settled, and it went on to 89 before stopping. **A monotone counter
+read once is a lower bound, not a resting place** - difference it, or say
+which it is.
 
 ### Use GUEST INTERRUPT TIME, not wall time, to decide patience
 
