@@ -1988,18 +1988,57 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     //
     // `l2_entry_priority` is the priority sampled at the previous entry,
     // which is what this VMM already reads; using it costs nothing.
+    // **The test below is on the pending vector, not on the priority
+    // alone, and that is the correction that makes this switch worth
+    // another boot.** It used to read
+    //
+    //     } else if (this->l2_entry_priority[cpu] >= dispatch_class) {
+    //
+    // which withholds the window at any priority at or above DISPATCH
+    // *whatever vector is waiting*, and that is measurably wrong. SDM
+    // 12.8.4 admits a vector when its priority class strictly exceeds
+    // the task priority's class, so at a task priority of 0x20 - class
+    // 2, and 22.0% of one measured processor's entries - the clock
+    // vector 0xd1 at class 13 is perfectly deliverable. The old test
+    // withheld the window there anyway, and the window is this VMM's
+    // delivery mechanism for *every* vector. That is the mechanism
+    // behind the measurement in this switch's own option text: it "took
+    // vector 0x2f from 9,627 to 11 and the CLOCK from 388,241 to 5,550
+    // in the same run". It did not merely fail to help the vector being
+    // chased - it stopped the one that was working.
+    //
+    // So withhold only when there is a known outstanding vector *and*
+    // the current priority actually masks it. Every other case gives
+    // the window exactly as the default build does, which makes this
+    // strictly less aggressive than the version that was measured
+    // harmful, and cannot starve a vector the guest could have taken.
+    //
+    // `pending_vector_now` is zero unless `count_dropped_requests` is
+    // building the census that fills it, so a build with `dropcnt=0`
+    // degrades to never withholding - the default behaviour - rather
+    // than to withholding blindly. That is the safe direction and it is
+    // deliberate; check `dropcnt=` in the manifest before reading a run.
+    //
+    // NOT yet measured on the rig. Boot 138 measured the storm this is
+    // aimed at - 118,695 interrupt-window exits on cpu 1, tracking the
+    // guest's ICR loop at 1.02 to 1 and running 23.8 times per timer
+    // arm - but this switch is still OFF by default and no boot has
+    // carried this version of the test.
     if constexpr (nested_vmx::window_on_tpr) {
-        constexpr std::uint64_t dispatch_class = 0x20;
-
         if ((cpu < max_cpus) &&
             (0 != (primary & primary_interrupt_window))) {
+            auto pending = this->pending_vector_now[cpu];
+            auto masked =
+                (0 != pending) &&
+                ((pending >> 4) <= (this->l2_entry_priority[cpu] >> 4));
+
             if (this->window_armed_on_drop[cpu]) {
                 // The priority came down since it was withheld, so this
                 // entry carries it. One-shot: cleared here so the next
                 // rise withholds again, rather than latching open after
                 // the first drop and leaving the poll exactly as it was.
                 this->window_armed_on_drop[cpu] = false;
-            } else if (this->l2_entry_priority[cpu] >= dispatch_class) {
+            } else if (masked) {
                 primary &= ~primary_interrupt_window;
                 this->window_deferred_count[cpu] += 1;
 
