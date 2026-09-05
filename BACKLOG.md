@@ -68288,3 +68288,48 @@ Frame-genuineness test, two `xp` reads on the next wedged boot:
 `*(KPRCB[0]+0xc8)`. **If either differs the frame is a fossil and the
 holder analysis is void.** Note the printer does not currently emit `r8`,
 so that half needs one line added first.
+
+## The printer no longer prints a field the hardware does not write
+
+`rig-dump-state.py`'s interrupted-context table printed `rdi`, which
+`KiIsrLinkage` **never writes** - the stub stores only Rax, Rcx, Rdx, R8,
+R9, R10, R11 into the `_KTRAP_FRAME`, plus Rsi from its own `push`. Rbx
+(+0x140) and Rdi (+0x148) keep whatever the kernel stack last left there.
+The offsets in `guest_windows.h` were right; the fields are simply not
+populated on an interrupt frame.
+
+Now: `rdi` is **not printed**, `r8` **is** (it was being read and thrown
+away), and two lines under the table say what the instrument cannot do -
+that `rdi`/`rbx` are stale, and that the ring is **shared across
+processors with no cpu field**, so N rows is one snapshot and per-cpu
+attribution is an inference rather than a reading.
+
+`r8` matters because it completes the frame-genuineness test: for a frame
+in `KiUpdateThreadQosGroupingSummaries`, `rdx` must equal `*(KPRCB+0xc0)`
+and `r8` must equal `*(KPRCB+0xc8)`. Two reads that say fossil or genuine.
+
+## The healthy-boot control for the wedge ring - first time it has been read
+
+Boot 187, zpp resident, **healthy and progressing** (`vtl_fresh_calls`
+81.12/s cpu 1 and 31.69/s cpu 0, copies 16.02/s and 1.57/s):
+
+    rip                                        irql  rcx    rsi
+    ExpUpdateTimerConfigurationWorker+0x1c5       0  0x0    0x2625
+    KiDpcInterruptBypass+0x12                     2  ...    ...
+    KiAcquirePrcbLocksForIsolationUnit+0x5c       2  0x2    0xfffff8077be972a0
+
+**`KiAcquirePrcbLocksForIsolationUnit+0x5c` appears on a HEALTHY boot**,
+with `rcx = 2` (ProcessorCount) and `rsi` = the Prcbs array base - the
+**same signature** as the wedged boot's spinner. One sample, beside a ring
+that is otherwise moving.
+
+That is the control this analysis needed and did not have: **the lock
+acquire is not rare and not itself pathological.** A healthy guest walks
+through it constantly; the wedge is that one traversal stops returning.
+Any future reading that finds this address must therefore NOT treat its
+presence as evidence of the wedge - only its *persistence* is.
+
+`rsi = 0x2625` = 9,765 on the `ExpUpdateTimerConfigurationWorker` row is
+`KeMaximumIncrement / 16`, and `rdx = 0xd2` = 210. Recorded unread; they
+are not needed for anything yet and are noted only so a later reader knows
+they were seen and not interpreted.

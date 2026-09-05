@@ -8850,18 +8850,47 @@ def main():
                 if not f[0]:
                     continue
                 rows.append(f)
+            # **`rdi` is NOT printed, and that is a fix, not an
+            # omission.** `KiIsrLinkage` writes only Rax, Rcx, Rdx, R8,
+            # R9, R10, R11 into the `_KTRAP_FRAME`, plus Rsi via its own
+            # `push %rsi`. It **never writes Rbx (+0x140) or Rdi
+            # (+0x148)**, so those slots hold whatever the kernel stack
+            # last left there. The offsets in `guest_windows.h` are
+            # correct; the fields are simply not populated on an
+            # interrupt frame.
+            #
+            # This was caught the way everything in this file gets
+            # caught - by a second reading. A frozen row printed
+            # `rdi = KiEndInterruptCycleAccumulation+0x274`, **a code
+            # address in a register that should hold data**, and it was
+            # read past. Printing it invites exactly that.
+            #
+            # `r8` IS written by the stub and was being discarded here.
+            # It is now printed, because it carries a decisive test: for
+            # a frame in `KiUpdateThreadQosGroupingSummaries`, `rdx` must
+            # equal `*(KPRCB+0xc0)` (SchedulerSubNode) and `r8` must
+            # equal `*(KPRCB+0xc8)` (GroupSetMember) - two reads that
+            # say whether the frame is genuine or a fossil.
             print("      rip                  irql  rcx"
-                  "                rdx                rsi"
-                  "                rdi                rsp"
+                  "                rdx                r8"
+                  "                 rsi                rsp"
                   "                frame")
             for f in rows:
-                _, rip, rsp, rcx, rdx, _r8, rsi, rdi, irql, fr = f
+                _, rip, rsp, rcx, rdx, r8, rsi, rdi, irql, fr = f
                 where = (f"ntoskrnl+0x{rip - kbase:x}"
                          if kbase and kbase <= rip < kbase + ksize
                          else f"0x{rip:x}")
                 print(f"      {where:<20} {irql:>4}  0x{rcx:016x} "
-                      f"0x{rdx:016x} 0x{rsi:016x} 0x{rdi:016x} "
+                      f"0x{rdx:016x} 0x{r8:016x} 0x{rsi:016x} "
                       f"0x{rsp:016x} 0x{fr:016x}")
+                _ = rdi
+            print("      (rdi and rbx are omitted: the ISR stub does not "
+                  "write them, so those slots are stale kernel stack. "
+                  "rcx/rdx/r8/rsi are genuine.)")
+            print("      (this ring is SHARED across processors and "
+                  "carries no cpu field, so N rows is one snapshot, not "
+                  "N independent samples, and per-cpu attribution is an "
+                  "inference - not a reading.)")
             for line in interrupted_context_verdicts(rows, kbase, ksize):
                 print(f"      {line}")
 
