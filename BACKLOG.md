@@ -65982,3 +65982,49 @@ function from `KiDpcInterrupt` - it performs no EOI and does not test
 hot-address censuses, where it is 22.7% - was sampling the **bypass**
 path, which is how the DPC queue is normally drained from eleven ISR
 tails without vector `0x2f` being involved at all.
+
+## Gate 1 admits as well - the refusal is gate 2, 3 or 5
+
+Wedged boot 174, three samples of hvix64's ISR stack:
+
+    ISR stack (A0+0x5d0)  00 d1 d1 00 00 00 00 00 ...
+    depth 0  ->  top = stack[0] = 0x00, class 0
+    gate 1 admits 0x2f only if 2 > 0  ->  ADMITS
+
+There is no stale high-class vector pinning the processor priority. The
+`d1 d1` in slots 1 and 2 sit *above* the depth and are not consulted.
+
+So of the six decline branches in `HvpApicDeliverHighestIrr`:
+
+    gate 1  PPR / ISR stack top      ADMITS   (measured, depth 0, top 0x00)
+    gate 4  TPR, class > VTPR>>4     ADMITS on 25.4% of entries (measured)
+    gate 2  an event is already staged in the pending-interruption block
+    gate 3  guest RFLAGS.IF
+    gate 5  interruptibility state & 3 (blocking-by-STI / MOV-SS)
+    gate 6  0x32d4d0
+
+**Gate 2 is now the strongest candidate, and it has a mechanism this
+session already measured.** Every tick stages the clock vector `0xd1` into
+vmcs12 - the exit budget showed exactly one injection per tick, and the
+0xd1 staging rate matches the EOI rate 1:1 on both processors. If a
+staged event is present whenever hvix64 evaluates the pending IRR, `0x2f`
+is declined every time without anything being wrong with priority at all:
+it simply never gets a turn.
+
+That would also explain the shape of the whole trace - `0x2f` latched in
+IRR in 6 of 6 samples, healthy and wedged alike, while the clock is
+delivered every period - without requiring anything to be broken. It is
+the "answered part of an interface" pattern inverted: the clock is
+answered so promptly that the dispatch interrupt is never the highest
+thing hvix64 gets to act on.
+
+Gates 2, 3 and 5 all arm an interrupt window when they decline, and the
+window is granted on the first ask every time (measured), so this is
+consistent with everything else: hvix64 asks, is granted, injects the
+clock, and `0x2f` waits again.
+
+**The read that separates them** is the pending-interruption block at
+hvix64 `0x32d448` (gate 2), the guest RFLAGS.IF at `0x32d28c` (gate 3)
+and the interruptibility state at `0x32d250` -> `0x32d354` (gate 5). Those
+are hvix64 statics rather than per-VP fields, so they need the image base,
+which is recoverable but not yet pinned.

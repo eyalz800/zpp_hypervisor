@@ -210,6 +210,14 @@ depth = rq(A0 + 0x5e0)
 pend = rq(A0 + 0x5e8)
 lazy = rq(A0 + 0x520)
 irr0 = rq(A0 + 0x590)
+# Gate 1's input: the ISR stack. hvix64 declines when
+# `class(highest IRR) <= (ISRstack[depth] >> 4)` and, uniquely among the
+# six gates, **arms nothing** when it does - no interrupt window, no TPR
+# threshold - so a vector refused here leaves no trace in vmcs12 and is
+# invisible to every counter zpp owns. A stale high-class entry never
+# popped would block class-2 0x2f for ever.
+isr0 = rq(A0 + 0x5d0)
+isr1 = rq(A0 + 0x5d8)
 if None in (depth, pend, lazy, irr0):
     print('  one or more fields unreadable')
     sys.exit(1)
@@ -221,6 +229,21 @@ print(f'  SECOND pending (0x5ec)   0x{second:x}')
 print(f'  ApicLazyEoiGranted       {granted}')
 print(f'  IRR word0                {irr0:#018x}   '
       f'vector 0x2f pending = {(irr0 >> 47) & 1}')
+d = depth & 0xff
+if isr0 is not None and isr1 is not None:
+    stack = [(isr0 >> (8 * k)) & 0xff for k in range(8)] + \
+            [(isr1 >> (8 * k)) & 0xff for k in range(8)]
+    print(f'  ISR stack (A0+0x5d0)     '
+          + ' '.join(f'{v:02x}' for v in stack))
+    if d < 16:
+        top = stack[d]
+        print(f'    top = stack[{d}] = 0x{top:02x}, class {top >> 4}   '
+              f'GATE 1 admits 0x2f only if 2 > {top >> 4} -> '
+              + ('ADMITS' if 2 > (top >> 4) else 'REFUSES'))
+        if d == 0 and top != 0:
+            print(f'    NOTE depth 0 but slot 0 is 0x{top:02x}, not a zero '
+                  f'sentinel - slot 0 may be uninitialised; treat class '
+                  f'with suspicion until a writer for it is found')
 
 print()
 if second == 0x2f and 0 == granted:
