@@ -67196,3 +67196,106 @@ stated one, and it names the precise operation - differencing across two
 dumps - that the truncation makes invalid. That is the property the
 `quiet_rip` control has and `interrupted_rip` lacked, applied to a
 different failure.
+
+## SETTLED: the loop cannot be exited from inside, and zpp cannot break it
+
+Static analysis of `ntoskrnl.exe` against the five measured addresses,
+with `.pdata` confirming each is a real function start.
+
+### The gate nobody had named
+
+**`0x35e910` is `KiEndInterruptCycleAccumulation`**, called from
+`KiInterruptDispatchNoLockNoEtw+0x51`, and its tail is the whole decision:
+
+    NestingLevel -> 0
+    if (!KPRCB.InterruptRequest)  return FALSE        ; 0x35eb56
+    if (KPRCB.IdleHalt)           return FALSE        ; 0x35eb5c
+    if (OldIrql >= 2)  HalRequestSoftwareInterrupt(2) ; -> ICR 0x2f, return FALSE
+    return TRUE                                       ; -> KiDpcInterruptBypass
+
+So **the ICR and the bypass are mutually exclusive arms of one `if`**, not
+consecutive steps - which corrects CLAUDE.md's recorded sequence. Two more
+corrections from the bytes: the **EOI comes before both** (`+0x44`
+`HalPerformEndOfInterrupt`, `+0x51` the gate, `+0x5a` the bypass), and the
+ICR is *not* what causes the window exit at `KiDpcInterruptBypass+0x12` -
+the guest is at TPR class 2 there and `0x2f` is class 2, which SDM 13.8.3.1
+requires to *strictly exceed*, so it can never be delivered at that
+instruction.
+
+`KiUpdateRunTime` re-arms it every tick: on quantum expiry it sets
+`QuantumEnd`, and because `NestingLevel != 0` inside an interrupt it sets
+`KPRCB.InterruptRequest` rather than self-IPIing. The ISR sets it; the ISR
+tail consumes it. **That also explains the previously unexplained 99.2% of
+`0x2f` asks issued at task priority `0xd0`** - the request site runs before
+the IRQL is lowered at `+0x78`.
+
+### Every exit condition, and why none can fire
+
+    exit                        requires                    measured
+    tail FALSE at 0x35eb5c      IdleHalt = 1                0 (thread Running)
+    tail FALSE at 0x35eb56      InterruptRequest never set  set every tick
+    DPCs retire                 DpcRequestSummary & 0xBF    0
+    context switch              NextThread != 0             NULL
+    KiQuantumEnd picks another  a Ready thread at prio >=31 none
+
+Every branch that would end the loop is controlled by **scheduler** state,
+and the scheduler is behaving correctly: one runnable thread, priority 31,
+already running.
+
+### The decisive argument that zpp cannot help
+
+**Injecting `0x2f` ourselves would achieve nothing even if it worked.**
+`KiDpcInterrupt` (`0x6b2f60`) calls the *same* `KiDispatchInterrupt`
+(`0x298e60`) that the bypass already calls at `0x6b3696`. The only
+difference is one extra EOI. **The loop body does no work; delivering the
+interrupt does not create work to do.** That is readable in the bytes and
+it closes the last lever, on top of the three fatal `STALL_BREAKER`
+attempts, the unavailable VID, the audited-dead TPR threshold, and the four
+failed time interventions.
+
+### What breaks it on a healthy boot - one instruction
+
+`HalProcessorIdle` is `sti / hlt / retq`. That `hlt` is the **only** place
+in this path where the processor sits at TPR class 0 with IF=1 for a
+sustained interval. So the escape is:
+
+    DriverEntry returns -> phase-1 thread blocks -> nothing runnable
+      -> idle thread runs -> IdleHalt = 1
+      -> the gate returns FALSE: no bypass, no ICR
+      -> hlt at class 0 -> gate 4 admits class 2 -> 0x2f finally injected
+      -> KiDpcInterrupt EOIs it -> the IRR bit CLEARS
+      -> A0+0x5ec goes to zero -> the lazy-EOI grant returns
+      -> the explicit wrmsr 0x40000070 disappears, with 23.5% of all exits
+
+Corroborated by the login-screen boot already in memory, where
+`KiSwapThread` is hot and `KiDpcInterruptBypass+0x12` is **0.5% against
+~57% wedged**.
+
+**So nothing inside the loop exits it. It is exited from outside, by the
+interrupted thread ceasing to be runnable.** The loop is not a fault - it
+is what Windows does when one priority-31 thread busy-waits and nothing
+else is Ready. Every counter inside it reads healthy because every
+mechanism inside it *is* healthy.
+
+### A cross-check that validates the whole model
+
+Quiet entries per tick from the five shares: 1.000 + 0.936 + 0.615 + 0.436
++ 0.006 = **2.99**, plus the one injected `0xd1` entry = **3.99**, against
+the independently measured **4 reflections, 8 exits per `0xd1` delivered**.
+Two instruments, different mechanisms, agreeing to 0.3%.
+
+(The share arithmetic is the agent's, computed from boot 179's window. The
+percentages themselves remain withdrawn per the top-N-cut correction - what
+survives is the *ratio structure*, which the agent derived from the code and
+which the independent 4-reflections figure corroborates.)
+
+### Where the leverage actually is
+
+Not in zpp. The wedge is a guest-side livelock upstream of interrupt
+delivery, the VMCS and anything zpp writes. zpp's measured contribution is
+a **multiplier** on a loop whose iteration count is set by a spinning
+driver - exit budget closing to 0.009%, `int_window_stale` 0 over 3,055,183
+requests, the window granted on the first ask. What remains is either the
+driver (out of bounds - the rig's Windows install is not to be modified) or
+making each tick cheaper, which changes how long the guest takes to *reach*
+the wedge and not whether it does.
