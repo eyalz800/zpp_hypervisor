@@ -1,0 +1,2655 @@
+module base 0x67061000, singleton 0x68550000
+
+cpu  exits       slots  l2-entries  l2-exits  requeued  deferred  pending  l2-activity
+  0      829585  819130      164156    164154     36891         0  0x     0  active
+  1      532278  524667      219389    219386      9222         0  0x     0  active
+
+last hypercall from the second level, per processor
+  cpu 0: 0x0012 HvCallVtlReturn                seen 92,352
+         rcx 0x0000000000000012  rdx 0x0000000000000000  r8 0x0000000000000000
+         at tsc 429,035,549,987   <- compare against a SECOND dump: a tsc that does not move while exits climb is a guest suspended inside this call, not one that stopped calling
+  cpu 1: 0x0012 HvCallVtlReturn                seen 9,504
+         rcx 0x000000000001000b  rdx 0x00000000000000d2  r8 0x0000000000000001
+         at tsc 428,893,149,906   <- compare against a SECOND dump: a tsc that does not move while exits climb is a guest suspended inside this call, not one that stopped calling
+
+cpu  exits       resumes-reached  in-handler  sipi-waits  unclaimed
+  0      829585           835856       -6271           0          0
+  1      532278           548920      -16642           0          0
+
+emulator: impossible_decodes 0  refused_instruction_count 0
+    both zero - nothing fabricated, nothing refused
+
+cpu  probes-sent  wake-exit  wake-root  activity  cs:rip
+  nothing probed. If `probe=0` in `zpp switches` this instrument was not built;
+  if `probe=1` then no processor ever reached a probe round, which means the
+  driving processor stopped exiting too.
+  0            0          0          0         0  0x0000:0x0
+     <- never probed
+  1            0          0          0         0  0x0000:0x0
+     <- never probed
+
+ap-fault trap: never armed (switch off, or no paging transition on an application processor) - this says nothing
+
+cpu 0 vmcs02 secondary controls: asked 0x1010ae, granted 0x1010ae  <- ALL GRANTED
+    virtualize_apic_accesses       no
+    apic_register_virtualization   no
+    virtual_interrupt_delivery     no
+
+cpu 1 vmcs02 secondary controls: asked 0x1010ae, granted 0x1010ae  <- ALL GRANTED
+    virtualize_apic_accesses       no
+    apic_register_virtualization   no
+    virtual_interrupt_delivery     no
+
+cpu 0 VMX capabilities answered to the guest hypervisor (39 reads)
+    0x480  IA32_VMX_BASIC         0x009810007a707001
+    0x485  MISC                   0x0000000000000165
+    0x486  CR0_FIXED0             0x0000000080000021
+    0x487  CR0_FIXED1             0x00000000ffffffff
+    0x488  CR4_FIXED0             0x0000000000002000
+    0x489  CR4_FIXED1             0x0000000000372fff
+    0x48b  PROCBASED_CTLS2        0x001138ee00000000
+    0x48c  EPT_VPID_CAP           0x00000f0106134040
+    0x48d  TRUE_PINBASED_CTLS     0x0000003f00000016
+    0x48e  TRUE_PROCBASED_CTLS    0xfff9fffe04006172
+    0x48f  TRUE_EXIT_CTLS         0x00bfefff00036dfb
+    0x490  TRUE_ENTRY_CTLS        0x0001d3ff000011fb
+    0x491  VMFUNC                 0x0000000000000001
+
+cpu 0 hypercalls from the SECOND level (Windows)
+    0x000c        45,144  HvCallModifyVtlProtectionMask
+    0x0012        27,386  HvCallVtlReturn
+    0x0011        27,371  HvCallVtlCall
+    0x0003         2,057  
+    0x0051           188  HvCallSetVpRegisters
+    0x0002           172  
+    0x769b            32  
+    0x0050            24  HvCallGetVpRegisters
+    0x007b             5  
+    0x006c             3  
+    0x000f             2  HvCallEnableVpVtl
+    0x0000             2  
+    0x8001             1  
+    0x0046             1  HvCallGetPartitionId
+    0x0016             1  
+    0x000d             1  HvCallEnablePartitionVtl
+
+cpu 0 wrmsr by MSR (every exit, at the trace record, 155,628 censused)
+    0x40000070        48,932   31.4%  last 0x0000000000000000  HV_EOI
+    0x40000071        48,144   30.9%  last 0x000000000004002f  HV_ICR
+    0x400000b1        45,119   29.0%  last 0x000000007df759f9  HV_STIMER0_COUNT
+    0x40000084        10,812    6.9%  last 0x0000000000000000  HV_EOM
+    0x400000b0         2,410    1.5%  last 0x0000000000030008  HV_STIMER0_CONFIG
+    0x0000083e             7    0.0%  last 0x000000000000000b  
+    0x00000838             7    0.0%  last 0x0000000000000000  X2APIC_INIT_COUNT
+    0x00000832             7    0.0%  last 0x00000000000300fd  X2APIC_LVT_TIMER
+    0x40000001             5    0.0%  last 0x0000000117a22003  
+    0x00000834             5    0.0%  last 0x00000000000000fe  
+    0xc0000084             4    0.0%  last 0x0000000000004700  
+    0xc0000082             4    0.0%  last 0xfffff806ad7bf200  
+    ... and 65 more MSRs
+
+cpu 0 wrmsr by MSR (SECOND level, at the reflect decision, 155,738 censused)
+    0x40000070        48,970   31.4%  up     48,971  last 0x0000000000000000  HV_EOI
+    0x40000071        48,177   30.9%  up     48,179  last 0x000000000004002f  HV_ICR
+    0x400000b1        45,150   29.0%  up     45,150  last 0x000000007e051416  HV_STIMER0_COUNT
+    0x40000084        10,824    7.0%  up     10,824  last 0x0000000000000000  HV_EOM
+    0x400000b0         2,410    1.5%  up      2,410  last 0x0000000000030008  HV_STIMER0_CONFIG
+    0x0000083e             7    0.0%  up          7  last 0x000000000000000b  
+    0x00000838             7    0.0%  up          7  last 0x0000000000000000  X2APIC_INIT_COUNT
+    0x00000832             7    0.0%  up          7  last 0x00000000000300fd  X2APIC_LVT_TIMER
+    0x00000834             5    0.0%  up          5  last 0x00000000000000fe  
+    0xc0000084             4    0.0%  up          4  last 0x0000000000004700  
+    0xc0000082             4    0.0%  up          4  last 0xfffff806ad7bf200  
+    0xc0000081             4    0.0%  up          4  last 0x0023001000000000  
+    ... and 65 more MSRs
+
+cpu 0 where the guest was when an interrupt landed on it (110,783 samples, 1030 distinct)
+  0xfffff806ad2a6f8f       27370   24.7%  ntoskrnl+0x6a6f8f
+  0xfffff806ad2b3692       26244   23.7%  ntoskrnl+0x6b3692
+  0xfffff8063b39001c       20988   18.9%
+  0xfffff806ad2b32f0        9451    8.5%  ntoskrnl+0x6b32f0
+  0xfffff806442ba548        4329    3.9%
+  0xfffff8063b390003        3848    3.5%
+  0xfffff806ace96dd6        2563    2.3%  ntoskrnl+0x296dd6
+  0xfffff806ace41643        1465    1.3%  ntoskrnl+0x241643
+  0xfffff806acf3fd56        1355    1.2%  ntoskrnl+0x33fd56
+  0xfffff806ace73e70        1340    1.2%  ntoskrnl+0x273e70
+  0xfffff806ace98971         844    0.8%  ntoskrnl+0x298971
+  0xfffff806ace99625         314    0.3%  ntoskrnl+0x299625
+  0xfffff806acecc395         277    0.3%  ntoskrnl+0x2cc395
+  0xfffff806acf93e81         271    0.2%  ntoskrnl+0x393e81
+  ... and every non-ntoskrnl row below the cut (215 of 1016 remaining):
+  0xfffff8063f110b50         191    0.2%
+  0xfffff8063f2ab263          63    0.1%
+  0xfffff8063f4ae3db          51    0.0%
+  0xfffff8063f556134          31    0.0%
+  0xfffff8063f25f873          28    0.0%
+  0xfffff8063f110b63          20    0.0%
+  0xfffff8063f2ab3e9          18    0.0%
+  0xfffff8063b39000f          15    0.0%
+  0xfffff8063f111243          13    0.0%
+  0xfffff8063f4ae3df          12    0.0%
+  0xfffff806404119ad          11    0.0%
+  0xfffff8063f23c860          11    0.0%
+  0xfffff8063f0917f5          11    0.0%
+  0xfffff806442ba442           9    0.0%
+  0xfffff8063feddcf6           9    0.0%
+  0xfffff8063f1e4340           9    0.0%
+  0xfffff8064023f84f           8    0.0%
+  0xfffff8064047545f           7    0.0%
+  0xfffff8063fe369dc           7    0.0%
+  0xfffff8063f21f6e0           7    0.0%
+  0xfffff80640411c74           6    0.0%
+  0xfffff8063f2ab519           6    0.0%
+  0xfffff8063f115100           6    0.0%
+  0xfffff806402e52c5           5    0.0%
+  0xfffff8063fede867           5    0.0%
+  0xfffff8063f4ae472           5    0.0%
+  0xfffff8063f4ad652           5    0.0%
+  0xfffff806442be7f9           4    0.0%
+  0xfffff80640411c7a           4    0.0%
+  0xfffff80640411c6c           4    0.0%
+  0xfffff8064041199c           4    0.0%
+  0xfffff80640411990           4    0.0%
+  0xfffff8063f2fd1a7           4    0.0%
+  0xfffff8063f111750           4    0.0%
+  0xfffff806404752f0           3    0.0%
+  0xfffff8064041229a           3    0.0%
+  0xfffff80640412290           3    0.0%
+  0xfffff8064041228c           3    0.0%
+  0xfffff806404119b4           3    0.0%
+  0xfffff8063fd625e0           3    0.0%
+  0xfffff8063f556d37           3    0.0%
+  0xfffff806442bf701           2    0.0%
+  0xfffff806410b1a30           2    0.0%
+  0xfffff80640f002ac           2    0.0%
+  0xfffff80640412294           2    0.0%
+  0xfffff80640411c7e           2    0.0%
+  0xfffff806404119b7           2    0.0%
+  0xfffff806402e562e           2    0.0%
+  0xfffff806402e52cf           2    0.0%
+  0xfffff806402ab030           2    0.0%
+  0xfffff806402a5eb2           2    0.0%
+  0xfffff806402a5e30           2    0.0%
+  0xfffff80640200ae0           2    0.0%
+  0xfffff8063fee1f10           2    0.0%
+  0xfffff8063fed7037           2    0.0%
+  0xfffff8063fed2d50           2    0.0%
+  0xfffff8063feb40fe           2    0.0%
+  0xfffff8063feab4be           2    0.0%
+  0xfffff8063fe637b0           2    0.0%
+  0xfffff8063f550480           2    0.0%
+  0xfffff8063f4ae4b8           2    0.0%
+  0xfffff8063f2f21ec           2    0.0%
+  0xfffff8063f21f8ba           2    0.0%
+  0xfffff8063f110bc2           2    0.0%
+  0xfffff8063e5fc4b1           2    0.0%
+  0xfffff8064441094c           1    0.0%
+  0xfffff806443563a0           1    0.0%
+  0xfffff8064435458b           1    0.0%
+  0xfffff80644354479           1    0.0%
+  0xfffff80644354421           1    0.0%
+  0xfffff806443542bb           1    0.0%
+  0xfffff8064435423d           1    0.0%
+  0xfffff80644353cd0           1    0.0%
+  0xfffff80644353940           1    0.0%
+  0xfffff80644353635           1    0.0%
+  0xfffff806443535d2           1    0.0%
+  0xfffff806442c4faa           1    0.0%
+  0xfffff806442a53b3           1    0.0%
+  0xfffff80644246c69           1    0.0%
+  0xfffff8064423870d           1    0.0%
+  0xfffff8064421942e           1    0.0%
+  0xfffff806441f7efc           1    0.0%
+  0xfffff806441f20c9           1    0.0%
+  0xfffff806441f0a80           1    0.0%
+  0xfffff806441e3c63           1    0.0%
+  0xfffff80642469008           1    0.0%
+  0xfffff806410ee500           1    0.0%
+  0xfffff806410c539c           1    0.0%
+  0xfffff806410c07af           1    0.0%
+  0xfffff806410b2e10           1    0.0%
+  0xfffff80641081070           1    0.0%
+  0xfffff80641043120           1    0.0%
+  0xfffff80640f54aa0           1    0.0%
+  0xfffff80640f30812           1    0.0%
+  0xfffff80640f30785           1    0.0%
+  0xfffff80640f304a9           1    0.0%
+  0xfffff80640f2fed6           1    0.0%
+  0xfffff80640f2fec5           1    0.0%
+  0xfffff80640f2dbdd           1    0.0%
+  0xfffff80640f0028a           1    0.0%
+  0xfffff80640effd13           1    0.0%
+  0xfffff80640ef6f18           1    0.0%
+  0xfffff80640e61ad8           1    0.0%
+  0xfffff80640deeb50           1    0.0%
+  0xfffff8064090cd90           1    0.0%
+  0xfffff80640705e73           1    0.0%
+  0xfffff8064050c240           1    0.0%
+  0xfffff806404601a0           1    0.0%
+  0xfffff8064045fa60           1    0.0%
+  0xfffff8064045a66a           1    0.0%
+  0xfffff8064045a557           1    0.0%
+  0xfffff8064045a541           1    0.0%
+  0xfffff806404242db           1    0.0%
+  0xfffff806404196f3           1    0.0%
+  0xfffff80640412c22           1    0.0%
+  0xfffff80640412b62           1    0.0%
+  0xfffff80640411db5           1    0.0%
+  0xfffff80640411c70           1    0.0%
+  0xfffff806404119a0           1    0.0%
+  0xfffff80640411998           1    0.0%
+  0xfffff80640411994           1    0.0%
+  0xfffff8064040c304           1    0.0%
+  0xfffff80640409885           1    0.0%
+  0xfffff806403f3530           1    0.0%
+  0xfffff806403e7db6           1    0.0%
+  0xfffff806403dd080           1    0.0%
+  0xfffff806403d6d3e           1    0.0%
+  0xfffff806403d59d1           1    0.0%
+  0xfffff806403d1e31           1    0.0%
+  0xfffff806403c4780           1    0.0%
+  0xfffff806403a5bf8           1    0.0%
+  0xfffff8064036840a           1    0.0%
+  0xfffff806402e572c           1    0.0%
+  0xfffff806402e5326           1    0.0%
+  0xfffff806402e52ca           1    0.0%
+  0xfffff806402e52c0           1    0.0%
+  0xfffff806402e5253           1    0.0%
+  0xfffff8064029fa96           1    0.0%
+  0xfffff8064029d105           1    0.0%
+  0xfffff8064029af3e           1    0.0%
+  0xfffff806402957b0           1    0.0%
+  0xfffff80640268311           1    0.0%
+  0xfffff8064025de90           1    0.0%
+  0xfffff806401494a0           1    0.0%
+  0xfffff8063ffd7360           1    0.0%
+  0xfffff8063fed9d8b           1    0.0%
+  0xfffff8063fed703b           1    0.0%
+  0xfffff8063feccad4           1    0.0%
+  0xfffff8063febf792           1    0.0%
+  0xfffff8063fe95a6b           1    0.0%
+  0xfffff8063fe94e1e           1    0.0%
+  0xfffff8063fe3f2ff           1    0.0%
+  0xfffff8063fe3a460           1    0.0%
+  0xfffff8063fe368b0           1    0.0%
+  0xfffff8063fe35ad0           1    0.0%
+  0xfffff8063fe318d0           1    0.0%
+  0xfffff8063fc2591a           1    0.0%
+  0xfffff8063fc22c3c           1    0.0%
+  0xfffff8063faf1ec0           1    0.0%
+  0xfffff8063fa4cb54           1    0.0%
+  0xfffff8063f9b2b4b           1    0.0%
+  0xfffff8063f500b10           1    0.0%
+  0xfffff8063f4d6809           1    0.0%
+  0xfffff8063f4cf3e0           1    0.0%
+  0xfffff8063f4ba2ff           1    0.0%
+  0xfffff8063f4b6120           1    0.0%
+  0xfffff8063f4b2edd           1    0.0%
+  0xfffff8063f4ae4b4           1    0.0%
+  0xfffff8063f4ae46e           1    0.0%
+  0xfffff8063f49e5cc           1    0.0%
+  0xfffff8063f493467           1    0.0%
+  0xfffff8063f366010           1    0.0%
+  0xfffff8063f34a353           1    0.0%
+  0xfffff8063f2fd291           1    0.0%
+  0xfffff8063f2fd203           1    0.0%
+  0xfffff8063f2f2b00           1    0.0%
+  0xfffff8063f2f1da0           1    0.0%
+  0xfffff8063f2e063f           1    0.0%
+  0xfffff8063f2ab46b           1    0.0%
+  0xfffff8063f23e584           1    0.0%
+  0xfffff8063f21383c           1    0.0%
+  0xfffff8063f20e0f0           1    0.0%
+  0xfffff8063f1ecdf0           1    0.0%
+  0xfffff8063f1d1ed2           1    0.0%
+  0xfffff8063f16821c           1    0.0%
+  0xfffff8063f164c31           1    0.0%
+  0xfffff8063f15fb47           1    0.0%
+  0xfffff8063f15a280           1    0.0%
+  0xfffff8063f13e998           1    0.0%
+  0xfffff8063f11a75a           1    0.0%
+  0xfffff8063f11511c           1    0.0%
+  0xfffff8063f113bc4           1    0.0%
+  0xfffff8063f1117d8           1    0.0%
+  0xfffff8063f111245           1    0.0%
+  0xfffff8063f11113c           1    0.0%
+  0xfffff8063f0f7d72           1    0.0%
+  0xfffff8063f0a9c13           1    0.0%
+  0xfffff8063f09be8c           1    0.0%
+  0xfffff8063f097f46           1    0.0%
+  0xfffff8063f0977c9           1    0.0%
+  0xfffff8063f09265f           1    0.0%
+  0xfffff8063f091820           1    0.0%
+  0xfffff8063f091723           1    0.0%
+  0xfffff8063f08fb56           1    0.0%
+  0xfffff8063f08b27e           1    0.0%
+  0xfffff8063f083508           1    0.0%
+  0xfffff8063f082df7           1    0.0%
+  0xfffff8063ea41419           1    0.0%
+  0xfffff8063ea01f5f           1    0.0%
+  0xfffff8063e917f90           1    0.0%
+  0xfffff8063e8bb2f0           1    0.0%
+  0xfffff8063e8b6d55           1    0.0%
+  0xfffff8063e68b025           1    0.0%
+  0xfffff8063e57f568           1    0.0%
+  0xfffff8063b390012           1    0.0%
+  contention: 803 colliding samples decayed a resident entry (a rate, not lost hot addresses)
+
+cpu 0 where the guest was on an entry staging nothing (the control) (295,542 samples, 784 distinct)
+  0xfffff806ad2a768e       51792   17.5%  ntoskrnl+0x6a768e
+  0xfffff806ad02890d       50256   17.0%  ntoskrnl+0x42890d
+  0xfffff8063b390003       45898   15.5%
+  0xfffff806acfa57fa       45750   15.5%  ntoskrnl+0x3a57fa
+  0xfffff8063b390035       28391    9.6%
+  0xfffff8063b39001c       21104    7.1%
+  0xfffff806acf100e6       11401    3.9%  ntoskrnl+0x3100e6
+  0xfffff806ad2b3318        7700    2.6%  ntoskrnl+0x6b3318
+  0xfffff806ad2b32f0        6695    2.3%  ntoskrnl+0x6b32f0
+  0xfffff806ad2b3692        4826    1.6%  ntoskrnl+0x6b3692
+  0xfffff806ad2aeb0c        4806    1.6%  ntoskrnl+0x6aeb0c
+  0xfffff806ad7bdf40        3777    1.3%  ntoskrnl+0xbbdf40
+  0xfffff806acfa57e9        2400    0.8%  ntoskrnl+0x3a57e9
+  0xfffff806ad7be948        1839    0.6%  ntoskrnl+0xbbe948
+  ... and every non-ntoskrnl row below the cut (145 of 770 remaining):
+  0xfffff8063e5412b0         332    0.1%
+  0x0000000001af54b4         152    0.1%
+  0xfffff8063f0917f5          31    0.0%
+  0xfffff8574a7a7697          28    0.0%
+  0xfffff806442b8102          14    0.0%
+  0xfffff806442b80f1          14    0.0%
+  0xfffff806442b8157          11    0.0%
+  0xfffff806442b8027           5    0.0%
+  0xfffff806442a823a           5    0.0%
+  0xfffff806442be7e8           4    0.0%
+  0xfffff806442a90bf           4    0.0%
+  0xfffff8063fb0cd2a           4    0.0%
+  0xfffff8063fb0cd19           4    0.0%
+  0xfffff8063faff294           4    0.0%
+  0x0000000001cba7e7           4    0.0%
+  0x0000000001cba73e           4    0.0%
+  0x0000000001cba72d           4    0.0%
+  0xfffff806442a8b0d           3    0.0%
+  0xfffff8063fede867           3    0.0%
+  0xfffff8063b39000f           3    0.0%
+  0xfffff80644361120           2    0.0%
+  0xfffff806442ba548           2    0.0%
+  0xfffff806442b7f6b           2    0.0%
+  0xfffff806442aa0c0           2    0.0%
+  0xfffff806442a91be           2    0.0%
+  0xfffff806442a8186           2    0.0%
+  0xfffff806442a8175           2    0.0%
+  0xfffff80644276716           2    0.0%
+  0xfffff80644276688           2    0.0%
+  0xfffff806442759ba           2    0.0%
+  0xfffff8064427564a           2    0.0%
+  0xfffff80644273965           2    0.0%
+  0xfffff80644272dda           2    0.0%
+  0xfffff80644270729           2    0.0%
+  0xfffff806442705f6           2    0.0%
+  0xfffff806442705d5           2    0.0%
+  0xfffff8064426b108           2    0.0%
+  0xfffff8064426b0fa           2    0.0%
+  0xfffff8064426b0d0           2    0.0%
+  0xfffff80640e06130           2    0.0%
+  0xfffff80640705ece           2    0.0%
+  0xfffff80640705ebd           2    0.0%
+  0xfffff8063fd625e0           2    0.0%
+  0xfffff8063f4ae4b8           2    0.0%
+  0xfffff8063f4ad652           2    0.0%
+  0xfffff8063e69894c           2    0.0%
+  0xfffff8574a7a7694           1    0.0%
+  0xfffff8064441098c           1    0.0%
+  0xfffff8064441092d           1    0.0%
+  0xfffff80644361160           1    0.0%
+  0xfffff806442bf701           1    0.0%
+  0xfffff806442be8c0           1    0.0%
+  0xfffff806442ba43d           1    0.0%
+  0xfffff806442ba3a8           1    0.0%
+  0xfffff806442b965b           1    0.0%
+  0xfffff806442b964a           1    0.0%
+  0xfffff806442b9638           1    0.0%
+  0xfffff806442b80a7           1    0.0%
+  0xfffff806442b8067           1    0.0%
+  0xfffff806442aa06f           1    0.0%
+  0xfffff806442a8d19           1    0.0%
+  0xfffff806442a8a80           1    0.0%
+  0xfffff80644276643           1    0.0%
+  0xfffff80644276602           1    0.0%
+  0xfffff80644275a30           1    0.0%
+  0xfffff806442759de           1    0.0%
+  0xfffff806442759d5           1    0.0%
+  0xfffff806442758e6           1    0.0%
+  0xfffff80644275265           1    0.0%
+  0xfffff80644272d55           1    0.0%
+  0xfffff80644272d0e           1    0.0%
+  0xfffff806442709fd           1    0.0%
+  0xfffff8064426aa10           1    0.0%
+  0xfffff8064426991d           1    0.0%
+  0xfffff8064426810d           1    0.0%
+  0xfffff8064425da31           1    0.0%
+  0xfffff806431d763c           1    0.0%
+  0xfffff806431d75ed           1    0.0%
+  0xfffff80640f309de           1    0.0%
+  0xfffff80640f30785           1    0.0%
+  0xfffff80640f304a9           1    0.0%
+  0xfffff80640f3042c           1    0.0%
+  0xfffff80640ef6f18           1    0.0%
+  0xfffff806407ac87d           1    0.0%
+  0xfffff80640705f23           1    0.0%
+  0xfffff80640705e73           1    0.0%
+  0xfffff80640475443           1    0.0%
+  0xfffff806404119ad           1    0.0%
+  0xfffff8064036840a           1    0.0%
+  0xfffff806402e52e6           1    0.0%
+  0xfffff806402e52c0           1    0.0%
+  0xfffff806401f1d0c           1    0.0%
+  0xfffff806401f1cbb           1    0.0%
+  0xfffff806401f1cac           1    0.0%
+  0xfffff80640111099           1    0.0%
+  0xfffff8063fee1ffe           1    0.0%
+  0xfffff8063fee1f15           1    0.0%
+  0xfffff8063fee003b           1    0.0%
+  0xfffff8063feddcf6           1    0.0%
+  0xfffff8063fed7037           1    0.0%
+  0xfffff8063fed2d50           1    0.0%
+  0xfffff8063feb40fe           1    0.0%
+  0xfffff8063fe637b0           1    0.0%
+  0xfffff8063fe368b0           1    0.0%
+  0xfffff8063fe349c0           1    0.0%
+  0xfffff8063fe318d0           1    0.0%
+  0xfffff8063fb23de7           1    0.0%
+  0xfffff8063fb23da7           1    0.0%
+  0xfffff8063f4e32db           1    0.0%
+  0xfffff8063f4e3287           1    0.0%
+  0xfffff8063f4cbada           1    0.0%
+  0xfffff8063f4ae4b4           1    0.0%
+  0xfffff8063f4ae46e           1    0.0%
+  0xfffff8063f4ae3db           1    0.0%
+  0xfffff8063f4a58b1           1    0.0%
+  0xfffff8063f4a3b14           1    0.0%
+  0xfffff8063f49e5cc           1    0.0%
+  0xfffff8063f2f2b00           1    0.0%
+  0xfffff8063f2ab4ed           1    0.0%
+  0xfffff8063f25f873           1    0.0%
+  0xfffff8063f23c860           1    0.0%
+  0xfffff8063f1e4340           1    0.0%
+  0xfffff8063f09b874           1    0.0%
+  0xfffff8063f09b834           1    0.0%
+  0xfffff8063f09b815           1    0.0%
+  0xfffff8063ebbfe66           1    0.0%
+  0xfffff8063ebbfe55           1    0.0%
+  0xfffff8063ea4147f           1    0.0%
+  0xfffff8063ea4142a           1    0.0%
+  0xfffff8063ea41419           1    0.0%
+  0xfffff8063ea0c0e8           1    0.0%
+  0xfffff8063ea01f0a           1    0.0%
+  0xfffff8063e8c1a30           1    0.0%
+  0xfffff8063e698a14           1    0.0%
+  0xfffff8063e6989c5           1    0.0%
+  0xfffff8063e69898c           1    0.0%
+  0xfffff8063e541960           1    0.0%
+  0xfffff8063e5418d8           1    0.0%
+  0xfffff8063e541898           1    0.0%
+  0xfffff8063e541879           1    0.0%
+  0x0000000001d59699           1    0.0%
+  0x0000000001d59690           1    0.0%
+  0x0000000001d59683           1    0.0%
+  0x0000000001ad693f           1    0.0%
+  0x0000000001ad691c           1    0.0%
+  contention: 420 colliding samples decayed a resident entry (a rate, not lost hot addresses)
+
+cpu 0 second-level threads (15 samples, newest last)
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    thread 0xfffff806adbd25c0 IDLE  start ntoskrnl+0x6ad0b0  state 2  wait 0/irql 2
+    -> 1 distinct thread(s) in the last 6 samples  <- ONE THREAD, not scheduling
+
+cpu 1 second-level threads (35 samples, newest last)
+    thread 0xffffb707294de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+    thread 0xffffb707294de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+    thread 0xffffb707294de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+    thread 0xffffb707294de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+    thread 0xffffb707294f1040  start ntoskrnl+0x5cf460  state 2  wait 0/irql 0
+    thread 0xffffb707294de080  start ntoskrnl+0x6fb520  state 2  wait 0/irql 0
+    -> 2 distinct thread(s) in the last 6 samples
+
+interrupted context (24 frames found, 26 samples with no frame)
+      rip                  irql  rcx                rdx                rsi                rdi                rsp                frame
+      ntoskrnl+0x3e95d6       0  0x29abaf4419fdadd5 0x0000000000000000 0x0000000000000002 0x0000000000000000 0xfffff38e34006e40 0xfffff38e34006cb0
+      ntoskrnl+0x3e92a4       0  0xffff808cc9000000 0x0000000000000030 0x0000000000000030 0x0000000000000000 0xfffff38e34006e40 0xfffff38e34006cb0
+      0xfffff8063b39001c      2  0x0000000000000012 0x0000000000000000 0x0000000000000000 0x0000000000000000 0xfffff38e34109ea8 0xfffff38e34109d10
+      0xfffff8063b39001c      0  0x0000000000000012 0x0000000000000000 0x0000000000000000 0x0000000000000000 0xfffff38e34006fc8 0xfffff38e34006e30
+      ntoskrnl+0x298971       2  0xffff908086514180 0x0000000000000001 0xffffb707294de000 0xfffff806acf5ec6d 0xfffff38e34266600 0xfffff38e34266470
+      ntoskrnl+0x241643       0  0xffffb70729507000 0xfffff806ada2cc40 0xffff808cc99c7000 0x0000000000000000 0xfffff38e3426ed70 0xfffff38e3426ebe0
+      ntoskrnl+0x6b32f0       2  0x0000000000000000 0x0000000000000000 0x0000000000000000 0xfffff806ad2a7670 0xfffff38e342787f0 0xfffff38e34278660
+      ntoskrnl+0x273e70       0  0xfffff8063f51b2c0 0x0000000000000000 0xffffb70729cfb830 0xfffff806ace7a411 0xfffff38e342789a0 0xfffff38e34278810
+      0xfffff8063b39001c      0  0x0000000000030038 0x0000000000000000 0x0000000000000000 0x0000000000000000 0xfffff38e3410a6d8 0xfffff38e3410a540
+      ntoskrnl+0x6b32f0       2  0x0000000000000000 0x0000000000000000 0x0000000000000000 0xfffff806ad2a7670 0xfffff38e34006680 0xfffff38e340064f0
+      ntoskrnl+0x33fd56       0  0xffffca0009d91730 0xffffca0009d8e700 0xffffca0009d91730 0xfffff80600000001 0xfffff38e34006390 0xfffff38e34006200
+      ntoskrnl+0x6b3692       2  0x0100001f80000000 0xffff90808651c930 0xffffb707294ba6c0 0x0000000000000000 0xfffff38e340064d0 0xfffff38e34006340
+      0xfffff8063b39001c      0  0x0000000000000012 0x0000000000000000 0x0000000000000000 0xfffff806ace37c7f 0xfffff38e34006628 0xfffff38e34006490
+      ntoskrnl+0x6b3692       2  0x0100001f80000000 0xffff90808651c930 0xffffb707294ba6c0 0x0000000000000000 0xfffff38e340071e0 0xfffff38e34007050
+      ntoskrnl+0x2cc395       0  0xfffff38e3402fa50 0x0000000000000000 0xfffff8063b170200 0x0000000000000000 0xfffff38e3402f8a0 0xfffff38e3402f710
+      ntoskrnl+0x296dd6       0  0xffffca0003503880 0xfffff38e34006a00 0xffffca0003503880 0x0000000000000000 0xfffff38e34006ab0 0xfffff38e34006920
+      ntoskrnl+0x3e95d6      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x3e92a4      1 samples  EVERY field identical - a retry
+      0xfffff8063b39001c     4 samples  moving: rcx(2), rdi(2), rsp(4), frame(4)   same: rdx, rsi
+      ntoskrnl+0x298971      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x241643      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x6b32f0      2 samples  moving: rsp(2), frame(2)   same: rcx, rdx, rsi, rdi
+      ntoskrnl+0x273e70      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x33fd56      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x6b3692      2 samples  moving: rsp(2), frame(2)   same: rcx, rdx, rsi, rdi
+      ntoskrnl+0x2cc395      1 samples  EVERY field identical - a retry
+      ntoskrnl+0x296dd6      1 samples  EVERY field identical - a retry
+      -> 11 interleaved contexts, verdicted separately; the count of contexts is NOT movement
+
+cpu 0 second-level call stack - where it is now (44 frames, rsp 0xfffff38e34006920, rip 0xfffff806ad2b32f0)
+    kernel base 0xfffff806acc00000 size 0x1450000 - offsets below are into it
+    ntoskrnl+0x38dfed
+    ntoskrnl+0x2936e6
+    ntoskrnl+0x296dd6
+    ntoskrnl+0x21cee5
+    ntoskrnl+0x21c6f1
+    ntoskrnl+0x34073d
+    ntoskrnl+0xe38d40
+    ntoskrnl+0xe38d40
+    ntoskrnl+0x93dcbd
+    ntoskrnl+0xe37fc0
+    ntoskrnl+0x93d23f
+    ntoskrnl+0x9fae44
+    ntoskrnl+0x9923a9
+    ntoskrnl+0x9c516f
+    ntoskrnl+0x990c65
+    ntoskrnl+0x990028
+    ntoskrnl+0x4462da
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xa1261c
+    ntoskrnl+0x2b1a5c
+    ntoskrnl+0xef53d0
+    ntoskrnl+0xef53d0
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xa1226f
+    ntoskrnl+0x9b7c40
+    ntoskrnl+0xf8c6a0
+    ntoskrnl+0x9b710e
+    ntoskrnl+0x6adc00
+    ntoskrnl+0xc6bac0
+    ntoskrnl+0xc69e62
+    ntoskrnl+0xb4d3e0
+    ntoskrnl+0xc64cc2
+    ntoskrnl+0xc6bc10
+    ntoskrnl+0x6fb520
+    ntoskrnl+0xc1c9f4
+    ntoskrnl+0x6fb55b
+    ntoskrnl+0xf8ccb8
+    ntoskrnl+0x6fb520
+    ntoskrnl+0x4839da
+    ntoskrnl+0x6fb520
+    ntoskrnl+0xfd25c0
+    ntoskrnl+0x6ad274
+    ntoskrnl+0x483980
+
+cpu 0 second-level call stack - what it interrupted (41 frames, rsp 0xfffff38e34006ab0, rip 0xfffff806ace96dd6)
+    kernel base 0xfffff806acc00000 size 0x1450000 - offsets below are into it
+    ntoskrnl+0x21cee5
+    ntoskrnl+0x21c6f1
+    ntoskrnl+0x34073d
+    ntoskrnl+0xe38d40
+    ntoskrnl+0xe38d40
+    ntoskrnl+0x93dcbd
+    ntoskrnl+0xe37fc0
+    ntoskrnl+0x93d23f
+    ntoskrnl+0x9fae44
+    ntoskrnl+0x9923a9
+    ntoskrnl+0x9c516f
+    ntoskrnl+0x990c65
+    ntoskrnl+0x990028
+    ntoskrnl+0x4462da
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xa1261c
+    ntoskrnl+0x2b1a5c
+    ntoskrnl+0xef53d0
+    ntoskrnl+0xef53d0
+    ntoskrnl+0xe2d9c8
+    ntoskrnl+0xa1226f
+    ntoskrnl+0x9b7c40
+    ntoskrnl+0xf8c6a0
+    ntoskrnl+0x9b710e
+    ntoskrnl+0x6adc00
+    ntoskrnl+0xc6bac0
+    ntoskrnl+0xc69e62
+    ntoskrnl+0xb4d3e0
+    ntoskrnl+0xc64cc2
+    ntoskrnl+0xc6bc10
+    ntoskrnl+0x6fb520
+    ntoskrnl+0xc1c9f4
+    ntoskrnl+0x6fb55b
+    ntoskrnl+0xf8ccb8
+    ntoskrnl+0x6fb520
+    ntoskrnl+0x4839da
+    ntoskrnl+0x6fb520
+    ntoskrnl+0xfd25c0
+    ntoskrnl+0x6ad274
+    ntoskrnl+0x483980
+
+cpu  stimer arm->fire, against what was actually asked
+  0  1,178 answered, 4,249,969 cycles (2,133.5 us at 1.992 GHz), 468.7 Hz  -> 1.22x the 1.752 ms it asked for over 1,190 periodic arms
+  1  12 answered, 5,941,450 cycles (2,982.7 us at 1.992 GHz), 335.3 Hz  -> 1.03x the 2.897 ms it asked for over 12 periodic arms
+
+cpu 0 synthetic timer ring by kind, newest 32 of 63,610 slots taken: COUNT written 16 (50%), clock vector injected 16 (50%)
+
+cpu 0 last synthetic timer events (63,610 slots taken - NOT arms, newest last)
+    clock vector injected    value 0xd1 tsc 0x655c1e6a2e
+    COUNT written            value 0x7e6f0839 tsc 0x655c1fa5cf
+    clock vector injected    value 0xd1 tsc 0x655c6dc0ef
+    COUNT written            value 0x7e6f6e32 tsc 0x655c6efc6a
+    clock vector injected    value 0xd1 tsc 0x655cc0126d
+    COUNT written            value 0x7e703bce tsc 0x655d0f030b
+    clock vector injected    value 0xd1 tsc 0x655d5d1f3c
+    COUNT written            value 0x7e70a322 tsc 0x655d5f626e
+
+cpu  cpl0        cpl1     cpl2     cpl3 (first level, every exit)
+  0           0        0        0        0
+  1           0        0        0        0
+
+ept leaf permissions, as bits rwx (guest = eptp12 alone, composed = installed)
+  cpu 0  001  guest       92,777  composed       92,777
+  cpu 0  011  guest    2,502,516  composed    2,502,516
+  cpu 0  101  guest      172,239  composed      172,239
+  cpu 0  111  guest          610  composed          610
+  cpu 1  001  guest        6,619  composed        6,619
+  cpu 1  011  guest      460,311  composed      460,311
+  cpu 1  101  guest       30,024  composed       30,024
+  cpu 1  111  guest          183  composed          183
+
+cpu 0 decode check: HvCallVtlCall rcx=0x0000000000000011 code=0x11 fast=0 reps=0 start=0  <- DECODE OK
+cpu 0 ModifyVtlProtectionMask census over ALL calls (the ring below is only the last few):
+    non-zero statuses 0   <- never failed
+    answers short of the reps asked: 0
+    reps asked 74,809  reps done 74,853   <- all completed
+    the LAST call - the final act of the work item that stops:
+      rip 0xfffff8063b390000  cr3 0x8800002
+      rsp 0xffffbc803f32d508
+      stack window:
+        +0x00  0xfffff806442bf701
+        +0x08  0x0000000000348b88
+        +0x10  0xfffff806441f20a6
+        +0x18  0x000000ffffffffff
+        +0x20  0x0000000000000005
+        +0x28  0xffff900002345068
+        +0x30  0x0000000000000005
+        +0x40  0xa028000000000000
+        +0x48  0x0000000000000282
+        +0x50  0xfffff806441ef924
+        +0x58  0x000000011f369c61
+        +0x60  0x0000000002345068
+        +0x70  0x000000ffffffffff
+        +0x78  0xffffbc803f32d5a0
+        +0x88  0x0000000100000000
+        +0x90  0xfffff8064424f4e3
+        +0xb0  0xffffec00008f9b48
+        +0xb8  0xffffffffffffffff
+        +0xc0  0x000000000000000b
+        +0xc8  0x000000000011f36a
+        +0xd0  0x0000000000000003
+        +0xe0  0x0000000000348b88
+        +0xe8  0x0000000000348b0f
+        +0xf0  0x0000000000000001
+        +0xf8  0xffffbc803f32de90
+      AFTER the answer landed (32 words readable) - differences from the window above:
+        +0x50  0xfffff806441ef924 -> 0xfffff806441ef9d1
+        +0x98  0x0000000000000000 -> 0x0000000000000001
+      the answer was delivered to the CALLING level 42,730 times, to the OTHER level 0 times
+      where the answer resumes the guest, over all calls:
+        0xfffff8063b390003     42,743
+      shadow lookup of the walked frames: 8,384 probed, 4,051 not normally mapped   <- a difference on our side
+          perms r--        130
+          perms rw-         20
+          perms r-x      4,183
+          the read-only frames: 130 seen, first 8 recorded   <- FIRST eight, not the last eight
+            0x11aa03  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aa04  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aa05  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aa06  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aa07  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aac9  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aaca  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aacb  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+        last frame status 1 perms 0x0
+      the first exit after a protection answer, by reason:
+        vmcall              42,758
+          code 0x02                                  2
+          code 0x03                                190
+          code 0x0c ModifyVtlProtectionMask     23,969
+          code 0x12 VtlReturn                   18,595
+          the LAST answer was followed by code 0x12 VtlReturn
+        last one was: vmcall
+      and where the NEXT instruction lands:
+      last answer entered cr3 0x8800002, call was from cr3 0x8800002
+      secure-kernel thread 0xfffff80644302f80  [+0xac] = 0x00000050  bit4 = 1
+        over all calls: bit4 SET 42,787, clear 0   <- the in-use lock is held at the call
+      r15 at the last call (loop remaining) = 1   <- non-zero: it had work left
+      EARLY call (#100) - what the answer wrote (1 words changed):
+        +0xc8  0x00000000000018ff -> 0x0000000000001900
+cpu 0 HvCallModifyVtlProtectionMask: 42,700 calls
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    0 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+  rep start over the last 32: 1 distinct, min 0 max 0
+
+cpu 1 decode check: HvCallVtlCall rcx=0x0000000000000011 code=0x11 fast=0 reps=0 start=0  <- DECODE OK
+cpu 1 ModifyVtlProtectionMask census over ALL calls (the ring below is only the last few):
+    non-zero statuses 0   <- never failed
+    answers short of the reps asked: 0
+    reps asked 2,359  reps done 2,359   <- all completed
+    the LAST call - the final act of the work item that stops:
+      rip 0xfffff8063b390000  cr3 0x8800002
+      rsp 0xffffbc804007d3a8
+      stack window:
+        +0x00  0xfffff806442bf701
+        +0x08  0xffffbc804007d3f0
+        +0x10  0xfffff806441f20a6
+        +0x30  0x000000000000000b
+        +0x40  0xffffbc803f32e000
+        +0x48  0x0000000000000001
+        +0x50  0xfffff806441ef924
+        +0x58  0xffffbc804007d510
+        +0x60  0xfffff806441f20a6
+        +0x68  0x0000000000000002
+        +0x70  0xffffbc804007d510
+        +0x78  0xffffbc804007d440
+        +0x88  0x8000000300000000
+        +0x90  0xfffff80641e960dd
+        +0x98  0xffffbc8000000000
+        +0xb0  0x0000000000000001
+        +0xb8  0xffffffffffffffff
+        +0xc0  0x000000000000000b
+        +0xc8  0x0000000000348b81
+        +0xe0  0xffffbc80400a8000
+        +0xe8  0x000000ffffffffff
+        +0xf0  0xffffd35e40200548
+        +0xf8  0x0000000000000009
+      AFTER the answer landed (32 words readable) - differences from the window above:
+        +0x50  0xfffff806441ef924 -> 0xfffff806441ef9d1
+        +0x98  0xffffbc8000000000 -> 0xffffbc8000000001
+      the answer was delivered to the CALLING level 2,104 times, to the OTHER level 0 times
+      where the answer resumes the guest, over all calls:
+        0xfffff8063b390003      2,104
+      shadow lookup of the walked frames: 433 probed, 287 not normally mapped   <- a difference on our side
+          perms r--        144
+          perms r-x          2
+          the read-only frames: 144 seen, first 8 recorded   <- FIRST eight, not the last eight
+            0x11aacf  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad0  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad1  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad2  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad3  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad4  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad5  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+            0x11aad6  shadow r--   our own tables: status 0 perms rwx  eptp12: status 0 perms r--   <- AGREES: the guest hypervisor asked for this
+        last frame status 0 perms 0x1
+      the first exit after a protection answer, by reason:
+        vmcall               2,104
+          code 0x03                                369
+          code 0x0c ModifyVtlProtectionMask        876
+          code 0x12 VtlReturn                      858
+          the LAST answer was followed by code 0x12 VtlReturn
+        last one was: vmcall
+      and where the NEXT instruction lands:
+      last answer entered cr3 0x8800002, call was from cr3 0x8800002
+      secure-kernel thread 0xffffbc8040076000  [+0xac] = 0x00000050  bit4 = 1
+        over all calls: bit4 SET 2,104, clear 0   <- the in-use lock is held at the call
+      r15 at the last call (loop remaining) = 1   <- non-zero: it had work left
+      EARLY call (#100) - what the answer wrote (15 words changed):
+        +0x00  0xfffff806442bf701 -> 0xfffff806441ef924
+        +0x48  0xffffbc8000000001 -> 0xffffbc8000000000
+        +0x50  0xfffff806441ef924 -> 0x0000000000000000
+        +0x78  0xffffbc804007d490 -> 0x00000000003473e1
+        +0x90  0xffffbc804009e000 -> 0xffffbc80400a1000
+        +0x98  0x000000ff00000000 -> 0x000000ffffffffff
+        +0xa0  0x0000000000000000 -> 0xffffd35e40200510
+        +0xa8  0x0000000000000000 -> 0x0000000000000009
+        +0xb8  0xffffffffffffffff -> 0x80000003473e1021
+        +0xc0  0x0000000000000009 -> 0xfffff8064421ac54
+        +0xc8  0x000000000011aad1 -> 0x0000000000000018
+        +0xd0  0xffffd35e402004f0 -> 0xffffd35e40200508
+        +0xe0  0x00000000003473e0 -> 0x00000000003473e1
+        +0xf0  0xffff900002248ca0 -> 0xffff900002248ca8
+        +0xf8  0x0000000000000001 -> 0x0000000000000000
+cpu 1 HvCallModifyVtlProtectionMask: 2,104 calls
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+    code=0x00c fast=1 reps=    1 start=    0 | answer status=0x0000 done=    1 | partition=SELF
+  rep start over the last 32: 1 distinct, min 0 max 0
+
+synthetic interrupt controller pages, as the guest named them - cpu 0 slot 0, eptp 0x101b1d01e:
+  SIMP  0x0000000117a5c001  enabled 1  gpa 0x117a5c000
+  SIEFP 0x0000000000000000  enabled 0  gpa 0x0
+  read the message slots with xp at the SIMP gpa: sixteen 256-byte slots, a non-zero type word at slot base means a message the guest has not consumed
+
+synthetic interrupt controller pages, as the guest named them - cpu 0 slot 1, eptp 0x101b1a01e:
+  SIMP  0x0000000117a57001  enabled 1  gpa 0x117a57000
+  SIEFP 0x0000000000000000  enabled 0  gpa 0x0
+  read the message slots with xp at the SIMP gpa: sixteen 256-byte slots, a non-zero type word at slot base means a message the guest has not consumed
+
+NMIs re-injected into a guest rather than reflected: 0
+
+VP assist page: no processor has registered one
+
+state at the last second-level HLT reflected up
+  cpu 0  rflags 0x40286  IF 1  interruptibility 0x1
+  cpu 1  rflags 0x40286  IF 1  interruptibility 0x1
+
+VMX instructions refused on mode / cr4.vmxe: none
+
+PAGE-TABLE WALK REFUSALS (why this VMM said 'not mapped')
+  cpu 1  level 2  linear 0x7f9dc000
+          table 0x7fb68000  entry 0x0   <- entry has PRESENT clear
+
+VMX operand failures: none on any processor
+
+VMX instructions refused by this VMM: none on any processor
+  xsetbv refused: none
+
+VMX instructions refused for an out-of-range processor index: none
+
+nested VMX state per processor (a clear in_vmx_operation is a #UD to the level above)
+  cpu 0  in_vmx_operation 1  vmxon 0x101ae4000  current_vmcs 0x117a3b000
+  cpu 1  in_vmx_operation 1  vmxon 0x114f94000  current_vmcs 0x114fb0000
+
+second-level entries refused: none on any processor
+
+cpu  held events seen by reflect_l2_exit  first          last           at reason
+
+no held event was destroyed by reflect_l2_exit (pending_event_lost = 0 on every cpu)
+
+cpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled
+  0          19100      561424          0       0         0         416802
+  1           2891      289873          0       0         0          73458
+
+cpu 0 shadow EPT roots held (slot 0 current)
+  slot 0  0x000101b1a000  <- current
+  slot 1  0x000101b1d000
+  slot 2  0x000000000000
+  slot 3  0x000000000000
+  2 distinct non-zero root(s)
+
+cpu 1 shadow EPT roots held (slot 1 current)
+  slot 0  0x000101b1d000
+  slot 1  0x000101b1a000  <- current
+  slot 2  0x000000000000
+  slot 3  0x000000000000
+  2 distinct non-zero root(s)
+
+cpu 0 share of wall time spent in the exit handler
+  handler cycles       268,440,025,498
+  elapsed cycles       413,117,703,165   (207.4 s at 1.992 GHz)
+  duty                           0.650   <- NOT starved: the guest has time it is not using
+  of which:
+    guest hypervisor (L1)     100,231,121,230    24.3% of wall
+    Windows          (L2)      44,441,518,148    10.8% of wall
+    Windows' share of non-VMM time: 30.7%
+
+cpu 0 IUM secure-call block at 0xfffff38e340068e0  ->  guest-physical 0x11b8fa930
+  read the same physical from the monitor and compare: a disagreement means the two trust levels' extended page tables alias it to different host pages
+  +0x00  0x0000000000f40002
+  +0x08  0x0000000000348b9a
+  +0x10  0x0000000000017000
+  +0x18  0x0000000140000074
+  request byte  = 0 (0x00)
+  every request byte ever seen (24,275 calls):
+    code   0     24,275  100.0%   secure memory manager (SkmiMapViewOfImage etc)
+  the block's first quadword changed 14,989 times
+  code-0 requests: 24,281, parameters differed from the previous one 24,233 times (99.8%)   <- distinct requests
+  page-walk span: 0x11a483..0x13fbff = 153,469 pages (599.5 MB), 8,398 page requests
+    density 5.5% of the range its own extremes define - NOT a completion fraction, and 0x13fbff was reached by definition
+    steps: 7,442 +1, 15 repeat, 907 backward, 31 forward-gap
+      longest run 513 pages (~8.8 pages per run over 954 runs)
+      partition BROKEN: 8,395 != 8,397 - do not believe any figure on this line
+      backward steps present: the walk RESTARTS or revisits; it is not one monotonic pass
+  the last code-0 blocks seen (oldest first, newest LAST; ring position 1):
+    +0x00 0x0000000000f40002  +0x08 0x0000000000348b9f  +0x10 0x000000000001c000
+    +0x00 0x0000000000c10002  +0x08 0x0000000140000074  +0x10 0x000000010000001d
+    +0x00 0x0000000001010002  +0x08 0x000000000011f381  +0x10 0x0000000000000001
+    +0x00 0x0000000000f40002  +0x08 0x00000000003485a0  +0x10 0x000000000001d000
+    +0x00 0x0000000000c10002  +0x08 0x0000000140000074  +0x10 0x000000010000001e
+    +0x00 0x0000000001010002  +0x08 0x000000000011f382  +0x10 0x0000000000000001
+    +0x00 0x0000000000f40002  +0x08 0x00000000003485a1  +0x10 0x000000000001e000
+    +0x00 0x0000000001010002  +0x08 0x000000000011f380  +0x10 0x0000000000000001   <- NEWEST
+  request word, low half, as a population:
+    0x00f40002     10,366   42.7%
+    0x01010002      8,412   34.6%   <- what the PFN filter selects
+    0x00f30002      3,966   16.3%
+    0x00000000        409    1.7%
+    0x00d30002         93    0.4%
+    0x00db0002         78    0.3%
+    0x00e10002         76    0.3%
+    0x00e40002         76    0.3%
+    0x00d40002         10    0.0%
+    0x010b0002          2    0.0%
+    0x01000002          1    0.0%
+    0x00fb0002          1    0.0%
+    0x00df0002          1    0.0%
+    0x00e50002          1    0.0%
+    0x00e30002          1    0.0%
+    0x00dd0002          1    0.0%
+    (beyond sixteen distinct) 829
+
+  secure calls by SERVICE (24,325 with a readable block):
+    0x00f4      10,364   42.6%  VslCopyProtectedPage
+    0x0101       8,410   34.6%  VslSetPlaceholderPages
+    0x00f3       3,966   16.3%  VslRemoveProtectedPage
+    0x0000         409    1.7%  VslFlushEntireTb
+    0x00c1         217    0.9%  VslValidateSecureImagePages
+    0x00dc         179    0.7%  VslEnableKernelCfgTarget
+    0x002d         115    0.5%  VslApplySecureImageFixups
+    0x00d3          93    0.4%  VslReserveProtectedPages
+    0x00d9          81    0.3%  VslCompleteSecureDriverLoad
+    0x00f7          80    0.3%  VslSetPrivilegedPte
+    0x00db          78    0.3%  VslMapKernelScpPages
+    0x00e1          76    0.3%  
+    0x00e4          76    0.3%  
+    0x00d1          60    0.2%  VslpSecureKernelPeriodicTick
+    0x001b          11    0.0%  
+    0x0016          10    0.0%  VslCreateSecureAllocation
+    0x0017          10    0.0%  VslFillSecureAllocation
+    0x001d          10    0.0%  VslPrepareSecureImageRelocations
+    0x00d4          10    0.0%  
+    0x0019           7    0.0%  VslCreateSecureImageSection
+    0x001a           7    0.0%  VslFinalizeSecureImageHash
+    0x0021           7    0.0%  VslTransferSecureImageVersionResource
+    0x001e           6    0.0%  VslRelocateImage
+    0x001f           6    0.0%  VslCloseSecureHandle
+    0x0018           4    0.0%  VslMakeCodeCatalog
+    0x0023           4    0.0%  VslExchangeEntropy
+    0x00f1           4    0.0%  VslFastFlushSecureRangeList
+    0x0104           4    0.0%  VslExemptSecurePteRange
+    0x002b           2    0.0%  VslCaptureSecureImageIat
+    0x010b           2    0.0%  VslGetSecurePciDeviceAlternateFunctionNumberForVtl0Dma
+    0x0002           1    0.0%  VslStartSecureProcessor
+    0x0003           1    0.0%  VslFinishStartSecureProcessor
+    0x0024           1    0.0%  
+    0x00d0           1    0.0%  
+    0x00d2           1    0.0%  VslExecuteWorkItems
+    0x00d7           1    0.0%  VslInitializeSecureKernelCfg
+    0x00d8           1    0.0%  
+    0x00da           1    0.0%  VslUnloadSecureDriver
+    0x00dd           1    0.0%  
+    0x00df           1    0.0%  
+    0x00e3           1    0.0%  VslInitFunctionOverrideCapabilities
+    0x00e5           1    0.0%  VslSynchronizeXSave
+    0x00f6           1    0.0%  VslRegisterProtectedPage
+    0x00fb           1    0.0%  
+    0x00fe           1    0.0%  VslRegisterLogPages
+    0x0100           1    0.0%  
+    0x0103           1    0.0%  MiProtectDriverSectionPte
+    call class  0=409  2=23,916
+    entry reason  0=24,325
+
+  what VTL1 ANSWERED at HvCallVtlReturn (24,177 returns)
+    answers that differed from the one before: 14,979
+    the reply moves, so a re-asked request is being answered differently each time
+      rbx 0x0000000001010102  rax 0x0000000000000001
+      rbx 0x0000000100d10102  rax 0x0000000000000001
+
+  fresh calls 23,906   re-entries 409   (partition BROKEN vs 24,325 blocks - do not use these numbers)
+    class-0 blocks carrying a service: 0
+    re-entry by reason  0=409
+    block address  same 391  moved 17  last 0x11b8fa7d0
+    re-entries CHARGED TO the call that issued them:
+      0x00d9         296  VslCompleteSecureDriverLoad
+      0x0101          83  VslSetPlaceholderPages
+      0x001b          11  
+      0x00dd           9  
+      0x00da           3  VslUnloadSecureDriver
+      0x00f1           3  VslFastFlushSecureRangeList
+      0x00d0           2  
+      0x00d1           1  VslpSecureKernelPeriodicTick
+      0x00e1           1  
+    the last re-entries (409 seen), oldest first:
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000000000  block 0x11b8f95d0  owner 0x200d9
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x000002417f7f0000  block 0x11b8f95d0  owner 0x200f1  +   0.009s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000345ef2  block 0x11b8fa790  owner 0x2001b  +   0.280s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000040000003  +0x10 0xffffb70729518040  block 0x11b8f95d0  owner 0x200d9  +   0.456s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000100000000  +0x10 0x001000000011ab74  block 0x11b8f95d0  owner 0x200d9  +   0.003s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000100000000  +0x10 0x001000000011ab75  block 0x11b8f95d0  owner 0x200d9  +   0.003s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000100000000  +0x10 0x001000000011ab79  block 0x11b8f95d0  owner 0x200d9  +   0.003s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000001  +0x10 0x0000000000000000  block 0x11b8f95d0  owner 0x200d9  +   0.004s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000000000  block 0x11b8f95d0  owner 0x200d9  +   0.019s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x000000000011ab9c  block 0x11b8f95d0  owner 0x20101  +   0.166s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0xfffffcea57f8a000  +0x10 0x000000000011ab9c  block 0x11b8f95d0  owner 0x20101  +   0.006s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x000002417f7f0000  block 0x11b8f95d0  owner 0x200f1  +   0.010s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000345ef3  block 0x11b8fa790  owner 0x2001b  +   0.086s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000345ef3  block 0x11b8fa790  owner 0x2001b  +   0.028s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000345ef2  block 0x11b8fa7d0  owner 0x2001b  +   7.100s
+      class 0 reason 0 service 0x0000 cont 0x00000001  +0x08 0x0000000000000000  +0x10 0x0000000000345ef2  block 0x11b8fa7d0  owner 0x2001b  +   2.680s
+
+  the IMAGE VALIDATION walk (0x0f4 VslCopyProtectedPage <- MiCopyPage):
+    10,356 calls, frames 0x100000..0x36348d, last 0x3485a5
+    +1 10,210  same 0  back 46  skip 100   partition BROKEN - do not use these numbers
+  the walk's RATE over time (23 epochs, newest last) - a flat pfn column beside a climbing calls column is a walk that STOPPED:
+    tsc     15,743,646,095  pfn        0  code0        0  calls        1
+    tsc     32,930,138,182  pfn        0  code0      685  calls   12,106  (+0 pfn, +685 code0, +12,105 calls, x1.0 threshold, 1,408.7/s)
+    tsc     50,113,325,188  pfn        0  code0    2,690  calls   18,121  (+0 pfn, +2,005 code0, +6,015 calls, x1.0 threshold, 700.1/s)
+    tsc     67,293,574,289  pfn      892  code0    4,506  calls   23,753  (+892 pfn, +1,816 code0, +5,632 calls, x1.0 threshold, 655.6/s)
+    tsc     84,475,485,352  pfn    1,412  code0    6,088  calls   28,996  (+520 pfn, +1,582 code0, +5,243 calls, x1.0 threshold, 610.3/s)
+    tsc    101,655,367,522  pfn    1,956  code0    7,625  calls   34,246  (+544 pfn, +1,537 code0, +5,250 calls, x1.0 threshold, 611.2/s)
+    tsc    118,863,933,793  pfn    2,560  code0    9,024  calls   39,461  (+604 pfn, +1,399 code0, +5,215 calls, x1.0 threshold, 606.1/s)
+    tsc    136,056,940,614  pfn    3,121  code0   10,496  calls   44,653  (+561 pfn, +1,472 code0, +5,192 calls, x1.0 threshold, 604.0/s)
+    tsc    153,239,352,084  pfn    3,684  code0   11,973  calls   49,863  (+563 pfn, +1,477 code0, +5,210 calls, x1.0 threshold, 606.4/s)
+    tsc    170,419,847,851  pfn    4,301  code0   13,359  calls   55,105  (+617 pfn, +1,386 code0, +5,242 calls, x1.0 threshold, 610.2/s)
+    tsc    187,602,450,613  pfn    4,846  code0   14,859  calls   60,286  (+545 pfn, +1,500 code0, +5,181 calls, x1.0 threshold, 603.1/s)
+    tsc    204,783,253,085  pfn    5,450  code0   16,234  calls   65,455  (+604 pfn, +1,375 code0, +5,169 calls, x1.0 threshold, 601.7/s)
+    tsc    221,966,382,628  pfn    6,018  code0   17,678  calls   70,616  (+568 pfn, +1,444 code0, +5,161 calls, x1.0 threshold, 600.7/s)
+    tsc    239,155,853,788  pfn    6,565  code0   19,166  calls   75,782  (+547 pfn, +1,488 code0, +5,166 calls, x1.0 threshold, 601.1/s)
+    tsc    256,337,052,033  pfn    7,139  code0   20,865  calls   81,252  (+574 pfn, +1,699 code0, +5,470 calls, x1.0 threshold, 636.7/s)
+    tsc    297,681,170,541  pfn    7,209  code0   21,251  calls   82,582  (+70 pfn, +386 code0, +1,330 calls, x2.4 threshold, 64.3/s)
+    tsc    314,862,332,370  pfn    7,503  code0   21,857  calls   84,746  (+294 pfn, +606 code0, +2,164 calls, x1.0 threshold, 251.9/s)
+    tsc    332,053,073,507  pfn    7,918  code0   22,697  calls   87,481  (+415 pfn, +840 code0, +2,735 calls, x1.0 threshold, 318.2/s)
+    tsc    349,382,311,281  pfn    8,170  code0   23,310  calls   89,243  (+252 pfn, +613 code0, +1,762 calls, x1.0 threshold, 203.4/s)
+    tsc    366,725,689,236  pfn    8,185  code0   23,382  calls   89,558  (+15 pfn, +72 code0, +315 calls, x1.0 threshold, 36.3/s)
+    tsc    383,968,307,496  pfn    8,267  code0   23,704  calls   90,653  (+82 pfn, +322 code0, +1,095 calls, x1.0 threshold, 127.0/s)
+    tsc    402,770,244,170  pfn    8,290  code0   23,819  calls   91,107  (+23 pfn, +115 code0, +454 calls, x1.1 threshold, 48.3/s)
+    tsc    420,860,718,812  pfn    8,363  code0   24,134  calls   92,164  (+73 pfn, +315 code0, +1,057 calls, x1.1 threshold, 116.9/s)
+
+  cpu 0 second-level hypercalls, MOST RECENT epoch (span 18,090,474,642 ticks = 9.0s at 2 GHz):
+    0x0011  +     315     34.82/s  total     24,331  HvCallVtlCall
+    0x0012  +     315     34.82/s  total     24,333  HvCallVtlReturn
+    0x000c  +     229     25.32/s  total     42,944  HvCallModifyVtlProtectionMask
+    0x0003  +     144     15.92/s  total        861  
+    0x000b  +      47      5.20/s  total        227  HvCallSendSyntheticClusterIpi
+    0x0002  +       5      0.55/s  total        104  
+    0x0051  +       2      0.22/s  total        103  HvCallSetVpRegisters
+    0x0000  +       0      0.00/s  total          1  
+    0x769b  +       0      0.00/s  total         16  
+    0x0050  +       0      0.00/s  total         20  HvCallGetVpRegisters
+    0x000d  +       0      0.00/s  total          1  HvCallEnablePartitionVtl
+    0x000f  +       0      0.00/s  total          2  HvCallEnableVpVtl
+    0x0016  +       0      0.00/s  total          1  
+    0x007b  +       0      0.00/s  total          1  
+    0x0046  +       0      0.00/s  total          1  HvCallGetPartitionId
+    0x8001  +       0      0.00/s  total          1  
+    0x006c  +       0      0.00/s  total          3  
+    0x006f  +       0      0.00/s  total          2  
+    0x009b  +       0      0.00/s  total          1  
+    0x0052  +       0      0.00/s  total          3  
+    0x0048  +       0      0.00/s  total          4  HvCallDepositMemory
+    0x0076  +       0      0.00/s  total          1  
+    0x0087  +       0      0.00/s  total          1  
+    0x004e  +       0      0.00/s  total          1  HvCallCreateVp
+    0x0101  +       0      0.00/s  total          1  
+    0x009a  +       0      0.00/s  total          1  HvCallGetVpIndexFromApicId
+    0x0099  +       0      0.00/s  total          1  HvCallStartVirtualProcessor
+    0x0104  +       0      0.00/s  total          2  
+    0x0088  +       0      0.00/s  total          3  
+    0x0089  +       0      0.00/s  total         22  
+    0x0108  +       0      0.00/s  total          1  
+    (beyond 32 distinct codes) 0   <- census complete
+  trust-level calls the census MISSED: 1 below the kernel floor, 0 untranslated, 0 unreadable   <- every total above is a LOWER BOUND
+  task priority at the trust-level call:
+    class  0 (0x00)      1,554    6.4%  <- admits both
+    class  1 (0x10)      3,024   12.5%  <- admits both
+    class  2 (0x20)     18,320   75.5%
+    class 12 (0xc0)          9    0.0%
+    class 13 (0xd0)         53    0.2%  <- masks the clock AND the deferred call
+    class 15 (0xf0)      1,315    5.4%
+  gaps between consecutive trust-level calls (24,274 of them):
+    2^22      2,105.6 us      5,778   23.8%  (cumulative  23.8%)
+    2^23      4,211.1 us     16,049   66.1%  (cumulative  89.9%)
+    2^24      8,422.3 us      1,725    7.1%  (cumulative  97.0%)
+    2^25     16,844.6 us        619    2.6%  (cumulative  99.6%)
+    2^26     33,689.2 us         39    0.2%  (cumulative  99.7%)
+    2^27     67,378.4 us         13    0.1%  (cumulative  99.8%)
+    2^28    134,756.8 us          6    0.0%  (cumulative  99.8%)
+    2^29    269,513.5 us          7    0.0%  (cumulative  99.8%)
+    2^30    539,027.0 us         34    0.1%  (cumulative 100.0%)
+    2^31  1,078,054.0 us          2    0.0%  (cumulative 100.0%)
+    2^33  4,312,216.2 us          1    0.0%  (cumulative 100.0%)
+    2^35 17,248,864.6 us          1    0.0%  (cumulative 100.0%)
+  what the entry running VTL1 carried (24,275 entries):
+    no event         24,275  100.0%  <- nothing injected; whatever ends its turn is not an injected interrupt
+  VINA flag chain: gs 0xfffff806442fff80 -> block 0xfffff80641525008
+    dword at +4 = 0x00000000   bit 0 = 0  <- clear
+    block physical = 0x117a44008
+    at the RETURN (after KiVinaInterrupt cleared it - the aftermath, not the decision):
+      set 1  clear 24,332
+    at the CALL, before VTL1 runs - THE DECISION:
+      set 0  clear 24,330  unread 1   -> SET on 0.0% of entries
+  how long VTL1 ran (us), by VINA flag at its return:
+      bucket        us     VINA clear     VINA set
+      2^21   1,052.8         4,637            0
+      2^22   2,105.6        18,333            0
+      2^23   4,211.1           979            0
+      2^24   8,422.3             7            0
+      2^25  16,844.6           317            0
+      2^26  33,689.2             1            0
+      2^28 134,756.8             2            0
+      2^33 4,312,216.2             0            1   <- SATURATED: this bucket is 'at least'
+  STATUS        = 0x00348b9a  (success or not an error)
+
+cpu 0 how each second-level fault was answered
+  reflected-walk                  131    0.0%
+  watched                           2    0.0%
+  installed                   422,811  100.0%
+
+cpu 1 how each second-level fault was answered
+  reflected-walk                    2    0.0%
+  installed                    78,151  100.0%
+
+cpu 0 ept-violation pages in the exit ring (13 of 32 slots, 13 distinct)
+  0x000123c40000       1    7.7%
+  0x0001003ab000       1    7.7%
+  0x000117a43000       1    7.7%
+  0x00011cf76000       1    7.7%
+  0x0000002ae000       1    7.7%
+  0x000121b43000       1    7.7%
+  0x00035ab4f000       1    7.7%
+  0x00700060b000       1    7.7%
+  0x000120fc1000       1    7.7%
+  0x000361f06000       1    7.7%
+  0x000345556000       1    7.7%
+  0x000348bcd000       1    7.7%
+  leaves that did not help: 0
+
+host exception: vector 0 error 0x0 rip 0x0 cs 0x0 cr2 0x0
+
+unhandled exit: never - no processor stopped on one
+
+sleep request: never - no processor saw a PM1_CNT write with SLP_EN, so the stop was NOT a guest ACPI sleep
+
+VT-d (DMAR) traffic this VMM absorbed, register page 0xfed90
+  cpu 0  reads 2  writes 0  qi_descriptors 0  qi_waits_completed 0
+
+reset request: never - nothing wrote 0xcf9 or 0x64. Both are armed, so this is a real negative for BOTH of hvix64 HvpResetSystem's writes
+vm entry failure: never - no entry was refused
+
+cpu 0 VMX-instruction exits from the LEVEL ABOVE (all thirteen instructions): 252,097
+  last one: rip 0xfffff8574a7a8308 rcx 0x400000b1 rdx 0x0 rax 0x7fb04460
+    no VMCALL from the level above - the count above is other VMX instructions, and the guest hypervisor made no hypercall of this VMM
+
+cpu 1 VMX-instruction exits from the LEVEL ABOVE (all thirteen instructions): 260,639
+  last one: rip 0xfffff8574a7a8308 rcx 0x12 rdx 0x0 rax 0x0
+    no VMCALL from the level above - the count above is other VMX instructions, and the guest hypervisor made no hypercall of this VMM
+
+cpu 0 where VTL1 RESUMED, newest first (24,335 armed entries, last 64 shown, 1 distinct)
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    -> ONE address across the whole window: the secure kernel restarts from the same place every time and the outstanding service is NOT progressing
+
+cpu 1 where VTL1 RESUMED, newest first (3,249 armed entries, last 64 shown, 1 distinct)
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    0xfffff8063b390035
+    -> ONE address across the whole window: the secure kernel restarts from the same place every time and the outstanding service is NOT progressing
+
+start-up IPIs, as this VMM saw them
+  local apic page watched at 0x0   <- NOT WATCHED: no xAPIC interrupt command reaches this VMM
+  commands decoded off the page 2  undecoded writes 0
+  INIT seen 1   start-up seen 1   refused broadcast 0   refused logical 0
+  last command written 0xc4687
+  processors known to this VMM 2   unresponsive at an EPT rendezvous 0
+  cpu  virtualized  by-guest-sipi  launched  activity  queued-vector  hand-off
+    0            1              0         1         0  0x          0  0x0
+    1            1              1         1         0  0x          0  0x0
+  activity 3 is wait-for-SIPI; a queued vector still set is one this VMM swallowed and never delivered
+
+the guest's periodic timer count, rewritten by this VMM: floored 0, stretched 0   <- untouched
+
+reader proven: host_page_table[0] = 0x69554023
+manifest unread at 0x6bd5a1b8: all 0x00 bytes. **This is a failed read, not a wrong base** - check nothing else is holding the monitor connection. Compare `reader proven` above: if that passed, the base is fine.
+
+framebuffer (the firmware's, from the graphics output protocol)
+  base   0x7000000000  size 0x7e9000 (8,100 KiB)
+  1920 x 1080, stride 1920 pixels, format 1 (BGRX (blue first))
+  read it with: scripts/rig-screen.py --base 0x7000000000 --width 1920 --height 1080 --stride 1920 --format 1
+
+--- per-processor census: what each processor asked for ---
+
+cpu 0  exits 862,053  ring slots 851,185  (10,868 merged as repeats)
+  CHECK FAILED: exit reasons sum to 862,673 against exit_total 862,053 - a reason past the table's bound, or a stale read
+  CHECK FAILED: cpuid_total 4,497 against the CPUID row 4,918 - do not use the census below
+  cpuid leaves (4,497 total, 15 past the 24 slots)
+    0x00000000       3,207   71.3%  max leaf + vendor
+    0x00000001         949   21.1%  features; EBX[31:24] initial APIC ID
+    0x40000001         128    2.8%  hv interface signature
+    0x40000003          44    1.0%  hv features/privileges
+    0x00000007          30    0.7%  structured features
+    0x80000000          25    0.6%  max extended leaf
+    0x00000004          24    0.5%  cache topology (subleaf)
+    0x80000001          14    0.3%  extended features
+    0x0000000d          13    0.3%  xsave
+    0x0000000b          12    0.3%  x2APIC topology; EDX = x2APIC ID
+    0x80000008          11    0.2%  physical address bits
+    0x00000006           7    0.2%  thermal/power
+    0x40000004           6    0.1%  hv recommendations
+    0x00000005           2    0.0%  
+    0x00000011           1    0.0%  
+    0x00000010           1    0.0%  
+    0x0000000f           1    0.0%  RDT monitoring
+    0x0000000e           1    0.0%  
+    0x0000000c           1    0.0%  
+    0x0000000a           1    0.0%  
+    0x00000009           1    0.0%  
+    0x00000008           1    0.0%  
+    0x00000003           1    0.0%  
+    0x00000002           1    0.0%  
+    last cpuid at rip 0xfffff8574a6ace50; leaf 0 answered EAX=0x16 from rip 0xfffff8574a65c26f
+  exit reasons
+    ept-violation       427,755   49.6%
+    vmresume            174,390   20.2%
+    vmcall               93,038   10.8%
+    vmptrld              57,172    6.6%
+    wrmsr                39,223    4.5%
+    hlt                  24,498    2.8%
+    invept               19,475    2.3%
+    int-window            7,294    0.8%
+    ext-int               6,752    0.8%
+    cpuid                 4,918    0.6%
+    invvpid               3,463    0.4%
+    tpr-below             2,440    0.3%
+    rdmsr                   943    0.1%
+    vmread                  751    0.1%
+    vmwrite                 497    0.1%
+    gdtr-idtr                26    0.0%
+    io                       11    0.0%
+    cr-access                10    0.0%
+    xsetbv                    8    0.0%
+    vmclear                   4    0.0%
+    vmlaunch                  3    0.0%
+    dr-access                 1    0.0%
+    vmon                      1    0.0%
+  guest hypervisor's own index 0 from gs base 0xfffff8574a430000 - agrees with cpu 0
+  VMCALL census (second-level path): seen 103,897, max code 0x8001, distinct codes 27
+    codes: 0x0 0x2 0x3 0xb 0xc 0xd 0xf 0x11 0x12 0x16 0x46 0x48 0x4e 0x50 0x51 0x52 0x6c 0x6f 0x76 0x7b 0x7c 0x87 0x88 0x89 0x99 0x9a 0x9b
+  start-ups applied 0  inits emulated 0  started_by_start_up_ipi 0  launch_error 0
+    of those, DECLINED as a repeat start-up 0, so 0 actually reached the guest state
+    tracked hypercall: code 0x76 pending 1 captured 0 status 0x0 rip 0xfffff8063b390000  <- STILL PENDING - the handler did not return
+    resumes 862,545, last resumed with rip 0xfffff8574a7a843d
+
+cpu 1  exits 607,778  ring slots 599,008  (8,770 merged as repeats)
+  CHECK FAILED: exit reasons sum to 610,520 against exit_total 607,778 - a reason past the table's bound, or a stale read
+  CHECK FAILED: cpuid_total 1,646 against the CPUID row 1,916 - do not use the census below
+  cpuid leaves (1,646 total, 8 past the 24 slots)
+    0x00000000       1,481   90.0%  max leaf + vendor
+    0x00000001          99    6.0%  features; EBX[31:24] initial APIC ID
+    0x00000004          24    1.5%  cache topology (subleaf)
+    0x0000000b           7    0.4%  x2APIC topology; EDX = x2APIC ID
+    0x0000000d           6    0.4%  xsave
+    0x00000007           2    0.1%  structured features
+    0x00000006           2    0.1%  thermal/power
+    0x80000000           1    0.1%  max extended leaf
+    0x00000016           1    0.1%  processor frequency
+    0x00000015           1    0.1%  TSC/core crystal ratio
+    0x00000014           1    0.1%  
+    0x00000013           1    0.1%  
+    0x00000012           1    0.1%  
+    0x00000011           1    0.1%  
+    0x00000010           1    0.1%  
+    0x0000000f           1    0.1%  RDT monitoring
+    0x0000000e           1    0.1%  
+    0x0000000c           1    0.1%  
+    0x0000000a           1    0.1%  
+    0x00000009           1    0.1%  
+    0x00000008           1    0.1%  
+    0x00000005           1    0.1%  
+    0x00000003           1    0.1%  
+    0x00000002           1    0.1%  
+    last cpuid at rip 0xfffff8574a741695; leaf 0 answered EAX=0x16 from rip 0xfffff8574a655b4e
+  exit reasons
+    vmresume            251,699   41.4%
+    wrmsr               126,093   20.7%
+    ept-violation        83,453   13.7%
+    int-window           73,694   12.1%
+    ext-int              21,507    3.5%
+    vmptrld              14,979    2.5%
+    tpr-below            14,902    2.5%
+    vmcall               10,872    1.8%
+    hlt                   4,244    0.7%
+    invept                3,283    0.5%
+    invvpid               2,840    0.5%
+    cpuid                 1,916    0.3%
+    vmwrite                 533    0.1%
+    vmread                  312    0.1%
+    rdmsr                   134    0.0%
+    gdtr-idtr                29    0.0%
+    cr-access                 8    0.0%
+    xsetbv                    4    0.0%
+    ldtr-tr                   4    0.0%
+    vmclear                   4    0.0%
+    io                        3    0.0%
+    vmlaunch                  3    0.0%
+    dr-access                 1    0.0%
+    vmon                      1    0.0%
+    sipi                      1    0.0%
+    init                      1    0.0%
+  guest hypervisor's own index 1 from gs base 0xffffe80000287000 - agrees with cpu 1
+  start-ups applied 2  inits emulated 1  started_by_start_up_ipi 1  launch_error 0
+    of those, DECLINED as a repeat start-up 0, so 2 actually reached the guest state
+    tracked hypercall: code 0x0 pending 0 captured 0 status 0x0 rip 0x0  <- returned
+    resumes 609,370, last resumed with rip 0xfffff806ad2a768e
+      application 1 applied by: launch
+      application 2 applied by: sipi exi
+    *** 2 start-up applications on one processor: the second sends a processor that is already running back to its entry point, which wedges it exactly like never having started ***
+
+cpuid leaves recorded (6143 entries, 182 in the hypervisor range)
+  0x00000000  149
+  0x00000001  297
+  0x00000007  5
+  0x0000000b  7
+  0x0000000d  2
+  0x40000001  33
+  0x40000003  16
+  0x80000000  2
+  0x80000001  1
+
+cpu  rec  vp-assist-writes  evmcs-reads  evmcs-writes
+  0     0                 0            0             0
+  1     0                 0            0             0
+
+cpu  replayed-leaves  faulted-leaves
+  0                0          416802
+  1                0           73458
+
+cpu  rebuild-new-root  rebuild-stale-generation  generation-discards
+  0             19100                         0                    0
+  1              2891                         0                    0
+
+cpu  invept-single-context  invept-all-context
+  0                  19100                   0
+  1                   2891                   0
+
+cpu  l2-run%  l1-run%  vmm%   (share of wall clock)
+  0   10.76    24.26  64.98
+  1    4.31    68.02  27.67
+
+cpu  hot-state skipped/done
+  0        459559/    362936
+  1        945804/    154887
+
+cpu  shadow-loads  shadow-stores
+  0        222881         222883
+  1        239291         239293
+
+cpu 0 phase tree (164,156 round trips, 1,635,273 handler cycles a round trip)
+     phase                                     calls  calls/RT     cyc/call      cyc/RT   self/RT   %vmm
+   25  exit: prologue                            836,630     5.10       11,352      57,856    57,856    3.5
+   26  exit: dispatch                            836,630     5.10      296,011   1,508,637   780,301   92.3
+    1    reflect_l2_exit                         166,713     1.02      156,917     159,362    -8,568    9.7
+    0      save_l2_state                         167,712     1.02       40,826      41,711    41,711    2.6
+    4      copy_vmcs12_to_shadow                 223,320     1.36       26,121      35,536       339    2.2
+   40        copy out: vmptrst                   223,320     1.36          422         575       575    0.0
+   41        copy out: vmptrld shadow            223,320     1.36        5,862       7,976     7,976    0.5
+   42        copy out: field writes              223,320     1.36       10,182      13,852    13,852    0.8
+   43        copy out: vmclear                   223,320     1.36        4,197       5,710     5,710    0.3
+   44        copy out: vmptrld back              223,320     1.36        5,206       7,083     7,083    0.4
+    7      vmptrld->vmcs01                       166,713     1.02        6,765       6,870     6,870    0.4
+   12      load_l1_host_state                    166,713     1.02       49,364      50,133    50,133    3.1
+   13      exit information                      166,713     1.02       19,127      19,426    19,426    1.2
+   31      reflect: exit ring                    166,713     1.02        8,246       8,375     8,375    0.5
+   32      reflect: msr store                    166,713     1.02          395         402       402    0.0
+   33      reflect: msr load + invvpid           166,713     1.02        5,347       5,431     5,431    0.3
+   34      reflect: evmcs store                  166,713     1.02           45          47        47    0.0
+    9    on_l2_ept_fault                         417,951     2.55      102,051     259,830   259,830   15.9
+   20    vmptrld: whole call                      56,607     0.34      277,962      95,852     2,386    5.9
+   16      vmptrld: read region                   56,607     0.34        9,224       3,181     3,181    0.2
+   17      vmptrld: flush old                     56,607     0.34      218,661      75,402    19,430    4.6
+   24        materialise: whole                   50,891     0.31      180,548      55,973        52    3.4
+   21          materialise: vmptrld in            50,891     0.31        7,120       2,207     2,207    0.1
+   22          materialise: field loop            50,891     0.31      168,210      52,148    52,148    3.2
+   23          materialise: vmptrld out           50,891     0.31        5,048       1,565     1,565    0.1
+   18      vmptrld: assign                        56,607     0.34        4,899       1,690     1,690    0.1
+   19      vmptrld: shadow publish                56,607     0.34       38,257      13,192    13,192    0.8
+   36    on_guest_vmlaunch                       166,713     1.02      210,019     213,291    55,956   13.0
+    2      build_vmcs02                          166,713     1.02      134,102     136,192       296    8.3
+    6        vmptrld->vmcs02                     166,713     1.02        6,452       6,553     6,553    0.4
+   14        build: before vmptrld               166,713     1.02       28,093      28,531     5,152    1.7
+    8          merge_nested_bitmaps              166,713     1.02       23,020      23,379     9,573    1.4
+   10            merge: guest page read          500,088     3.05        4,531      13,806    13,806    0.8
+   15        build: after vmptrld                166,713     1.02       99,265     100,812   100,812    6.2
+   35      enter_or_park_l2                      166,713     1.02       20,819      21,144    21,144    1.3
+   27  resume: events                            836,630     5.10        5,790      29,509    29,509    1.8
+   28  resume: diag and rip                      836,630     5.10        1,041       5,309     5,309    0.3
+   29  resume: record_exit                       836,630     5.10        2,583      13,165    13,165    0.8
+   30  resume: entry census                      836,630     5.10        5,608      28,582    28,582    1.7
+       --- the six adjacent intervals                                            1,643,058            100.5
+       --- handler_cycles                                                        1,635,274            100.0
+       --- outside the split                                                        -7,784             -0.5
+       cross-cutting - each of these is already inside one of the rows above,
+       and is NOT subtracted from that row's self, because it has more than
+       one caller. Do not add them to the tree.
+    3    shadow_ept_pointer_for                  584,514     3.56          687       2,446     2,446    0.1
+    5    copy_shadow_to_vmcs12                   223,319     1.36       51,534      70,108       351    4.3
+   45      copy in: vmptrst                      223,319     1.36          607         826       826    0.1
+   46      copy in: vmptrld shadow               223,319     1.36        6,726       9,151     9,151    0.6
+   47      copy in: field reads                  223,319     1.36       34,517      46,958    46,958    2.9
+   48      copy in: vmclear                      223,319     1.36        4,207       5,724     5,724    0.4
+   49      copy in: vmptrld back                 223,319     1.36        5,217       7,098     7,098    0.4
+   38    guest read: whole call              107,314,768   653.74          673     440,468   243,391   26.9
+   11      guest read: map_window            107,315,083   653.74          301     197,078   197,078   12.1
+   39    guest write: whole call                 227,706     1.39        2,118       2,939     2,410    0.2
+   37      guest write: map_window               227,706     1.39          381         529       529    0.0
+
+cpu 1 phase tree (219,389 round trips, 515,861 handler cycles a round trip)
+     phase                                     calls  calls/RT     cyc/call      cyc/RT   self/RT   %vmm
+   25  exit: prologue                            549,798     2.51       11,094      27,802    27,802    5.4
+   26  exit: dispatch                            549,798     2.51      187,959     471,034    87,010   91.3
+    1    reflect_l2_exit                         227,078     1.04      163,778     169,518      -713   32.9
+    0      save_l2_state                         227,078     1.04       47,230      48,886    48,886    9.5
+    4      copy_vmcs12_to_shadow                 240,018     1.09       26,559      29,057       297    5.6
+   40        copy out: vmptrst                   240,018     1.09          424         464       464    0.1
+   41        copy out: vmptrld shadow            240,018     1.09        5,729       6,268     6,268    1.2
+   42        copy out: field writes              240,018     1.09       10,647      11,649    11,649    2.3
+   43        copy out: vmclear                   240,018     1.09        4,396       4,810     4,810    0.9
+   44        copy out: vmptrld back              240,018     1.09        5,090       5,569     5,569    1.1
+    7      vmptrld->vmcs01                       227,078     1.04        6,946       7,190     7,190    1.4
+   12      load_l1_host_state                    227,078     1.04       47,654      49,325    49,325    9.6
+   13      exit information                      227,078     1.04       19,435      20,116    20,116    3.9
+   31      reflect: exit ring                    227,078     1.04        9,423       9,754     9,754    1.9
+   32      reflect: msr store                    227,078     1.04          371         384       384    0.1
+   33      reflect: msr load + invvpid           227,078     1.04        5,280       5,466     5,466    1.1
+   34      reflect: evmcs store                  227,078     1.04           51          53        53    0.0
+    9    on_l2_ept_fault                          74,567     0.34      112,272      38,160    38,160    7.4
+   20    vmptrld: whole call                      12,940     0.06      233,749      13,787       416    2.7
+   16      vmptrld: read region                   12,940     0.06       10,282         606       606    0.1
+   17      vmptrld: flush old                     12,940     0.06      170,782      10,073     3,448    2.0
+   24        materialise: whole                    7,794     0.04      186,484       6,625         7    1.3
+   21          materialise: vmptrld in             7,794     0.04        7,918         281       281    0.1
+   22          materialise: field loop             7,794     0.04      173,108       6,150     6,150    1.2
+   23          materialise: vmptrld out            7,794     0.04        5,270         187       187    0.0
+   18      vmptrld: assign                        12,940     0.06        5,501         325       325    0.1
+   19      vmptrld: shadow publish                12,940     0.06       40,122       2,366     2,366    0.5
+   36    on_guest_vmlaunch                       227,078     1.04      157,054     162,558    58,453   31.5
+    2      build_vmcs02                          227,078     1.04       92,004      95,229       296   18.5
+    6        vmptrld->vmcs02                     227,078     1.04        6,720       6,956     6,956    1.3
+   14        build: before vmptrld               227,078     1.04       23,164      23,977     4,280    4.6
+    8          merge_nested_bitmaps              227,078     1.04       19,029      19,696     8,053    3.8
+   10            merge: guest page read          681,183     3.10        3,750      11,643    11,643    2.3
+   15        build: after vmptrld                227,078     1.04       61,832      64,000    64,000   12.4
+   35      enter_or_park_l2                      227,078     1.04        8,575       8,876     8,876    1.7
+   27  resume: events                            549,798     2.51        5,208      13,053    13,053    2.5
+   28  resume: diag and rip                      549,798     2.51          684       1,716     1,716    0.3
+   29  resume: record_exit                       549,798     2.51        1,254       3,145     3,145    0.6
+   30  resume: entry census                      549,798     2.51        6,250      15,664    15,664    3.0
+       --- the six adjacent intervals                                              532,414            103.2
+       --- handler_cycles                                                          515,861            100.0
+       --- outside the split                                                       -16,553             -3.2
+       cross-cutting - each of these is already inside one of the rows above,
+       and is NOT subtracted from that row's self, because it has more than
+       one caller. Do not add them to the tree.
+    3    shadow_ept_pointer_for                  301,626     1.37          531         730       730    0.1
+    5    copy_shadow_to_vmcs12                   240,017     1.09       53,022      58,008       281   11.2
+   45      copy in: vmptrst                      240,017     1.09          673         737       737    0.1
+   46      copy in: vmptrld shadow               240,018     1.09        6,924       7,576     7,576    1.5
+   47      copy in: field reads                  240,017     1.09       35,712      39,070    39,070    7.6
+   48      copy in: vmclear                      240,017     1.09        4,373       4,784     4,784    0.9
+   49      copy in: vmptrld back                 240,017     1.09        5,082       5,560     5,560    1.1
+   38    guest read: whole call               11,619,334    52.96          916      48,536    31,031    9.4
+   11      guest read: map_window             11,619,335    52.96          330      17,505    17,505    3.4
+   39    guest write: whole call                 243,532     1.11        1,513       1,681     1,161    0.3
+   37      guest write: map_window               243,532     1.11          467         519       519    0.1
+
+cpu 0 second-level entry rips (35,284 entries, 8 distinct, 8,690 beyond the table)
+  0xfffff806acfa57fa       17335   49.1%
+  0xfffff806ad2a6f8f       15485   43.9%
+  0xfffff806ad02890d        1475    4.2%
+  0xfffff806ad2a768e         809    2.3%
+  0xfffff806ad2b3692          71    0.2%
+  0xfffff806acebe54a          69    0.2%
+  0xfffff806acecc395          36    0.1%
+  0xfffff806aced23bc           4    0.0%
+
+cpu 1 second-level entry rips (30,274 entries, 8 distinct, 25,781 beyond the table)
+  0xfffff806ad2a768e        9920   32.8%
+  0xfffff806ad02890d        9097   30.0%
+  0xfffff8063b39001c        6965   23.0%
+  0xfffff806acf100e6        3363   11.1%
+  0xfffff806acf3fd56         492    1.6%
+  0xfffff806ad7be948         320    1.1%
+  0xfffff806ace4b913         112    0.4%
+  0xfffff806ad7c0771           5    0.0%
+
+cpu 0 entered-at census: agreed 175,570, differed 0, lowest 0x1ad6874
+  NEVER entered anywhere vmcs12 did not ask for
+
+cpu 1 entered-at census: agreed 253,210, differed 0, lowest 0xfffff8063b390003
+  NEVER entered anywhere vmcs12 did not ask for
+
+cpu 0 lowest-rip entry, at entry 22: rip 0x1ad6874, long mode
+    vmcs02 cs 0x0010 base 0x0 limit 0x0 ar 0x209b
+    vmcs02 cr0 0x80010033 (PE=1), efer 0xd00 (LMA=1), rflags 0x6 (VM=0)
+    vmcs12 cs 0x0000 base 0x0 cr0 0x80010033
+    *** vmcs02 DIFFERS from vmcs12 - composed, not copied ***
+    linear entry address 0x1ad6874 (base + rip)
+
+cpu 1 lowest-rip entry, at entry 19: rip 0xfffff8063b390003, long mode
+    vmcs02 cs 0x0010 base 0x0 limit 0x0 ar 0x209b
+    vmcs02 cr0 0x80010033 (PE=1), efer 0x500 (LMA=1), rflags 0x96 (VM=0)
+    vmcs12 cs 0x0010 base 0x0 cr0 0x80010033
+    vmcs02 CARRIES EXACTLY what vmcs12 asked for
+    linear entry address 0xfffff8063b390003 (base + rip)
+
+cpu 0 low second-level rip census (below 0x1000):
+               3  on_guest_vmptrld       memory -> vmcs12
+    no advance ever landed below one page: every low address was COPIED, not computed here
+    first: on_guest_vmptrld       memory -> vmcs12
+      wrote 0x0 over 0x0, length 0, reason 0x0, detail 0x101ae5000, at l2 entry 0
+    last : on_guest_vmptrld       memory -> vmcs12
+      wrote 0x0 over 0xfffff8063b390000, length 0, reason 0x0, detail 0x117a3e000, at l2 entry 80
+
+cpu 1 low second-level rip census (below 0x1000):
+               3  on_guest_vmptrld       memory -> vmcs12
+    no advance ever landed below one page: every low address was COPIED, not computed here
+    first: on_guest_vmptrld       memory -> vmcs12
+      wrote 0x0 over 0x0, length 0, reason 0x0, detail 0x114f95000, at l2 entry 0
+    last : on_guest_vmptrld       memory -> vmcs12
+      wrote 0x0 over 0xfff0, length 0, reason 0x0, detail 0x114fb0000, at l2 entry 17
+
+cpu 0 second-level rip SERVED to guest vmread:
+    the guest hypervisor never VMREAD the rip field here - nothing was served, so nothing served can explain the 2
+
+cpu 0 shadow region imposing rip on the cache:
+         234,785  collected guest_rip from the region
+         159,934  CHANGED the cached value
+               0  moved it BACKWARDS
+    NORMAL under shadowing: with the control in force this is how the guest hypervisor's silent VMWRITE reaches the cache at all, and nothing moved backwards. Not a discarded write.
+    first: served 0xfffff8574a7a7694, cache held 0x0, region last imposed 0xfffff8574a7a7694
+      shadowing on, at l2 entry 0
+    last : served 0xfffff806acfa57fa, cache held 0xfffff806acfa57f8, region last imposed 0xfffff806acfa57fa
+      shadowing on, at l2 entry 177,056
+
+cpu 1 second-level rip SERVED to guest vmread:
+    the guest hypervisor never VMREAD the rip field here - nothing was served, so nothing served can explain the 2
+
+cpu 1 shadow region imposing rip on the cache:
+         271,330  collected guest_rip from the region
+         143,888  CHANGED the cached value
+               0  moved it BACKWARDS
+    NORMAL under shadowing: with the control in force this is how the guest hypervisor's silent VMWRITE reaches the cache at all, and nothing moved backwards. Not a discarded write.
+    first: served 0xfffff8574a7a7694, cache held 0x0, region last imposed 0xfffff8574a7a7694
+      shadowing on, at l2 entry 0
+    last : served 0xfffff8063b39001c, cache held 0xfffff8063b390019, region last imposed 0xfffff8063b39001c
+      shadowing on, at l2 entry 256,084
+
+cpu 0 exit information REFLECTED to the guest hypervisor:
+         177,405  reflections
+               0  with a vmcs12 rip below 0x1000
+          16,940  for a reason sdm 30.2.5 leaves the length undefined
+               0  of those with a NON-ZERO length reported
+    *** THIS NEVER HAPPENED: no reflection on this processor carried a rip below one page, and none reported a non-zero instruction length for an exit the architecture leaves it undefined for. Both arithmetic routes to a low entry rip are dead here. ***
+    last      : reason 0x20, length 2, vmcs12 rip 0xfffff806acfa57f8, save_l2_state ran, at l2 entry 177,443
+    vmcs shadowing currently armed on this processor: yes
+
+cpu 1 exit information REFLECTED to the guest hypervisor:
+         257,193  reflections
+               0  with a vmcs12 rip below 0x1000
+         112,613  for a reason sdm 30.2.5 leaves the length undefined
+               0  of those with a NON-ZERO length reported
+    *** THIS NEVER HAPPENED: no reflection on this processor carried a rip below one page, and none reported a non-zero instruction length for an exit the architecture leaves it undefined for. Both arithmetic routes to a low entry rip are dead here. ***
+    last      : reason 0x7, length 0, vmcs12 rip 0xfffff806ad2b32f0, save_l2_state ran, at l2 entry 257,334
+    vmcs shadowing currently armed on this processor: yes
+
+vmcs shadowing stand-down: THIS NEVER HAPPENED - no processor was left holding the control when it was stood down, so the frozen-region hazard is unreachable here
+
+cpu 0 vmcs12 region traffic:
+          57,795  flushes attempted
+               0  flushes that FAILED to write the region
+               0  flushes that persisted a rip below 0x1000
+          57,796  vmptrld region loads
+               3  that loaded a rip below 0x1000
+               0  of a region another processor flushed last
+               3  of a region NO flush ever succeeded on
+               0  where the region disagreed with the last flush of it
+    first low load   : region 0x101ae5000, rip 0x0, previous 0x0
+      last flushed by never flushed, ever flushed NO, at l2 entry 0
+    last load        : region 0x117a3b000, rip 0xfffff8063b39001c, previous 0xfffff8063b390035
+      last flushed by cpu 0, ever flushed yes, at l2 entry 177,708
+
+cpu 1 vmcs12 region traffic:
+          15,745  flushes attempted
+               0  flushes that FAILED to write the region
+               0  flushes that persisted a rip below 0x1000
+          15,746  vmptrld region loads
+               3  that loaded a rip below 0x1000
+               0  of a region another processor flushed last
+               3  of a region NO flush ever succeeded on
+               0  where the region disagreed with the last flush of it
+    first low load   : region 0x114f95000, rip 0x0, previous 0x0
+      last flushed by never flushed, ever flushed NO, at l2 entry 0
+    last load        : region 0x114fad000, rip 0xfffff8063b39001c, previous 0xfffff8063b390035
+      last flushed by cpu 1, ever flushed yes, at l2 entry 258,681
+
+vmcs12 regions seen, by physical address:
+    0x101ae5000: 1 flushes (0 failed), 1 loads, last flushed by cpu 0, last loaded by cpu 0
+      last persisted rip 0xfffff8574a7a7697, ever flushed yes
+    0x117a3b000: 28,897 flushes (0 failed), 28,898 loads, last flushed by cpu 0, last loaded by cpu 0
+      last persisted rip 0xfffff8063b39001c, ever flushed yes
+    0x117a3e000: 28,897 flushes (0 failed), 28,897 loads, last flushed by cpu 0, last loaded by cpu 0
+      last persisted rip 0xfffff8063b390035, ever flushed yes
+    0x114f95000: 1 flushes (0 failed), 1 loads, last flushed by cpu 1, last loaded by cpu 1
+      last persisted rip 0xfffff8574a7a7697, ever flushed yes
+    0x114fad000: 7,896 flushes (0 failed), 7,897 loads, last flushed by cpu 1, last loaded by cpu 1
+      last persisted rip 0xfffff8063b39001c, ever flushed yes
+    0x114fb0000: 7,896 flushes (0 failed), 7,896 loads, last flushed by cpu 1, last loaded by cpu 1
+      last persisted rip 0xfffff8063b390035, ever flushed yes
+
+*** the region path is implicated - read the counters above: `unflushed` non-zero is a vmcs12 whose contents this VMM never wrote, `disagreed` non-zero is memory losing what was written, and `flushes that FAILED` is the write that was discarded at the call site ***
+
+cpu 0 virtual task priority at second-level entry (178,498 entries)
+  0x20       63818   35.8%
+  0x00       44791   25.1%
+  0xf0       34703   19.4%
+  0x40       25304   14.2%
+  0xd0        6196    3.5%
+  0x10        3089    1.7%
+  0x60         403    0.2%
+  0xc0         110    0.1%
+  0xe0          70    0.0%
+  0x30          12    0.0%
+  0x50           2    0.0%
+  owed by SDM 27.6.7 0, armed while already at or above 0
+  cpl seen: 
+  time-stamp counter between stagings of vector 0xd1 into vmcs02 (37,501 gaps, TSC 1.992 GHz measured)
+    2^19 (    0.26 - 0.53 ms)           4    0.0%
+    2^20 (    0.53 - 1.05 ms)          93    0.2%
+    2^21 (    1.05 - 2.11 ms)        1037    2.8%
+    2^22 (    2.11 - 4.21 ms)       25327   67.5%
+    2^23 (    4.21 - 8.42 ms)        4017   10.7%
+    2^24 (    8.42 - 16.84 ms)        4602   12.3%
+    2^25 (   16.84 - 33.69 ms)        2113    5.6%
+    2^26 (   33.69 - 67.38 ms)         303    0.8%
+    2^27 (   67.38 - 134.76 ms)           2    0.0%
+    2^28 (  134.76 - 269.51 ms)           3    0.0%
+    these gaps span 234.7 s of the 224.6 s this boot has been handling exits (104.5%)
+    <- accounts for the run, so the distribution is of the whole of it
+
+  processor priority at entry [NOT MAINTAINED - expect 0x00, see SDM 32.1.1; use the task priority above] (178,554)
+    0x00      178554  100.0%
+
+  vectors vmcs02 actually carried (41,483)
+    0xd1       37529   90.5%
+    0x2f        2816    6.8%
+    0x50         692    1.7%
+    0xd2         321    0.8%
+    0x60         117    0.3%
+    0xe1           6    0.0%
+    0xe0           2    0.0%
+
+  entries carrying no event while the task priority was below the dispatch class: 16,883 (cumulative - read as a delta. NOT a fault by itself: the site does not check that anything was pending)
+
+  vectors the guest asked for (4,262)
+    0x2f        4261  100.0%
+    0xe1           1    0.0%
+
+  task priority when it asked (4,262)
+    0xd0        3575   83.9%
+    0x20         516   12.1%
+    0xf0          95    2.2%
+    0x60          75    1.8%
+    0xc0           1    0.0%
+
+  what one trust-level round trip costs
+    HvCallVtlCall -> HvCallVtlReturn (secure kernel)
+      24,581 halves, 3,669,899 cycles (1842.3 us at 1.992 GHz), 7.3 exits
+    HvCallVtlReturn -> HvCallVtlCall (ordinary kernel)
+      24,580 halves, 14,274,839 cycles (7166.1 us at 1.992 GHz), 28.1 exits
+    BOOT-WIDE MEANS, not the current state: 24,580 round trips
+    spanning 221.4 s of wall clock = 111.01 round trips/s
+    most recent epoch says 27.67/s (+247 over 8.9 s)
+    <- DISAGREE by 4.0x. The means above are dominated by a
+       different, faster phase and do NOT describe the guest now.
+       Difference two dumps to get the current cost.
+
+cpu 1 virtual task priority at second-level entry (260,635 entries)
+  0xd0      109022   41.8%
+  0x20       80540   30.9%
+  0x00       47801   18.3%
+  0xf0       18454    7.1%
+  0x40        4143    1.6%
+  0x60         232    0.1%
+  0x10         223    0.1%
+  0xc0         144    0.1%
+  0xe0          48    0.0%
+  0x30          18    0.0%
+  0x50          10    0.0%
+  owed by SDM 27.6.7 0, armed while already at or above 0
+  cpl seen: 
+  time-stamp counter between stagings of vector 0xd1 into vmcs02 (59,480 gaps, TSC 1.992 GHz measured)
+    2^19 (    0.26 - 0.53 ms)         120    0.2%
+    2^20 (    0.53 - 1.05 ms)       23169   39.0%
+    2^21 (    1.05 - 2.11 ms)       27114   45.6%
+    2^22 (    2.11 - 4.21 ms)        5843    9.8%
+    2^23 (    4.21 - 8.42 ms)        3197    5.4%
+    2^24 (    8.42 - 16.84 ms)          30    0.1%
+    2^25 (   16.84 - 33.69 ms)           4    0.0%
+    2^27 (   67.38 - 134.76 ms)           3    0.0%
+    these gaps span 100.6 s of the 222.6 s this boot has been handling exits (45.2%)
+    *** CUMULATIVE, AND IT DOES NOT COVER THE RUN. The percentages above are of a
+        phase, not of now: a histogram of intervals cannot record the interval it
+        is inside, so a clock that stopped leaves this frozen and still reading
+        96%. Difference two dumps - `--delta N` reports these buckets per window. ***
+
+  processor priority at entry [NOT MAINTAINED - expect 0x00, see SDM 32.1.1; use the task priority above] (260,808)
+    0x00      260808  100.0%
+
+  vectors vmcs02 actually carried (73,195)
+    0xd1       59519   81.3%
+    0x2f       13237   18.1%
+    0x60         422    0.6%
+    0xf0          12    0.0%
+    0x0d           4    0.0%
+    0xe1           1    0.0%
+
+  entries carrying no event while the task priority was below the dispatch class: 23,111 (cumulative - read as a delta. NOT a fault by itself: the site does not check that anything was pending)
+
+  vectors the guest asked for (48,438)
+    0x2f       48430  100.0%
+    0xe1           6    0.0%
+    0xe0           2    0.0%
+
+  task priority when it asked (48,438)
+    0xd0       47828   98.7%
+    0x20         415    0.9%
+    0xf0         151    0.3%
+    0x60          36    0.1%
+    0xc0           8    0.0%
+
+  what one trust-level round trip costs
+    HvCallVtlCall -> HvCallVtlReturn (secure kernel)
+      3,645 halves, 3,805,261 cycles (1910.3 us at 1.992 GHz), 9.8 exits
+    HvCallVtlReturn -> HvCallVtlCall (ordinary kernel)
+      3,645 halves, 49,752,418 cycles (24976.1 us at 1.992 GHz), 161.9 exits
+    BOOT-WIDE MEANS, not the current state: 3,645 round trips
+    spanning 98.0 s of wall clock = 37.19 round trips/s
+    most recent epoch says 56.31/s (+486 over 8.6 s)
+    <- AGREE: the mean above still describes the guest.
+
+interrupt-window exits, and the priority they fired at
+
+cpu 0  reflected 7,548  stale 0
+  the priority was never sampled: the class histogram is empty on 7,548 window exits.
+  *** but nested_virtual_apic_address is 0x117a3c000, NOT zero - the level above DID set a TPR shadow, so 'no page to read from' is not the reason. The sampling site is not running, or is storing elsewhere. Do not read this as evidence against a TPR-threshold fix. ***
+
+cpu 1  reflected 76,852  stale 0
+  the priority was never sampled: the class histogram is empty on 76,852 window exits.
+  *** but nested_virtual_apic_address is 0x114fb1000, NOT zero - the level above DID set a TPR shadow, so 'no page to read from' is not the reason. The sampling site is not running, or is storing elsewhere. Do not read this as evidence against a TPR-threshold fix. ***
+
+the dispatch vector, from the ask to the delivery
+  *** THIS NEVER HAPPENED: the instrument did not look at one second-level entry on any processor. That is a statement about the BUILD, not about the guest - check `dropcnt=` in `strings <hypervisor> | grep 'zpp switches'`, and if it reads 0 nothing below was ever counted. Do not read a zero here as 'nothing was dropped'. ***
+
+cpu 0 synthetic MSRs written (41,507)
+  0x400000b1       32016   77.1%  STIMER0_COUNT
+  0x40000071        4262   10.3%  ICR
+  0x400000b0        2461    5.9%  STIMER0_CONFIG
+  0x40000070        2425    5.8%  EOI
+  0x40000084         323    0.8%  EOM
+  0x40000001           3    0.0%  
+  0x40000093           2    0.0%  
+  0x40000090           2    0.0%  
+  0x40000083           2    0.0%  
+  0x40000040           2    0.0%  
+  0x40000021           2    0.0%  REFERENCE_TSC
+  0x40000004           2    0.0%  
+  0x40000000           2    0.0%  
+  0x40000094           1    0.0%  
+  0x40000091           1    0.0%  
+  0x40000073           1    0.0%  VP_ASSIST_PAGE
+
+cpu 0 synthetic MSRs read (273)
+  0x40000020         256   93.8%  TIME_REF_COUNT
+  0x40000083           6    2.2%  
+  0x40000001           3    1.1%  
+  0x40000073           2    0.7%  VP_ASSIST_PAGE
+  0x40000021           2    0.7%  REFERENCE_TSC
+  0x40000023           1    0.4%  
+  0x40000022           1    0.4%  
+  0x40000004           1    0.4%  
+  0x40000002           1    0.4%  
+
+VP assist page probe (machine-wide, NOT per cpu)
+  L2 physical (what Windows wrote) 0x114fb5000
+  via the guest hypervisor's own EPT 0x114fb5000
+  via this VMM's identity map        0x114fb5000
+  the two paths agree: YES
+  write-watch armed: 0x0
+  WRITES SEEN: 0   <- MEANINGLESS, no watch is armed
+
+cpu 0 interrupt-window exiting, as vmcs12 asked for it at entry
+  armed 9,241 of 179,769 entries (5.1%)
+
+cpu 1 synthetic MSRs written (130,806)
+  0x40000070       51767   39.6%  EOI
+  0x40000071       49123   37.6%  ICR
+  0x400000b1       17861   13.7%  STIMER0_COUNT
+  0x40000084       12015    9.2%  EOM
+  0x400000b0          29    0.0%  STIMER0_CONFIG
+  0x40000093           2    0.0%  
+  0x40000090           2    0.0%  
+  0x40000083           2    0.0%  
+  0x40000040           2    0.0%  
+  0x40000094           1    0.0%  
+  0x40000091           1    0.0%  
+  0x40000073           1    0.0%  VP_ASSIST_PAGE
+
+cpu 1 synthetic MSRs read (9)
+  0x40000083           5   55.6%  
+  0x40000020           2   22.2%  TIME_REF_COUNT
+  0x40000073           1   11.1%  VP_ASSIST_PAGE
+  0x40000002           1   11.1%  
+
+cpu 1 interrupt-window exiting, as vmcs12 asked for it at entry
+  armed 130,664 of 264,798 entries (49.3%)
+
+reference TSC page: the guest's clock, in hertz
+
+  cpu 0  page 0x117a24000 enabled, published 1 time(s), 256 counter reads
+    time-stamp counter 1,992,000,000 Hz  (FALLBACK, measured at the wall; CPUID.15H read zero)
+    published scale 0x0148ff002dd81006  implies   10,000,003 Hz  ok
+    fitted    scale 0x0148ff002dd81006  implies   10,000,003 Hz  ok
+    fit baseline 2,166,670,966 counts (1087.7 ms)
+    offset 0xe72b70, collinearity error 0 x100ns
+    page reads   sequence 1, scale 0x0148ff002dd81006, offset 0xe72b70
+      agrees with reference_scale - the guest reads what we published
+
+  cpu 1  page 0x0 DISABLED, published 0 time(s), 2 counter reads
+    time-stamp counter 1,992,000,000 Hz  (FALLBACK, measured at the wall; CPUID.15H read zero)
+    published scale -                            -
+    fitted    scale -                            -
+    offset 0x0, collinearity error 0 x100ns
+    NOT PUBLISHED - the guest is still reading the counter MSR
+
+the tick account: asked against given
+
+  cpu 0  STIMER0_CONFIG 0x30008 (one-shot, DISABLED), time-stamp counter 1,992,000,000 Hz (FALLBACK, measured at the wall; CPUID.15H read zero)
+    asked      17,512.7 x100ns per arm (1.751 ms, 571.0 Hz)  over 1,232 arms
+    given      21,596.8 x100ns per arm (2.160 ms, 463.0 Hz)  over 1,220 answered
+    ratio         0.811x  LATE by 1.233x
+    arms asked 1,232, answered 1,220, displaced before an answer 12  (DISAGREE)
+
+    timeline, oldest first (us from the first row)
+             0.0 us  clock vector injected             209
+            41.6 us  STIMER0_COUNT           2,268,606,725
+          2638.4 us  clock vector injected             209
+          2674.8 us  STIMER0_COUNT           2,268,633,057
+          5267.0 us  clock vector injected             209
+          5317.4 us  STIMER0_COUNT           2,268,659,469
+          7899.5 us  clock vector injected             209
+          7941.0 us  STIMER0_COUNT           2,268,685,720
+         10527.8 us  clock vector injected             209
+         10564.0 us  STIMER0_COUNT           2,268,711,949
+         13149.6 us  clock vector injected             209
+         13186.0 us  STIMER0_COUNT           2,268,738,167
+         15769.4 us  clock vector injected             209
+         15805.6 us  STIMER0_COUNT           2,268,764,364
+         18388.4 us  clock vector injected             209
+         18424.6 us  STIMER0_COUNT           2,268,790,556
+         21008.5 us  clock vector injected             209
+         21044.8 us  STIMER0_COUNT           2,268,816,756
+         23631.2 us  clock vector injected             209
+         23667.5 us  STIMER0_COUNT           2,268,842,984
+         26252.6 us  clock vector injected             209
+         26289.7 us  STIMER0_COUNT           2,268,869,205
+         28882.3 us  clock vector injected             209
+         28924.2 us  STIMER0_COUNT           2,268,895,550
+         31513.7 us  clock vector injected             209
+         31555.5 us  STIMER0_COUNT           2,268,921,861
+         34141.0 us  clock vector injected             209
+         34177.1 us  STIMER0_COUNT           2,268,948,080
+         36762.8 us  clock vector injected             209
+         36804.4 us  STIMER0_COUNT           2,268,974,352
+         39396.4 us  clock vector injected             209
+         39432.6 us  STIMER0_COUNT           2,269,000,635
+
+  cpu 1  STIMER0_CONFIG 0x3000a (periodic, DISABLED), time-stamp counter 1,992,000,000 Hz (FALLBACK, measured at the wall; CPUID.15H read zero)
+    asked      28,080.8 x100ns per arm (2.808 ms, 356.1 Hz)  over 13 arms
+    given      28,325.6 x100ns per arm (2.833 ms, 353.0 Hz)  over 13 answered
+    ratio         0.991x  ok
+    arms asked 13, answered 13, displaced before an answer 0  (one vector per arm)
+
+    timeline, oldest first (us from the first row)
+             0.0 us  clock vector injected             209
+           776.7 us  clock vector injected             209
+          1759.2 us  clock vector injected             209
+          2759.9 us  clock vector injected             209
+          4719.1 us  clock vector injected             209
+          6468.3 us  clock vector injected             209
+          8218.0 us  clock vector injected             209
+          9927.5 us  clock vector injected             209
+         11663.6 us  clock vector injected             209
+         13401.9 us  clock vector injected             209
+         15114.7 us  clock vector injected             209
+         16859.5 us  clock vector injected             209
+         18585.2 us  clock vector injected             209
+         20302.7 us  clock vector injected             209
+         21550.2 us  clock vector injected             209
+         25038.4 us  clock vector injected             209
+         27795.3 us  clock vector injected             209
+         31078.9 us  clock vector injected             209
+         31871.8 us  clock vector injected             209
+         32844.7 us  clock vector injected             209
+         33624.5 us  clock vector injected             209
+         38196.4 us  clock vector injected             209
+         38951.6 us  clock vector injected             209
+         39961.7 us  clock vector injected             209
+         40953.9 us  clock vector injected             209
+         42918.0 us  clock vector injected             209
+         47155.3 us  clock vector injected             209
+         48149.0 us  clock vector injected             209
+         49120.9 us  clock vector injected             209
+         49892.4 us  clock vector injected             209
+         51519.8 us  clock vector injected             209
+         53663.6 us  clock vector injected             209
+
+cpu 0 load_l1_host_state audit (52 fields written, 922,328 samples)
+  46 of 52 slots never observed changed - those writes are the elidable set
+  writes elided: 8,157,410
+  DIVERGED AFTER ELISION: 0   (the safety property holds)
+    slot  2  field 0x6804  changed        1  <- the processor undoes this one
+    slot  5  field 0x681e  changed    17737  <- the processor undoes this one
+    slot  6  field 0x681c  changed        1  <- the processor undoes this one
+    slot  7  field 0x6820  changed    17728  <- the processor undoes this one
+    slot 13  field 0x4802  changed     2600  <- the processor undoes this one
+    slot 17  field 0x4804  changed     2626  <- the processor undoes this one
+
+cpu 1 load_l1_host_state audit (52 fields written, 1,279,756 samples)
+  46 of 52 slots never observed changed - those writes are the elidable set
+  writes elided: 12,267,878
+  DIVERGED AFTER ELISION: 0   (the safety property holds)
+    slot  2  field 0x6804  changed        1  <- the processor undoes this one
+    slot  5  field 0x681e  changed    24611  <- the processor undoes this one
+    slot  6  field 0x681c  changed        1  <- the processor undoes this one
+    slot  7  field 0x6820  changed    24603  <- the processor undoes this one
+    slot 13  field 0x4802  changed     3889  <- the processor undoes this one
+    slot 17  field 0x4804  changed     3974  <- the processor undoes this one
+
+guest-state shadow: 0 divergences over 454,287 deferrable exits
+  none - the deferral's model matched vmcs02 every time, so the fourth condition is not a stale field value
+
+cpu 0 where an exit's cycles are
+  exits handled            889,225
+  inside this VMM          316,962 cycles/exit
+  wall clock per exit      514,287 cycles/exit
+  share inside this VMM    61.6%
+  everything else          197,324 cycles/exit  (transition, the level above, its guest)
+  guest-state reads: 364,908 done, 8,027,976 skipped  (9.0 skipped per exit)
+  mapping window: 229,859,570 repoints through the cached leaf, 3 through the full walk (100.00% fast, 258.5 per exit)
+
+cpu 1 where an exit's cycles are
+  exits handled            667,649
+  inside this VMM          216,667 cycles/exit
+  wall clock per exit      678,819 cycles/exit
+  share inside this VMM    31.9%
+  everything else          462,152 cycles/exit  (transition, the level above, its guest)
+  guest-state reads: 547,780 done, 12,051,116 skipped  (18.1 skipped per exit)
+
+--- cpu 0: HvCallVtlCall 0x11, 24,587 switches ---
+     register       changed  first                latest
+     rax                 0  0x0                  0x0
+     rbx             15133  0xd10002             0xd10002
+     rcx                 0  0x11                 0x11
+     rdx             15217  0xfffff38e34270930   0xfffff38e34270930
+     rsp             15219  0xfffff38e34270708   0xfffff38e34270708
+     rbp                78  0xffffb70729ccf400   0xffffb70729ccf400
+     rsi               583  0x1                  0x1
+     rdi                78  0xffffb70729ccf400   0xffffb70729ccf400
+     r8                755  0x0                  0x0
+     r9                 78  0x104                0x104
+     r10             16433  0x0                  0x0
+     r11             19158  0xfffff780000003b0   0xfffff780000003b0
+     r12               583  0x0                  0x0
+     r13             16959  0xf                  0xf
+     r14                 1  0x2                  0x2
+     r15             14955  0xd1                 0xd1
+     rip                 0  0xfffff8063b390019   0xfffff8063b390019
+     cr3                11  0x1ae002             0x1ae002
+     rflags          12455  0x40282              0x40282
+     eptp                0  0x101b1a01e          0x101b1a01e
+
+--- cpu 0: HvCallVtlReturn 0x12, 24,589 switches ---
+     register       changed  first                latest
+     rax                 2  0x1                  0x1
+     rbx             15226  0x100d30102          0x100d10102
+     rcx                 0  0x12                 0x12
+     rdx                 0  0x0                  0x0
+     rsp                 0  0xffffbc803f32dec8   0xffffbc803f32dec8
+     rbp                 1  0x0                  0x0
+     rsi                 1  0x0                  0x0
+     rdi               300  0xffffb707294de080   0xffffb70729ccf400
+     r8                  0  0x0                  0x0
+     r9                  0  0x0                  0x0
+     r10                 0  0x0                  0x0
+     r11                 0  0x0                  0x0
+     r12               583  0x0                  0x0
+     r13             17143  0xffffff7c0321300f   0xf
+     r14                 0  0x0                  0x0
+     r15                 1  0x0                  0x0
+     rip                 0  0xfffff8063b390032   0xfffff8063b390032
+     cr3                 0  0x8800002            0x8800002
+     rflags              0  0x46                 0x46
+     eptp                0  0x101b1d01e          0x101b1d01e
+
+--- cpu 0: STIMER0 periodic arm, 1 switches ---
+     register       changed  first                latest
+     rax                 0  0x43f8               0x43f8
+     rbx                 0  0x43f8               0x43f8
+     rcx                 0  0x400000b1           0x400000b1
+     rdx                 0  0x0                  0x0
+     rsp                 0  0xfffff38e340075b0   0xfffff38e340075b0
+     rbp                 0  0x43f8               0x43f8
+     rsi                 0  0x2                  0x2
+     rdi                 0  0xfffff79d000186d8   0xfffff79d000186d8
+     r8                  0  0xfffff79d000186d8   0xfffff79d000186d8
+     r9                  0  0xfffff806acfa5780   0xfffff806acfa5780
+     r10                 0  0x1fffff00d59f4af0   0x1fffff00d59f4af0
+     r11                 0  0x1000000000000      0x1000000000000
+     r12                 0  0xfffff806adbd0700   0xfffff806adbd0700
+     r13                 0  0x0                  0x0
+     r14                 0  0xfffff38e34007660   0xfffff38e34007660
+     r15                 0  0x0                  0x0
+     rip                 0  0xfffff806acfa57f8   0xfffff806acfa57f8
+     cr3                 0  0x1ae002             0x1ae002
+     rflags              0  0x40046              0x40046
+     eptp                0  0x101b1a01e          0x101b1a01e
+
+--- cpu 1: HvCallVtlCall 0x11, 4,153 switches ---
+     register       changed  first                latest
+     rax                 0  0x0                  0x0
+     rbx              2201  0x2d0002             0x2d0002
+     rcx                 0  0x11                 0x11
+     rdx              2301  0xfffff38e340073e0   0xfffff38e340073e0
+     rsp              2301  0xfffff38e340071b8   0xfffff38e340071b8
+     rbp                22  0xffffb707294de080   0xffffb707294de080
+     rsi              1344  0x1                  0x1
+     rdi                22  0xffffb707294de080   0xffffb707294de080
+     r8               1376  0x0                  0x0
+     r9                 22  0x8                  0x8
+     r10              2073  0x0                  0x0
+     r11              2030  0xfffff780000003b0   0xfffff780000003b0
+     r12              1344  0x0                  0x0
+     r13              1944  0xffffb70729d0200f   0xffffb70729d0200f
+     r14                 0  0x2                  0x2
+     r15              2167  0x2d                 0x2d
+     rip                 0  0xfffff8063b390019   0xfffff8063b390019
+     cr3                28  0x1ae002             0x1ae002
+     rflags            707  0x40286              0x40286
+     eptp                0  0x101b1a01e          0x101b1a01e
+
+--- cpu 1: HvCallVtlReturn 0x12, 4,166 switches ---
+     register       changed  first                latest
+     rax                 6  0x1                  0x1
+     rbx              2255  0xf70102             0x1002d0102
+     rcx                 0  0x12                 0x12
+     rdx                 9  0x0                  0x0
+     rsp                 0  0xffffbc804007dec8   0xffffbc804007dec8
+     rbp                 7  0x0                  0x0
+     rsi                 8  0x0                  0x0
+     rdi               100  0xffffb707294de080   0xffffb707294de080
+     r8                  6  0x0                  0x0
+     r9                  7  0x0                  0x0
+     r10                 8  0x0                  0x0
+     r11                 8  0x0                  0x0
+     r12              1349  0x1                  0x0
+     r13              1977  0xfffff806426a500f   0xffffb70729d0200f
+     r14                 7  0x0                  0x0
+     r15                 9  0x0                  0x0
+     rip                 0  0xfffff8063b390032   0xfffff8063b390032
+     cr3                 0  0x8800002            0x8800002
+     rflags              0  0x46                 0x46
+     eptp                0  0x101b1d01e          0x101b1d01e
+
+--- HvCallVtlCall 0x11 call site ---
+  rip 0xfffff8063b390019 rsp 0xfffff38e340071b8 cr3 0x1ae002
+  image  0x0 ''
+  caller 0xfffff806acd81000 '' at 0xfffff806ad2a774b
+    +0x000  0xfffff806ad2a774b
+    +0x008  0xffffca01800109e0
+    +0x010  0xfffff38e340073e0
+    +0x030  0x3640
+    +0x0e8  0x5420000
+    +0x0f0  0xfffff806acf8e571
+    +0x0f8  0xffffca0009daa180
+    +0x100  0xffffb707294de080
+    +0x108  0xfffff38e340073e0
+    +0x110  0x1
+    +0x118  0x1
+    +0x128  0xffffb70729d0200f
+    +0x130  0x2
+    +0x138  0x2d
+    +0x140  0xfffff806acf8e108
+    +0x148  0xfffff806adb8df40
+    +0x150  0xffffb70700000000
+    +0x170  0xffffca0009daa180
+    +0x178  0xfffff806002d8d01
+    +0x180  0x809daa180
+    +0x188  0xffffb70729d0200f
+    +0x190  0x500000000
+    +0x198  0x100000000
+    +0x1a8  0xfffff806ada39bb8
+    +0x1b8  0xffffc2993d93c1a4
+    +0x1c0  0xfffff806acf31081
+    +0x1c8  0x348e08
+    +0x1d0  0x6
+    +0x1d8  0xffffb70729d02050
+    +0x1e8  0x6
+    +0x1f0  0x348e08
+    +0x1f8  0x140000084
+  code at 0xfffff806ad2a734b:
+    0000000000668b02458bc86642890409b802000000c3cccccccccccc660f1f8400000000008b02458bc842890409b804000000c3cccccccccccccc66660f1f84000000000048894c24084883ec284885c97445e84d4e0000e8c8f6efff4c8bc8488b4424304805f000000049b8a0752aad06f8ffff4c8980f80000004c8d4424304c8980980000004c8b4424284c8940784c89888000000033c04883c428c3cccccccccccc48894c24084883ec28e832f6dcff488b4c2430f0ff01f39083390075f90f20d00f22d04883c428c3cccccccccccc669048894c24084883ec28488b05689a9100891033c933d24d33c049b9ffffffff00000000e88881e9ff488b4c24304881c190000000e8974d0000e812f6efff4c8bc8488b44243049b8a0752aad06f8ffff4c8980780200004c8d4424304c8980180200004c8b4424284c8980f80100004c89880002000033c04883c428c3cccccccccccc66666666660f1f840000000000658b0425a40100008bc84869c1c0050000480305b09991004805f0000000488b9890000000488b8880000000488b9088000000488bb0a8000000488bb8b0000000488ba098000000488ba8a00000004c8b80b80000004c8b88c00000004c8b90c80000004c8b98d00000004c8ba0d80000004c8ba8e00000004c8bb0e80000004c8bb8f0000000ff70449d0fae88000100000f28b0000200000f28b810020000440f288020020000440f288830020000440f289040020000440f289850020000440f28a060020000440f28a870020000440f28b080020000440f28b890020000488b4078eb0acccccccccccc0f1f40004883ec304889442428488d542430e86df5efff4883c428b801000000c3cccccccccccc66666666660f1f8400000000004853415456574883ec28488bda498bf0498bf9488d05a6fdffff4533e4ffd00f1f004585e47536488b542470880284c0753e41ffc4f0ff057c778e004885db742feb02f390393d6d778e0075f6488bcbe8fbdb0000488bc3488bceebc0b9940200403bc1750c488b542470c60201eb0233c08bf0488b4424708a08e8b0fcebff8bc64883c4285f5e415c5bc3cccccccccccccccccccc66660f1f8400000000004851505265488b1425888d0000b9700000400fba3200720633c08bd00f305a5859c3cccccccccccc0f1f8400000000004881ec38010000488d8424000100000f297424300f297c2440440f29442450440f294c2460440f29542470440f295880440f296090440f2968a0440f2970b0440f2978c0488968f848891848897808488970104c8960184c8968204c8970284c8978304889542408488b1af3440f6f5208f3440f6f5a18f3440f6f6228f3440f6f6a38f3440f6f7248f3440f6f7a584d8bc8450f20c065488b3c2588010000488b051aa1b500e8a5000000
+  vp assist level 0: page 0x114fb5000 read 512 bytes err 0x0 first 0x114fb5000
+
+--- HvCallVtlReturn 0x12 call site ---
+  rip 0xfffff8063b390032 rsp 0xffffbc804007dec8 cr3 0x8800002
+  image  0x0 ''
+  caller 0xfffff806441e1000 'securekernel.exe' at 0xfffff806442ba3a4
+    +0x000  0xfffff806442ba3a4
+    +0x010  0xf70002
+    +0x028  0x348e07
+    +0x030  0xfffff806426a5000
+    +0x0d8  0x200
+    +0x130  0x20001
+  code at 0xfffff806442b9fa4:
+    c4205fc3cccccccccccccccc4883ec38488b0575f604004d8bd14d8bd84885c0750f488b442470832000b803000000eb27488b5424704d8bc2448b4c24604889542428488b5424684889542420488bd1498bcbffd00f1f004883c438c3cccccccccccccc48895c240848896c241856574154415641574881ec80000000488b05d82704004833c448894424704c8bb42400010000488d4c2430488bbc2408010000488bea33d2418ad9448d4240e86ab400004533e484db740a418d442403e9c60000004d89264c89278bbc24f000000065488b1c250000000085ff0f84a4000000488b73704c8d4c2420488bc5488d4c243048c1e80c33d241b8001000004889442420e8d8f0f5ffba01000000488d4c24304c8bc6e87257f4ff448bbc24e800000081e5ff0f00004803f54585ff74358bac24d800000083c510740f488b4b78488bd6448bc5e891ad000041c1e7054403fd412bff418bcf48034b78448bc7498d1437eb0a488b4b784c8bc7488bd6e868ad0000488d4c2430e8aa4ef4ff488b4b7849890e410fb7c4488b4c24704833cce8565400004c8d9c2480000000498b5b30498b6b40498be3415f415e415c5f5ec3cccccccccccccccccccccccccccccccc66660f1f8400000000004157415641554154535657559c4881ecd00000000f297424300f297c2440440f29442450440f294c2460440f29542470440f299c2480000000440f29a42490000000440f29ac24a0000000440f29b424b0000000440f29bc24c0000000488bec450f20c06683a528010000004488852a01000033ff4d33e44d33ed0f57f60f57ff450f57c0450f57c948898d200100004c8bf965488b34250800000041807f01058b9ea80000007507808d2901000001fa654c8b3425000000004180beb6000000007419488b4e70488d0581a606000fae010fae084180a6b600000000f786ac00000000080000742c493976487526b9020100c00f328986b80000008996bc000000b9000100c00f328986b00000008996b40000004c8bc5488bd6498bcee80555fbff418b0748c1e320480bd8f3450f6f5708f3450f6f5f18f3450f6f6728f3450f6f6f38f3450f6f7748f3450f6f7f58488be583bea8000000004889ae800000007412488bd5498b6630488bec488bcee8be55fbff33f64d33ff4d33f633ed0f20e048a9000004007429488b058ef9040065488b142500090000483bd07414488bc283e003740c488bc248c1ea2033c90f01d133d24d33c04d33c94d33d24d33db0f57c00f57c90f57d20f57db0f57e40f57ed0f22d2b901000000658a0425c0000000a8027417658a0425b00a0000a840740b890c24e8d45500008b0c2448833d893c0700007422f048ff0d7f3c070048833d773c070000f39075f4803d748d0600007405e845070000488b05ce5c0600ffd0
+  vp assist level 0: page 0x0 read 0 bytes err 0x100000010 first 0x0
+
+--- STIMER0 periodic arm call site ---
+  rip 0xfffff806acfa57f8 rsp 0xfffff38e340075b0 cr3 0x1ae002
+  image  0xfffff806acc00000 'ntoskrnl.exe'
+  caller 0xfffff806acc00000 'ntoskrnl.exe' at 0xfffff806acf5d4ed
+    +0x000  0xffffb707294ba000
+    +0x008  0xfffff806acf5d4ed
+    +0x018  0xfffff806adafeb80
+    +0x020  0x1
+    +0x028  0xfffff806acf6b564
+    +0x030  0x43f8
+    +0x038  0xfffff79d00018580
+    +0x040  0x1
+    +0x048  0xfffff806ad07af56
+    +0x058  0x1
+    +0x060  0xfffff8063b166180
+    +0x068  0x43f8
+    +0x078  0xfffff806acf0dcfc
+    +0x080  0xfffff8063b16f700
+    +0x090  0xfffff8063b166180
+    +0x098  0xc000000d
+    +0x0a8  0xfffffffffffffffd
+    +0x0b8  0xd1
+    +0x0c0  0xd
+    +0x0c8  0xfffff806ad77410d
+    +0x0d0  0x1
+    +0x0d8  0x4000
+    +0x0e8  0xffffc2993d93c494
+    +0x0f0  0x2625a
+    +0x0f8  0xfffff8063b166180
+    +0x100  0x5780
+    +0x108  0xfffff806adbd0700
+    +0x110  0xfffff8063b166180
+    +0x118  0xfffff806acf0d7da
+    +0x120  0xfffff38e34007880
+    +0x128  0x43f8
+    +0x130  0xfffff38e340077d0
+    +0x158  0xfffff806ad144eee
+    +0x160  0x10001000000
+    +0x168  0x2625a00000003
+    +0x170  0xffffc2993d93c454
+    +0x180  0xfffffffffffffffd
+    +0x188  0xfffff806ad0f5432
+    +0x190  0x43f8
+    +0x198  0xfffff806ad07af56
+    +0x1a8  0xfffff79d00001af0
+    +0x1b0  0x6
+    +0x1c0  0xfffff38e34007778
+    +0x1c8  0xfffff806acf0da75
+    +0x1d0  0x47
+    +0x1d8  0xfffff806ad037f76
+    +0x1e0  0xd100000000
+    +0x1e8  0xd
+    +0x1f8  0x1
+  code at 0xfffff806acf5d0ed:
+    542438448b8424c0000000498b4720488d157d94ffff48330536b2ac00498bcf49334f084933c74533c9483bc2498bd20f850d020000e85894ffff488b8c24a0000000898424c00000004c8be185c00f887a0100004d0975108b442440f049014750448bf34d8d6705440fb60141f6c0017514410fb64f03488d542448e8a1b2ffff450fb604248b9424b0000000448be28b4c2434898c24c00000004585f6790b448d2411899c24c000000041f6c001751e488b8c24a8000000410fb657034883c1084c8b8424c8000000e813f6fcff816708fffdffff8b8c24c0000000e9bbf4ffff4885c00f8523feffffe989faffff4983c1e08bc7c1e8100f57c0498bc9482bcf48c1f9046633c12bd1664133c0448bc266894702498bc1410f110149c1e004410f11411066418951024d03c1664189490449330148330515b1ac00498901410fb745204883c00348c1e0044903c54c3bc00f8301f9ffff0fb7c248899c24a0000000898424a4000000498bc0488b8c24a000000048c1e82048c1e9206633c8488b05cab0ac0048c1e8206633c86641894804e9c1f8ffff418d40ff418bd048c1e80c412bd241c1ea0cb93f0000002ac84d8bc649d3e8498bc6410fb6ca48d3e04c23c04d234510e90df9ffff448bb424c0000000e98dfeffff03d1442bf1e9e0f2ffff498bd5498bcfe8560d00008b8424c00000004883c460415f415e415d415c5f5e5bc3cc4885d2750732c0e983faffff4933d2e944faffff458be6e9a0f5ffff498b5424104885d2750732c0e946f9ffff4d8d5c24104c33dae9f8f8ffffe82b348600e9eefdffff4c89a424a0000000e92afdffff488b0f48330defafac004833cf48c1e920e968f3ffff49014f58e903f2ffff49015758e9a9f9ffff49015758e925f5ffff49015758e91af6ffff4d014758e93cf7ffff4d014758e955f8ffff4833c2e935feffff4833c2e9b7fbffffcccccccccccccccccc4c8bdc49895b0845894b2055565741544155415641574883ec500fb64104458d5002488be9413bd00fb709448bfa450f44d00f57c083e00148c1e106ffc0488d5d034183c20f4803cd41c1ea044533e44103c2448be88984249800000065488b04258801000041c1e5100fb690750700000fb6450223d033c0899424a0000000440fb7349149c1e6064c03f5f64505010f11442430498943b875180fb6134d8d43a8498d4e08e84508000085c00f84f8000000448b842498000000488d442430458bcd4889442420498bd6488bcde821010000488bf04885c00f84af000000f6450501750d0fb60b488d542430e872afffff0fb75e02488d7e108bc6c1e81033d80fb7058eaeac0033d8c1e30483eb10f64504017413488d462048a9ff0f00007507488d7e2083c3f0f68424a800000002448bf3740b418bd6488bcfe8c38e3500
+  vp assist level 0: page 0x117a43000 read 512 bytes err 0x0 first 0x117a43000
+
+cpu  guest-state skipped/done   control skipped/done
+  0      5364744/    2285973      3634860/     109327
+  1     10067760/     347514      4555474/      47529
+
+vmcs fields the guest hypervisor uses
+  --- vmread (1111 total, 28 distinct) ---
+    0x6400 exit_qualification                                  227   20.4%
+    0x640a guest_linear_address                                133   12.0%
+    0x4408 idt_vectoring_information_field                     133   12.0%
+    0x2400 guest_physical_address                              133   12.0%
+    0x6802 guest_cr3                                           104    9.4%
+    0x440e vm_exit_instruction_information                      67    6.0%
+    0x6818 guest_idtr_base                                      57    5.1%
+    0x4812 guest_idtr_limit                                     57    5.1%
+    0x681c guest_rsp                                            51    4.6%
+    0x6804 guest_cr4                                            33    3.0%
+    0x6800 guest_cr0                                            26    2.3%
+    0x400c vm_exit_controls                                     13    1.2%
+    0x6808 guest_cs_base                                        12    1.1%
+    0x4802 guest_cs_limit                                       12    1.1%
+    0x0802 guest_cs_selector                                    12    1.1%
+    0x6816 guest_gdtr_base                                       8    0.7%
+    0x4810 guest_gdtr_limit                                      8    0.7%
+    0x6826 guest_ia32_sysenter_eip                               3    0.3%
+    0x6824 guest_ia32_sysenter_esp                               3    0.3%
+    0x482a guest_ia32_sysenter_cs                                3    0.3%
+    0x6814 guest_tr_base                                         2    0.2%
+    0x6812 guest_ldtr_base                                       2    0.2%
+    0x4822 guest_tr_access_rights                                2    0.2%
+    0x4820 guest_ldtr_access_rights                              2    0.2%
+    0x480e guest_tr_limit                                        2    0.2%
+    0x480c guest_ldtr_limit                                      2    0.2%
+    0x080e guest_tr_selector                                     2    0.2%
+    0x080c guest_ldtr_selector                                   2    0.2%
+  --- vmwrite (1030 total, 97 distinct) ---
+    0x2806 guest_ia32_efer                                      20    1.9%
+    0x6804 guest_cr4                                            19    1.8%
+    0x6006 cr4_read_shadow                                      19    1.8%
+    0x400c vm_exit_controls                                     19    1.8%
+    0x4012 vm_entry_controls                                    18    1.7%
+    0x6004 cr0_read_shadow                                      17    1.7%
+    0x6818 guest_idtr_base                                      15    1.5%
+    0x6816 guest_gdtr_base                                      15    1.5%
+    0x6814 guest_tr_base                                        15    1.5%
+    0x6812 guest_ldtr_base                                      15    1.5%
+    0x6810 guest_gs_base                                        15    1.5%
+    0x680e guest_fs_base                                        15    1.5%
+    0x680c guest_ds_base                                        15    1.5%
+    0x680a guest_ss_base                                        15    1.5%
+    0x6808 guest_cs_base                                        15    1.5%
+    0x6806 guest_es_base                                        15    1.5%
+    0x6802 guest_cr3                                            15    1.5%
+    0x4822 guest_tr_access_rights                               15    1.5%
+    0x4820 guest_ldtr_access_rights                             15    1.5%
+    0x481e guest_gs_access_rights                               15    1.5%
+    0x481c guest_fs_access_rights                               15    1.5%
+    0x481a guest_ds_access_rights                               15    1.5%
+    0x4814 guest_es_access_rights                               15    1.5%
+    0x4812 guest_idtr_limit                                     15    1.5%
+    0x4810 guest_gdtr_limit                                     15    1.5%
+    0x480e guest_tr_limit                                       15    1.5%
+    0x480c guest_ldtr_limit                                     15    1.5%
+    0x480a guest_gs_limit                                       15    1.5%
+    0x4808 guest_fs_limit                                       15    1.5%
+    0x4806 guest_ds_limit                                       15    1.5%
+    0x4804 guest_ss_limit                                       15    1.5%
+    0x4802 guest_cs_limit                                       15    1.5%
+    0x4800 guest_es_limit                                       15    1.5%
+    0x080e guest_tr_selector                                    15    1.5%
+    0x080c guest_ldtr_selector                                  15    1.5%
+    0x080a guest_gs_selector                                    15    1.5%
+    0x0808 guest_fs_selector                                    15    1.5%
+    0x0806 guest_ds_selector                                    15    1.5%
+    0x0804 guest_ss_selector                                    15    1.5%
+    0x0802 guest_cs_selector                                    15    1.5%
+    0x0800 guest_es_selector                                    15    1.5%
+    0x6826 guest_ia32_sysenter_eip                              13    1.3%
+    0x6824 guest_ia32_sysenter_esp                              13    1.3%
+    0x6800 guest_cr0                                            13    1.3%
+    0x482a guest_ia32_sysenter_cs                               13    1.3%
+    0x2804 guest_ia32_pat                                       13    1.3%
+    0x2010 tsc_offset                                           13    1.3%
+    0x4004 exception_bitmap                                     12    1.2%
+    0x681c guest_rsp                                            11    1.1%
+    0x6c16 host_rip                                             10    1.0%
+    0x401e secondary_processor_based_vm_execution_controls         10    1.0%
+    0x4018 vm_entry_exception_error_code                        10    1.0%
+    0x6c14 host_rsp                                              8    0.8%
+    0x6002 cr4_guest_host_mask                                   8    0.8%
+    0x6c12 host_ia32_sysenter_eip                                6    0.6%
+    0x6c10 host_ia32_sysenter_esp                                6    0.6%
+    0x6c0e host_idtr_base                                        6    0.6%
+    0x6c0c host_gdtr_base                                        6    0.6%
+    0x6c0a host_tr_base                                          6    0.6%
+    0x6c08 host_gs_base                                          6    0.6%
+    0x6c06 host_fs_base                                          6    0.6%
+    0x6c04 host_cr4                                              6    0.6%
+    0x6c02 host_cr3                                              6    0.6%
+    0x6c00 host_cr0                                              6    0.6%
+    0x6822 guest_pending_debug_exceptions                        6    0.6%
+    0x6000 cr0_guest_host_mask                                   6    0.6%
+    0x4c00 host_ia32_sysenter_cs                                 6    0.6%
+    0x4826 guest_activity_state                                  6    0.6%
+    0x401a vm_entry_instruction_length                           6    0.6%
+    0x4014 vm_entry_msr_load_count                               6    0.6%
+    0x4010 vm_exit_msr_load_count                                6    0.6%
+    0x400e vm_exit_msr_store_count                               6    0.6%
+    0x400a cr3_target_count                                      6    0.6%
+    0x4008 page_fault_error_code_match                           6    0.6%
+    0x4006 page_fault_error_code_mask                            6    0.6%
+    0x4000 pin_based_vm_execution_controls                       6    0.6%
+    0x2c02 host_ia32_efer                                        6    0.6%
+    0x2c00 host_ia32_pat                                         6    0.6%
+    0x2802 guest_ia32_debugctl                                   6    0.6%
+    0x2800 vmcs_link_pointer                                     6    0.6%
+    0x2012 virtual_apic_address                                  6    0.6%
+    0x200a vm_entry_msr_load_address                             6    0.6%
+    0x2008 vm_exit_msr_load_address                              6    0.6%
+    0x2006 vm_exit_msr_store_address                             6    0.6%
+    0x0c0c host_tr_selector                                      6    0.6%
+    0x0c0a host_gs_selector                                      6    0.6%
+    0x0c08 host_fs_selector                                      6    0.6%
+    0x0c06 host_ds_selector                                      6    0.6%
+    0x0c04 host_ss_selector                                      6    0.6%
+    0x0c02 host_cs_selector                                      6    0.6%
+    0x0c00 host_es_selector                                      6    0.6%
+    0x202c xss_exiting_bitmap                                    4    0.4%
+    0x201a ept_pointer                                           4    0.4%
+    0x2004 msr_bitmap                                            4    0.4%
+    0x2002 io_bitmap_b                                           4    0.4%
+    0x2000 io_bitmap_a                                           4    0.4%
+    0x0000 vpid                                                  4    0.4%
+
+gs processor index agreed on all 1,576,772 exits checked
+
+[our own vmcs accesses: could not find zpp::arch::x86_64::vmx::vmcs_read_field in .rig-deployed-hypervisor.elf]
+
+guest thread list: 6 threads, walk ran 1 time(s), refreshed 56 time(s)
+  process 0xffffb707294a1040   kernel image 0xfffff806acc00000 + 0x1450000
+  [start addresses unsymbolized: no ntkrnlmp.pdb under syms/ - pass --guest-syms]
+  idx  thread              state         irql  wait reason
+  [ 0] 0xffffb707294de080  Running          0  Executive  start 0xfffff806ad2fb520
+  [ 1] 0xffffb707294b3040  Waiting          0  Executive  start 0xfffff806ad1d4fe0
+  [ 2] 0xffffb707294b2040  Waiting          0  Executive  start 0xfffff806ad0e33e0
+  [ 3] 0xffffb70729492040  Waiting          0  Executive  start 0xfffff806ad0e33e0
+  [ 4] 0xffffb707294f0040  Waiting          0  Executive  start 0xfffff806ad1cf460
+  [ 5] 0xffffb707294f1040  Waiting          0  Executive  start 0xfffff806ad1cf460
+
+  5 waiting, 1 running/standby, 0 ready, 0 other
+  AT LEAST ONE THREAD IS RUNNABLE. The guest is executing work, not blocked - which points at throughput and away from a stalled device.
+     5 x Executive - waiting on a dispatcher object somebody else must signal
+
+  is this reading live? `guest_thread_refreshes` = 56. Run:
+    python3 scripts/rig-dump-state.py --elf .rig-deployed-hypervisor.elf --delta 20 2>&1 | grep -i thread
+  A refresh count that does not move over the window means the sampler stopped and the states above are stale - NOT that the threads stopped changing.
+
+cpu 0 where the handler's time goes, by exit reason (315,327 cycles/exit overall)
+  vmcall           107,524 1,465,851cyc  55.6%   532.6rd    16.3wr    2,670/acc  107525/107524
+  vmresume         468,219   213,466cyc  35.2%    43.4rd    26.5wr    3,054/acc  L1
+  ept-violation    538,382   134,957cyc  25.6%    21.4rd     1.4wr    5,925/acc  538213/538382
+  wrmsr            182,336   202,836cyc  13.0%    53.0rd    14.2wr    3,015/acc  182332/182336
+  vmptrld           76,761   343,792cyc   9.3%    77.0rd    10.5wr    3,927/acc  L1
+  int-window        90,889   202,583cyc   6.5%    50.6rd    13.5wr    3,161/acc  L2
+  hlt               33,784   203,544cyc   2.4%    69.1rd    18.5wr    2,322/acc  L2
+  ext-int           31,948   208,222cyc   2.3%    54.3rd    13.3wr    3,080/acc  31949/31948
+  tpr-below         20,199   200,432cyc   1.4%    51.5rd    12.5wr    3,128/acc  L2
+  invept            23,737   135,529cyc   1.1%    30.3rd     2.9wr    4,078/acc  L1
+  invvpid            7,066    83,718cyc   0.2%    32.8rd     3.2wr    2,325/acc  L1
+  cpuid              6,834    84,271cyc   0.2%    19.9rd     3.6wr    3,601/acc  691/6834
+  rdmsr              1,077   125,735cyc   0.0%    29.4rd     7.0wr    3,460/acc  625/1077
+  vmread             1,111    81,473cyc   0.0%    29.3rd     2.9wr    2,531/acc  L1
+  vmwrite            1,030    51,168cyc   0.0%    20.1rd     2.0wr    2,316/acc  L1
+  gdtr-idtr             63   207,473cyc   0.0%    51.5rd    14.0wr    3,167/acc  L2
+  cr-access             18   208,663cyc   0.0%    46.1rd    15.3wr    3,402/acc  14/18
+  vmlaunch               6   611,183cyc   0.0%    69.7rd    82.0wr    4,030/acc  L1
+  io                    14   168,711cyc   0.0%    48.2rd     7.3wr    3,040/acc  13/14
+  ldtr-tr                4   406,906cyc   0.0%    99.8rd    59.5wr    2,555/acc  L2
+  sipi                   1 1,616,020cyc   0.0%    80.0rd    51.0wr   12,336/acc  L1
+  xsetbv                12   126,199cyc   0.0%    27.7rd    11.3wr    3,236/acc  4/12
+  vmclear                8   122,127cyc   0.0%    36.5rd     2.5wr    3,131/acc  L1
+  dr-access              2   321,659cyc   0.0%    79.0rd    36.0wr    2,797/acc  L2
+  vmon                   2   155,920cyc   0.0%    24.0rd     2.0wr    5,997/acc  L1
+  init                   1   143,788cyc   0.0%    15.0rd     4.0wr    7,568/acc  L1
+  --- split covers 153.1% of the cycles and 176.9% of the exits
+  --- vmcall takes 8.16x the VMCS accesses of a wrmsr and costs 7.23x the cycles; near-equal ratios mean the excess is hardware, a cost ratio far above the access ratio means it is software
+
+cpu 0 build_vmcs02, split (130,678 cycles a call over 185,618 calls)
+  slot                                      cyc/call  share  rd/call  wr/call  cyc/access
+  every guest-state field                     83,826  30.7%     3.66    29.48       2,530
+  host state once, then every control         82,737  30.3%    10.55    24.84       2,338
+  bitmaps merged, own controls in hand        52,530  19.2%     2.32     0.60      17,959
+  the event to inject, transition flush       25,603   9.4%     1.86     4.36       4,120
+  the VMPTRLD itself                          17,194   6.3%     1.03     0.22      13,740
+  ept pointer and TPR shadow decided           5,073   1.9%     0.18     0.06      20,677
+  controls read and validated                  3,177   1.2%     0.16     0.04      16,116
+  the three MSR areas checked                  3,092   1.1%     0.17     0.04      14,407
+  --- coverage 209.1% of the phase's cycles, 252.8% of its calls reached the end
+  --- 79.6 VMCS accesses a call; over the slots that take them, 3,434 cycles each (launch-time price list says ~3,100 a read, ~2,200 a write)
+  --- 100.0% of the phase is slots that touch the VMCS, 0.0% is software that touches nothing
+
+cpu 0 a vmcall reflection against a wrmsr one, by phase
+  vmcall (107,689 exits, 1,466,129 cyc, 549.1 accesses an exit)
+    save_l2_state          36,986 cyc    14.7rd     0.2wr
+    reflect_l2_exit       153,227 cyc    30.4rd    10.5wr
+    exit information       18,212 cyc     5.3rd     0.1wr
+    residue             1,257,704 cyc   482.3rd     5.6wr
+    --- the three phases hold 14.2% of the cycles and 11.1% of the accesses
+  wrmsr (183,251 exits, 202,724 cyc, 67.2 accesses an exit)
+    save_l2_state          47,912 cyc    17.4rd     1.0wr
+    reflect_l2_exit       164,189 cyc    38.8rd    13.4wr
+    exit information       19,649 cyc     6.4rd     0.5wr
+    residue               -29,026 cyc    -9.6rd    -0.7wr
+    --- the three phases hold 114.3% of the cycles and 115.4% of the accesses
+
+[l2 profile: no samples - is ZPP_PROFILE_L2 on?]
+
+cpu 0 exit reasons (total 903,213)
+  ept-violation          442933   49.0%
+  vmresume               186287   20.6%
+  vmcall                  93770   10.4%
+  vmptrld                 57830    6.4%
+  wrmsr                   44814    5.0%
+  hlt                     29244    3.2%
+  invept                  20086    2.2%
+  int-window               7631    0.8%
+  ext-int                  7049    0.8%
+  cpuid                    4918    0.5%
+  invvpid                  3751    0.4%
+  tpr-below                2631    0.3%
+  rdmsr                     943    0.1%
+  vmread                    763    0.1%
+  vmwrite                   497    0.1%
+  gdtr-idtr                  28    0.0%
+  io                         11    0.0%
+  cr-access                  10    0.0%
+  xsetbv                      8    0.0%
+  vmclear                     4    0.0%
+  vmlaunch                    3    0.0%
+  vmon                        1    0.0%
+  dr-access                   1    0.0%
+
+cpu 1 exit reasons (total 700,624)
+  vmresume               285998   40.8%
+  wrmsr                  139243   19.9%
+  ept-violation           99583   14.2%
+  int-window              84187   12.0%
+  ext-int                 25313    3.6%
+  vmptrld                 19300    2.8%
+  tpr-below               17828    2.5%
+  vmcall                  14057    2.0%
+  hlt                      4977    0.7%
+  invept                   3803    0.5%
+  invvpid                  3339    0.5%
+  cpuid                    1916    0.3%
+  vmwrite                   533    0.1%
+  vmread                    348    0.0%
+  rdmsr                     134    0.0%
+  gdtr-idtr                  35    0.0%
+  cr-access                   8    0.0%
+  vmclear                     4    0.0%
+  ldtr-tr                     4    0.0%
+  xsetbv                      4    0.0%
+  vmlaunch                    3    0.0%
+  io                          3    0.0%
+  init                        1    0.0%
+  sipi                        1    0.0%
+  vmon                        1    0.0%
+  dr-access                   1    0.0%
+
+cpu 0 vectors injected into the second level (49,430 over 8 distinct)
+  0xd1       41227   83.4%
+  0x40        4158    8.4%
+  0x2f        2866    5.8%
+  0x50         693    1.4%
+  0xd2         355    0.7%
+  0x60         123    0.2%
+  0xe1           6    0.0%
+  0xe0           2    0.0%
+
+cpu 0 external interrupt vectors reflected upward (7,060 over 6 distinct)
+  0xef        6080   86.1%
+  0xff         759   10.8%
+  0x50         106    1.5%
+  0x2f          68    1.0%
+  0x60          37    0.5%
+  0xed          10    0.1%
+
+cpu 1 vectors injected into the second level (85,625 over 7 distinct)
+  0xd1       64787   75.7%
+  0x2f       15287   17.9%
+  0x40        5106    6.0%
+  0x60         428    0.5%
+  0xf0          12    0.0%
+  0x0d           4    0.0%
+  0xe1           1    0.0%
+
+cpu 1 external interrupt vectors reflected upward (25,484 over 4 distinct)
+  0xef       24426   95.8%
+  0xff         921    3.6%
+  0x2f          89    0.3%
+  0x60          48    0.2%
+
+cpu 0 injection reconciliation: staged vs carried
+  0x2f  staged      2,866  carried          0   ** 2,866 STAGED AND NOT CARRIED - dropped here
+  0x40  staged      4,158  carried          0   ** 4,158 STAGED AND NOT CARRIED - dropped here
+  0x50  staged        693  carried          0   ** 693 STAGED AND NOT CARRIED - dropped here
+  0x60  staged        123  carried          0   ** 123 STAGED AND NOT CARRIED - dropped here
+  0xd1  staged     41,428  carried          0   ** 41,428 STAGED AND NOT CARRIED - dropped here
+  0xd2  staged        355  carried          0   ** 355 STAGED AND NOT CARRIED - dropped here
+  0xe0  staged          2  carried          0   ** 2 STAGED AND NOT CARRIED - dropped here
+  0xe1  staged          6  carried          0   ** 6 STAGED AND NOT CARRIED - dropped here
+  NOTE vectors staged and NONE carried. Either the census is off (needs census=1 in the manifest) or every injection is being lost before entry.
+
+cpu 1 injection reconciliation: staged vs carried
+  0x0d  staged          4  carried          0   ** 4 STAGED AND NOT CARRIED - dropped here
+  0x2f  staged     15,365  carried          0   ** 15,365 STAGED AND NOT CARRIED - dropped here
+  0x40  staged      5,137  carried          0   ** 5,137 STAGED AND NOT CARRIED - dropped here
+  0x60  staged        428  carried          0   ** 428 STAGED AND NOT CARRIED - dropped here
+  0xd1  staged     64,981  carried          0   ** 64,981 STAGED AND NOT CARRIED - dropped here
+  0xe1  staged          1  carried          0   ** 1 STAGED AND NOT CARRIED - dropped here
+  0xf0  staged         12  carried          0   ** 12 STAGED AND NOT CARRIED - dropped here
+  NOTE vectors staged and NONE carried. Either the census is off (needs census=1 in the manifest) or every injection is being lost before entry.
+
+--- cpu 0: last exits (count 819130) ---
+  [819098] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806ad2c10e7 phys=0x700060bcac [l2-rip]
+  [819099] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff8064036840a phys=0x120fc140a [l2-rip]
+  [819100] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806ad4a6e3b phys=0x361f066a8 [l2-rip]
+  [819101] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff8064023f84f phys=0x345556068 [l2-rip]
+  [819102] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806ad444ee8 phys=0x348bcde00 [l2-rip]
+  [819103] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff80642490790 phys=0x11f315790 [l2-rip]
+  [819104] hlt              qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [819105] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x400000b1 value=0x7e557b31 [l1-rip]
+  [819106] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806acfa57fa [l2-rip]
+  [819107] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806acf103ce phys=0x123c40c00 [l2-rip]
+  [819108] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806acf103ce phys=0x1003abc20 [l2-rip]
+  [819109] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806ad2a7682 phys=0x117a43000 [l2-rip]
+  [819110] hlt              qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [819111] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a6f8f [l2-rip]
+  [819112] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x400000b1 value=0x7e55e207 [l1-rip]
+  [819113] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806acfa57fa [l2-rip]
+  [819114] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806acf0b08f phys=0x11cf76158 [l2-rip]
+  [819115] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff80640f2dbdd phys=0x2ae968 [l2-rip]
+  [819116] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff80640f2dbdd phys=0x121b43bdd [l2-rip]
+  [819117] ept-violation    qual=0x0            active cs=0x0000 rip=0xfffff806ad448fe0 phys=0x35ab4fe40 [l2-rip]
+  [819118] hlt              qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [819119] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a6f8f [l2-rip]
+  [819120] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x400000b1 value=0x7e5647c5 [l1-rip]
+  [819121] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806acfa57fa [l2-rip]
+  [819122] hlt              qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [819123] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a6f8f [l2-rip]
+  [819124] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x400000b1 value=0x7e56ad62 [l1-rip]
+  [819125] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806acfa57fa [l2-rip]
+  [819126] hlt              qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [819127] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a6f8f [l2-rip]
+  [819128] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x400000b1 value=0x7e57145c [l1-rip]
+  [819129] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806acfa57fa [l2-rip]
+
+--- cpu 1: last exits (count 524667) ---
+  [524635] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad7bdf40 [l2-rip]
+  [524636] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x40000070 value=0x0 [l1-rip]
+  [524637] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a768e [l2-rip]
+  [524638] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524639] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524640] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x40000071 value=0x4002f [l1-rip]
+  [524641] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad02890d [l2-rip]
+  [524642] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524643] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524644] tpr-below        qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524645] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524646] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x40000071 value=0x4002f [l1-rip]
+  [524647] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad02890d [l2-rip]
+  [524648] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524649] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524650] tpr-below        qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524651] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b3318 [l2-rip]
+  [524652] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524653] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ace96dd6 [l2-rip]
+  [524654] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x40000070 value=0x0 [l1-rip]
+  [524655] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2a768e [l2-rip]
+  [524656] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524657] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524658] wrmsr            qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d detail=0x40000071 value=0x4002f [l1-rip]
+  [524659] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad02890d [l2-rip]
+  [524660] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524661] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b32f0 [l2-rip]
+  [524662] tpr-below        qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524663] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ad2b3318 [l2-rip]
+  [524664] int-window       qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
+  [524665] vmresume         qual=0x0            active cs=0x0000 rip=0xfffff806ace96dd6 [l2-rip]
+  [524666] ext-int          qual=0x0            active cs=0x0000 rip=0xfffff8574a7a843d [l1-rip]
