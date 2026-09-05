@@ -19,6 +19,15 @@ usage: guest-processes.py <kernel_base_hex> <cr3_hex> [--head-rva 0xf05c60]
 import re, socket, sys, time
 RIG, PORT = '192.168.1.199', 4446
 LINKS, NAME = 472, 824
+# `_EPROCESS.UniqueProcessId` and `InheritedFromUniqueProcessId`, both
+# `void*`, both from `llvm-pdbutil dump --types`. Printing the parent is
+# what turns "WerFault.exe is running" into "WerFault.exe was started by
+# X" - Windows Error Reporting is spawned by the process that faulted (or
+# by the service host on its behalf), so the parent names the casualty.
+# Note there are two `UniqueProcessId` members in this PDB and only the
+# `void*` one at 464 is _EPROCESS's; the `unsigned long` at 40 belongs to
+# another struct and reads as garbage here.
+PID, PPID = 464, 720
 
 def monitor(cmds):
     s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.35)
@@ -79,6 +88,7 @@ def rname(va):
 head = BASE + HEAD_RVA
 cur = rq(head)
 seen, names, why = set(), [], 'ran out of iterations'
+by_pid, parents = {}, []
 for _ in range(400):
     if cur is None: why = 'READ FAILED - the walk is truncated, not the list'; break
     if cur == head: why = 'reached the list head - complete'; break
@@ -86,8 +96,12 @@ for _ in range(400):
     seen.add(cur)
     eproc = cur - LINKS
     nm = rname(eproc + NAME) or '<unreadable>'
+    pid = rq(eproc + PID)
+    ppid = rq(eproc + PPID)
     names.append(nm)
-    print(f'  {nm}', flush=True)
+    by_pid[pid if pid is not None else -1] = nm
+    parents.append((nm, pid, ppid))
+    print(f'  {nm:20s} pid {pid}  parent {ppid}', flush=True)
     cur = rq(cur)
 
 print(f'{len(names)} processes; walk ended because: {why}')
@@ -97,6 +111,24 @@ print(f'{len(names)} processes; walk ended because: {why}')
 # nothing above should be believed.
 if names and names[0] == 'System':
     print('cross-check: first entry is `System` - offsets are right')
+    # Resolve each parent id to a name now that the whole list is known.
+    # A parent that is not in the list is not an error - it is a process
+    # that has already exited, which is the normal case for a spawner.
+    # **PID reuse makes this lie, and it lies plausibly.** Windows
+    # recycles process ids, so a parent id belonging to a process that
+    # has exited can match a *different* live process that was later
+    # given the same id. Measured here: `csrss.exe` and `winlogon.exe`
+    # both resolved to "started by fontdrvhost.ex (pid 936)", and both
+    # are started by `smss.exe` - which had exited, freeing 936 for
+    # fontdrvhost. The resolution is only trustworthy when the named
+    # parent is one that plausibly spawns the child, so it is printed
+    # with a warning rather than as fact.
+    for nm, pid, ppid in parents:
+        who = by_pid.get(ppid)
+        if who:
+            print(f'    {nm} <- parent id {ppid} is currently {who} '
+                  f'(CHECK: ids are reused, so this is only the parent '
+                  f'if that process plausibly spawns this one)')
 else:
     print(f'cross-check FAILED: first entry is {names[:1]}, expected '
           f'`System`. Offsets or head RVA are wrong - do not believe '
