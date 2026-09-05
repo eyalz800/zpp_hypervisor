@@ -68451,3 +68451,50 @@ differs. Boot 187 matches the originally documented wedge
 is reached from at least two different scheduler states**, which argues the
 lock contention is the invariant and the DPC state is downstream of it -
 not the other way round, which is how `84684e7` framed it.
+
+## CONFIRMED: cpu 1 reaches KiQuantumEnd from the IDLE LOOP, not from the clock
+
+`2f92970` predicted this and named what would confirm or refute it.
+Differenced over the same 150 s window on wedged boot 187:
+
+    cpu 1 (delta 114,209)                    A       B    delta
+      KiIdleLoop+0x4c        (0x6ad0fc)     292     522    +230   GROWING
+      KiQuantumEnd+0x538     (0x299958)  62,204  98,756  +36,552  GROWING
+      KiDispatchInterrupt+0x190..0x1a5       ABSENT               <- REFUTED
+      PoIdle+0xbd            (0x44481d)       5       5      +0   stale
+
+    cpu 0 (delta 1,309,166)
+      KiIdleLoop+0x4c/0xd1/0x135           frozen, delta 0        <- stale rows
+      KiDispatchInterrupt+0x1a0               15      16      +1
+      KiQuantumEnd+0x538                     ABSENT
+
+**The idle loop is executing on cpu 1 and growing; the interrupt path's
+call into `KiQuantumEnd` is absent there entirely.** `KiQuantumEnd` has
+exactly two callers, so with one growing and the other absent, cpu 1 is in
+quantum-end processing **via `KiIdleLoop`**.
+
+**Stated at the strength the measurement supports:** this confirms *which
+caller*, not the exact call site. I predicted the return address
+`KiIdleLoop+0xb4`; what grew is `+0x4c`. The distinction matters because
+`+0x4c` being hot only says the idle loop is live, and the call-site proof
+would need `+0xb4` specifically. The refutation half is the stronger one -
+`KiDispatchInterrupt+0x190..0x1a5` has **no row at all** on cpu 1.
+
+The contrast with cpu 0 is the control and it is clean: cpu 0 carries
+`KiIdleLoop` rows too, but **frozen at delta 0** - stale entries from
+earlier in the boot that a cumulative read would have shown as "present"
+and a differenced read correctly shows as dead. Same instrument, same
+window, opposite verdicts, and only the differencing separates them.
+
+### What this makes the wedge
+
+Not "a worker thread is starved of a slice". It is: **cpu 1 has nothing to
+run, enters the idle loop, the idle loop does quantum-end bookkeeping, and
+that bookkeeping blocks for ever on a PrcbLock held by cpu 0.** The
+processor with no work is the one that cannot make progress, and it is
+stuck in the path it takes *because* it has no work.
+
+That also disposes of the last framing in which `IdleHalt = 1` looked like
+a contradiction. The escape this tree documented - idle thread runs,
+`IdleHalt` set, interrupt loop gated off - **does happen on cpu 1**, and it
+does not help, because the block is downstream of it.
