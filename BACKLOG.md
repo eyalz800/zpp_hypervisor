@@ -66621,3 +66621,57 @@ recognisable spin in a few instructions.
 This is the fifth instrument-shaped error of the session and the second
 of its exact kind: a classification made by *exclusion from one list*,
 where the correct answer lived in a list that was never consulted.
+
+## RESOLVED: the "tight spin loop" is the Hyper-V HYPERCALL PAGE
+
+Read the page and disassembled it. `0xfffff8003bd20000` on boot 177:
+
+    +0x00  vmcall            +0x03  retq
+    +0x04  movl %eax,%ecx    +0x06  movl $0x11,%eax     <- HvCallVtlCall
+    +0x0b  vmcall            +0x0e  retq
+    +0x0f  movq %rcx,%rax    +0x12  movq $0x11,%rcx
+    +0x19  vmcall            +0x1c  retq
+    +0x1d  movl %eax,%ecx    +0x1f  movl $0x12,%eax     <- HvCallVtlReturn
+    +0x24  vmcall            +0x27  retq
+    +0x2b  movq $0x12,%rcx   +0x32  vmcall  +0x35 retq
+    +0x36  nop padding
+
+**It is the Hyper-V hypercall page.** The three "hot" offsets are
+`retq` and register set-up around the `vmcall`s for codes **0x11
+`HvCallVtlCall`** and **0x12 `HvCallVtlReturn`** - the VTL switch stubs.
+It maps identically in both address spaces (different physical pages,
+byte-identical contents - a per-VTL copy).
+
+**So it is not a spin loop, and never was.** Three readings of this in
+turn, each wrong:
+
+1. `eaa6a82` - "the phase-1 spin is in DRIVER code", inferred from falling
+   outside ntoskrnl's range;
+2. `49b542c` - "not a VTL0 driver, three offsets in 32 bytes, still a
+   tight loop", after 105 modules failed to contain it;
+3. this - it is the hypercall page, and "in no loaded module" is exactly
+   right, because the hypervisor maps it via `HV_X64_MSR_HYPERCALL` and it
+   belongs to no PE image at all.
+
+Each step narrowed correctly; the error carried through all three was the
+unexamined premise that **clustered addresses mean a loop**. Three offsets
+within 32 bytes is equally the signature of a *stub that everything calls*.
+
+### And the census is CUMULATIVE, which changes what a wedged reading means
+
+The rows are counted from boot, so a hot map read on a wedged guest
+describes **the whole boot**, overwhelmingly its healthy majority, not the
+wedge. Boot 177 was progressing at 640/s with VTL round trips at 152/s
+when this was sampled - so the hypercall-return sites dominating is
+exactly right and says nothing about a stall.
+
+That also resolves an apparent contradiction: wedged boot 174 showed 18.7%
+at the same page while `vmcall` was measured at 0.05/s. Both are true. The
+percentage is history; the rate is now.
+
+**Consequence for the open question.** The hot-address census cannot name
+what the phase-1 thread is doing *while wedged* unless it is differenced.
+`--delta` refuses these members today. What survives untouched is the
+stack evidence, which is not cumulative: `PnpCallDriverEntry` ->
+`ExSetTimerResolution` -> `KeGenericProcessorCallback`, reproduced
+frame-for-frame on two independent boots.
