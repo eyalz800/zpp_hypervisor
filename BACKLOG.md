@@ -64942,3 +64942,67 @@ present and busy:
 So the `0x0f4` traffic really is the image-validation walk and the label
 is right. Boot 166's narrower mix was a boot that had not got that far,
 not evidence about the mechanism.
+
+## Correction: \Driver\IntcAudioBus was a MIS-ACCUSATION, and 0x9F is a clock
+
+Two facts from `ntoskrnl.exe` + the PDB, both of which change what
+`d00b6c0` claimed.
+
+**Bugcheck 0x9F's P2 is the `Pdo`, not the driver holding the IRP.**
+`PopIrpWatchdogBugcheck` raises
+`KeBugCheckEx(0x9F, 3, _POP_IRP_DATA.Pdo, &TRIAGE_9F_POWER, .Irp)`. A PDO
+is created by its *parent bus driver*, so walking
+`P2->DriverObject->DriverName` names the **enumerator**. So
+`\Driver\IntcAudioBus` says "the stuck device is a child enumerated by
+IntcAudioBus", not "IntcAudioBus failed to complete an IRP". The driver
+actually sitting on the IRP is `CurrentDevice` at `_POP_IRP_DATA+0x28`,
+which nothing had read. **`d00b6c0` overstated this and is corrected
+here.**
+
+**And the stop code is a flat timeout with no grace path.**
+`PopEnableIrpWatchdog` arms at `PopWatchdogSleepTimeout` /
+`PopWatchdogResumeTimeout`, both **600** seconds and written nowhere in
+5 MB of `.text` (registry-only override, out of bounds here). Worse,
+`PopDisableIrpWatchdog` and `PopCompleteIrpWatchdog` each bugcheck
+*themselves* if `KeCancelTimer` returns FALSE - so an IRP completed
+perfectly at t=601 s still stops the machine. 0x9F therefore certifies
+only **"600 s of guest interrupt time elapsed with this IRP
+outstanding"**, which any machine livelocked that long produces whichever
+driver happened to hold one.
+
+### The live read: wedged boot 169 has NO power IRP in flight
+
+`scripts/guest-power-irps.py` walks `PopIrpList` (RVA `0xf0bd70`, agreed
+between the PDB and the disassembly). On boot 169, wedged, 3 processes,
+`vtl_fresh_calls` +0 on both processors:
+
+    PopIrpList head 0xfffff807c3b0bd70  Flink == Blink == head
+      -> reader proven: well-formed EMPTY list
+    guest interrupt time 1,286.0 s since boot
+    PopIrpList is EMPTY - no power IRP is in flight
+
+**So the wedge exists with no power IRP outstanding at all**, past twice
+the 600 s deadline. A stuck power IRP cannot be its cause.
+
+**This unifies the two wedge shapes.** It is one wedge. Boot 168 happened
+to have a power IRP in flight when it hit, so it self-terminated at 600 s
+and printed a driver name; boots 166, 167 and 169 had none, so they hang
+indefinitely and print nothing. The difference between "wedged" and
+"bugchecked 0x9F" is not two failures - it is whether a power IRP was
+outstanding, which is timing.
+
+**Consequence for triage, and it cuts against a rule in the recipe.**
+`multicore-login-screen-reached-recipe` says never call a boot wedged
+before an hour. That still holds for boots with no power IRP. But a boot
+*with* one self-destructs at 600 s of guest interrupt time, so past that
+point a live read may be of a corpse. Read `PopIrpList` early: empty
+means the hour rule applies, non-empty puts a deadline on the boot.
+
+**Reader-proof note worth keeping.** The obvious proof - "read
+`PopWatchdogSleepTimeout`, it must be 600" - **failed on a base already
+known good**, reading 296,207,625. The symbol is in PDB segment **27**,
+not 26, so the RVA taken from the disassembly pointed into a different
+section. `PnpEnumerationInProgress` was likewise `0xf8a190`, not
+`0xf8a1a0`. Both would have been quoted as findings. The walk therefore
+proves itself **structurally** instead - a LIST_ENTRY whose neighbour
+points back at it - which needs no constant and no build agreement.
