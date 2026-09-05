@@ -66909,3 +66909,45 @@ real.
 **The rule, and it is the sixth instrument lesson of this session:** when a
 census ships with a named control, read the control *first*. This one was
 printed in every dump I took, for the whole investigation.
+
+### Rebuilt on the control: the two profiles are real, with different content
+
+`ce0f81e` retracted the two-profile claim pending a rebuild on `quiet_rip`.
+Rebuilt, it **survives** - but what distinguishes the profiles is not what
+was first claimed.
+
+Boot 178, control, 129,631 samples added during the stall:
+
+    HalpHvTimerArm+0x7a                 40.6%
+    hypercall page, three offsets       45.7%
+    HvlWriteApicCommandRegister+0x1d     4.7%
+    HvlEndSystemInterrupt+0x1e           2.8%
+    KiDpcInterruptBypass+0x12          absent
+
+Boot 177, control, 2,211,303 samples added during the wedge:
+
+    HvlEndSystemInterrupt+0x1e          31.7%
+    KiDpcInterruptBypass+0x12           27.7%
+    HvlWriteApicCommandRegister+0x1d    19.9%
+    KiInterruptDispatchNoLockNoEtw      13.1%
+    HalpHvTimerArm+0x7a                  2.6%
+
+**Two genuinely different end states, on the same binary:**
+
+- **177 - the clock livelock.** The documented ICR -> int-window ->
+  `KiDpcInterruptBypass` -> EOI -> `HvlEndSystemInterrupt` -> ICR loop,
+  three of whose addresses CLAUDE.md already names.
+- **178 - timer arming plus VTL calls.** `HalpHvTimerArm` at 40.6% with
+  the hypercall page at 45.7%: the guest is still *arming its synthetic
+  timer and making trust-level calls*, and `KiDpcInterruptBypass` never
+  appears at all. It is not in the clock loop.
+
+The original framing - "one spins, one goes idle" - was wrong in both
+halves, because it was built on `interrupted_rip`, where
+`HalProcessorIdle+0xf` is the `retq` after `hlt` and counts **wake-ups**.
+The correct statement is that one boot ends in the clock livelock and the
+other ends still transacting with the hypervisor while making no progress.
+
+That distinction is worth more than the original: 178's profile says the
+guest is *not* starved of ticks and *is* getting VTL calls through, so
+whatever stops it there is upstream of interrupt delivery entirely.
