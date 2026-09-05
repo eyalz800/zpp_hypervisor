@@ -64753,3 +64753,50 @@ periodic tick alone rather than stalled work. Do not go looking for a
 stuck secure kernel; the question is what in normal mode stopped issuing
 `MiCopyPage`, with 26 `System` threads parked in `WrVirtualMemory` as its
 visible form.
+
+## Boot 167: a SECOND wedge shape, and the freeze point is not a page
+
+Same binary as boot 166 (`nested=1 selfipi=0 windowtpr=0 drop=0
+dropcnt=0 reftsc=1`), 2 vCPUs, zpp resident, `VM status: running`.
+
+**The freeze point moves between boots**, so no single page is at fault:
+
+    boot 166   walk froze at pfn 8,123, frames 0x100000..0x11d749
+    boot 167   walk froze at pfn 8,904, frames 0x100000..0x3635e9
+
+Boot 167 got about three times further in frames and then stopped, so
+this is a race, not a bad page.
+
+**And it is a deeper stop than 166.** Differenced over 60 s, *every* VTL
+counter on *both* processors reads +0 — `vtl_fresh_calls` included, which
+boot 166 still had ticking at 0.84/s. `vmcall` runs at 0.05/s, which is
+why: the guest has stopped issuing hypercalls at all, so it never enters
+VTL1. Yet it is executing hard — **724,323 exits in the window,
+11,444/s** — with no HLT on either processor:
+
+    cpu 0  6,847/s   wrmsr 2,243/s  int-window 769/s  ext-int 412/s
+    cpu 1  4,599/s   wrmsr 1,150/s  int-window 575/s  ext-int 574/s
+    tpr-below: ONE exit in the whole window (boot 166: 450/s on cpu 1)
+
+`Phase1Initialization` is the running thread on cpu 0 (state Running,
+last wait `WrPreempted`, IRQL 0) with cpu 1 idle — the classic shape,
+which makes boot 166's swapped roles the unusual case.
+
+### Instrument trap: EOM rate is BACKPRESSURE, not drain
+
+The delta read
+
+    cpu 0  EOI 768/s  EOM 705/s
+    cpu 1  EOI 574/s  EOM 0.17/s
+
+looks exactly like cpu 1 failing to drain its SynIC message slot, and the
+reader prints the invariant that seems to confirm it ("the message rate
+and the interrupt rate are the same quantity and must agree"). **It is
+backwards.** Reading the two slots directly settles it: both cycle
+`0x80000010` (HvMessageTypeTimerExpired) -> `0`, so both processors *are*
+consuming messages. A guest writes EOM only when another message was
+pending, so a *high* EOM rate means that processor is behind and a low
+one means it is keeping up. cpu 0 is the loaded one.
+
+Same lesson as the rest of the family: the counter could not report which
+direction it meant, and one narrow `xp` of the actual slot could.
