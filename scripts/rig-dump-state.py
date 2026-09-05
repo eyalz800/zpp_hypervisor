@@ -8508,6 +8508,24 @@ def main():
                 # gap is the instrument reporting its own loss, which is
                 # the one thing the old single-word version could not
                 # do.
+                # **Name the ntoskrnl rows the cut suppressed.** They
+                # are the one class this printer still truncates, and a
+                # reader differencing two dumps will otherwise take
+                # "absent from the list" for "was zero" - which is
+                # exactly what happened: five shares of one loop were
+                # differenced across the cut and summed to 106.3%, an
+                # impossibility that was the only thing that caught it.
+                # A suppressed row is not a cold row; the fourteenth
+                # here has stood at 4% of the samples.
+                hidden = [(h, r) for h, r in ordered[14:] if _label(r)]
+                if hidden:
+                    hsum = sum(h for h, _ in hidden)
+                    print(f"  *** {len(hidden)} ntoskrnl row(s) below the "
+                          f"cut, totalling {hsum:,} samples "
+                          f"({100.0 * hsum / (tot or 1):.1f}%). A row "
+                          f"absent from the list above is NOT zero - do "
+                          f"not difference this census across two dumps "
+                          f"unless both printed the row. ***")
                 seen = sum(h for h, _ in rows)
                 if tot:
                     print(f"  rows sum to {seen:,} of {tot:,} samples "

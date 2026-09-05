@@ -67169,3 +67169,30 @@ Seventh instrument lesson of the session, and the first where the
 arithmetic caught it rather than a second instrument: **a set of shares
 that sums past 100% is not a finding to explain, it is a reading to
 discard.**
+
+### The printer now names the cut - and the cut does NOT fully explain the 106.3%
+
+`rig-dump-state.py` now prints, per processor:
+
+    *** 636 ntoskrnl row(s) below the cut, totalling 6,222 samples (1.6%).
+        A row absent from the list above is NOT zero - do not difference
+        this census across two dumps unless both printed the row. ***
+
+Measured on three processors of one dump: **1.6%, 3.0%, 0.5%**.
+
+**That is honest but incomplete as an explanation.** If the suppressed
+ntoskrnl rows total at most ~3% of samples, then treating two of them as
+zero cannot by itself inflate a five-row sum from ~100% to 106.3%. Some
+other error is in that arithmetic - a mismatched pair of dumps, or a
+denominator taken from a different section - and I have not isolated it.
+
+So the position on `cce45a3`'s percentages is unchanged and, if anything,
+firmer: **withdrawn, and not to be reconstructed by patching one term.**
+A calculation with a known-impossible result and an incompletely-known
+cause is not repaired by explaining part of it.
+
+The warning is still worth having: it converts a silent truncation into a
+stated one, and it names the precise operation - differencing across two
+dumps - that the truncation makes invalid. That is the property the
+`quiet_rip` control has and `interrupted_rip` lacked, applied to a
+different failure.
