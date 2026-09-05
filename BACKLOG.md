@@ -67552,3 +67552,41 @@ Note the trap that region carries: **a nearest-symbol-below lookup labels
 all of them "the clock path"**, because `ExpUpdateTimerConfigurationWorker`
 (`0x30d2b0`) and `KeDelayExecutionThread` (`0x310cb0`) sit among them.
 Resolve against `ntkrnlmp_symbols.csv`, not the PE exports.
+
+### The widened cut immediately shows non-interrupt-path code
+
+First dump with the 0.05% floor (boot 184, transient phase, 111,095
+control samples, 79 rows printed against the old 14). Rows that the old
+cut hid entirely:
+
+    HalpHvTimerArm+0x69              0.7%   a second timer-arm site
+    HvlpGetRegister64+0x3e           0.2%   reading a Hyper-V register
+    HalpInterruptSendIpi+0x9a        0.2%   the ICR requester chain
+    KiDpcInterrupt+0x3b8             0.1%
+    HalpPciReadMmConfigUshort+0x3    0.1%   *** PCI config space read ***
+    KiIsrThunkShadow+0x688           0.1%
+    KeZeroPages+0x10                 0.1%   *** page zeroing - real work ***
+
+**`KeZeroPages` and `HalpPciReadMmConfigUshort` are not interrupt path.**
+They are the first rows this investigation has seen that are plausibly the
+*thread's own code* rather than the clock servicing it. That is precisely
+what the cut was hiding and precisely why it was raised.
+
+`HalpInterruptSendIpi+0x9a` is also worth noting: it is the middle of the
+chain `KiEndInterruptCycleAccumulation -> HalRequestSoftwareInterrupt ->
+HalpInterruptSendIpi -> HvlWriteApicCommandRegister` that issues the `0x2f`
+self-IPI, so its appearance corroborates the loop account from a second
+address.
+
+**`HalpPciReadMmConfigUshort` deserves a flag.** This rig passes through an
+NVMe controller and a GPU, and the tree already records that reading the
+config space of a dead passed-through device hangs the whole machine. A
+guest PnP enumeration reading PCI config space is a plausible place to
+stall, and it has never been considered. It is 0.1% here - small, and this
+boot is in the *transient*, not the livelock - so this is a lead to check
+on a wedged dump, not a finding.
+
+**Caveat on all of the above:** 0.1-0.2% of a 111,095-sample census is
+100-250 samples. That is enough to say the address was executed, not
+enough to say it is where time goes. The wedged dump, where the census
+runs to millions of samples, is where these rows become quantitative.
