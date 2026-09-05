@@ -3523,6 +3523,27 @@ static_assert(!(window_on_tpr && deliver_on_drop),
               "ZPP_WINDOW_ON_TPR and ZPP_DELIVER_ON_DROP drive the same "
               "per-processor state and must not both be on");
 
+// **`deliver_on_drop` does nothing without the TPR shadow, and the
+// manifest cannot say so.** The arming block lives inside
+// `build_vmcs02`'s `if (honour_tpr_shadow)`, and `honour_tpr_shadow` is
+// forced false whenever `tpr_shadow_offered` is 0 - so with
+// `-DZPP_NESTED_TPR_SHADOW=OFF` the binary still prints `drop=1` while
+// the switch is inert, and a `tpr=0` against `tpr=1` comparison is
+// silently also a `deliver_on_drop` comparison. Two variables, one
+// experiment, and nothing in the artifact to catch it: exactly the
+// class CLAUDE.md's manifest section exists for.
+//
+// A note beside `drop=` in `build_switches.cpp` was the alternative and
+// was rejected: the manifest is read after a boot, and this is
+// answerable before one. Both constants are `constexpr`, so the
+// combination can simply be refused - `window_on_tpr` above sets the
+// precedent. Turning the shadow off means turning this off with it.
+static_assert(!(deliver_on_drop && !tpr_shadow_offered),
+              "ZPP_DELIVER_ON_DROP arms a TPR threshold only where the "
+              "TPR shadow was honoured, so it is inert with "
+              "ZPP_NESTED_TPR_SHADOW off - turn both off together, or "
+              "the manifest's drop= claims a switch that does nothing");
+
 #ifndef ZPP_COUNT_DROPS
 #define ZPP_COUNT_DROPS 0
 #endif

@@ -6074,60 +6074,6 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
     residue(34, evmcs_start);
 }
 
-namespace
-{
-/**
- * The general-purpose register an exit qualification names.
- *
- * Spelled out rather than indexed, for the reason the control-register
- * handler in `exit_dispatch.cpp` gives for doing the same: the encoding
- * is the architecture's register numbering and the context stores them in
- * whatever order its assembly pushed them, so an index into the structure
- * would be right only by coincidence.
- */
-std::uint64_t * general_purpose_register(arch::x86_64::context & context,
-                                         std::uint64_t number)
-{
-    switch (number) {
-    case 0:
-        return &context.rax;
-    case 1:
-        return &context.rcx;
-    case 2:
-        return &context.rdx;
-    case 3:
-        return &context.rbx;
-    case 4:
-        return &context.rsp;
-    case 5:
-        return &context.rbp;
-    case 6:
-        return &context.rsi;
-    case 7:
-        return &context.rdi;
-    case 8:
-        return &context.r8;
-    case 9:
-        return &context.r9;
-    case 10:
-        return &context.r10;
-    case 11:
-        return &context.r11;
-    case 12:
-        return &context.r12;
-    case 13:
-        return &context.r13;
-    case 14:
-        return &context.r14;
-    case 15:
-        return &context.r15;
-    default:
-        return nullptr;
-    }
-}
-
-} // namespace
-
 bool hypervisor::on_nested_cr8_access(std::size_t cpu,
                                       std::uint64_t qualification,
                                       arch::x86_64::context & context,
@@ -6165,10 +6111,30 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
     auto access = (qualification >> access_shift) & access_mask;
     auto gpr = (qualification >> gpr_shift) & gpr_mask;
 
-    auto slot = general_purpose_register(context, gpr);
-    if (nullptr == slot) {
-        return false;
-    }
+    // **Encoding 4 is RSP, and RSP is not in the captured context.** This
+    // used to go through a local switch that returned `&context.rsp` for
+    // it, which is the same defect `exit_dispatch.cpp`'s control-register
+    // case carried and was fixed for - the exit stub stores the address
+    // of the context structure in that slot on purpose, because
+    // `restore_context` iretqs onto it. So `mov rsp, cr8` would have
+    // written the priority class over the frame pointer the iretq is
+    // about to use, and `mov cr8, rsp` would have read a host stack
+    // address, found reserved bits set in it and injected a #GP the
+    // guest never earned.
+    //
+    // `guest_register` / `set_guest_register` are the pair that knows
+    // this; both answer encoding 4 from `vmcs.guest_rsp()`. There is no
+    // "no such register" case left, because `gpr_mask` is four bits and
+    // all sixteen encodings name one.
+    //
+    // **This function is unreachable in the shipping build**, because
+    // `nested_vmx::tpr_shadow_offered` is 1, the shadow is honoured and
+    // CR8 therefore never exits - which is why the defect was latent and
+    // is explicitly not a reason to leave it. The switch is one `-D`
+    // away, the same one an A/B of the TPR shadow would turn, and the
+    // failure it produces is a corrupted host iretq frame - not
+    // something anybody would trace back to a register table.
+    // `tests/nested_exit` covers encoding 4 in both directions.
 
     std::uint8_t vtpr{};
     auto at = page + virtual_task_priority_offset;
@@ -6187,7 +6153,7 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
         // inverse of the write below, and a guest whose CR8 reads four
         // bits too large raises its own interrupt priority every time it
         // saves and restores one.
-        *slot = vtpr >> priority_class_shift;
+        set_guest_register(context, gpr, vtpr >> priority_class_shift);
         this->nested_cr8_reads[cpu] = this->nested_cr8_reads[cpu] + 1;
         return true;
     }
@@ -6198,19 +6164,21 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
 
     constexpr std::uint64_t priority_class_mask = 0xf;
 
+    auto value = guest_register(context, gpr);
+
     // SDM 2.5, CR8: "Reserved bits ... must be written with zeros.
     // Writing a nonzero value to these bits will cause a
     // general-protection exception." The guest is given the fault
     // hardware would have given it rather than having the value
     // silently truncated, which is the rule this project applies to
     // everything else it emulates.
-    if (0 != (*slot & ~priority_class_mask)) {
+    if (0 != (value & ~priority_class_mask)) {
         inject_general_protection_fault();
         advance_rip = false;
         return true;
     }
 
-    vtpr = static_cast<std::uint8_t>((*slot & priority_class_mask)
+    vtpr = static_cast<std::uint8_t>((value & priority_class_mask)
                                      << priority_class_shift);
 
     if (auto written = write_guest_physical(

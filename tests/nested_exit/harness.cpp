@@ -323,6 +323,25 @@ std::uint64_t hypervisor::guest_register(const arch::x86_64::context & c,
     return c.*arch::x86_64::detail::encoded_registers[encoding];
 }
 
+// The writing half of the pair, copied from nested_vmx.cpp for the same
+// reason its sibling above is: that translation unit is not compiled
+// here. Both live or die on encoding 4 going to the VMCS rather than to
+// `context.rsp`, and `test_cr8_encoding_four` is what asserts it.
+void hypervisor::set_guest_register(arch::x86_64::context & c,
+                                    std::uint64_t encoding,
+                                    std::uint64_t value)
+{
+    constexpr std::uint64_t encoded_rsp = 4;
+    if (encoded_rsp == encoding) {
+        this->vmcs.guest_rsp(value);
+        return;
+    }
+    if (encoding >= 16) {
+        return;
+    }
+    c.*arch::x86_64::detail::encoded_registers[encoding] = value;
+}
+
 std::expected<void, zpp::error> hypervisor::read_guest_physical(
     std::uint64_t physical, std::span<std::byte> into)
 {
@@ -7324,6 +7343,185 @@ static void test_shadow_copies_name_the_current_vmcs()
     h.running_l2[cpu] = false;
 }
 
+/**
+ * `on_nested_cr8_access` through register encoding 4, which is RSP.
+ *
+ * **This defect has now happened twice in this tree**, which is why it
+ * gets a test rather than a comment. `exit_dispatch.cpp`'s
+ * control-register case had a `case 4: value = context.rsp` and was
+ * fixed; `nested_entry.cpp` had a local register table with
+ * `return &context.rsp` and is fixed here. The exit stub stores the
+ * *address of the context structure* in that slot on purpose, because
+ * `restore_context` iretqs onto it - so it is a hypervisor stack address
+ * inside this module and never the guest's stack pointer.
+ *
+ * Both directions are wrong in their own way, and both are asserted
+ * below: `mov rsp, cr8` wrote the priority class over the iretq frame
+ * pointer, and `mov cr8, rsp` read that host address, found bits outside
+ * the four the architecture allows and injected a #GP the guest never
+ * earned.
+ *
+ * The path is unreachable in the shipping build - `tpr_shadow_offered`
+ * is 1, the shadow is honoured, and `mov cr8` never exits - so nothing
+ * on the rig would ever have shown it. That is an argument for a host
+ * test, not against one.
+ */
+static void test_cr8_encoding_four()
+{
+    std::println("\n-- MOV CR8 through register encoding 4 (RSP)");
+
+    zpp::arch::x86_64::context registers;
+    reset(registers);
+
+    // Not one of the fixture's other pages, and mapped, so
+    // `read_guest_physical` answers it.
+    constexpr std::uint64_t virtual_apic = 0x00000000'60000000ull;
+    constexpr std::size_t vtpr_offset = 0x80;
+    constexpr std::uint64_t encoded_rsp = 4;
+    constexpr std::uint64_t encoded_rax = 0;
+
+    // SDM Table 28-3: bits 3:0 the control register, bits 5:4 the access
+    // type - 0 is MOV to, 1 is MOV from - and bits 11:8 the general
+    // purpose register.
+    auto qualification = [](std::uint64_t access, std::uint64_t gpr) {
+        return 8ull | (access << 4) | (gpr << 8);
+    };
+    constexpr std::uint64_t move_to = 0;
+    constexpr std::uint64_t move_from = 1;
+
+    page_of(virtual_apic);
+    hv().running_l2[cpu] = true;
+    hv().nested_virtual_apic_address[cpu] = virtual_apic;
+
+    // Zero, so the write case below stops after the write instead of
+    // reflecting a TPR-below-threshold exit. What the reflection does is
+    // a different question with its own cases; what is under test here
+    // is which register the value came from.
+    hv().nested_tpr_threshold[cpu] = 0;
+
+    // What the exit stub really leaves behind, and what the removed
+    // register table would have handed the guest.
+    auto context_address = reinterpret_cast<std::uint64_t>(&registers);
+
+    check(0 != (context_address & ~std::uint64_t(0xf)),
+          "the fixture's context address has bits outside the four a "
+          "priority class occupies - without that the write case below "
+          "would pass against the defect it exists to catch");
+
+    {
+        // MOV from CR8. VTPR's high nibble is the priority class.
+        page_of(virtual_apic)[vtpr_offset] = std::byte{0x30};
+        registers.rsp = context_address;
+        hv().vmcs.guest_rsp(0);
+
+        auto reads_before = hv().nested_cr8_reads[cpu];
+        bool advance_rip = true;
+
+        check(hv().on_nested_cr8_access(
+                  cpu,
+                  qualification(move_from, encoded_rsp),
+                  registers,
+                  advance_rip),
+              "`mov rsp, cr8` is answered against the guest "
+              "hypervisor's virtual-APIC page");
+        check(3 == hv().vmcs.guest_rsp(),
+              "and the priority class lands in the VMCS guest RSP, "
+              "which is where the guest's own stack pointer lives");
+        check(context_address == registers.rsp,
+              "the captured context's rsp is untouched - it is the "
+              "frame `restore_context` iretqs onto, and the old table "
+              "wrote the priority class over it");
+        check((reads_before + 1) == hv().nested_cr8_reads[cpu],
+              "and the read is counted");
+    }
+
+    {
+        // MOV to CR8, with a legal priority class in the guest's real
+        // RSP and a host address in the context slot. The old table read
+        // the latter, so this case failed with a #GP and no write.
+        registers.rsp = context_address;
+        hv().vmcs.guest_rsp(2);
+        page_of(virtual_apic)[vtpr_offset] = std::byte{};
+
+        auto faults_before = g_general_protection_faults;
+        auto writes_before = hv().nested_cr8_writes[cpu];
+        bool advance_rip = true;
+
+        check(
+            hv().on_nested_cr8_access(cpu,
+                                      qualification(move_to, encoded_rsp),
+                                      registers,
+                                      advance_rip),
+            "`mov cr8, rsp` is answered too");
+        check(faults_before == g_general_protection_faults,
+              "and raises no #GP: the value comes from the VMCS, not "
+              "from the host stack address the context slot holds");
+        check(std::byte{0x20} == page_of(virtual_apic)[vtpr_offset],
+              "the class the guest wrote reaches VTPR's high nibble");
+        check((writes_before + 1) == hv().nested_cr8_writes[cpu],
+              "and the write is counted");
+    }
+
+    {
+        // The other side of it, so the case above cannot pass by the
+        // emulation having stopped faulting altogether. SDM 2.5: CR8's
+        // "Reserved bits ... must be written with zeros. Writing a
+        // nonzero value to these bits will cause a general-protection
+        // exception."
+        registers.rax = 0x10;
+        hv().vmcs.guest_rsp(0);
+
+        auto faults_before = g_general_protection_faults;
+        bool advance_rip = true;
+
+        check(
+            hv().on_nested_cr8_access(cpu,
+                                      qualification(move_to, encoded_rax),
+                                      registers,
+                                      advance_rip),
+            "a `mov cr8, rax` with a reserved bit set is still "
+            "answered");
+        check((faults_before + 1) == g_general_protection_faults,
+              "and still earns the #GP SDM 2.5 requires");
+        check(!advance_rip, "with RIP left at the faulting instruction");
+    }
+
+    {
+        // And encoding 4 read back through the VMCS on the same path a
+        // guest would use it: write a class, read it back, and get what
+        // was written. A read that is not the inverse of the write
+        // raises the guest's own interrupt priority every time it saves
+        // and restores CR8.
+        registers.rsp = context_address;
+        hv().vmcs.guest_rsp(7);
+        bool advance_rip = true;
+
+        static_cast<void>(
+            hv().on_nested_cr8_access(cpu,
+                                      qualification(move_to, encoded_rsp),
+                                      registers,
+                                      advance_rip));
+        hv().vmcs.guest_rsp(0);
+        static_cast<void>(hv().on_nested_cr8_access(
+            cpu,
+            qualification(move_from, encoded_rsp),
+            registers,
+            advance_rip));
+
+        check(7 == hv().vmcs.guest_rsp(),
+              "a class written through encoding 4 reads back through "
+              "encoding 4 unchanged");
+        check(context_address == registers.rsp,
+              "and neither direction ever touched the context slot");
+    }
+
+    // The fixture's own state, back where the cases after this expect
+    // it: `reset` does not clear these three.
+    hv().running_l2[cpu] = false;
+    hv().nested_virtual_apic_address[cpu] = 0;
+    hv().nested_tpr_threshold[cpu] = 0;
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -7367,6 +7565,7 @@ int main()
     test_synic_pages_are_kept_per_trust_level();
     test_guest_thread_sample_stride();
     test_control_registers_a_vm_entry_refuses();
+    test_cr8_encoding_four();
 
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();

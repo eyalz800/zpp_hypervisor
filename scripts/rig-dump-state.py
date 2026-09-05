@@ -175,6 +175,62 @@ VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12",
 # have to move together: they did not, once, and that is `ecc4b70`.
 VTL1_DURATION_BUCKETS = 34
 
+# `zpp switches: ...`, as read off the running module near the top of
+# `main`.  Kept here so the sections further down can ask what was
+# compiled in before they name a cause for a member reading zero.
+#
+# **This exists because a section named the wrong cause and it cost an
+# investigation cycle.**  The interrupt-window block below used to say of
+# an empty `int_window_vtpr` that "the sampling site is not running, or
+# is storing elsewhere ... do not read this as evidence against a
+# TPR-threshold fix", when the site is simply compiled out: its only
+# increment is inside `if (nested_vmx::census_exits)` and `census=0` is
+# the shipping build.  A member that cannot be written is not a member
+# that was written and lost, and only the manifest distinguishes them.
+#
+# `None` means the manifest was never read - a failed monitor read, a
+# wrong base, or a code path that runs before `main` gets to it - which
+# is a third answer and is not the same as `census=0`.
+BUILD_MANIFEST = None
+
+
+def manifest_field(name):
+    """The value of one `name=value` field of the build manifest.
+
+    `None` when the manifest was not read, or carries no such field -
+    which is what a binary predating the field looks like.  Split on
+    whitespace and matched whole: CLAUDE.md records a `grep -oE` over
+    this string matching a prefix, declaring `novina=` missing and
+    getting a duplicate switch added on that premise.
+    """
+    if BUILD_MANIFEST is None:
+        return None
+    for field in BUILD_MANIFEST.split():
+        key, sep, value = field.partition("=")
+        if sep and key == name:
+            return value
+    return None
+
+
+def census_caveat(what):
+    """One line saying whether `census=` explains an empty instrument.
+
+    `what` names the members, so the caller reads as a sentence.  Three
+    answers, and the third is the point: unknown is not zero.
+    """
+    census = manifest_field("census")
+    if census == "0":
+        return (f"  *** census=0 in the build manifest, so nothing "
+                f"writes {what}: COMPILED OUT. The only increment site "
+                f"is inside `if (nested_vmx::census_exits)`. Zero here "
+                f"is a fact about this build and says NOTHING about the "
+                f"guest. Rebuild with -DZPP_CENSUS_EXITS=ON to ask. ***")
+    if census is None:
+        return ("  (the build manifest was not read, so whether "
+                "`census=` compiled these out is unknown - which is not "
+                "the same as knowing they were sampled)")
+    return None
+
 
 def gdb_offsets(elf, members, optional=False, quiet=False):
     """Ask the ELF where each member lives inside the singleton."""
@@ -1639,6 +1695,19 @@ def dump_priority(args, elf, instance):
                # `clock_gap_coverage_lines`.
                "handler_first_tsc", "handler_last_tsc"]
     off = gdb_offsets(elf, members)
+
+    # The six the TPR-shadow block at the end of this function reads.
+    # Nothing in `scripts/` has ever printed one of them, which is part
+    # of how `on_nested_cr8_access` carried a register-table defect
+    # unnoticed. Optional, so a dump of a deployed binary that predates
+    # any of them loses that block and not the whole section - the
+    # reason `gdb_offsets` grew the flag in the first place.
+    cr8_members = ["tpr_shadow_honoured", "tpr_shadow_refused",
+                   "tpr_shadow_absent", "nested_cr8_reads",
+                   "nested_cr8_writes", "nested_cr8_below_threshold"]
+    off.update(gdb_offsets(elf, cr8_members, optional=True))
+    cr8_members = [m for m in cr8_members if m in off]
+
     vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
         "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
         "sizeof(('zpp::hypervisor::hypervisor' *)0)"
@@ -1676,7 +1745,7 @@ def dump_priority(args, elf, instance):
     for member in ("l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta"):
         reader.queue(instance + off[member], args.cpus * 32)
     reader.queue(instance + off["l2_hypercall_epoch_span"], args.cpus)
-    for member in ("handler_first_tsc", "handler_last_tsc"):
+    for member in ["handler_first_tsc", "handler_last_tsc"] + cr8_members:
         reader.queue(instance + off[member], args.cpus)
     got = reader.run()
 
@@ -1700,9 +1769,24 @@ def dump_priority(args, elf, instance):
             print(f"  0x{vtpr:02x}  {count:>10}  "
                   f"{100.0 * count / total:5.1f}%")
 
-        print(f"  owed by SDM 27.6.7 {word('l2_tpr_would_fire', cpu):,}, "
-              f"armed while already at or above "
-              f"{word('l2_tpr_armed_above', cpu):,}")
+        would_fire = word("l2_tpr_would_fire", cpu)
+        armed_above = word("l2_tpr_armed_above", cpu)
+        print(f"  owed by SDM 27.6.7 {would_fire:,}, "
+              f"armed while already at or above {armed_above:,}")
+
+        # Both are written only inside `save_l2_state`'s
+        # `if constexpr (nested_vmx::census_exits)`, so on the shipping
+        # build they are zero however the guest behaves.  "Never true
+        # means the guest hypervisor only arms the threshold while its
+        # guest is already above it" is their declared reading, and it
+        # is exactly the wrong conclusion to draw from a counter that
+        # was compiled out.  Same defect as the interrupt-window block
+        # below, said here because this is where these two are read.
+        if not (would_fire or armed_above):
+            caveat = census_caveat("`l2_tpr_would_fire` and "
+                                   "`l2_tpr_armed_above`")
+            if caveat:
+                print(caveat)
 
         cpl = [word("l2_cpl_seen", cpu * cpl_slots + i)
                for i in range(cpl_slots)]
@@ -1875,6 +1959,70 @@ def dump_priority(args, elf, instance):
                     word("l2_hypercall_epoch_span", cpu)):
                 print(line)
 
+    # What `build_vmcs02` decided about the TPR shadow, and what the CR8
+    # emulator behind it did.  **Six counters written by the hypervisor
+    # and read by nothing until now**, which is the trap CLAUDE.md's
+    # "check existing instruments first" note is about from the other
+    # side: an instrument nobody prints is an instrument nobody checks,
+    # and `on_nested_cr8_access` carried a register-table defect for as
+    # long as it did partly because no dump would have shown it running.
+    #
+    # Outside the per-processor loop above on purpose: that loop skips a
+    # processor whose `l2_entry_vtpr` histogram is empty, and a
+    # processor with no second-level entries is exactly the one whose
+    # disposition is worth reading.
+    if len(cr8_members) != 6:
+        print("\nthe TPR shadow, per processor: SKIPPED, the deployed "
+              "binary is missing " + ", ".join(
+                  m for m in ("tpr_shadow_honoured", "tpr_shadow_refused",
+                              "tpr_shadow_absent", "nested_cr8_reads",
+                              "nested_cr8_writes",
+                              "nested_cr8_below_threshold")
+                  if m not in off))
+        return
+
+    print("\nthe TPR shadow, per processor, and the CR8 exits behind it")
+    print("  honoured: handed to the processor.  refused: asked for, "
+          "page rejected, CR8")
+    print("  exiting forced in its place.  absent: the level above "
+          "never asked.")
+    print("  cpu   honoured    refused     absent | "
+          "cr8 reads   writes  below-threshold")
+    for cpu in range(args.cpus):
+        print(f"  {cpu:3d} {word('tpr_shadow_honoured', cpu):>10,} "
+              f"{word('tpr_shadow_refused', cpu):>10,} "
+              f"{word('tpr_shadow_absent', cpu):>10,} | "
+              f"{word('nested_cr8_reads', cpu):>9,} "
+              f"{word('nested_cr8_writes', cpu):>8,} "
+              f"{word('nested_cr8_below_threshold', cpu):>16,}")
+
+    # **A zero in the three CR8 columns is a fact about the build, not
+    # about the guest**, and every one of them will read zero on the
+    # shipping binary.  `on_nested_cr8_access` is reached only from
+    # `exit_dispatch.cpp`'s control-register case, which only sees a CR8
+    # exit where `build_vmcs02` forced CR8 load/store exiting in place of
+    # a TPR shadow it would not hand to the processor - and with
+    # `tpr=1` the shadow is honoured, so `mov cr8` never exits at all.
+    # Said here so nobody reads "0 CR8 exits" as "the guest does not
+    # touch CR8": it touches it constantly, and the processor answers
+    # every one against the virtual-APIC page without telling us.
+    tpr = manifest_field("tpr")
+    if tpr == "1":
+        print("  NOTE tpr=1 in the build manifest: the TPR shadow is "
+              "honoured, so `mov cr8` never exits and the three CR8 "
+              "columns are zero BY CONSTRUCTION. They say nothing "
+              "about how often the guest writes CR8 - only "
+              "-DZPP_NESTED_TPR_SHADOW=OFF makes them measurable.")
+    elif tpr == "0":
+        print("  NOTE tpr=0 in the build manifest: no TPR shadow is "
+              "handed to the processor, CR8 exiting is forced in its "
+              "place, and the three CR8 columns are then the real "
+              "count of the guest's own `mov cr8`.")
+    else:
+        print("  (the build manifest was not read, so whether the CR8 "
+              "columns CAN be non-zero is unknown - they are reachable "
+              "only with tpr=0)")
+
 
 def dump_interrupt_window(args, elf, instance):
     """Every interrupt-window exit, and the priority it fired at.
@@ -1981,7 +2129,7 @@ def dump_interrupt_window(args, elf, instance):
                 for i in range(classes)]
         rows = [r for r in rows if r[0]]
         if not rows:
-            # Report the empty histogram, then READ the member that
+            # Report the empty histogram, then READ the members that
             # would explain it.  This branch used to assert "because
             # nested_virtual_apic_address is zero" without ever
             # looking, and on 2026-09-02 that was false - the member
@@ -1990,16 +2138,35 @@ def dump_interrupt_window(args, elf, instance):
             # precondition is that the level above DID set the shadow
             # and left the threshold at zero.  An instrument may name
             # a cause only from a value it has read.
+            #
+            # **And then it named the wrong one anyway.**  The
+            # replacement text said "the sampling site is not running,
+            # or is storing elsewhere", which is a claim about the
+            # running machine; the site is compiled out.
+            # `nested_entry.cpp`'s interrupt-window case guards the only
+            # `int_window_vtpr` increment with `nested_vmx::census_exits
+            # && 0 != page`, and `ZPP_CENSUS_EXITS` defaults to 0 - so
+            # the histogram is empty by construction in the shipping
+            # build, with the page present and the site perfectly
+            # healthy.  That reading cost an investigation cycle, and it
+            # is the manifest, not any member, that settles it.  Check
+            # `census=` before naming a cause: the same file already
+            # does at the base proof and at the injection census.
+            census = census_caveat("`int_window_vtpr`")
             page = word("nested_virtual_apic_address", cpu)
             print(f"  the priority was never sampled: the class "
                   f"histogram is empty on {asked:,} window exits.")
-            if page:
-                print(f"  *** but nested_virtual_apic_address is "
-                      f"0x{page:x}, NOT zero - the level above DID set "
-                      f"a TPR shadow, so 'no page to read from' is not "
-                      f"the reason. The sampling site is not running, "
-                      f"or is storing elsewhere. Do not read this as "
-                      f"evidence against a TPR-threshold fix. ***")
+            print(f"  nested_virtual_apic_address 0x{page:x} - the "
+                  f"page the sample would have come from")
+            if census:
+                print(census)
+            elif page:
+                print(f"  *** census is ON and "
+                      f"nested_virtual_apic_address is NOT zero - the "
+                      f"level above DID set a TPR shadow, so neither "
+                      f"'compiled out' nor 'no page to read from' is "
+                      f"the reason. The sampling site really is not "
+                      f"running, or is storing elsewhere. ***")
             else:
                 print("  *** nested_virtual_apic_address is zero on "
                       "this processor - the level above set no TPR "
@@ -10512,6 +10679,11 @@ def main():
             print("base proven: zpp_build_switches reads back at the base")
             manifest = raw.split(b"\0")[0].decode("ascii", "replace")
             print(f"  {manifest}")
+            # Kept for the sections below, which run after this and have
+            # no base of their own to re-read it from. See
+            # `BUILD_MANIFEST`.
+            global BUILD_MANIFEST
+            BUILD_MANIFEST = manifest
             # `census=0` leaves the exit ring's qualification, activity
             # state and CS selector reading zero and `cpl_seen` empty -
             # and zero is a legal value for all three, so nothing in the
