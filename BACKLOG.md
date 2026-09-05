@@ -66447,3 +66447,28 @@ consecutive value inside the saturated Phase-0 band.
 thread, calls `ExSetTimerResolution` and does not return, spinning on the
 processor that is already the clock owner, with nothing blocked, nothing
 starved, the DPC path healthy, and no migration pending.
+
+### The Phase-0 constant is exactly 3,010, and it was hiding the real spread
+
+Boots 175 and 176 both read `VslRemoveProtectedPage` = **3,010** early,
+before driver loading has got going (boot 176: 3,010 removes against only
+529 copies). Identical to the digit on two independent boots, which is
+what a blind one-per-loader-page sweep should produce.
+
+Subtracting it from the six wedged totals decomposes the coordinate:
+
+    total     3,916  3,958  3,970  3,965  3,963  3,951    spread 1.4%
+    phase 0   3,010 (constant)
+    phase 1     906    948    960    955    953    941    spread 5.6%
+
+**The famous 1.3% tightness was largely the constant.** The part of the
+count that phase 1 actually contributes varies by 5.6% - four times
+looser, and in line with the copy count's 6.5% rather than distinct from
+it.
+
+So `VslRemoveProtectedPage` is not a specially well-conditioned coordinate
+at all; it merely carries a large constant that suppressed its apparent
+variance. That is the quantitative form of the retraction in `9bd4c31`,
+and it is a trap worth naming on its own: **a counter with a large fixed
+offset will always look tighter than the process it is measuring. Subtract
+the floor before quoting a spread.**
