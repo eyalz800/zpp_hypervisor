@@ -66225,3 +66225,59 @@ Two more, same session, different class:
   because `.references/` is absent in this worktree and the change could
   not be run against a real PDB - a fix nobody has watched work is a fix
   that may not have been applied.
+
+## RETRACTION: there is no pile-up of blocked threads. There never was
+
+First thread census taken with **both** defects fixed - the
+`_KTHREAD.ThreadListEntry` offset (760, not `_IRP`'s 32) and the
+monitor-echo regex. Wedged boot 174, `System`:
+
+    25  Executive (0)        6  WrQueue (15)      4  WrFreePage (8)
+     2  Suspended            1  WrVirtualMemory   1  WrPreempted
+     1  UserRequest
+
+Previously reported from the same instrument: "26 `WrVirtualMemory` + 14
+`WrLpcReply`" (boot 166), then "26 `WrPageOut` + 14 `WrLpcReply`" (boot
+171), then "27 `WrVirtualMemory` + 13 `WrLpcReply`" (boot 172, after the
+offset fix but before the echo fix). **All three were fabrications.** The
+byte read came from the echoed command's address, which is identical
+across threads and stable across boots - indistinguishable from a real
+wait state, and stable enough that a *changing* value between boots looked
+like a finding in its own right.
+
+**What is withdrawn.** Everything resting on "a fixed pool of ~40 System
+threads is blocked in its entirety":
+
+- the `MiReferenceControlArea` control-area-gate analysis, and the
+  reasoning that 26 waiters on a stack-local KGATE meant the thread
+  holding `BeingCreated` had neither succeeded nor failed;
+- the 26/14 "pool size, not a signature" finding, which was two
+  fabrications compared against each other;
+- any reading of `WrPageOut` versus `WrVirtualMemory` as a difference
+  between boots.
+
+**What the real census says.** Nothing is piled up. 6 `WrQueue` is
+`ExpWorkerThread`s idle waiting for work items, which is their normal
+state; 25 `Executive` is the generic wait; one thread each in
+`WrVirtualMemory` and `WrPreempted`. This is what a *healthy* System
+process looks like, on a guest that is wedged.
+
+That is consistent with everything measured since: the DPC path is
+healthy, no image is mid-load, no power IRP is outstanding, 2.7M pages are
+free, and the one thread that is actually spinning is
+`Phase1Initialization` itself. **Nothing is blocked. One thread is
+looping.**
+
+### Why this took four readings to catch
+
+The wrong value passed every surface check. It was a small integer, it
+decoded to a real `KWAIT_REASON`, the counts were stable across boots, and
+the split even *moved* plausibly between boots. CLAUDE.md's rule - read a
+value whose correct answer is known independently - is exactly what a
+wait-reason census cannot do for itself, which is why the offset and the
+parser both had to be proven before the first reading rather than after
+the fourth.
+
+`tests/python_layout/test_monitor_echo.py` now enforces the parser half
+tree-wide, with a negative control that fails and names the line when the
+defect is reintroduced.
