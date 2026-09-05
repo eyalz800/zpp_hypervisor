@@ -65201,3 +65201,47 @@ came back to 64.6/s, so a low rate in one epoch is not a wedge - which is
 why the epoch table's whole column has to be read rather than its last
 row. This is the same mistake the ring-buffer rule already warns about,
 in a different instrument.
+
+## Second power-IRP confirmation, and a better clock for "is it wedged yet"
+
+Boot 170, wedged (cpu 0 `vtl_fresh_calls` +0 and copies +0 on both over
+60 s, cpu 1 still ticking at 0.98/s - the boot-166 shape):
+
+    PopIrpList head 0xfffff80485f0bd70  Flink == Blink == head
+      -> reader proven: well-formed EMPTY list
+    guest interrupt time 422.7 s since boot
+
+That is the **second** wedged boot with no power IRP outstanding (169 was
+the first, at 1,286 s). Two independent confirmations that a stuck power
+IRP is not the cause, and that these wedges cannot self-terminate.
+
+Boot 170 also lands one more row on the odometer table, and it is not a
+repeat of 78:
+
+    boot   drivers   copy calls
+    166      78        10,172
+    169      78        10,172
+    170      84        10,701
+    167      91        10,863
+    168     148           -      (bugchecked at the 600 s watchdog)
+
+### Use GUEST INTERRUPT TIME, not wall time, to decide patience
+
+`multicore-login-screen-reached-recipe` says never call a multicore boot
+wedged before an hour. That hour is **wall** time, and it is the wrong
+clock: under this VMM the guest accumulates its own time far more slowly
+than the wall, so an hour at the wall is a much shorter boot from the
+guest's point of view. Boot 170 read **422.7 s** of guest interrupt time
+after substantially longer than that in wall clock.
+
+`scripts/guest-power-irps.py` prints it, from
+`KUSER_SHARED_DATA.InterruptTime` (`0xFFFFF78000000008`) minus
+`InterruptTimeBias` (`+0x3B0`), both PDB-confirmed. It costs one page walk
+and needs no state dump.
+
+Boot 150, the run that reached the login screen, took ~50 minutes of wall
+clock including a 40-minute stall that cleared. Nobody measured its guest
+clock, so the correct threshold in guest seconds is not yet known - but
+comparing wall times across boots whose overhead differs is comparing two
+different quantities, and that is worth fixing before another boot is
+killed early.
