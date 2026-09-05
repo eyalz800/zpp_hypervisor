@@ -67643,3 +67643,76 @@ would have returned cannot be determined from a guest that is not
 executing it. The question is not "what is the driver waiting for" but
 "why does one tick cost enough that the thread never advances" - and that
 is the per-tick cost avenue, already measured and closed in `b711510`.
+
+## The interrupted thread does not execute AT ALL, and the frame chain is a fossil - proven with no cut
+
+Boot 184, wedged, two full censuses 200 s apart with `ZPP_CENSUS_ALL=1`
+(new: removes the cut entirely, which is the only way to difference this
+census legally - with no absent rows there is no row that reads as zero).
+
+    cpu 0 control   A 1,510,743 samples / 850 rows
+                    B 2,227,071 samples / 927 rows
+                    delta 716,328
+
+    the five clock-loop addresses      704,359    98.3%
+    everything else                     11,969     1.7%
+    of that, NON-ntoskrnl                   37   0.005%
+
+**Every one of the 1.7% symbolizes to interrupt, DPC or scheduler code**
+- `KiIsrThunkShadow+0x688`, `HalpInterruptSendIpi+0x9a`,
+`KiDispatchInterrupt+0x0/+0x43/+0x4d/+0x86`, `KiDpcInterrupt+0x390/+0x3b8`,
+`KiDpcInterruptBypass+0x16`, `KiQuantumEnd+0x461/+0xd0f`,
+`KiRetireDpcList+0xcec`, `KiAcquirePrcbLocksForIsolationUnit+0x34/+0x5c`,
+`KiTryScheduleNextForegroundBoost+0x4`, `KiCheckPreferredHeteroProcessor`.
+
+**Not one row of thread code. The thread's share is not "under 1%" - it
+is zero.** `be5ee33` said under 1% and that was the cut's residue, not the
+thread; with the cut gone the residue resolves into more of the same
+interrupt path. Corrected.
+
+The 124 addresses new in B carry **343 samples total (0.05%)**, 86 of them
+single hits - eviction churn in a 2,048-row table, not progress. So the
+row set is not growing either: the guest is not reaching new code.
+
+### This independently kills the ThreadLock theory, by prediction
+
+The static analysis of `KeGenericProcessorCallback+0x14e` (a *return*
+address - the outstanding callee is `KeSetSystemGroupAffinityThread`)
+named three unbounded spin loops in the subtree and predicted the exact
+census addresses each would produce:
+
+    loop 1  ThreadLock spin          0x30e740-0x30e762   ABSENT
+    loop 1  hypercall escape         0x30e8c9-0x30e8eb   ABSENT
+    loop 2  isolation-unit PRCB      0x30eb3f-0x30eb5a   ABSENT
+    loop 2  escape                   0x30eb5c-0x30eb77   ABSENT
+    HvlNotifyLongSpinWait            0x298a10-0x298aa6   ABSENT
+    KeRevertToUserGroupAffinity      0x30f32f-0x30f348   ABSENT
+    ExpUpdateTimerConfigWorker       0x30d2b0-0x30d507   ABSENT
+    KeGenericProcessorCallback       0x30e0f0-0x30e380   1 sample, frozen
+
+**Zero samples in 2.2 million, with no cut suppressing anything.** A
+prediction this specific failing this completely settles it: the thread is
+not in that subtree. That is the analysis's own case G - *the chain is
+stale* - and it agrees with `be5ee33` reached from the opposite direction.
+
+**Both routes now say the same thing and neither could have said it
+alone.** The census says the thread executes nothing; the static analysis
+says if it were in the named subtree the census would show these
+addresses. Together: `IopLoadDriver -> PnpCallDriverEntry ->
+ExSetTimerResolution -> KeGenericProcessorCallback` is a **fossil** - the
+words are coherent because a returned call leaves byte-identical frames,
+and `sample_guest_stack`'s own declaration calls its output "a set of
+candidates to symbolize, not a call stack".
+
+### What this closes and what it leaves
+
+Closed: the spinning-driver framing, the `VBoxSup.sys` attribution *for
+the multicore wedge*, the ThreadLock/PRCB-lock hypotheses, and any further
+work on that stack chain. Six sessions of "which driver" rested on frames
+that had already returned.
+
+Left: **why does the clock path consume 100% of a processor's entries.**
+`KiQuantumEnd` and `KiRetireDpcList` both grow, so the scheduler is
+running and DPCs are retiring - the machinery works, it just never yields
+a slice to anything else. That is the per-tick cost question, and it is
+the only avenue with anything left in it.

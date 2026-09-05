@@ -8663,9 +8663,22 @@ def main():
                 # the floor. On the dumps this was written against that
                 # is 40-60 rows, not hundreds - the tail is genuinely
                 # cold.
+                #
+                # `ZPP_CENSUS_ALL=1` removes the cut entirely. That is
+                # the only way to DIFFERENCE the census legally: the
+                # standing rule against differencing across a cut
+                # (`read-the-control-and-difference-everything`) exists
+                # because an absent row reads as zero, and with no cut
+                # there are no absent rows. Use it to answer "is the
+                # interrupted thread progressing or looping" - a
+                # progressing thread grows the row *set* between two
+                # dumps, a looping one revisits the same addresses. The
+                # tail is ~600 rows on a wedged guest, which prints.
                 ordered = sorted(rows, reverse=True)
-                _floor = max(14, sum(1 for h, _ in ordered
-                                     if h >= 0.0005 * (tot or 1)))
+                _floor = (len(ordered)
+                          if os.environ.get('ZPP_CENSUS_ALL') == '1'
+                          else max(14, sum(1 for h, _ in ordered
+                                           if h >= 0.0005 * (tot or 1))))
                 for h, r in ordered[:_floor]:
                     print(f"  0x{r:016x}  {h:>10}  "
                           f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
