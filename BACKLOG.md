@@ -65924,3 +65924,61 @@ The instrument that can answer it is the guest instruction pointer census
 reader labels them "cpu 0"), so with one processor spinning and one idle
 its rows cannot be attributed. Fixing that is now on the critical path
 rather than being hygiene.
+
+## The guest DOES reach PASSIVE - the TPR gate is not what refuses 0x2f
+
+hvix64's `HvpApicDeliverHighestIrr` has **six** decline branches, not one.
+Gate 4 (RVA `0x2fe05f`) fetches register `0x41004`, which resolves through
+`HvpGetVpRegister` to CR8 - i.e. `byte[apic_page + 0x80] >> 4`, the xAPIC
+task priority class - and declines unless
+`class(vector) > VTPR>>4`, **strictly**. Vector `0x2f` is class 2, so it is
+refused at `0xd0` (class 13) *and* at `0x20` (class 2). It needs the guest
+at class 0 or 1: PASSIVE or APC. That is exactly what a real local APIC
+does, and it is why Windows encodes IRQL in the vector's high nibble.
+
+That model predicts the guest never drops below class 2. **It does.**
+Boot 174, cpu 0, 473,362 second-level entries:
+
+    0x20   33.5%      0x40    6.0%
+    0xd0   27.0%      0x10    0.7%   <- APC, class 1
+    0x00   24.7%      0x60+   0.1%   <- PASSIVE, class 0
+    0xf0    7.9%
+
+**A quarter of entries are at PASSIVE and would admit a class-2 vector.**
+So gate 4 is not the permanent decliner, and the refusal falls back to
+gate 1 (the PPR/ISR-stack test, which arms *nothing* when it declines),
+gate 5 (blocking-by-STI / MOV-SS) or gate 6.
+
+Gate 1 is the one worth chasing precisely because it is silent: it neither
+arms an interrupt window nor writes a TPR threshold, so a vector refused
+there leaves no trace in vmcs12 at all. A stale entry on hvix64's ISR
+stack - say a class-4 vector never popped - would block `0x2f` for ever
+and be invisible from every counter zpp owns. The read is
+`A0 + 0x5d0 + depth`, one byte, with the walker that already works.
+
+### This also corrects a recorded claim
+
+`nested_vmx.h:393` states the task priority was "never once below `0x20`
+across 630,418 second-level entries". On this configuration it is below
+`0x20` on **25.4%** of entries. Line 349 of the same header says "task
+priority zero or `0x10` on about a tenth of entries", which is the same
+shape as today's reading. The two in-tree statements contradict each
+other and today's measurement agrees with the second.
+
+**Caveat, stated because the percentage depends on it:**
+`l2_entry_vtpr` merges VTL0 and VTL1 entries -
+`nested_virtual_apic_address[cpu]` holds whichever VMCS was built last -
+and the secure kernel runs high by construction. So the *percentages* need
+splitting by trust level before they mean anything precise. The
+qualitative claim survives that caveat: VTL1 running high cannot
+manufacture entries at `0x00`, so the PASSIVE entries are real.
+
+### A symbolisation anchor was wrong
+
+`ntoskrnl+0x6b3692` is **`KiDpcInterruptBypass+0x12`**, a different
+function from `KiDpcInterrupt` - it performs no EOI and does not test
+`IdleHalt`. The instruction after `KiDpcInterrupt`'s `sti` is
+`0x6b32e7`. Any reading anchored on `0x6b3692` - including this session's
+hot-address censuses, where it is 22.7% - was sampling the **bypass**
+path, which is how the DPC queue is normally drained from eleven ISR
+tails without vector `0x2f` being involved at all.
