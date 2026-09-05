@@ -68393,3 +68393,61 @@ holder site is **real on this boot too**, not an artifact of boot 185.
 Settling (L) vs (D) needs an instrument whose population is *asynchronous
 entries*, which is precisely the design already worked out and not built.
 That is now the blocking measurement rather than a speculative nicety.
+
+## Boot 187 differenced - the shape holds, and the spinner is the IDLE thread
+
+`8138e79` quoted boot 187's census **cumulatively**, which is the error this
+file records under "Difference, never quote cumulative". Corrected here by
+differencing two uncut censuses 150 s apart. **The conclusion survives**,
+which it was not entitled to until measured:
+
+    cpu 1  delta 114,209        cpu 0  delta 1,309,166
+    32.9% HvlEndSystemInterrupt+0x1e     33.5% HvlEndSystemInterrupt+0x1e
+    32.6% HvlWriteApicCommandReg+0x1d    26.5% KiDpcInterruptBypass+0x12
+    32.0% KiQuantumEnd+0x538             18.1% HvlWriteApicCommandReg+0x1d
+                                         16.4% KiInterruptDispatchNoLock+0x7c
+
+Three equal thirds on cpu 1 with the spinner at 32.0%, differenced, on the
+third boot. The wedge is deterministic and the reading is now properly
+supported rather than borrowed from a cumulative total.
+
+### Two instruments disagreed about cpu 1, and the disagreement is the finding
+
+The DPC read taken minutes earlier said cpu 1 was **`CurrentThread ==
+IdleThread`, `IdleHalt = 1`, RUNNING IDLE**. The census says cpu 1 spends
+32% of its entries spinning in `KiQuantumEnd+0x538`. Those look
+incompatible - an idle, halting processor is not spinning on a lock.
+
+They are not incompatible. **`KiQuantumEnd` has exactly two callers:
+`KiDispatchInterrupt+0x196` and `KiIdleLoop+0xaf`.** So the idle thread
+reaches quantum-end processing directly from the idle loop, and the
+processor can be simultaneously "running the idle thread" by `KPRCB` and
+"spinning in `KiQuantumEnd`" by RIP. Both instruments are right.
+
+**This changes what cpu 1 is.** It is not a starved worker thread waiting
+for a slice - it is the **idle loop**, stuck trying to complete quantum-end
+work against a lock it cannot get. That also explains `IdleHalt = 1` with
+no escape: the settled account says `IdleHalt` gates the interrupt loop off
+and lets the guest recover, and here the flag is set and recovery still
+does not happen, because the block is not the interrupt loop at all.
+
+**INFERRED, flagged**: the `KiIdleLoop+0xaf` call site comes from the
+disassembly report, not from a frame I read on this boot. What would
+confirm it is the return address `KiIdleLoop+0xb4` appearing in a stack or
+interrupted frame for cpu 1; what would refute it is
+`KiDispatchInterrupt+0x19b` appearing there instead.
+
+### And the DPC state does NOT match boot 185
+
+    boot 185 wedged           boot 187 wedged
+    DpcQueueDepth  2 / 1      DpcQueueDepth  0 / 0     (empty)
+    DpcRequestSummary 0x2a/0x22   DpcRequestSummary 0 / 0
+    QuantumEnd     1 / 1      QuantumEnd     1 / 0
+    IdleHalt       0 / 0      IdleHalt       0 / 1
+
+So the *census* shape reproduces exactly while the *scheduler* state
+differs. Boot 187 matches the originally documented wedge
+(`DpcRequestSummary = 0`, empty queue); boot 185 did not. **The same spin
+is reached from at least two different scheduler states**, which argues the
+lock contention is the invariant and the DPC state is downstream of it -
+not the other way round, which is how `84684e7` framed it.
