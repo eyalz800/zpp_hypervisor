@@ -67041,3 +67041,53 @@ state until the census stops changing shape.** A window that differs from
 the window before it is not yet the answer - it is the approach. Boot
 179's 605/s, 93/s and 0.0/s windows disagree with each other completely,
 and only the last one is the wedge.
+
+## CONFIRMED on three boots: the wedge has a reproducible three-stage trajectory
+
+Measured on the control (`quiet_rip`), every figure differenced between
+consecutive windows of the same boot. Boots 177, 179 and 180 all follow
+the same sequence:
+
+    stage        walk rate   dominant control rows
+    -----------------------------------------------------------------
+    healthy      600-670/s   hypercall page 96-98%
+                             (HvCallVtlCall / HvCallVtlReturn stubs)
+    transient     90-190/s   HalpHvTimerArm+0x7a  56.2% (180)
+                                                  56.6% (179)
+    livelock       0-70/s    HvlEndSystemInterrupt+0x1e
+                             KiDpcInterruptBypass+0x12
+                             KiInterruptDispatchNoLockNoEtw+0x7c
+                             HvlWriteApicCommandRegister+0x1d
+                             - 98.8% of boot 179's final 19.8M samples
+
+Boot 180's transition window, differenced: `HvlEndSystemInterrupt` 29.5%,
+`KiDpcInterruptBypass` 24.6%, `HvlWriteApicCommandRegister` 16.4%, and
+`HalpHvTimerArm` **falling** from 56.2% to 7.7%. The livelock displaces
+the transient rather than following it independently.
+
+**The transient's peak is remarkably consistent** - 56.6% and 56.2% on two
+boots - which makes it a reliable *phase marker*. It is **not** an outcome
+predictor: `cd773fa` claimed that and `74bb0cf` retracted it, because boot
+179 hit 56.6% and then went to the livelock anyway.
+
+Boot 178, previously written up as a second wedge profile, is now clearly
+a boot **caught in the transient**: it was called at 161,935 control
+samples with `HalpHvTimerArm` at 40.6%, where boot 179 needed 19.8M
+samples for the livelock to emerge.
+
+### Why this is worth having
+
+It gives a **stage** to any boot from one differenced pair of dumps, and
+it says how long to wait before a characterisation means anything. The
+three prior mischaracterisations in this file were all the same error -
+reading a stage as an outcome - and the sample counts explain how it
+happened: the healthy and transient stages produce hundreds of thousands
+of samples, the livelock produces tens of millions, so any observation
+that stops early is dominated by whichever stage it caught.
+
+**Still missing, and it is the one sample that matters:** a boot that
+reaches the login screen, with a control baseline taken before it slows.
+Every boot measured this way so far has ended in the livelock. Whether a
+successful boot skips the transient, passes through it faster, or exits
+the livelock is unknown, and it is exactly the comparison that would say
+what "escaping" consists of.
