@@ -67830,3 +67830,138 @@ that returns **without** clearing `PRCB.QuantumEnd` (+0x38b9).
 current and never reaches that `hlt`** - so the one instruction that ends
 this class of livelock is being approached and not taken. That is a second,
 independent handle on the same wedge and it is new.
+
+## THE MULTICORE WEDGE, NAMED: both PrcbLocks held, cpu 1 spinning in KiQuantumEnd
+
+Static analysis of `KiQuantumEnd` (RVA `0x299420`) plus nine census
+predictions plus two live lock reads. **Every prediction held.**
+
+### What KiQuantumEnd+0x538 is - VERIFIED on the shipped binary
+
+Not a call, not a `wrmsr`. It is the instruction after `pause` in an
+**unbounded spin loop** that acquires **bit 0 of `KPRCB+0x30` (PrcbLock)
+for every PRCB in the isolation unit** - `KiAcquirePrcbLocksForIsolationUnit`
+inlined:
+
+    +0x500  movq (%rsi),%rdi          <- LOOP TOP, next PRCB in the unit
+    +0x505  lock btsq $0,0x30(%rdi)   <- acquire
+    +0x50c  jae +0x543                   got it -> next PRCB
+    +0x512  testl %ebx,HvlLongSpinCountMask
+    +0x518  jne +0x536                <- OBSERVED 0.2%
+    +0x536  pause
+    +0x538  movq 0x30(%rdi),%rax      <- OBSERVED 33.1%
+    +0x53f  jne +0x510                   still held -> back off
+    +0x541  jmp +0x505                   free -> retry
+
+`+0x538` follows the longest-latency instruction in the loop, so nearly
+every interrupt taken while spinning lands there. The 165:1 ratio between
+`+0x538` and `+0x518` is a latency ratio - exactly what a `pause` backoff
+loop produces. **The loop has no exit but acquiring. No timeout, no yield.**
+
+My earlier reading (`84684e7`) had the sequence right and the mechanism
+wrong: it is not `+0x538 -> call -> ICR -> EOI`. It is *interrupt lands at
+`+0x538` -> ISR -> ISR writes HV ICR -> writes HV EOI -> `iret` back into
+the spin -> next `pause`*. Three census samples per interrupt, which is
+exactly the observed 33.3 / 33.3 / 33.1.
+
+### The nine census predictions - ALL CONFIRMED
+
+    +0x543..0x54f  loop acquires and advances      ABSENT  <- NEVER ACQUIRES
+    KiIsrThunkShadow+0x178  vector 0x2f delivered  ABSENT
+    KiDispatchInterrupt+0x149  ctx switch done     ABSENT
+    KiQuantumEnd+0xc92         ctx switch done     ABSENT
+    KiDispatchInterrupt+0x65   DPCs ran            ABSENT
+    KiQuantumEnd+0x524..534    long-spin hypercall ABSENT
+    KiQuantumEnd+0x4b2  KiScanSharedReadyThreads   ABSENT
+    KiQuantumEnd+0xa3f  FAST_FAIL corrupt list     ABSENT
+    KiQuantumEnd+0x5e0..660  anti-starvation scan  ABSENT
+
+`+0x543` absent is the one that matters: **the loop never acquires once in
+1.76M samples.** This is a deadlock, not a slow queue. "DPCs ran" absent
+independently confirms `DpcCount` frozen (`84684e7`) from a second
+instrument.
+
+`+0x524..534` absent means `HvCallNotifyLongSpinWait` never fires, so
+**the guest never tells zpp it is spinning** - the enlightenment that
+exists for exactly this is not reaching us.
+
+### The live lock read - BOTH HELD
+
+    KPRCB[0]+0x30   0x1  0x1  0x1     bit 0 SET
+    KPRCB[1]+0x30   0x1  0x1  0x1     bit 0 SET
+    PRCB0->0x8e58   0xfffff8006e9f5298
+    PRCB1->0x8e58   0xfffff8006e9f5298   <- THE SAME DESCRIPTOR
+
+**One isolation unit covers both processors**, and both carry the same
+array pointer, so the acquisition order is identical on both. **ABBA is
+ruled out** - that was the alternative that would have changed the fix
+completely.
+
+### Why cpu 1 can never recover - VERIFIED
+
+`KiDpcInterruptBypass+0x4/+0x9` is `movl $0x2,%ecx ; movq %rcx,%cr8`:
+**IRQL is raised to 2 before `KiDispatchInterrupt`, and `KiQuantumEnd`
+runs inside that.** So cpu 1 spins at CR8 = 2. Vector `0x2f` is priority
+class 2, so **the DPC self-IPI it requests every tick is masked by its own
+TPR and can never be delivered.** Vector `0xd1` (clock, class 13) still
+arrives - that is the interrupt landing at `+0x538`.
+
+`KiIsrThunkShadow+0x688` decodes as `0x688/8 = 0xd1`: the table is 8 bytes
+per vector, so boot 184's row was **the clock**, and `+0x178` would be
+`0x2f`. Its absence confirms the masking account.
+
+### Which processor holds it - TWO READINGS, and I cannot yet separate them
+
+- **(b) cpu 0 holds and is stuck in the interrupt path.** cpu 0's census
+  has **no `KiQuantumEnd` row at all** - it is entirely
+  `HvlEndSystemInterrupt` / `HalpHvTimerAcknowledgeInterrupt` /
+  `HvlWriteApicCommandRegister`. Its `NestingLevel` flips 1/0, so it is in
+  `KiRetireDpcList`, and `KiExecuteAllDpcs` is one of ~40 takers of this
+  same lock. This is the reading the analysis named in advance for "cpu 0
+  shows no KiQuantumEnd row".
+- **(a) cpu 1 self-deadlock.** `KiQuantumEnd` takes these locks **twice**,
+  at `+0x220` (releasing `+0x2f0`) and again at `+0x500`. If the first
+  release did not happen, cpu 1 spins at `+0x500` on a lock it holds
+  itself. Both locks being held is consistent with this too.
+
+**Both are consistent with every reading taken so far and they are not the
+same bug.** What separates them: whether cpu 0 is inside a lock-holding
+region. Recorded as open rather than guessed.
+
+### This joins up with the per-tick cost avenue, which was thought closed
+
+If (b) holds, cpu 0 is not holding the lock because of a logic error - it
+is holding it because it **cannot finish**, being saturated servicing a
+574.7 Hz tick at zpp's per-exit cost. Then per-tick cost is not an
+efficiency question but the **direct cause**: make the holder finish and
+it releases. That reframes `b711510`'s negative result, which measured
+throughput rather than whether a holder completes.
+
+### Why the tick rate makes a benign lock lethal - VERIFIED
+
+`KiVelocityFlags` bit 18 (`Feature_ShortThreadQuantum`) is set
+**unconditionally** - `KiInitializeVelocity+0x2b` is a bare `btsl $0x12`
+with no `IsEnabled` test, the check having been constant-folded on, while
+neighbouring features do test theirs. Consequences, all from the same bit:
+
+    KiCyclesPerClockQuantum   10,375,000 (5.208 ms) -> 1,729,166 (0.868 ms)
+    clock period                        15.625 ms   ->            1.74 ms
+    KiQueryQuantumReset  class 2,5,6,7:  reset = 2  ->  1.736 ms = ONE TICK
+
+So for a low-quantum thread class the quantum expires **every tick**, and
+`KiQuantumEnd` - the most expensive function on the tick path and the only
+one taking every PRCB lock in the unit, twice - runs at 574.7 Hz instead of
+~21 Hz. **There is no registry key, CPUID, MSR or boot option that turns
+this off from the Windows side.** It is not a lie zpp tells; it is what
+converts a benign lock into a livelock at our per-exit cost.
+
+Anti-starvation was checked as a candidate and **refuted**: its windows are
+tick-counted, so a 9x faster tick makes them fire 9x *sooner*, not later.
+
+### Open, and honestly unreconciled
+
+cpu 1's 312,166 samples over 150 s at 3 per interrupt implies **693 Hz**,
+against 574.7 Hz from `KeQuantumEndTimerIncrement = 17,400` - a 21%
+discrepancy. Either a fourth exit per tick, another interrupt source, or
+the tick is not 574.7 Hz on this boot. **Do not quote "one interrupt per
+tick" until this is reconciled.**
