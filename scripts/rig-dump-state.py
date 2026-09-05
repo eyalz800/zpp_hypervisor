@@ -4056,6 +4056,13 @@ def dump_ap_census(args, elf, instance):
                "cpuid_total", "cpuid_leaf_codes", "cpuid_leaf_counts",
                "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_raw",
                "cpuid_leaf0_rip", "l1_gs_base", "l1_gs_index",
+               # `l1_own_cr3` is the guest hypervisor's OWN cr3, taken
+               # from vmcs12's host_cr3 on every reflection. Its offset
+               # was already resolved here but it had no print site, so
+               # the value existed and was unreadable. It is the second
+               # of the two anchors needed to walk hvix64's own address
+               # space from outside - `l1_gs_base` is the first.
+               "l1_own_cr3",
                "l1_gs_index_taken", "start_up_applied", "init_emulated",
                "started_by_start_up_ipi", "launch_error",
                # `off` is a CURATED list, not every DWARF member, and
@@ -4227,6 +4234,31 @@ def dump_ap_census(args, elf, instance):
             verdict = "agrees" if index == cpu else "DISAGREES"
             print(f"  guest hypervisor's own index {index} from gs base "
                   f"0x{gs:x} - {verdict} with cpu {cpu}")
+            # The pair (gs base, own cr3) is what lets a reader walk into
+            # hvix64's private structures - its per-VP block and the
+            # software vAPIC hanging off it - which is otherwise
+            # unreachable from outside. Printed together because neither
+            # is usable alone.
+            # Distinguish "not queued" from "read as zero". Those are
+            # different failures and only one of them is about the guest:
+            # `word` returns None when the member was never queued or its
+            # offset never resolved, and 0 when it was read and is zero.
+            # Collapsing them with `or 0` printed "never recorded" for a
+            # plumbing gap, which is the exact shape of instrument this
+            # tree keeps getting caught by - a reader that cannot say why
+            # it has nothing.
+            own = word("l1_own_cr3", cpu)
+            if own is None:
+                print(f"    guest hypervisor's own cr3 NOT QUEUED by this "
+                      f"reader - the member exists and is written on every "
+                      f"reflection, so this is a gap here, not a fact "
+                      f"about the guest")
+            elif own:
+                print(f"    guest hypervisor's own cr3 0x{own:x}  "
+                      f"<- walk its address space with this, gs base above")
+            else:
+                print(f"    guest hypervisor's own cr3 read as ZERO - no "
+                      f"reflection has been seen on this processor")
         else:
             print(f"  guest hypervisor's own index never sampled "
                   f"(no CPUID exit with vmcs01 current)")
