@@ -64739,3 +64739,17 @@ what happens afterwards. Note the frozen `pfn` value 8,123 equals the
 For triage, watch the walk's `pfn` column rather than the process list:
 it distinguishes progress from wedge in one dump and minutes earlier,
 where `guest-processes.py` only ever reports 3 processes either way.
+
+### Refinement: VTL0 stopped ASKING; the secure kernel is not stuck
+
+One read settles the direction, and it changes where to look. The
+in-flight secure-call block reads `0xd10002` — service `0x00d1`
+`VslpSecureKernelPeriodicTick`, reached via `VslpEnterIumSecureMode` ->
+`HvlSwitchToVsmVtl1+0xab`. VTL1 is alive and doing nothing but ticking.
+
+So the stopped walk is the visible form of a **VTL0-side block**, not a
+secure-kernel hang, and the ~2.0/s of residual VTL traffic is the
+periodic tick alone rather than stalled work. Do not go looking for a
+stuck secure kernel; the question is what in normal mode stopped issuing
+`MiCopyPage`, with 26 `System` threads parked in `WrVirtualMemory` as its
+visible form.
