@@ -65155,3 +65155,49 @@ untouched.
 `SDM 12.1`, `SDM 12.9.1`, `Table 12-1` and the `SDM 11.4.x` citations
 were checked and are **correct** - they really are Processor Management
 and Multiple-Processor Management. Do not sweep them.
+
+## Triage metric: VslCompleteSecureDriverLoad is a driver-load odometer
+
+Better than anything else available during phase 1, and it costs nothing
+- it is already in the secure-service census of every dump.
+
+The chain is verified against `ntoskrnl.exe`: `MmLoadSystemImageEx`
+@`0x9b8091` -> `MiFinalizeDriverCfgState` `0xa32eb8` ->
+`MiCompleteSecureDriverLoad` `0xa33a80` -> secure service **0x00d9**. So
+its count is *driver images that finished `MmLoadSystemImageEx`
+completely*.
+
+Why it beats the two instruments already in use:
+
+- **The process list cannot move during phase 1.** It reads 3 processes
+  on a healthy early boot and on a dead one alike, so it cannot tell them
+  apart - only whether phase 1 finished at all.
+- **VTL call counts inflate.** The secure kernel keeps ticking
+  (`VslpSecureKernelPeriodicTick`) whether or not normal mode is making
+  progress, which is exactly how six boots were once filed as "stall" on
+  VTL count alone.
+
+A completed driver load is monotone, is caused by normal-mode progress,
+and cannot be manufactured by VTL1 spinning.
+
+### What it has shown so far
+
+    boot   drivers   copy calls   outcome
+    166      78        10,172     wedged, all VTL +0 except the tick
+    169      78        10,172     wedged, identical to 166
+    167      91        10,863     wedged, deeper (every VTL counter +0)
+    168     148           -       bugchecked 0x9F at the 600 s watchdog
+    170      84            -      stuttering: 145/s -> 7.6/s -> 64.6/s
+
+**Boots 166 and 169 stopped at exactly the same place** - same driver
+count, same copy count - which is a much stronger statement than the
+earlier "the freeze point moves". Both are true: the stopping point is
+not unique (91, 148 and 84 all occur), but 78 is strongly preferred and
+is hit exactly. That is the shape of a *contended* step rather than a
+uniformly random one.
+
+Note also that a stall is not always terminal. Boot 170 fell to 7.6/s and
+came back to 64.6/s, so a low rate in one epoch is not a wedge - which is
+why the epoch table's whole column has to be read rather than its last
+row. This is the same mistake the ring-buffer rule already warns about,
+in a different instrument.
