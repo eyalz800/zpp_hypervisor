@@ -66533,3 +66533,44 @@ guest simply never returns to a state where it would take one.
 boot 174 was killed before it was run. The addresses to resolve on the
 next wedge are the two in the driver page, via
 `scripts/guest-modules.py <base> <cr3> <address>`.
+
+## Integrating the per-CPU census without redeploying BROKE the census
+
+Worth recording because it is a new shape of the "verify the binary that
+actually ran" trap, and it cost the best instrument in the investigation
+for two boots.
+
+`5ea5503` gave `interrupted_rip` / `quiet_rip` their `[max_cpus]`
+dimension and taught the reader to loop per processor. The reader is run
+from the working tree; the hypervisor on the rig was deliberately **not**
+redeployed, to keep the known-good login-screen binary. The result is that
+**the reader and the binary disagreed about the shape of the member**, and
+the whole hot-address section simply stopped appearing in dumps - not with
+an error, just absent.
+
+That is the ordinary staleness trap inverted. The usual failure is a stale
+*binary* read by a current reader; here it was a current *reader* against
+a deliberately stale binary, and the deliberate part is what made it
+plausible to leave alone.
+
+**Resolved by deploying**, since the census is now the instrument that
+named the driver spin and is worth more than binary continuity. The
+switch manifest is byte-identical before and after -
+
+    nested=1 selfipi=0 windowtpr=0 drop=0 dropcnt=0 reftsc=1
+    profile=0 census=0 probe=0
+
+- so the change is instrumentation only: per-processor arrays and comments,
+no behavioural switch touched, build clean and the host suite at baseline.
+`deploy-to-rig.sh` verified the hash from a fresh mount and printed both
+manifests for comparison.
+
+As predicted, the module base moved: **`0x67061000` -> `0x66e6a000`**,
+from +2,060,288 bytes of `.bss`. `.rig-deployed-hypervisor.elf` was
+updated with it, so reader offsets match again.
+
+**The rule this adds:** when a reader and the deployed binary are
+deliberately allowed to diverge, the divergence must be *checked*, not
+assumed harmless. A member whose shape changed makes its whole section
+vanish silently, which reads as "that instrument had nothing to say"
+rather than "that instrument was not running".
