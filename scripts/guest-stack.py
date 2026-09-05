@@ -111,7 +111,10 @@ def rq(va, n=1):
 
 BASE = int(sys.argv[1], 16)
 ETH = int(sys.argv[3], 16)
-LO, HI = BASE, BASE + 0x1000000
+# ntoskrnl's SizeOfImage is 0x1450000, not 0x1000000. The old bound was
+# short by 4.5 MB - harmless for code, which all sits under +0xc83000, but
+# wrong for any "not in ntoskrnl" verdict drawn from it.
+LO, HI = BASE, BASE + 0x1450000
 
 
 def nm(v):
@@ -134,7 +137,7 @@ if not (top and bot and bot < top and top - bot < (1 << 20)):
     sys.exit(1)
 
 # Scan low (deepest/most recent) to high (outermost), 32 qwords a read.
-seen, frames = set(), []
+seen, frames, others = set(), [], []
 addr = bot
 while addr < top:
     n = min(32, (top - addr) // 8)
@@ -143,12 +146,36 @@ while addr < top:
         addr += n * 8
         continue
     for i, v in enumerate(w):
-        if LO <= v < HI and v not in seen:
+        if v in seen:
+            continue
+        if LO <= v < HI:
             seen.add(v)
             frames.append((addr + i * 8, v))
+        elif v >= 0xffff800000000000:
+            # **Canonical, and NOT ntoskrnl.** These were previously
+            # discarded, which is why a driver's own frames read as
+            # "unlabelled" - they were never printed at all. A third-party
+            # DriverEntry that does not return leaves its frames here and
+            # nowhere else, so dropping them threw away the only evidence
+            # of where inside that driver the thread is. Collected
+            # separately so the ntoskrnl list above is unchanged.
+            seen.add(v)
+            others.append((addr + i * 8, v))
     addr += n * 8
 
 print(f'{len(frames)} distinct ntoskrnl words on the stack '
       f'(~SCAN, not an unwind - deepest first):')
 for at, v in frames:
     print(f'  ~ 0x{at:x}  {nm(v)}')
+
+# Anything canonical that is not ntoskrnl: drivers, the secure kernel, the
+# hypercall page, and plain data that happens to look like a pointer. A
+# scan cannot tell code from data, so these are candidates, not frames -
+# but the driver's are in here and nowhere else.
+if others:
+    print(f'\n{len(others)} canonical NON-ntoskrnl words (candidates, not '
+          f'frames - a scan cannot tell code from data):')
+    for at, v in others[:60]:
+        print(f'  ~ 0x{at:x}  0x{v:x}')
+    if len(others) > 60:
+        print(f'  ... and {len(others) - 60} more')

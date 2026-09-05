@@ -67418,3 +67418,46 @@ available could prove it changed the odds.**
 So the honest position: the inventory is real and worth landing as
 hygiene, gated behind `census_exits` where it is diagnostic - but not as a
 route to the login screen.
+
+### QUALIFIED: the frame is coherent but not proven live - zero VBoxSup words on the stack
+
+Fixed `guest-stack.py`, which discarded every stack word outside
+`[BASE, BASE+0x1000000)` - so a driver's own frames were never printed,
+which is why they read as "unlabelled". (The bound was also short: ntoskrnl's
+`SizeOfImage` is `0x1450000`.) Canonical non-ntoskrnl words are now
+collected and printed separately.
+
+Re-run on the same thread, filtering to VBoxSup's image
+(`DllBase 0xfffff802236c0000`, size `0x12b000`):
+
+    0 VBoxSup words on the stack
+
+**So `VBoxSup`'s `DriverEntry` was not executing when that read was
+taken.** The four cross-checks at `R` prove the frame is *internally
+coherent* - `[R]`, `[R+0x50]`, `[R+0x38]`, `[R+0x30]==[R+0x48]` all agree -
+but `guest-stack.py` is a **scan, not an unwind**, and a stale frame from a
+*completed* `PnpCallDriverEntry` passes every one of them, because the whole
+frame goes stale together. Coherence is not liveness.
+
+That is consistent with the read having been taken on a **healthy,
+progressing** boot: `VBoxSup`'s `DriverEntry` ran, returned, and left its
+frame behind. What the read actually establishes is **the most recent
+driver whose `DriverEntry` was called on that thread** - which is worth
+having, and is not the same claim as "the driver that is spinning".
+
+**So `b711510` is qualified, not retracted.** `VBoxSup.sys` is named
+correctly and the identification method is sound; what is not yet shown is
+that it is the driver that fails to return. The single-core note recorded
+the same driver independently, which is corroboration but not proof for
+the multicore case.
+
+**The decisive test, and it is now one command:** take the same read on a
+**wedged** boot. If `VBoxSup`'s `DriverEntry` is the thing spinning, its
+own return addresses must be on the stack above `R` - the filter that hid
+them is fixed. If the wedged stack also shows zero VBoxSup words, then the
+spinning code is somewhere else entirely and the whole
+`PnpCallDriverEntry` line needs re-examining.
+
+This is the same error the tree records twice already: **a scan's hit is a
+candidate, not a frame**, and `guest-thread-stack.py`'s own docstring says
+so. I had the warning and still read a coherent frame as a live one.
