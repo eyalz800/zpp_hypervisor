@@ -66838,3 +66838,74 @@ vmcs02 is not doing what the VMCS says and the fault is here; zero means
 hvix64 only ever arms a threshold while already at or above it and the
 line is confirmed dead. Given `{0: 1.58M, 2: 63}`, zero is expected.
 **That reading has never been taken, because the census is off.**
+
+## The control settles it: the wedge IS the documented clock loop
+
+`interrupted_rip` has a declared control, `quiet_rip` - entries staging
+**nothing**, so they resume the guest where it actually was rather than
+into an ISR. The reader prints both in every dump. **I read only the
+first, for this entire investigation.**
+
+Differenced across boot 177's two dumps (2,211,303 control samples added
+during the wedge):
+
+    HvlEndSystemInterrupt+0x1e            31.7%
+    KiDpcInterruptBypass+0x12             27.7%
+    HvlWriteApicCommandRegister+0x1d      19.9%
+    KiInterruptDispatchNoLockNoEtw+0x7c   13.1%
+    HalpHvTimerArm+0x7a                    2.6%
+
+**That is CLAUDE.md's recorded stall signature, verbatim** -
+`HvlWriteApicCommandRegister+0x1d` (writes ICR `0x2f`) -> `int-window` ->
+`KiDpcInterruptBypass+0x12` -> EOM -> EOI -> `HvlEndSystemInterrupt+0x1e`
+-> ICR -> repeat. Three of the named addresses match exactly. The wedge is
+that loop, and the tree had it written down already.
+
+### Why `interrupted_rip` distorted it
+
+Every hot row in `interrupted_rip` is **the first architecturally
+interruptible instruction after an interrupt window opens**. Verified by
+reading the guest's own bytes:
+
+    6a6f8d  sti
+    6a6f8e  hlt
+    6a6f8f  retq      <- "HalProcessorIdle+0xf", the 85% row
+
+and the same shape at `KiDpcInterruptBypass+0x12` (second instruction
+after `sti`), `KiDpcInterrupt+0x390` (likewise) and
+`KiCheckForThreadDispatch+0x7f` (first instruction after `mov cr8`).
+
+`interrupted_rip` is written **once per second-level entry that stages a
+valid event**, and SDM 27.2.1.1 forbids staging an external interrupt
+while blocking-by-STI or blocking-by-MOV-SS is set. So the census can only
+ever sample where injection is *permitted* - **it measures its own
+precondition.** Its declaration says exactly this and names `quiet_rip` as
+the control; I did not read the control.
+
+The discriminator is stark: `KiCheckForThreadDispatch+0x7f` is **34.5% of
+`interrupted_rip` and absent from the control**. That row was an artefact.
+`KiDpcInterruptBypass+0x12` appears in both, at 50.2% and 27.7%, so it is
+real.
+
+### What this retracts
+
+- **`3470c28`** - "two instructions are 84.7% of the wedge". The
+  `KiCheckForThreadDispatch` half does not survive the control.
+- **`cc0ff15`** - "two wedge profiles, one spins and one goes idle". Both
+  profiles were built from `interrupted_rip`, and `HalProcessorIdle+0xf`
+  is the `retq` after `hlt`, so a high count there means *the processor
+  halted and woke*, which is a wake-up rate, not idleness. The two-profile
+  claim must be rebuilt on `quiet_rip` before it means anything.
+- The stack chain in `d81cef9` needs one edge removed:
+  **`PnpEnableWatchdog` cannot call `ExSetTimerResolution`** - it calls
+  only `PnpAllocateWatchdog` and `PnpWatchdogTimerStart`, and nothing in
+  ntoskrnl calls `ExSetTimerResolution` directly (it is export ordinal 401,
+  reached through an import thunk). The consistent reading of that scan is
+  `PnpCallDriverEntry` -> a **driver's** `DriverEntry` -> the thunk. The
+  conclusion is unchanged and slightly strengthened - a third-party driver
+  asked for a finer timer resolution - but the intermediate frame was a
+  stale slot, as the walker's own docstring warns.
+
+**The rule, and it is the sixth instrument lesson of this session:** when a
+census ships with a named control, read the control *first*. This one was
+printed in every dump I took, for the whole investigation.
