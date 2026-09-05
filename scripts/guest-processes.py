@@ -44,12 +44,27 @@ def monitor(cmds):
     d = out.decode('utf-8', 'replace')
     return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', d).replace('\x1b', '')
 
+# **Filter to DATA ROWS before matching.** The monitor echoes the
+# command it was sent, and a physical address in that echo is 9-12 hex
+# digits, so any width narrower than sixteen matches the address. `{16}`
+# was safe here only by that accident; `xp_b`'s `{2}` was not. It
+# returned the address's leading two digits as the first byte, so a
+# process name at an address beginning `0x20`-`0x7e` grew a leading
+# character (`:lsass.exe`, `Acsrss.exe`) and one beginning `0x1f` or
+# below did not, since `rname` filters to printable. The `System`
+# cross-check below did catch it - and reported it as "offsets or head
+# RVA are wrong - do not believe the list above", which sends the reader
+# to re-derive a KASLR base that was never the problem.
+def _rows(d):
+    return '\n'.join(l for l in d.splitlines()
+                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
+
 def xp_q(phys, n=1):
-    d = monitor([f'xp /{n}xg 0x{phys:x}'])
+    d = _rows(monitor([f'xp /{n}xg 0x{phys:x}']))
     return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
 
 def xp_b(phys, n):
-    d = monitor([f'xp /{n}xb 0x{phys:x}'])
+    d = _rows(monitor([f'xp /{n}xb 0x{phys:x}']))
     return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', d)]
 
 BASE = int(sys.argv[1], 16)

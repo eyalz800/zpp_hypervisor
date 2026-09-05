@@ -66028,3 +66028,200 @@ hvix64 `0x32d448` (gate 2), the guest RFLAGS.IF at `0x32d28c` (gate 3)
 and the interruptibility state at `0x32d250` -> `0x32d354` (gate 5). Those
 are hvix64 statics rather than per-VP fields, so they need the image base,
 which is recoverable but not yet pinned.
+**Done - see the section below.** `interrupted_*` and `quiet_*` carry
+`[max_cpus]` and the reader prints a row per processor, so that census
+can now be attributed. Note the module base moved with the binary: the
+singleton grew 2,060,288 bytes, so re-read `allocate_rwx done at ...`
+for this build rather than carrying one across.
+
+## Audit: per-processor writes into whole-machine words, and what is left
+
+Instrument defects found and fixed on 2026-09-05; the ones deliberately
+**not** fixed are recorded here so they are not re-discovered as
+findings, and so the reason for leaving them is on record rather than
+only the conclusion.
+
+The class: a member written from a path that runs on every processor,
+declared without a `[max_cpus]` dimension, and printed by
+`rig-dump-state.py` under a "cpu 0" heading. Three errors follow and they
+compound - two processors sum into one cell, the unlocked
+read-modify-write loses increments so a numerator and its denominator
+lose at different rates, and the label names a processor whose
+contribution is not separable. `l2_hypercall_code_counts` was already
+documented as one instance; there are seventeen more.
+
+### Fixed
+
+- `interrupted_*` / `quiet_*` (hypervisor.h:5923, 5988) - the hot-address
+  census and its control. `interrupted_samples` was also in the reader's
+  `DELTA_GLOBAL_COUNTERS`, a list documented as being for "single words,
+  not per-processor rows", so the wrong claim was written down rather
+  than merely implied.
+- `guest_stack_*` / `guest_interrupted_*` (hypervisor.h:5781, 6179) -
+  **the worst of the set, because it did not mislabel a number, it
+  manufactured a stack.** One shared 48-entry array and one shared count
+  reset to zero at the top of the walk, so a second processor sent the
+  first one's next frame to index 0. Every entry is inside the kernel
+  image because that is the filter, so a spliced stack symbolises exactly
+  as cleanly as a real one. CLAUDE.md's 26-frame
+  `Phase1Initialization -> ... -> HvlSwitchToVsmVtl1+0xab` came out of
+  this array.
+- `host_exception` / `host_exception_cr2` (hypervisor.h:3587) - a
+  seven-field frame copied field by field, so two faulting processors
+  leave a record that is neither of theirs. The same function already
+  took `this_processor()` twice, for `ap_wake_root` and for the recovery
+  point, with a comment saying a shared counter "cannot name the
+  processor". This pair sat between the two.
+- Reader-side denominators, no hypervisor change: `handler_reason_*` and
+  `vmcs02_split_*` divided an all-processor numerator by processor 0's
+  denominator, and both print a coverage line their own headers call the
+  check that makes them results rather than lists. Both now sum the
+  denominator across processors and say "all N processors".
+
+Total `.bss` cost, measured on the built ELF rather than reasoned about:
+the singleton went 60,485,632 -> 62,545,920 bytes (`llvm-nm -S`, +3.4%)
+and `.bss` 81,780,952 -> 83,841,240 (`llvm-readelf -S`), +2,060,288
+either way. **The module base moves when the binary's size changes**, so
+anything carrying a hardcoded base must re-read
+`allocate_rwx done at ...` for this build.
+
+### Found and deliberately NOT fixed
+
+- **`handler_reason_*` and `vmcs02_split_*` themselves** keep their flat
+  declarations. `resume.cpp:1530` states the choice deliberately - "Not
+  per processor, deliberately - one processor runs the guest being
+  chased" - and that premise stopped being true when this tree started
+  booting a two-processor guest to LogonUI. Reversing a documented
+  decision is a design call, not a mechanical fix, and the reader fix
+  above removes the wrong *number* without touching it. What it would
+  cost to dimension them: five and three arrays, about 100 KiB, plus a
+  per-processor printer.
+- **`profile_*`** (hypervisor.h:5996) is the identical shape to the
+  `interrupted_*` family just fixed, from the same call site
+  (`exit_dispatch.cpp:4103`, whose two neighbours are already passed
+  `slot - 1`). Not fixed for `.bss`: another pair of 2048-entry tables is
+  another 2 MiB on top of the 2 MiB already spent, and `profile=0` in the
+  switch manifest so nothing on the rig samples it. Fix it in the commit
+  that turns `ZPP_PROFILE_L2` on.
+- **`msr_write_*` / `l2_msr_write_*`** (hypervisor.h:13887, 13908). Nine
+  members, and the slot claim `if (0 == counts[slot]) codes[slot] = ...`
+  is a race that files one MSR's writes under another's code. The census
+  comment at `hypervisor.cpp:5378` claims it "cannot disagree" with
+  `exit_reason_counts[cpu][wrmsr]` because it is the same statement - the
+  total is per-processor and the census is not, so it does.
+- **`interrupted_contexts` ring** (hypervisor.h:6223). Two processors
+  interleaving into one ring make consecutive slots come from different
+  processors, which the verdict function reads as *registers changing*
+  when a single processor is frozen. Needs either a first dimension or a
+  recorded cpu column; the second is cheaper and better, which makes it a
+  design choice rather than a mechanical fix.
+- **`shadow_divergence_*`** (hypervisor.h:13058). The sharpest of the
+  unfixed set: the slot index is `shadow_divergences[cpu]`, a per-CPU
+  counter indexing a *global* array, and three of the six stored fields
+  are themselves read per-CPU. One printed row can carry one processor's
+  field with another's owner, and the header calls this "the failure
+  three boots could only report as a reset".
+- **`hypercall_codes` / `hypercall_code_counts` / `hypercalls_seen`,
+  `cpuid_trace` / `cpuid_trace_count`, `nested_capability_reads` /
+  `capability_answers`, `vtl_block_*`, `vmcall_seen`,
+  `vmx_refusal_ss_rights`, `guest_nmis_reinjected`** - all read today,
+  all labelled "cpu 0" or listed as global. Several carry a racy
+  read-then-increment slot claim (`slot = count; count = slot + 1`), so a
+  lost entry still advances the count and the reader walks slots that
+  nothing filled.
+- **`vtl_step_*`** (hypervisor.h:8133) prints an instruction *sequence*,
+  which two processors arming the same kind would interleave into a
+  plausible non-repeating trace. Compiled off (`stepvtl=0`), so no
+  current reading is affected - fix it before switching it on.
+- **`bucket_calls`** (hypervisor.h:4245) is declared, queued by the
+  reader, printed by nothing and **written by nothing**. It reads zero,
+  which is indistinguishable from "no reflections bucketed". Needs a
+  write site or deletion.
+
+### Not findings, recorded so they are not re-proposed
+
+`vp_assist_*` is written per processor and the reader already says
+`(machine-wide, NOT per cpu)`, with a comment recording that the heading
+used to claim otherwise - that is the model for a correctly handled
+global. `host_nmi_count` / `host_nmi_rip` are global by acknowledged
+design with `ap_wake_root[max_cpus]` added beside them for this exact
+reason. `emulated_writes` / `stepped_writes` already have
+`*_by_cpu[max_cpus]` companions. `vmcs_shadowing_stranded` genuinely
+counts *other* processors. Everything under `channel_*`, `framebuffer_*`,
+`dmar_*` and the `initialize_*` configuration fields is written once from
+a boot-processor-only path.
+
+## Audit: the monitor echo, and the scripts that were reading it
+
+The QEMU monitor echoes the command before answering, so a response
+carries the literal text `xp /1xb 0x351f61dd0`. A physical address there
+is 9-12 hex digits, so `re.findall(r'0x([0-9a-f]{2})', response)` returns
+`['35', '0d']` - **the address first**. Any width under sixteen matches
+the echo; `{16}` was safe only because an echoed address is never that
+long, which is why every pointer walk and page-table read in `scripts/`
+looked correct while byte and word reads were fabricated.
+
+Five scripts were affected and are fixed. What each would have made
+someone believe:
+
+- `guest-threads.py` - that a named guest thread is blocked on a specific
+  wait object. `rb()` returned the address's leading two digits for every
+  thread, so the WaitReason column was **identical across threads and
+  stable across boots**, which is what a real wait state looks like. The
+  file's own header records a *previous* fix to this column
+  (`_KTHREAD.ThreadListEntry` 760, not `_IRP`'s 32) and closes "that one
+  was always right" - true of the offset, false of every value printed.
+- `guest-thread-stack.py` - that the printed stack belongs to the thread
+  the docstring says it does. The fabricated byte was used as a
+  **selector**, so it dumped whichever thread's address began with the
+  requested wait reason, and printed nothing when none did -
+  indistinguishable from "no thread is in that state".
+- `guest-clock.py` - that bit 0 of the KUSER_SHARED_DATA seqlock is stuck
+  set, i.e. that every caller of `RtlGetInterruptTimePrecise` spins for
+  ever taking no VM exits. That is a named hypothesis in the script's own
+  docstring, and an odd leading address digit confirms it.
+- `guest-processes.py` - that the kernel base or CR3 is stale. Names grew
+  a leading character for roughly half of plausible addresses, and the
+  `System` cross-check caught it and blamed the offsets.
+- `guest-modules.py`, `guest-stack.py` - safe by arithmetic accident
+  (`{4}` on a four-digit artefact always exceeds the printable filter;
+  `{16}` everywhere else), anchored anyway.
+
+The fix is a four-line `_rows()` filter that already existed and was
+correct in the four scripts where the bug had been *caught*, and had
+never been propagated to the five that shared the idiom. It is now a test
+- `tests/python_layout/test_monitor_echo.py` - with a measured negative
+control: reintroducing the defect in `guest-processes.py` makes it fail
+and name the line.
+
+Two more, same session, different class:
+
+- `rig-watch-nvme.sh` referenced `$CC_CSTS`, assigned nowhere - the pair
+  was split into `$CC` and `$CSTS` and this line was not updated. Under
+  `set -u` that aborts on the line *before* the polling loop, so every
+  timestamped "first all-ones" reading this script exists to produce has
+  never been produced.
+- `rig-check-vmxon.sh` counted matching log *lines* and printed them as
+  "N processors reached a vm entry", then failed the run on that number.
+  The log ring collapses an identical repeated line into `[times=N]`, so
+  two processors emitting the same line count as one. The `vmxon` case
+  eight lines above already extracted the cpu and `sort -u`'d it.
+
+### Script-level, found and NOT fixed
+
+- `guest-cpu-snapshot.py`'s `_KTHREAD.NextProcessor` at offset 536 has no
+  corroboration anywhere in this tree - every other `_KTHREAD` offset
+  used by `scripts/` appears in at least two files - and it is read as a
+  qword where the field is a ULONG. Left in, now printed as
+  `UNVERIFIED offset`. Two anchors were added beside it (both PRCB
+  pointers canonical and distinct, each thread pointer canonical), since
+  those can only refuse and never fabricate.
+- `guest-securekernel-syms.py`'s section loop has no `break` and no
+  containment test, so the last section passing a 1 MB slop bound wins.
+  **Checked, and it is correct today by accident rather than by design**:
+  PE sections are in ascending `VirtualAddress` order and `rvas` is keyed
+  by 1-based section index, so "last qualifying" is the containing
+  section. It fails for an RVA in a gap past the final section. Not fixed
+  because `.references/` is absent in this worktree and the change could
+  not be run against a real PDB - a fix nobody has watched work is a fix
+  that may not have been applied.

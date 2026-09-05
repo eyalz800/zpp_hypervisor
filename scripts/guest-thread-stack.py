@@ -29,6 +29,16 @@ LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 760, 643
 # structure's StackBase - the docstring said "StackBase (8)" so the
 # comment and the value agreed with each other and both were wrong.
 KSTACK, SBASE = 88, 56
+# **And `xp_b` did not read memory at all.** See the header of
+# `guest-threads.py`: the regex matched the monitor's ECHO of the
+# command, so `rb()` returned the physical address's leading two hex
+# digits. Here that is worse than a wrong column, because the byte is a
+# SELECTOR - the walk below stops at the first thread whose address
+# happens to begin with the requested wait reason, so the stack printed
+# belonged to an arbitrary thread, and when no address began `0x12` the
+# script printed nothing, which reads exactly like "no thread is in
+# WrVirtualMemory". That is the question the docstring says this script
+# exists to answer.
 
 def monitor(cmds):
     s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.35)
@@ -43,8 +53,12 @@ def monitor(cmds):
     except Exception: pass
     s.close()
     return re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',out.decode('utf-8','replace'))
-def xp_q(p,n=1): return [int(x,16) for x in re.findall(r'0x([0-9a-f]{16})', monitor([f'xp /{n}xg 0x{p:x}']))]
-def xp_b(p,n):  return [int(x,16) for x in re.findall(r'0x([0-9a-f]{2})', monitor([f'xp /{n}xb 0x{p:x}']))]
+def _rows(d):
+    # Data rows only; the echoed command is not one.
+    return '\n'.join(l for l in d.splitlines()
+                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
+def xp_q(p,n=1): return [int(x,16) for x in re.findall(r'0x([0-9a-f]{16})', _rows(monitor([f'xp /{n}xg 0x{p:x}'])))]
+def xp_b(p,n):  return [int(x,16) for x in re.findall(r'0x([0-9a-f]{2})', _rows(monitor([f'xp /{n}xb 0x{p:x}'])))]
 
 BASE=int(sys.argv[1],16); CR3=int(sys.argv[2],16)&0x000ffffffffff000
 WANT=sys.argv[3]; WR=int(sys.argv[4]) if len(sys.argv)>4 else 18
@@ -75,7 +89,20 @@ def rname(va):
     if p is None: return ''
     return ''.join(chr(c) for c in xp_b(p,15) if 32<=c<127)
 
-cur=rq(HEAD); seen=set()
+# **Anchor before walking**, for the reason `guest-processes.py` gives:
+# `PsActiveProcessHead`'s first entry is always `System`, and without
+# that check a wrong base or head RVA produces a short garbage walk that
+# matches nothing and prints nothing - indistinguishable from "no thread
+# of that process is in that wait state", which is the answer this
+# script exists to give.
+_first=rq(HEAD)
+_name=rname(_first-LINKS+NAME) if _first else ''
+if not _name.lower().startswith('system'):
+    sys.exit(f'ANCHOR FAILED: the first entry of PsActiveProcessHead '
+             f'reads {_name!r}, not `System`. The kernel base or the '
+             f'head RVA 0xf05c60 is wrong for this build.')
+print('anchor: first entry of PsActiveProcessHead is `System`')
+cur=_first; seen=set()
 while cur and cur!=HEAD and cur not in seen:
     seen.add(cur); ep=cur-LINKS
     if WANT.lower() in rname(ep+NAME).lower():

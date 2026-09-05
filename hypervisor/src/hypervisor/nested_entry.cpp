@@ -6612,6 +6612,15 @@ void hypervisor::record_profile_sample(std::uint64_t rip)
 
 void hypervisor::sample_guest_stack(std::size_t cpu)
 {
+    // Every member this writes is `[max_cpus]` since 2026-09-05. They
+    // were single words and one shared array, and `count` is reset at
+    // the top of the walk below - so a second processor entering here
+    // sent the first one's next frame to index 0 and the printed trace
+    // was two stacks spliced. See `guest_stack_trace`.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
     auto base = this->guest_kernel_base;
     auto size = this->guest_kernel_size;
 
@@ -6627,13 +6636,13 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
         return;
     }
 
-    this->guest_stack_pointer = stack;
-    this->guest_stack_rip = this->vmcs.guest_rip();
-    this->guest_stack_count = 0;
+    this->guest_stack_pointer[cpu] = stack;
+    this->guest_stack_rip[cpu] = this->vmcs.guest_rip();
+    this->guest_stack_count[cpu] = 0;
 
     for (std::size_t word{};
          (word < guest_stack_words) &&
-         (this->guest_stack_count < guest_stack_capacity);
+         (this->guest_stack_count[cpu] < guest_stack_capacity);
          ++word) {
         auto at = stack + (word * sizeof(std::uint64_t));
 
@@ -6682,8 +6691,10 @@ void hypervisor::sample_guest_stack(std::size_t cpu)
             (value < (here + image_window));
 
         if (((value >= base) && (value < (base + size))) || near_here) {
-            this->guest_stack_trace[this->guest_stack_count] = value;
-            this->guest_stack_count = this->guest_stack_count + 1;
+            this->guest_stack_trace[cpu][this->guest_stack_count[cpu]] =
+                value;
+            this->guest_stack_count[cpu] =
+                this->guest_stack_count[cpu] + 1;
         }
     }
 
@@ -6695,6 +6706,12 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
                                           std::uint64_t base,
                                           std::uint64_t size)
 {
+    // Per processor, same change and same reason as the caller's. See
+    // `guest_interrupted_trace`.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
     // The five quadwords hardware pushes, by their shape. SDM 7.14.2
     // gives the order - RIP, CS, RFLAGS, RSP, SS at increasing addresses
     // - and Windows runs its kernel at code selector 0x10 with a stack
@@ -6719,9 +6736,9 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
             .has_value();
     };
 
-    this->guest_interrupted_count = 0;
-    this->guest_interrupted_rsp = 0;
-    this->guest_interrupted_rip = 0;
+    this->guest_interrupted_count[cpu] = 0;
+    this->guest_interrupted_rsp[cpu] = 0;
+    this->guest_interrupted_rip[cpu] = 0;
 
     std::uint64_t frame_at{};
 
@@ -6766,8 +6783,8 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
             continue;
         }
 
-        this->guest_interrupted_rip = frame[0];
-        this->guest_interrupted_rsp = frame[3];
+        this->guest_interrupted_rip[cpu] = frame[0];
+        this->guest_interrupted_rsp[cpu] = frame[3];
 
         // The *address* of the frame, not only its contents. The
         // enclosing `_KTRAP_FRAME` is at a fixed negative offset from
@@ -6776,7 +6793,7 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
         break;
     }
 
-    if (0 == this->guest_interrupted_rsp) {
+    if (0 == this->guest_interrupted_rsp[cpu]) {
         this->interrupted_context_not_found =
             this->interrupted_context_not_found + 1;
         return;
@@ -6787,20 +6804,20 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
     // And the thread's own stack, from the pointer the frame carried.
     for (std::size_t word{};
          (word < guest_stack_words) &&
-         (this->guest_interrupted_count < guest_stack_capacity);
+         (this->guest_interrupted_count[cpu] < guest_stack_capacity);
          ++word) {
         std::uint64_t value{};
-        if (!read(this->guest_interrupted_rsp +
+        if (!read(this->guest_interrupted_rsp[cpu] +
                       (word * sizeof(std::uint64_t)),
                   value)) {
             break;
         }
 
         if ((value >= base) && (value < (base + size))) {
-            this->guest_interrupted_trace[this->guest_interrupted_count] =
-                value;
-            this->guest_interrupted_count =
-                this->guest_interrupted_count + 1;
+            this->guest_interrupted_trace
+                [cpu][this->guest_interrupted_count[cpu]] = value;
+            this->guest_interrupted_count[cpu] =
+                this->guest_interrupted_count[cpu] + 1;
         }
     }
 }
@@ -6808,6 +6825,12 @@ void hypervisor::sample_interrupted_stack(std::size_t cpu,
 void hypervisor::record_interrupted_context(std::size_t cpu,
                                             std::uint64_t frame_at)
 {
+    // Reads `guest_interrupted_rip[cpu]` below, so it needs the same
+    // bound its caller has.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
     // The hardware frame's own address, minus where `_KTRAP_FRAME` puts
     // it, is the base of the trap frame. See `ktrap_frame_rip`: the five
     // quadwords the shape search matched are that structure's last five
@@ -6821,8 +6844,7 @@ void hypervisor::record_interrupted_context(std::size_t cpu,
 
     auto base = frame_at - guest_windows::ktrap_frame_rip;
 
-    auto read = [&](std::uint64_t linear,
-                    std::uint64_t & into) -> bool {
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
         auto physical = translate_guest_linear(cpu, linear);
         if (!physical) {
             return false;
@@ -6844,8 +6866,8 @@ void hypervisor::record_interrupted_context(std::size_t cpu,
 
     interrupted_context record{};
 
-    record.rip = this->guest_interrupted_rip;
-    record.rsp = this->guest_interrupted_rsp;
+    record.rip = this->guest_interrupted_rip[cpu];
+    record.rsp = this->guest_interrupted_rsp[cpu];
     record.frame = base;
 
     // Every one of these is a diagnostic and a failed read leaves its
@@ -9466,20 +9488,32 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // address being sampled. Split on what the level above staged, the
     // choice of table is again independent of anything this function
     // decides.
-    if (0 != (staged & valid)) {
-        this->interrupted_samples += 1;
-        note_hot_rip(this->interrupted_rip,
-                     this->interrupted_hits,
-                     this->interrupted_overflow,
-                     this->vmcs.guest_rip());
-    } else {
-        // Where the guest is on an entry the level above staged nothing
-        // on - the control for `interrupted_rip`. See `quiet_rip`.
-        this->quiet_samples += 1;
-        note_hot_rip(this->quiet_rip,
-                     this->quiet_hits,
-                     this->quiet_overflow,
-                     this->vmcs.guest_rip());
+    //
+    // **Keyed on `cpu`, and it was not until 2026-09-05.** This
+    // function runs on every processor and all eight members were
+    // single words, so a two-processor boot summed both processors
+    // into one cell, lost increments to the unlocked
+    // read-modify-write in `note_hot_rip`, and was printed under the
+    // heading "cpu 0". The guard matches the ones above it: a
+    // processor beyond `max_cpus` is absent from every census in this
+    // function alike, which is at least self-consistent.
+    if (cpu < max_cpus) {
+        if (0 != (staged & valid)) {
+            this->interrupted_samples[cpu] += 1;
+            note_hot_rip(this->interrupted_rip[cpu],
+                         this->interrupted_hits[cpu],
+                         this->interrupted_overflow[cpu],
+                         this->vmcs.guest_rip());
+        } else {
+            // Where the guest is on an entry the level above staged
+            // nothing on - the control for `interrupted_rip`. See
+            // `quiet_rip`.
+            this->quiet_samples[cpu] += 1;
+            note_hot_rip(this->quiet_rip[cpu],
+                         this->quiet_hits[cpu],
+                         this->quiet_overflow[cpu],
+                         this->vmcs.guest_rip());
+        }
     }
 
     // What the processor will actually act on, which is a different

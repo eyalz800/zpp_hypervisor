@@ -49,7 +49,18 @@ vmxon=$(grep -a 'guest vmxon at' "$LOG" \
 
 cpus=$(printf '%s\n' "$vmxon" | grep -c . || true)
 regions=$(printf '%s\n' "$vmxon" | awk '{print $2}' | sort -u | grep -c . || true)
-entries=$(grep -ac 'entering the second level' "$LOG" || true)
+# The same treatment as `vmxon` above, and it did not have it: this was
+# `grep -ac`, a count of matching LINES, printed and tested as a count
+# of PROCESSORS. Two ways for that to be wrong in opposite directions.
+# The log ring collapses a line identical to the one before it into a
+# `[times=N]` marker rather than taking a slot, so two processors
+# emitting textually identical entry lines count as one; and one
+# processor entering twice with anything logged in between counts as
+# two. The line carries its own processor - `nested_vmx.cpp:2912` logs
+# "cpu {} entering the second level" - so extract it and `sort -u`.
+entries=$(grep -a 'entering the second level' "$LOG" \
+          | sed 's/.*cpu \(0x[0-9a-f]*\) entering the second level.*/\1/' \
+          | sort -u | grep -c . || true)
 
 echo "vmxon      : $cpus of $EXPECTED processors"
 echo "regions    : $regions distinct"

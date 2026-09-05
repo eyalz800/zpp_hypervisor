@@ -36,19 +36,60 @@ def rq(va):
     p=v2p(va)
     if p is None: return None
     v=xp_q(p); return v[0] if v else None
+# **Two anchors, because every number below is a bare struct offset.**
+# `_KPRCB.CurrentThread` +0x08 / `NextThread` +0x10 / `IdleThread` +0x18
+# are asserted here and checked nowhere, and the headline output is the
+# comparison `cur == idle`, which is exactly the shape that reads
+# plausibly under a uniform wrong offset: two zeroes compare equal and
+# print `IDLE` for both processors, which is "the guest has nothing to
+# run" - the premise of a different investigation. A wrong
+# `KiProcessorBlock` does the same.
+#
+# Neither anchor can fabricate a reading; both can only refuse. That is
+# the point - an instrument with one field has nothing to disagree with.
+KERNEL_LOW = 0xffff800000000000
+def kernel_pointer(v):
+    return v is not None and v >= KERNEL_LOW and v != 0xffffffffffffffff
 t0=time.time()
 prcb=[rq(KPB), rq(KPB+8)]
+if not all(kernel_pointer(p) for p in prcb):
+    sys.exit(f'ANCHOR FAILED: KiProcessorBlock[0..1] read {prcb} - a '
+             f'processor block pointer must be a canonical kernel '
+             f'address. The base or CR3 handed in is wrong; nothing '
+             f'below would have been about this guest.')
+if prcb[0]==prcb[1]:
+    sys.exit(f'ANCHOR FAILED: both PRCB pointers read {prcb[0]:#x} - '
+             f'two processors do not share one processor block, so '
+             f'KiProcessorBlock is not where it was said to be.')
 out={}
 for i,p in enumerate(prcb):
-    if not p: continue
     cur=rq(p+0x08); nxt=rq(p+0x10); idle=rq(p+0x18)
-    npx=rq(cur+536) if cur else None
+    # `NextProcessor` at +536 is the one offset in this tree with no
+    # corroboration anywhere - every other `_KTHREAD` offset used by
+    # `scripts/` (State 388, WaitReason 643, StartAddress 1248,
+    # ThreadListEntry 760, Process 544) appears in at least two files,
+    # and 536 appears only here. It is also read as a full qword when
+    # the field is a ULONG, so the high half is whatever is adjacent.
+    # Kept, printed, and labelled unverified rather than quoted.
+    npx=rq(cur+536) if kernel_pointer(cur) else None
     out[i]=(p,cur,nxt,idle,npx)
 t1=time.time()
 print(f'single pass, span {t1-t0:.1f}s')
+print('anchors: both PRCB pointers canonical and distinct')
 for i,(p,cur,nxt,idle,npx) in out.items():
+    bad=[n for n,v in (('CurrentThread',cur),('IdleThread',idle))
+         if not kernel_pointer(v)]
+    bad+=[n for n,v in (('NextThread',nxt),)
+          if v is not None and v!=0 and not kernel_pointer(v)]
+    if bad:
+        print(f'  cpu {i} PRCB {p:#x}  ANCHOR FAILED: '
+              f'{", ".join(bad)} is not a kernel pointer - the '
+              f'_KPRCB offsets are wrong, do not read the rest')
+        continue
     tag='IDLE' if cur==idle else 'busy'
     print(f'  cpu {i} PRCB {p:#x}')
     print(f'    CurrentThread {cur:#x}  ({tag})')
-    print(f'    NextThread    {nxt:#x}')
-    print(f'    cur.NextProcessor(+536) {npx:#x}' if npx is not None else '    NextProcessor unreadable')
+    print(f'    NextThread    {nxt:#x}' if nxt is not None
+          else '    NextThread    unreadable')
+    print(f'    cur.NextProcessor(+536, UNVERIFIED offset) {npx:#x}'
+          if npx is not None else '    NextProcessor unreadable')

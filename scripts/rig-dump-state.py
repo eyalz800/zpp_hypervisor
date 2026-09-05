@@ -2780,15 +2780,36 @@ def dump_handler_by_reason(args, elf, instance):
                    "handler_reason_from_l2", "handler_reason_reads",
                    "handler_reason_writes"):
         reader.queue(instance + off[member], slots)
-    reader.queue(instance + off["handler_cycles"], 1)
-    reader.queue(instance + off["handler_exits"], 1)
+    # **The denominator must have the same population as the
+    # numerator, and it did not.** `handler_reason_*` is written from
+    # `resume.cpp:1535` with no `[cpu]` - the tree calls that deliberate
+    # at `resume.cpp:1530` ("one processor runs the guest being
+    # chased"), which stopped being true when this tree started booting
+    # a two-processor guest. `handler_cycles` and `handler_exits`, the
+    # denominators, ARE `[max_cpus]` and were read at index 0 alone. So
+    # every percentage below was an all-processor numerator over one
+    # processor's denominator, and the coverage line - the check the
+    # header calls "a split that does not add up is not a result" -
+    # reads above 100% on two processors and near 100% only by
+    # coincidence.
+    #
+    # Summing the denominator is the honest fix that needs no change to
+    # the hypervisor: it makes both sides machine-wide, and the heading
+    # says machine-wide instead of "cpu 0". Giving the split a
+    # `[max_cpus]` dimension would be better and is not done here - it
+    # reverses a decision the source states deliberately, which is a
+    # design call rather than a reader bug.
+    reader.queue(instance + off["handler_cycles"], args.cpus)
+    reader.queue(instance + off["handler_exits"], args.cpus)
     got = reader.run()
 
     def row(member, i):
         return got.get(instance + off[member] + 8 * i, 0)
 
-    total_cycles = got.get(instance + off["handler_cycles"], 0)
-    total_exits = got.get(instance + off["handler_exits"], 0) or 1
+    total_cycles = sum(got.get(instance + off["handler_cycles"] + 8 * c, 0)
+                       for c in range(args.cpus))
+    total_exits = sum(got.get(instance + off["handler_exits"] + 8 * c, 0)
+                      for c in range(args.cpus)) or 1
 
     rows = []
     split_cycles = 0
@@ -2802,7 +2823,8 @@ def dump_handler_by_reason(args, elf, instance):
         split_exits += exits
         rows.append((cycles, exits, i))
 
-    print(f"\ncpu 0 where the handler's time goes, by exit reason "
+    print(f"\nall {args.cpus} processors: where the handler's time "
+          f"goes, by exit reason "
           f"({total_cycles / total_exits:,.0f} cycles/exit overall)")
     for cycles, exits, i in sorted(rows, reverse=True):
         # Whose exit it was. A second-level exit is reflected and comes
@@ -2882,9 +2904,23 @@ def dump_vmcs02_split(args, elf, instance):
     reader.queue(instance + off["vmcs02_split_reads"], slots)
     reader.queue(instance + off["vmcs02_split_writes"], slots)
     reader.queue(instance + off["vmcs02_split_calls"], 1)
-    # phase 2 of processor 0, which is build_vmcs02's own bracket.
-    reader.queue(instance + off["phase_cycles"] + 8 * 2, 1)
-    reader.queue(instance + off["phase_calls"] + 8 * 2, 1)
+    # Phase 2 - build_vmcs02's own bracket - on **every** processor.
+    #
+    # It was processor 0's alone, and `vmcs02_split_*` above has no
+    # `[max_cpus]` at all (nested_entry.cpp:1266), so every per-call
+    # figure below divided an all-processor numerator by one
+    # processor's call count and read about 2x high on a two-processor
+    # guest. The coverage line - which the header calls the check that
+    # makes this a result rather than a list - was wrong the same way.
+    # Row length from the ELF, never a literal: `phase_cycles` is
+    # `[max_cpus][n]` and a stale `n` reads cpu 0 right and everyone
+    # else wrong, which is what `exit_reason_counts` already cost.
+    phase_row = gdb_lengths(elf, ["phase_cycles"])["phase_cycles"]
+    for _c in range(args.cpus):
+        reader.queue(instance + off["phase_cycles"]
+                     + 8 * (_c * phase_row + 2), 1)
+        reader.queue(instance + off["phase_calls"]
+                     + 8 * (_c * phase_row + 2), 1)
     got = reader.run()
 
     split = [got.get(instance + off["vmcs02_split_cycles"] + 8 * i, 0)
@@ -2894,11 +2930,16 @@ def dump_vmcs02_split(args, elf, instance):
     writes = [got.get(instance + off["vmcs02_split_writes"] + 8 * i, 0)
               for i in range(slots)]
     calls = got.get(instance + off["vmcs02_split_calls"], 0)
-    whole = got.get(instance + off["phase_cycles"] + 8 * 2, 0)
-    whole_calls = got.get(instance + off["phase_calls"] + 8 * 2, 0) or 1
+    whole = sum(got.get(instance + off["phase_cycles"]
+                        + 8 * (c * phase_row + 2), 0)
+                for c in range(args.cpus))
+    whole_calls = sum(got.get(instance + off["phase_calls"]
+                              + 8 * (c * phase_row + 2), 0)
+                      for c in range(args.cpus)) or 1
 
     total = sum(split) or 1
-    print(f"\ncpu 0 build_vmcs02, split ({whole // whole_calls:,} cycles a "
+    print(f"\nall {args.cpus} processors: build_vmcs02, split "
+          f"({whole // whole_calls:,} cycles a "
           f"call over {whole_calls:,} calls)")
     print(f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
           f"{'rd/call':>8} {'wr/call':>8} {'cyc/access':>11}")
@@ -4903,6 +4944,16 @@ DELTA_PER_CPU_COUNTERS = [
     # goes with it, and without it "the split covers N% of the exits"
     # has to be taken on trust rather than checked.
     ("handler_exits", "handler spans closed"),
+    # The two denominators of the hot-address census below.  Per
+    # processor since 2026-09-05 - see `interrupted_rip` in
+    # `hypervisor.h`.  They matter here more than most: every
+    # percentage the census prints is a hit count over one of these,
+    # and while they were single words the numerator was a lossy
+    # per-processor read-modify-write and the denominator was not, so
+    # the percentages were wrong in a direction the output could not
+    # show.
+    ("interrupted_samples", "interrupted-context samples"),
+    ("quiet_samples", "quiet samples"),
 ]
 
 # Monotonic counts that are single words, not per-processor rows.  Read
@@ -4913,8 +4964,14 @@ DELTA_GLOBAL_COUNTERS = [
     ("hypercalls_seen", "hypercalls seen (all processors)"),
     ("guest_nmis_reinjected", "guest NMIs reinjected"),
     ("cpuid_hypervisor_leaves_asked", "hypervisor CPUID leaves asked"),
-    ("interrupted_samples", "interrupted-context samples"),
-    ("quiet_samples", "quiet samples"),
+    # `interrupted_samples` and `quiet_samples` were here, and being in
+    # this list was itself the claim that they are whole-machine
+    # totals.  They were not: `record_l2_entry_event` runs on every
+    # processor and wrote a single word, so a two-processor boot summed
+    # both into it while the printer below labelled the result "cpu 0".
+    # They now carry `[max_cpus]` and live in DELTA_PER_CPU_COUNTERS.
+    # Left as a comment because "the member moved" is the one thing a
+    # reader of this list cannot work out from its absence.
     # Both of these must read zero for the whole boot.  A *delta* is the
     # stronger statement: it says nothing was fabricated or refused
     # inside this window, which a cumulative zero cannot say about a
@@ -7407,8 +7464,15 @@ def main():
     # Seven words - vector, error code, rip, cs, rflags, rsp, ss - queued
     # at its own length. The rig notes say to read this first for a
     # failure before the guest gets going, and it was never read.
-    monitor.queue(instance + off["host_exception"], 7)
-    monitor.queue(instance + off["host_exception_cr2"], 1)
+    #
+    # **Per processor since 2026-09-05.** It was one frame and one CR2
+    # for the whole machine, so two processors faulting left a record
+    # that was neither of theirs - the frame is copied field by field,
+    # so the tear is silent and the vector can belong to one processor
+    # and the RIP to another. Queued for every processor now, and the
+    # printer names which one.
+    monitor.queue(instance + off["host_exception"], 7 * args.cpus)
+    monitor.queue(instance + off["host_exception_cr2"], args.cpus)
 
     # Queued at their own length, which is the difference between a
     # reading and a plausible lie. A member resolved for its offset and
@@ -7657,20 +7721,34 @@ def main():
     # Two scalars, not per-processor arrays - the profiler is boot
     # processor only, which is why these are queued with a count of one.
     for name in ("profile_code_physical", "profile_code_virtual",
-                 "guest_stack_count", "guest_stack_pointer",
-                 "guest_stack_rip", "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
-               "interrupted_rip", "interrupted_hits",
-               "interrupted_samples", "interrupted_overflow",
-               "quiet_rip", "quiet_hits",
-               "quiet_samples", "quiet_overflow",
-                 "guest_interrupted_count", "guest_interrupted_rsp",
-                 "guest_interrupted_rip"):
+                 "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+                 # The eight `interrupted_*` / `quiet_*` members were
+                 # queued here at a width of one.  They are
+                 # `[max_cpus]` rows now and the block that prints them
+                 # queues them per processor; a width-of-one read here
+                 # would have kept cpu 0 alone in `words` and left the
+                 # heading honest only by accident.
+                 ):
         if name in off:
             monitor.queue(instance + off[name], 1)
+    # The call-stack members moved out of the list above on 2026-09-05.
+    # They were queued at a width of one under the heading "two scalars,
+    # not per-processor arrays - the profiler is boot processor only",
+    # and that was true of `profile_code_*` and never of these: the
+    # walk runs from `record_l2_entry_event` on every processor and from
+    # the preemption-timer exit, resetting the shared `count` to zero at
+    # the top, so what got printed was two processors' frames spliced
+    # into one list and labelled "cpu 0".  See `guest_stack_trace`.
+    for name in ("guest_stack_count", "guest_stack_pointer",
+                 "guest_stack_rip", "guest_interrupted_count",
+                 "guest_interrupted_rsp", "guest_interrupted_rip"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
     stack_capacity = 48
     for name in ("guest_stack_trace", "guest_interrupted_trace"):
         if name in off:
-            monitor.queue(instance + off[name], stack_capacity)
+            monitor.queue(instance + off[name],
+                          args.cpus * stack_capacity)
     # guest_thread_sample is eight 64-bit fields; 32 of them per processor.
     thread_fields, thread_capacity = 8, 32
     # `hypervisor::interrupted_context` - ten quadwords, sixteen deep.
@@ -8331,17 +8409,43 @@ def main():
     # Where the guest was when an interrupt landed on it - the only
     # unbiased sample of the guest's own code in this tool. See
     # `interrupted_rip`.
+    #
+    # **Per processor, and the heading said "cpu 0" while it was not.**
+    # Until 2026-09-05 all eight members were single words in the
+    # singleton, written from `record_l2_entry_event` on every
+    # processor. So on a two-processor guest this printed the *sum* of
+    # both processors under one processor's name, and the hit counts
+    # underneath had lost increments to an unlocked read-modify-write
+    # that the sample counts beside them had not. That combination
+    # inflates every percentage here by an amount the output has no way
+    # to show. See `interrupted_rip` in `hypervisor.h`.
+    #
+    # The row length comes from the ELF for the reason `gdb_lengths`
+    # exists: a literal 2048 here reads cpu 0 correctly - its row starts
+    # at offset zero, so a wrong stride cancels - and every other
+    # processor wrong, which is the exact failure `exit_reason_counts`
+    # already cost this file once.
     if "interrupted_rip" in off:
         kbase0 = read("guest_kernel_base") or 0
         ksize0 = read("guest_kernel_size") or 0
-        CAP = 2048
+        try:
+            CAP = gdb_lengths(args.elf,
+                              ["interrupted_rip"])["interrupted_rip"]
+        except SystemExit:
+            CAP = None
+            print("note: interrupted_rip is flat in this ELF (it "
+                  "predates the per-processor dimension); the "
+                  "hot-address census is skipped rather than printed "
+                  "under a processor it cannot be attributed to")
+    if "interrupted_rip" in off and CAP:
         for _p in ("interrupted", "quiet"):
             if _p + "_rip" not in off:
                 continue
-            for _n in (_p + "_rip", _p + "_hits"):
-                monitor.queue(instance + off[_n], CAP)
+            for _c in range(args.cpus):
+                for _n in (_p + "_rip", _p + "_hits"):
+                    monitor.queue(instance + off[_n] + _c * CAP * 8, CAP)
             for _n in (_p + "_samples", _p + "_overflow"):
-                monitor.queue(instance + off[_n], 1)
+                monitor.queue(instance + off[_n], args.cpus)
         words.update(monitor.run())
         for _p, _what in (("interrupted",
                            "when an interrupt landed on it"),
@@ -8349,44 +8453,70 @@ def main():
                            "on an entry staging nothing (the control)")):
             if _p + "_rip" not in off:
                 continue
-            rows = []
-            for i in range(CAP):
-                r = words.get(instance + off[_p + "_rip"] + 8 * i, 0)
-                h = words.get(instance + off[_p + "_hits"] + 8 * i, 0)
-                if h:
-                    rows.append((h, r))
-            tot = words.get(instance + off[_p + "_samples"], 0)
-            lost = words.get(instance + off[_p + "_overflow"], 0)
-            if not rows:
-                continue
-            print(f"\ncpu 0 where the guest was {_what} "
-                  f"({tot:,} samples, {len(rows)} distinct)")
-            def _label(r):
-                if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
-                    return f"  ntoskrnl+0x{r - kbase0:x}"
-                return ""
+            for _c in range(args.cpus):
+                rows = []
+                for i in range(CAP):
+                    r = words.get(instance + off[_p + "_rip"]
+                                  + (_c * CAP + i) * 8, 0)
+                    h = words.get(instance + off[_p + "_hits"]
+                                  + (_c * CAP + i) * 8, 0)
+                    if h:
+                        rows.append((h, r))
+                tot = words.get(instance + off[_p + "_samples"] + _c * 8,
+                                0)
+                lost = words.get(instance + off[_p + "_overflow"]
+                                 + _c * 8, 0)
+                if not rows:
+                    # Say so rather than skipping: a processor with no
+                    # rows and a processor absent from the output look
+                    # identical, and the second is what a wrong stride
+                    # produces.
+                    print(f"\ncpu {_c} where the guest was {_what}: no "
+                          f"rows ({tot:,} samples counted)")
+                    continue
+                print(f"\ncpu {_c} where the guest was {_what} "
+                      f"({tot:,} samples, {len(rows)} distinct)")
 
-            ordered = sorted(rows, reverse=True)
-            for h, r in ordered[:14]:
-                print(f"  0x{r:016x}  {h:>10}  "
-                      f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
-            # Everything NOT in ntoskrnl, however cold. The secure
-            # kernel and the hypercall page are where the trust-level
-            # livelock lives, and they are three orders of magnitude
-            # below the clock path - a top-N cut hides exactly the
-            # rows this census exists to show. `SkpReturnFromNormalMode
-            # RaxSet+0x114` was found only because it happened to make
-            # the fourteen; the rest of VTL1 did not.
-            rest = [(h, r) for h, r in ordered[14:] if not _label(r)]
-            if rest:
-                print(f"  ... and every non-ntoskrnl row below the cut "
-                      f"({len(rest)} of {len(ordered) - 14} remaining):")
-                for h, r in rest:
+                def _label(r):
+                    if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
+                        return f"  ntoskrnl+0x{r - kbase0:x}"
+                    return ""
+
+                ordered = sorted(rows, reverse=True)
+                for h, r in ordered[:14]:
                     print(f"  0x{r:016x}  {h:>10}  "
-                          f"{100.0 * h / (tot or 1):5.1f}%")
-            if lost:
-                print(f"  contention: {lost:,} colliding samples decayed a "
-                      f"resident entry (a rate, not lost hot addresses)")
+                          f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
+                # Everything NOT in ntoskrnl, however cold. The secure
+                # kernel and the hypercall page are where the
+                # trust-level livelock lives, and they are three orders
+                # of magnitude below the clock path - a top-N cut hides
+                # exactly the rows this census exists to show.
+                # `SkpReturnFromNormalModeRaxSet+0x114` was found only
+                # because it happened to make the fourteen; the rest of
+                # VTL1 did not.
+                rest = [(h, r) for h, r in ordered[14:] if not _label(r)]
+                if rest:
+                    print(f"  ... and every non-ntoskrnl row below the "
+                          f"cut ({len(rest)} of "
+                          f"{len(ordered) - 14} remaining):")
+                    for h, r in rest:
+                        print(f"  0x{r:016x}  {h:>10}  "
+                              f"{100.0 * h / (tot or 1):5.1f}%")
+                # The sum of the rows against the count taken beside
+                # them.  They cannot agree exactly - a decayed entry
+                # subtracts a hit the sample count keeps - but a large
+                # gap is the instrument reporting its own loss, which is
+                # the one thing the old single-word version could not
+                # do.
+                seen = sum(h for h, _ in rows)
+                if tot:
+                    print(f"  rows sum to {seen:,} of {tot:,} samples "
+                          f"({100.0 * seen / tot:5.1f}%); the shortfall "
+                          f"is eviction, not processors summed together")
+                if lost:
+                    print(f"  contention: {lost:,} colliding samples "
+                          f"decayed a resident entry (a rate, not lost "
+                          f"hot addresses)")
 
     # The interface's own crash report. HV_X64_MSR_CRASH_P0..P4 are
     # 0x40000100-0x40000104 and the control is 0x40000105; the guest
@@ -8533,6 +8663,16 @@ def main():
     # base moves every boot (KASLR) and an offset is comparable across
     # runs and against a PDB. Values outside the image are printed raw:
     # they are stack data that survived the scan's filter, not frames.
+    # **Per processor, and the heading claimed "cpu 0" while it was
+    # not.** The walk was a shared 48-entry array with a shared count
+    # that it resets to zero at the top, so a second processor starting
+    # a walk sent the first one's next frame to index 0. The result is a
+    # frame list every entry of which is inside the kernel image -
+    # because that is the filter - assembled from two stacks. It
+    # symbolises exactly as cleanly as a real one, which is why nothing
+    # in the output could have caught it: CLAUDE.md's 26-frame
+    # `Phase1Initialization -> ... -> HvlSwitchToVsmVtl1+0xab` came out
+    # of here. See `guest_stack_trace` in `hypervisor.h`.
     for label, tr, cnt, rsp, rip in (
             ("where it is now", "guest_stack_trace", "guest_stack_count",
              "guest_stack_pointer", "guest_stack_rip"),
@@ -8541,21 +8681,28 @@ def main():
              "guest_interrupted_rip")):
         if tr not in off:
             continue
-        n = read(cnt) or 0
-        if not n:
-            continue
-        print(f"\ncpu 0 second-level call stack - {label} "
-              f"({n} frames, rsp 0x{read(rsp) or 0:x}, "
-              f"rip 0x{read(rip) or 0:x})")
-        if kbase:
-            print(f"    kernel base 0x{kbase:x} size 0x{ksize:x} "
-                  f"- offsets below are into it")
-        for i in range(min(n, stack_capacity)):
-            frame = words.get(instance + off[tr] + 8 * i, 0)
-            if kbase and kbase <= frame < kbase + ksize:
-                print(f"    ntoskrnl+0x{frame - kbase:x}")
-            else:
-                print(f"    0x{frame:x}")
+        for _c in range(args.cpus):
+            n = read(cnt, _c) or 0
+            if not n:
+                # Say so. A processor with no walk and a processor
+                # missing from the output are the same silence, and the
+                # second is what a wrong stride produces.
+                print(f"\ncpu {_c} second-level call stack - {label}: "
+                      f"no frames walked")
+                continue
+            print(f"\ncpu {_c} second-level call stack - {label} "
+                  f"({n} frames, rsp 0x{read(rsp, _c) or 0:x}, "
+                  f"rip 0x{read(rip, _c) or 0:x})")
+            if kbase:
+                print(f"    kernel base 0x{kbase:x} size 0x{ksize:x} "
+                      f"- offsets below are into it")
+            for i in range(min(n, stack_capacity)):
+                frame = words.get(instance + off[tr]
+                                  + 8 * (_c * stack_capacity + i), 0)
+                if kbase and kbase <= frame < kbase + ksize:
+                    print(f"    ntoskrnl+0x{frame - kbase:x}")
+                else:
+                    print(f"    0x{frame:x}")
 
     # The instruction the second level is sitting on, read as bytes.
     #
@@ -10006,12 +10153,21 @@ def main():
     # 023; if that does not read back, no other number in this dump is
     # evidence. Four readings were believed this session that were not
     # measurements, and this is the check that would have caught them.
-    vec = read('host_exception', 0)
-    if vec is not None:
-        print(f"\nhost exception: vector {vec} error 0x"
-              f"{read('host_exception', 1):x} rip 0x{read('host_exception', 2):x} "
-              f"cs 0x{read('host_exception', 3):x} cr2 0x"
-              f"{read('host_exception_cr2', 0):x}")
+    # One row per processor, and a processor that took none says so.
+    # "no host exception on cpu 1" and "cpu 1 is not in this dump" were
+    # the same output while the record was a single shared frame.
+    for _c in range(args.cpus):
+        vec = read('host_exception', _c * 7 + 0)
+        if vec is None:
+            continue
+        if 0 == vec and 0 == (read('host_exception', _c * 7 + 2) or 0):
+            print(f"\ncpu {_c} host exception: none taken")
+            continue
+        print(f"\ncpu {_c} host exception: vector {vec} error 0x"
+              f"{read('host_exception', _c * 7 + 1):x} rip 0x"
+              f"{read('host_exception', _c * 7 + 2):x} "
+              f"cs 0x{read('host_exception', _c * 7 + 3):x} cr2 0x"
+              f"{read('host_exception_cr2', _c):x}")
 
     # **Why a processor stopped, which nothing above can say.**
     #

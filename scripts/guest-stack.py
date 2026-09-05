@@ -57,15 +57,26 @@ class Mon:
                 break
         d = re.sub(rb'\x1b\[[0-9;]*[A-Za-z]|[\x08\x0d]', b'',
                    buf).decode('utf-8', 'replace')
-        i = d.find(c)                # drop the monitor's echo of the command
-        return d[i + len(c):] if i >= 0 else d
+        return d
+
+
+# **Select the data rows rather than subtract the echo.** The old code
+# here found the command text and sliced past it, and returned the whole
+# buffer *including the echo* whenever `find` missed - a redraw, a split
+# echo - with no diagnosis. That is safe only while every regex below is
+# `{16}`, because an echoed physical address is 9-12 hex digits: the
+# first `xp /Nxw` added here would have read the address as the value.
+# `guest-clock.py` shared this idiom and did have such a read.
+def _rows(d):
+    return '\n'.join(l for l in d.splitlines()
+                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
 
 
 _M = Mon()
 
 
 def xp_q(phys, n=1):
-    d = _M.cmd(f'xp /{n}xg 0x{phys:x}')
+    d = _rows(_M.cmd(f'xp /{n}xg 0x{phys:x}'))
     return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
 
 

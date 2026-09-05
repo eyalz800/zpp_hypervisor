@@ -520,17 +520,29 @@ void hypervisor::on_host_exception(
         return;
     }
 
+    // This processor's own index, taken once and used for the record
+    // below as well as for the recovery point. `this_processor()` is
+    // valid in root operation, which this is - the NMI branch above
+    // relies on the same thing.
+    auto here = this_processor();
+
     // Record before touching anything that could fault again, so there is
     // something to read even if this handler does not survive.
-    this->host_exception = frame;
-    this->host_exception_cr2 = arch::x86_64::cr2();
+    //
+    // **Into this processor's own slot.** It was one shared frame until
+    // 2026-09-05, and a frame is seven fields copied one at a time, so
+    // two processors faulting left a record that was neither of theirs.
+    // See `host_exception`.
+    if (here < max_cpus) {
+        this->host_exception[here] = frame;
+        this->host_exception_cr2[here] = arch::x86_64::cr2();
+    }
 
     // Take the recovery point, if there is one, and consume it - unwinding
     // to it twice would land on a frame that has already returned.
     //
     // This processor's own recovery point. Reading another processor's
     // would unwind onto its stack; see the declaration.
-    auto here = this_processor();
     auto recovery_flag = (here < max_cpus)
                              ? this->host_exception_recovery_flag[here]
                              : nullptr;
@@ -7660,11 +7672,18 @@ hypervisor::main(arch::x86_64::context & caller_context)
         //
         // Still `host_exception` in spirit and still positive, so it
         // stays distinguishable from the loader's own -1.
+        //
+        // This processor's own slot, by the same index the recovery
+        // flag was armed with above - the handler looks that flag up
+        // with `this_processor()`, so the two indices already have to
+        // agree for a recovery to work at all, and reading the frame
+        // by a different one would report a fault this processor did
+        // not take.
         constexpr std::uint64_t host_exception_tag = 0x60000;
+        auto & taken = this->host_exception[cpuid % max_cpus];
         return std::unexpected(zpp::error{static_cast<error>(
-            host_exception_tag |
-            ((this->host_exception.vector & 0xff) << 8) |
-            (this->host_exception.error_code & 0xff))});
+            host_exception_tag | ((taken.vector & 0xff) << 8) |
+            (taken.error_code & 0xff))});
     }
 
     // Perform only on first CPU load. Not on a resume - see first_launch.

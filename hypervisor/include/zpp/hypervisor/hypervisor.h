@@ -3567,14 +3567,30 @@ private:
      * The exception the host IDT caught last, as the entry stub found it.
      * Kept for a debugger to read: the launch fails with a
      * host_exception error, which says what happened but not where.
+     *
+     * **Per processor since 2026-09-05.** It was one shared frame, and
+     * the frame is seven quadwords copied field by field - so two
+     * processors faulting produce a *torn* record: one's vector beside
+     * another's RIP, with nothing in it that could say so. That is the
+     * record CLAUDE.md's recognition recipe for a write into `.text`
+     * rests on ("a store into either takes `#PF` with error code 3"),
+     * and a torn frame points the reader at an instruction that never
+     * faulted.
+     *
+     * The same function already proves the path is per processor: the
+     * NMI branch above it takes `this_processor()` for `ap_wake_root`,
+     * with a comment saying outright that "a single shared counter says
+     * an NMI was taken somewhere and cannot name the processor", and
+     * the recovery point below it is indexed the same way. This pair
+     * sat between the two and was missed.
      */
-    arch::x86_64::exception_frame host_exception{};
+    arch::x86_64::exception_frame host_exception[max_cpus]{};
 
     /**
      * CR2 as of that exception, which is the address that faulted when the
      * vector is a page fault.
      */
-    std::uint64_t host_exception_cr2{};
+    std::uint64_t host_exception_cr2[max_cpus]{};
 
     /**
      * How many non-maskable interrupts this VMM has taken in root mode,
@@ -5762,16 +5778,42 @@ private:
     static constexpr std::size_t guest_stack_capacity = 48;
 
     std::uint64_t guest_kernel_size{};
-    std::uint64_t guest_stack_trace[guest_stack_capacity]{};
-    std::uint64_t guest_stack_count{};
-    std::uint64_t guest_stack_pointer{};
+
+    /**
+     * **Per processor since 2026-09-05, and the bug this fixes did not
+     * mislabel a number - it manufactured a stack.**
+     *
+     * These were single words and one shared 48-entry array, written
+     * from `sample_guest_stack(cpu)`, which runs on every processor
+     * from the second-level entry path and from the preemption-timer
+     * exit. `count` is reset to zero at the top of the walk, so a
+     * second processor starting a walk sends the first one's next frame
+     * to index 0 of the same array. The output is a syntactically valid
+     * frame list - every entry is inside the kernel image, because that
+     * is the filter - assembled from two processors' stacks and printed
+     * under "cpu 0".
+     *
+     * That matters more than the arithmetic defects beside it because
+     * CLAUDE.md's "naming a guest address costs one command" recipe is
+     * built on this array: 26 frames out of it were symbolised into
+     * `Phase1Initialization -> ... -> HvlSwitchToVsmVtl1+0xab` and
+     * quoted as the normal-mode stack. A spliced stack symbolises just
+     * as cleanly as a real one and there is nothing in the output that
+     * could say which it was.
+     *
+     * Cheap: `2 * 48 * 8 * max_cpus` is 24 KiB, against the 2 MiB the
+     * hot-address tables cost.
+     */
+    std::uint64_t guest_stack_trace[max_cpus][guest_stack_capacity]{};
+    std::uint64_t guest_stack_count[max_cpus]{};
+    std::uint64_t guest_stack_pointer[max_cpus]{};
 
     /**
      * The instruction pointer the stack was sampled at, so a trace can be
      * read against where the guest actually was rather than against an
      * assumption about it.
      */
-    std::uint64_t guest_stack_rip{};
+    std::uint64_t guest_stack_rip[max_cpus]{};
 
     /**
      * Where the second-level guest spends its time, sampled on a clock
@@ -5842,6 +5884,14 @@ private:
      * and a cold one loses it. `overflow` counts only the decays, which
      * is a *rate of contention* and not a count of lost hot addresses -
      * the distinction the linear version got wrong.
+     *
+     * **All three arguments are read-modify-written on plain words, so
+     * the row handed in must belong to one processor.** There is no
+     * lock and there must not be one: this runs on the entry path of
+     * every second-level entry, and a contended `zpp::spin_lock` there
+     * would cost more than the census is worth. The rows are indexed
+     * by `cpu` instead, which removes the race by construction rather
+     * than by exclusion - see `interrupted_rip`.
      */
     void note_hot_rip(std::uint64_t (&rips)[interrupted_capacity],
                       std::uint64_t (&hits)[interrupted_capacity],
@@ -5849,8 +5899,8 @@ private:
                       std::uint64_t rip)
     {
         constexpr std::uint64_t mix = 0x9e3779b97f4a7c15ull;
-        auto slot = static_cast<std::size_t>(
-            ((rip * mix) >> 45) & (interrupted_capacity - 1));
+        auto slot = static_cast<std::size_t>(((rip * mix) >> 45) &
+                                             (interrupted_capacity - 1));
 
         if (rips[slot] == rip) {
             hits[slot] = hits[slot] + 1;
@@ -5870,10 +5920,49 @@ private:
         overflow = overflow + 1;
     }
 
-    std::uint64_t interrupted_rip[interrupted_capacity]{};
-    std::uint64_t interrupted_hits[interrupted_capacity]{};
-    std::uint64_t interrupted_samples{};
-    std::uint64_t interrupted_overflow{};
+    /**
+     * **Per processor, and it was not until 2026-09-05.** All four
+     * were single words written from `record_l2_entry_event`, which
+     * runs on every processor, so a two-processor boot summed both
+     * into one cell and `rig-dump-state.py` printed that sum under the
+     * heading "cpu 0". Three things were wrong at once and each is
+     * worse than the last. The label named a processor whose samples
+     * were not separable from the other's. `interrupted_samples` sat
+     * in the reader's `DELTA_GLOBAL_COUNTERS` list, which is
+     * documented as being for "single words, not per-processor rows",
+     * so the wrong claim was written down rather than merely implied.
+     * And the hit counts were an unlocked read-modify-write while the
+     * sample counts beside them were too, so colliding processors lost
+     * increments from both - in different proportions, since the
+     * histogram is touched three times per sample and the counter
+     * once. Every percentage the reader prints is a hit over a sample
+     * count, so it was wrong by an amount nothing in the output could
+     * show.
+     *
+     * Same class as `l2_hypercall_code_counts` further down this file:
+     * a per-processor write into a whole-machine word, which is an
+     * instrument with no second field to disagree with.
+     *
+     * The cost is `.bss`, and it was measured on the built ELF rather
+     * than reasoned about. Four arrays at `2048 * 8 * max_cpus` is
+     * 2 MiB against 64 KiB; `llvm-nm -S` puts the singleton at
+     * 60,485,632 bytes before and 62,517,248 after, exactly
+     * +2,031,616, and `llvm-readelf -S` puts `.bss` at 81,780,952 then
+     * 83,812,568 - the same delta, so the four sample and overflow
+     * rows were absorbed by padding and cost nothing. +3.4% on the
+     * singleton, +2.5% on `.bss`. That is not free operationally:
+     * **the module base moves when the binary's size changes**, so
+     * anything carrying a hardcoded base must re-read
+     * `allocate_rwx done at ...` for this build. Paid
+     * deliberately - a census that cannot be attributed to a processor
+     * is not a census, and halving `interrupted_capacity` to pay for
+     * the dimension would change the table's eviction behaviour, which
+     * is the property 2048 was chosen for.
+     */
+    std::uint64_t interrupted_rip[max_cpus][interrupted_capacity]{};
+    std::uint64_t interrupted_hits[max_cpus][interrupted_capacity]{};
+    std::uint64_t interrupted_samples[max_cpus]{};
+    std::uint64_t interrupted_overflow[max_cpus]{};
 
     /**
      * The same histogram for entries carrying **no** event, which is the
@@ -5889,11 +5978,17 @@ private:
      * Sampled on entries that stage nothing, this table cannot be
      * shaped by injection at all. If the same address dominates both,
      * the guest is genuinely sitting there.
+     *
+     * Per processor for the reasons on `interrupted_rip`, and the
+     * control needed it more than the table it controls: "the same
+     * address dominates both" is a comparison of two distributions,
+     * and summing two processors into each of them can manufacture
+     * that agreement or destroy it.
      */
-    std::uint64_t quiet_rip[interrupted_capacity]{};
-    std::uint64_t quiet_hits[interrupted_capacity]{};
-    std::uint64_t quiet_samples{};
-    std::uint64_t quiet_overflow{};
+    std::uint64_t quiet_rip[max_cpus][interrupted_capacity]{};
+    std::uint64_t quiet_hits[max_cpus][interrupted_capacity]{};
+    std::uint64_t quiet_samples[max_cpus]{};
+    std::uint64_t quiet_overflow[max_cpus]{};
 
     /**
      * The stall breaker's state and its two counters. See
@@ -6081,10 +6176,17 @@ private:
      * frame sits depends on how much the handler has pushed since.
      * @{
      */
-    std::uint64_t guest_interrupted_rsp{};
-    std::uint64_t guest_interrupted_rip{};
-    std::uint64_t guest_interrupted_trace[guest_stack_capacity]{};
-    std::uint64_t guest_interrupted_count{};
+    /**
+     * Per processor for the reasons on `guest_stack_trace`, and by the
+     * same walk: `sample_interrupted_stack` is called from
+     * `sample_guest_stack` with the same `cpu`, resets `count` to zero
+     * the same way, and fills the same shape of array.
+     */
+    std::uint64_t guest_interrupted_rsp[max_cpus]{};
+    std::uint64_t guest_interrupted_rip[max_cpus]{};
+    std::uint64_t guest_interrupted_trace[max_cpus]
+                                         [guest_stack_capacity]{};
+    std::uint64_t guest_interrupted_count[max_cpus]{};
 
     void sample_interrupted_stack(std::size_t cpu,
                                   std::uint64_t stack,

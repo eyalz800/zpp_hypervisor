@@ -41,11 +41,21 @@ def monitor(cmds):
     s.close()
     d=out.decode('utf-8','replace')
     return re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',d).replace('\x1b','')
+# Data rows only. The monitor echoes the command, and a physical address
+# in the echo is 9-12 hex digits, so anything narrower than `{16}` can
+# match it. `xp_w`'s `{4}` was correct here **by arithmetic accident**:
+# the artefact is the address's first four digits, so it is at least
+# 0x1000 for any address of four or more digits and `rname`'s
+# `32 <= w < 127` filter always dropped it. That is a property of the
+# guest's RAM size, not of this code, so it is anchored properly now.
+def _rows(d):
+    return '\n'.join(l for l in d.splitlines()
+                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
 def xp_q(phys, n=1):
-    d = monitor([f'xp /{n}xg 0x{phys:x}'])
+    d = _rows(monitor([f'xp /{n}xg 0x{phys:x}']))
     return [int(x,16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
 def xp_w(phys, n):
-    d = monitor([f'xp /{n}xh 0x{phys:x}'])
+    d = _rows(monitor([f'xp /{n}xh 0x{phys:x}']))
     return [int(x,16) for x in re.findall(r'0x([0-9a-f]{4})', d)]
 CR3 = int(sys.argv[2],16) & 0x000ffffffffff000
 _ENTRY = {}
@@ -88,6 +98,31 @@ def name_at(entry):
 # page tables.
 want = int(sys.argv[3], 16) if len(sys.argv) > 3 else None
 found = None
+
+# **READER PROOF, ported from `guest-loading-driver.py:40-45`.** The
+# head's `Flink` is the first loaded image, which is always
+# `ntoskrnl.exe`, and its `DllBase` must equal the kernel base passed in
+# - two independent facts agreeing on one read. A wrong base, a wrong
+# cr3 or the wrong structure type all fail it; a wedged guest does not.
+# This file is the one that answers "did the driver load" and the one
+# whose output gets quoted, and it was the one without the proof.
+#
+# (The offsets here are documented as `_LDR_DATA_TABLE_ENTRY`, which is
+# the user-mode type its sibling explicitly names as the trap. The
+# numbers agree with `_KLDR_DATA_TABLE_ENTRY` so nothing is broken, but
+# the justification pointed at the wrong type - and this check is what
+# settles it either way.)
+_first=rq(head)
+_dllbase=rq(_first+0x30) if _first else None
+if _dllbase != base:
+    sys.exit(f'READER PROOF FAILED: the first module\'s DllBase reads '
+             f'{_dllbase if _dllbase is None else hex(_dllbase)}, and '
+             f'the kernel base handed in is {base:#x}. They must be the '
+             f'same address - the first entry of PsLoadedModuleList is '
+             f'ntoskrnl.exe. The base, the cr3 or the head RVA 0xef53d0 '
+             f'is wrong, and the list below would have been unrelated '
+             f'memory.')
+print(f'reader proven: first module DllBase == kernel base {base:#x}')
 
 cur=rq(head); seen=set(); names=[]; why='ran out of iterations'
 for _ in range(400):

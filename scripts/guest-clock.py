@@ -61,20 +61,39 @@ class Mon:
                 break
         d = re.sub(rb'\x1b\[[0-9;]*[A-Za-z]|[\x08\x0d]', b'',
                    buf).decode('utf-8', 'replace')
-        i = d.find(c)
-        return d[i + len(c):] if i >= 0 else d
+        return d
+
+
+# **Positive filtering, because the alternative fails open.** This used
+# to strip the monitor's echo by `d.find(c)` and slicing past it, and
+# return the WHOLE buffer - echo included - whenever the command text
+# was not found verbatim: a redraw the scrub above did not cover, or a
+# split echo. A physical address in that echo is 9-12 hex digits, so
+# `xp_w`'s `0x([0-9a-f]{8})` then matched the ADDRESS and returned it as
+# the value, with no diagnosis. `ksystem_time` was accidentally immune -
+# a fabricated word breaks its `high1 == high2` retry and it prints
+# "unreadable" - but `spin_fields` was not: it reads the
+# KUSER_SHARED_DATA seqlock at +0x340 as a single word, and an odd
+# leading digit reads as **bit 0 stuck set**, which is one of the two
+# named hypotheses in its own docstring and would have confirmed it.
+#
+# Selecting the rows can also say "I got nothing", which a strip that
+# fails open never can.
+def _rows(d):
+    return '\n'.join(l for l in d.splitlines()
+                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
 
 
 _M = Mon()
 
 
 def xp_q(phys, n=1):
-    d = _M.cmd(f'xp /{n}xg 0x{phys:x}')
+    d = _rows(_M.cmd(f'xp /{n}xg 0x{phys:x}'))
     return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
 
 
 def xp_w(phys, n=1):
-    d = _M.cmd(f'xp /{n}xw 0x{phys:x}')
+    d = _rows(_M.cmd(f'xp /{n}xw 0x{phys:x}'))
     return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{8})', d)]
 
 

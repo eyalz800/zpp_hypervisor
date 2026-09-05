@@ -61,7 +61,13 @@ CTRL_B=${ZPP_CTRL_B:-0x701110c000}
 CC=$(printf '0x%x' $(( NVME + 0x14 )))
 CSTS=$(printf '0x%x' $(( NVME + 0x1c )))
 
-echo "polling $NVME (CC/CSTS at $CC_CSTS) every ${INTERVAL}s"
+# `$CC_CSTS` was named here and assigned nowhere - the pair was split
+# into `$CC` and `$CSTS` above and this line was not updated. Under
+# `set -u` that is an unbound-variable error on the line BEFORE the
+# polling loop, so this script has exited 127 without ever taking a
+# sample, and every "first all-ones at HH:MM:SS" reading it exists to
+# produce has never been produced.
+echo "polling $NVME (CC at $CC, CSTS at $CSTS) every ${INTERVAL}s"
 echo "controls: $CTRL_A $CTRL_B - if these answer and the NVMe does not,"
 echo "          the device is the problem and not the reader"
 echo
