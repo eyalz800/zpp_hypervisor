@@ -65818,3 +65818,52 @@ every measurement this session can see, **empty**. That is worth stating
 plainly rather than being rediscovered: the remaining leverage is on what
 hvix64 is asked to do, or on why vector `0x2f` is never taken by the
 guest - not on how zpp forwards it.
+
+## The DPC queue is EMPTY on a healthy boot - baseline for the 0x2f question
+
+`scripts/guest-dpc-state.py` reads each processor's DPC state with
+`KPRCB.Number` as a per-entry reader proof. Boot 174, **healthy and
+progressing** at 243/s:
+
+    cpu 0   IdleHalt 1   NestingLevel 0   DpcQueueDepth 0   ActiveDpc NULL
+            DpcRequestSummary 0x0        CurrentThread == IdleThread
+    cpu 1   IdleHalt 0   NestingLevel 0   DpcQueueDepth 0   ActiveDpc NULL
+            DpcRequestSummary 0x0        QuantumEnd 1
+
+**Nothing is queued and nothing is requested on either processor.** That
+is worth having before the wedged reading, because it removes an
+assumption that has been carried implicitly for several sessions: "the DPC
+queue never drains" presumes there is something in it. On a healthy boot
+there is not.
+
+It also fits the third of the three sub-cases and rules out the other two
+by measurement rather than by inference. `NestingLevel 0` with `ActiveDpc`
+NULL on both processors means `KiRetireDpcList` is not entered - not that
+DPCs are requeued faster than they run, and not that one DPC never
+returned.
+
+**And it suggests the 0x2f asks are quantum-end, not DPC work.** Of the
+three per-tick self-IPI sites, one is gated on `DpcQueueDepth != 0` -
+which is 0 here - while the other two fire on quantum end and the boost
+scan. cpu 1 reads `QuantumEnd 1`. The quantum-end path sets
+`DpcRequestSummary` bit 6, `DpcNormalPriorityAntiStarvation`, and
+`KiDispatchInterrupt`'s gate masks with **0xBF, which excludes bit 6**. So
+a `0x2f` raised for that reason is delivered and legitimately drains
+nothing - which would explain deliveries that achieve no progress without
+anything being broken.
+
+Offsets, all verified against the PDB field list containing
+`NestingLevel` rather than by name (this PDB has a second `Number` at
+offset 2 of another structure, and duplicate member names have produced
+four wrong readings in this tree already):
+
+    IdleHalt +0x07 · CurrentThread +0x08 · NextThread +0x10
+    IdleThread +0x18 · NestingLevel +0x20 · Number +0x24
+    DpcData +0x3840, _KDPC_DATA sizeof 48: QueueDepth +0x18, Count +0x1c,
+      ActiveDpc +0x20  ->  +0x3858 / +0x385c / +0x3860
+    MaximumDpcQueueDepth +0x38a8 · QuantumEnd +0x38b9
+    DpcRoutineActive +0x38ba · DpcRequestSummary +0x38bc
+    DpcWatchdogCount +0x83ac
+
+`KeNumberProcessors` read 2, matching the launch. The wedged comparison is
+the next reading.
