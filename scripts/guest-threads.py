@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 # Print one process's threads and what each is waiting on. Offsets from
 # llvm-pdbutil --types: _KPROCESS.ThreadListHead 48 (EPROCESS+0x30),
-# _KTHREAD.ThreadListEntry 32, _KTHREAD.WaitReason 643 (unsigned char).
+# _KTHREAD.ThreadListEntry is at **760**, NOT 32. This PDB has THREE
+# members named `ThreadListEntry`: offset 32 belongs to `_IRP`, 760 to
+# `_KTHREAD`, 1400 to `_ETHREAD`. This script used 32 and therefore read
+# WaitReason from `_ETHREAD+0x55B` - inside SchedulerApc - for every
+# listing it ever printed. The values looked plausible (small integers
+# that decode to real wait reasons) and were quoted as findings.
+# Verified: `llvm-pdbutil dump --types` shows the 760 member sitting
+# between `SuspendEvent` (736) and `MutantListHead` (776), which is the
+# _KTHREAD neighbourhood; the 32 member sits between `AssociatedIrp` (24)
+# and `IoStatus` (48), which is _IRP's.
+# _KTHREAD.WaitReason 643 (unsigned char) - that one was always right.
 import re, socket, sys, time
 RIG, PORT = '192.168.1.199', 4446
-LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 32, 643
+LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 760, 643
 # KWAIT_REASON, the ones that matter here
 R = {0:'Executive',1:'FreePage',2:'PageIn',3:'PoolAllocation',
      4:'DelayExecution',5:'Suspended',6:'UserRequest',7:'WrExecutive',

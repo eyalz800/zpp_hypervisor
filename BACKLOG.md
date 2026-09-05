@@ -65469,3 +65469,63 @@ of four samples, and what structure would have that size. The cheap test
 is more samples - if the next two boots also land at 3,95x it is a
 constant, and if they scatter it is not. Worth noting 3,953 is not near
 any obvious power of two, so if it is a limit it is a derived one.
+
+## RETRACTION: two offset bugs in the thread scripts, and what they invalidate
+
+`scripts/guest-threads.py` and `scripts/guest-thread-stack.py` carried
+
+    TENTRY = 32     # should be 760
+    SBASE  = 8      # should be 56   (guest-thread-stack.py only)
+
+**`TENTRY = 32` is `_IRP.ThreadListEntry`, not `_KTHREAD`'s.** This PDB has
+*three* members of that name and `llvm-pdbutil dump --types` gives all
+three without complaint:
+
+    offset   32  between AssociatedIrp (24) and IoStatus (48)   -> _IRP
+    offset  760  between SuspendEvent (736) and MutantListHead  -> _KTHREAD
+    offset 1400                                                 -> _ETHREAD
+
+The scripts walk `_KPROCESS.ThreadListHead` (48 - correct) and then did
+`kt = th - 32`, so every `kt` was 728 bytes too high and every
+`WaitReason` ever printed was read from **`_ETHREAD+0x55B`**, inside
+`SchedulerApc`. `SBASE = 8` is likewise a different structure's
+`StackBase`; `_KTHREAD`'s stack group is `InitialStack 40 / StackLimit 48
+/ StackBase 56 / KernelStack 88`. The docstring said "StackBase (8)", so
+comment and value agreed with each other and both were wrong.
+
+**This is the third duplicate-member-name incident in this tree** - after
+`UniqueProcessId` (u32@40 vs void*@464) and `CycleTime`. CLAUDE.md already
+says to take offsets from the field list *containing a member you have
+already verified*. `WREASON = 643` was verified; `TENTRY` was not, and it
+sat on the same line.
+
+### What is retracted
+
+**The `WrVirtualMemory` versus `WrPageOut` distinction is withdrawn.** The
+claim that boot 166 showed 26 threads in `WrVirtualMemory` while boot 171
+showed 26 in `WrPageOut` - and the conclusion drawn from it, that "the
+wait reason is not invariant, so `MiReferenceControlArea` cannot be the
+general mechanism" - rests entirely on bytes read from the wrong offset.
+It may still be true; it is not evidence.
+
+### What survives
+
+**The counts do.** The list traversal uses `TLIST = 48`
+(`_KPROCESS.ThreadListHead`), which is correct, and the links are walked
+by `Flink` - the bad offset only affected the *per-thread field read*, not
+which threads were found. So "a fixed pool of about 40 `System` threads is
+blocked in its entirety, split roughly 26/14" stands.
+
+Corrected run on boot 172 (healthy, mid-boot): **27 `WrVirtualMemory`,
+13 `WrLpcReply`** - same shape, now read from the right byte.
+
+### The lesson, which is not the one already in CLAUDE.md
+
+The wrong offset did not produce obvious garbage. It produced **small
+integers that decoded to real, plausible wait reasons** - 18, 19, 17 -
+and a stable 26/14 split across boots. Every surface check passed. What
+would have caught it is the check the tree already mandates and I did not
+run here: read a value whose correct answer is known independently. There
+is no such value in a wait-reason census, which is precisely why the
+offset needed verifying against the PDB *before* the first reading, not
+after four of them.

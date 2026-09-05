@@ -22,8 +22,13 @@ usage: guest-thread-stack.py <kernel_base> <cr3> <process> [wait_reason]
 """
 import re, socket, sys, time
 RIG, PORT = '192.168.1.199', 4446
-LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 32, 643
-KSTACK, SBASE = 88, 8
+# See guest-threads.py for why TENTRY is 760 and not 32.
+LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 760, 643
+# _KTHREAD's stack group is InitialStack 40 / StackLimit 48 /
+# StackBase 56 / KernelStack 88. SBASE was 8, which is a different
+# structure's StackBase - the docstring said "StackBase (8)" so the
+# comment and the value agreed with each other and both were wrong.
+KSTACK, SBASE = 88, 56
 
 def monitor(cmds):
     s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.35)
