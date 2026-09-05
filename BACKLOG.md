@@ -67461,3 +67461,60 @@ spinning code is somewhere else entirely and the whole
 This is the same error the tree records twice already: **a scan's hit is a
 candidate, not a frame**, and `guest-thread-stack.py`'s own docstring says
 so. I had the warning and still read a coherent frame as a live one.
+
+## The decisive test: ZERO VBoxSup words on the WEDGED stack
+
+Boot 183, confirmed in the livelock on the control
+(`HvlEndSystemInterrupt` 28.5%, `KiDpcInterruptBypass` 25.4%,
+`KiInterruptDispatchNoLockNoEtw` 16.4%, `HvlWriteApicCommandRegister`
+13.8%). The phase-1 thread (Cid 8) had migrated from cpu 1 to cpu 0 and is
+Running there; cpu 1 is idle.
+
+Stack scan with the filter fixed, so driver frames can now print:
+
+    0xffffd40b59807288  KeGenericProcessorCallback+0x14e   deepest
+    0xffffd40b59807618  ExSetTimerResolution+0xbc
+    0xffffd40b59807838  PnpCallDriverEntry+0x54
+    0xffffd40b59807888  IopLoadDriver+0x6f2
+    0xffffd40b59807ae8  Phase1Initialization
+
+    0 VBoxSup words on the stack
+
+**A driver frame must lie between `PnpCallDriverEntry+0x54` (slot 0x838)
+and `ExSetTimerResolution+0xbc` (slot 0x618)** - the stack grows down, so
+0x618 is deeper - because nothing in ntoskrnl calls `ExSetTimerResolution`
+directly (export ordinal 401, reached through an import thunk). **That
+frame is absent.**
+
+### What this does and does not establish
+
+**Does not establish** that VBoxSup is spinning. Two reads now, healthy and
+wedged, both with zero VBoxSup words. The name from the `DRIVER_OBJECT`
+slot is the most recent driver whose `DriverEntry` was *called*; it is not
+evidence about what is executing.
+
+**Does establish** that the thread's deepest ntoskrnl frame while wedged is
+`KeGenericProcessorCallback+0x14e`, and that no third-party frame is
+present anywhere on the stack.
+
+**Three readings remain open and this measurement does not separate them:**
+
+1. The driver's frame is genuinely absent because its `DriverEntry`
+   returned, and the `ExSetTimerResolution` chain is *stale* - a scan
+   cannot distinguish a live frame from a dead one, which is exactly the
+   error `f591eb8` corrected.
+2. The spin is inside ntoskrnl itself, below `KeGenericProcessorCallback`,
+   and the driver is irrelevant.
+3. The driver's frames were overwritten - the thread has since gone deeper
+   and come back, leaving ntoskrnl words over them.
+
+**What would separate them** is the thread's *current* instruction, which a
+scan cannot give and which the per-CPU `quiet_rip` census gives only in
+aggregate. The census on this boot is 100% ntoskrnl in its top rows with no
+third-party address above the cut - which favours (2), but the cut hides
+rows below it and this census cannot be differenced across the cut.
+
+**So the driver identification stands as "the last `DriverEntry` called"
+and no more.** The claim that a third-party driver is the thing spinning -
+carried from the single-core investigation and reasonable on that evidence
+- is **not** confirmed here, and one reading of this data contradicts it.
