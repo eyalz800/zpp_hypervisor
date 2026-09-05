@@ -66418,3 +66418,32 @@ turned out to be a coordinate the boot passes through anyway - after the
 The pattern is worth naming: **a counter that every boot must pass through
 will cluster at whatever value the boot happens to stall near, and the
 clustering says more about the counter's rate than about the stall.**
+
+### REPRODUCED on a second boot - the DriverEntry chain is the wedge
+
+Boot 175, wedged independently of 174 (different KASLR base, different
+thread pointer, `vtl_fresh_calls` +0 on cpu 0, copies +0 on both). The
+thread holding cpu 0 is `0xffffe489664ab040`, `state 2` (Running), and its
+stack carries **every frame of the boot-174 chain**:
+
+    PnpCallDriverEntry+0x54            0x9b9160   PRESENT
+    PnpEnableWatchdog+0x41             0x9b9805   PRESENT
+    ExSetTimerResolution+0xbc          0x41662c   PRESENT
+    ExpUpdateTimerResolution+0x1cd     0x41690d   PRESENT
+    ExpUpdateTimerConfiguration+0xc6   0x416a42   PRESENT
+    KeGenericProcessorCallback+0x14e   0x30e23e   PRESENT
+    Phase1Initialization               0x6fb520   PRESENT
+    IoInitSystem+0x2c                  0xc1c9f4   PRESENT
+
+Two independent boots, identical chain, same deepest frame. This is no
+longer a lead from one stack scan - it is the wedge, reproduced.
+
+Boot 175's final counts also widen the band slightly: 85 drivers, **10,903
+copies** (previous maximum 10,863), removes 3,951 - which is the seventh
+consecutive value inside the saturated Phase-0 band.
+
+**The state of the diagnosis, in one line:** a third-party driver's
+`DriverEntry`, called synchronously by `IopLoadDriver` on the phase-1
+thread, calls `ExSetTimerResolution` and does not return, spinning on the
+processor that is already the clock owner, with nothing blocked, nothing
+starved, the DPC path healthy, and no migration pending.
