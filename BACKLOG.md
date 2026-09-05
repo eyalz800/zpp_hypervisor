@@ -68563,3 +68563,73 @@ The chain is now closed end to end and every link is measured:
 at the one link in that chain zpp controls. `b711510`'s negative result
 does not contradict this: it measured throughput, not whether a holder
 completes its critical section between two ticks.
+
+## RETRACTED: "the holder is re-interrupted forever at one instruction"
+
+`baaeedf` read `ExpUpdateTimerConfigurationWorker+0x1c5` at 46.3% of cpu 0's
+interrupt landings, growing by 199,121 in 150 s, as a holder that "never
+gets past it" - (L), tick saturation. **Disassembly refutes it outright:**
+
+    14030d471: 44 0f 22 c5     movq %rbp, %cr8        <- LOWER IRQL
+    14030d475: 48 8b 5c 24 40  movq 0x40(%rsp), %rbx  <- +0x1c5, THE HOT ROW
+    14030d47a: 48 8b 6c 24 50  movq 0x50(%rsp), %rbp
+    14030d47f: 48 83 c4 20     addq $0x20, %rsp
+    14030d483: 41 5f           popq %r15
+    14030d485: 5f              popq %rdi
+    14030d486: 5e              popq %rsi
+    14030d487: c3              retq
+
+**`+0x1c5` is the first instruction of the function EPILOGUE, immediately
+after a `mov cr8` that LOWERS IRQL.** Writing CR8 makes any pending vector
+of the unmasked classes deliverable at the very next instruction boundary,
+and that boundary is `+0x1c5`. The processor lands there **because that is
+where interrupts become legal again**, not because it is stuck.
+
+So the worker is **completing** - reaching its epilogue, lowering IRQL,
+taking the pending clock, and returning. It gets past `+0x1c5` constantly.
+(L) as "the holder is starved and cannot finish its critical section" is
+**not supported**, and `baaeedf`'s central claim is withdrawn.
+
+**The arithmetic in the same dump said so and I did not check it.** cpu 0's
+`l2-run` is 8.96% of wall, which at 1.992 GHz is ~310,000 cycles of Windows
+execution per 1.74 ms tick. That is ample to finish a critical section. A
+starvation account had to explain why 310,000 cycles are not enough, and it
+never did.
+
+### The rule I had in hand and failed to apply
+
+An earlier analysis stated it exactly, for `KiCheckForThreadDispatch+0x7f`:
+*"the deterministic landing spot for an interrupt unmasked by an IRQL
+lowering ... expect a pile-up at every `mov cr8` + next-instruction pair in
+any census of a guest that is unmasking pending work."*
+
+**`ExpUpdateTimerConfigurationWorker+0x1c5` is that pair, and I read its
+pile-up as a stall.** The general form, which belongs beside the
+`interrupted_rip` bias in
+[[read-the-control-and-difference-everything]]:
+
+**A hot row in an interrupt-landing census immediately after `mov cr8`,
+`sti`, or a `pop rflags` is an UNMASK SITE, not a stall.** It reports where
+interrupts became deliverable. Check the preceding instruction before
+reading persistence into any such row - the check costs one disassembly and
+it has now been needed twice.
+
+### What the evidence actually supports now
+
+cpu 0 runs the timer-configuration worker to completion, at tick rate, and
+each pass takes the isolation-unit PrcbLocks (`KiDowngradeIsolationUnitLock
+Handle` at 10.1% and growing is inside that work). cpu 1's idle-loop
+quantum-end path spins for the same locks and `+0x543..0x54f` shows it
+**never wins**.
+
+That is a **lock convoy / livelock**, not a deadlock: the holder releases,
+and re-acquires on the next tick before the spinner's `lock btsq` lands.
+It is consistent with every measurement including the ones that refuted
+starvation, and it keeps per-tick cost relevant for a different reason -
+not "the holder cannot finish" but "the holder comes back too often, and
+the window the spinner needs is too narrow."
+
+**INFERRED, and the discriminator is cheap**: if it is a convoy, cpu 0
+must be *entering* the worker repeatedly, so the worker's entry and its
+lock-acquire site should both be present and growing in cpu 0's census.
+If cpu 0 instead enters once and loops inside, they will be flat.
