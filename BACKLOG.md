@@ -66675,3 +66675,49 @@ what the phase-1 thread is doing *while wedged* unless it is differenced.
 stack evidence, which is not cumulative: `PnpCallDriverEntry` ->
 `ExSetTimerResolution` -> `KeGenericProcessorCallback`, reproduced
 frame-for-frame on two independent boots.
+
+## Differenced at last: the wedge runs KiDpcInterruptBypass + KiCheckForThreadDispatch
+
+The hot census is cumulative and `--delta` refuses it, but two dumps of
+**the same boot** give the difference by hand. Boot 177, cpu 0, per-CPU
+census (post-redeploy, so this is one processor and not a sum):
+
+    early, healthy at 640/s      3,105 samples
+    now,   wedged at 0.0/s     770,125 samples
+    added during the wedge     767,020
+
+    ntoskrnl+0x6b3692   KiDpcInterruptBypass+0x12       +385,350   50.2%
+    ntoskrnl+0x2bb96b   KiCheckForThreadDispatch+0x7f   +264,770   34.5%
+    ntoskrnl+0x6a6f8f   HalProcessorIdle+0xf             +50,193    6.5%
+    ntoskrnl+0x6b32f0   KiDpcInterrupt+0x390             +10,580    1.4%
+    0xfffff8003bd2001c  hypercall page (VtlCall retq)     +9,116    1.2%
+
+**Two instructions account for 84.7% of everything the guest did during
+the wedge**, and both are in ntoskrnl - `KiDpcInterruptBypass+0x12` and
+`KiCheckForThreadDispatch+0x7f`.
+
+Note how completely the differencing changes the picture. Cumulatively the
+hypercall page read **62.9%** early and 1.4% now; differenced it is
+**1.2%** of the wedge. The page that three commits chased as a "spin loop"
+contributes almost nothing to the stall - it dominated only because the
+early sample was taken while the guest was healthy and doing VTL calls.
+
+### What the two instructions are
+
+`KiDpcInterruptBypass` is the path eleven ISR tails use to drain the DPC
+queue *without* vector `0x2f` - it does no EOI and does not test
+`IdleHalt`. `KiCheckForThreadDispatch` is the return-from-interrupt check
+for whether a thread switch is owed. So the wedged guest is cycling
+between "an interrupt returned, should I drain DPCs" and "should I switch
+threads", at ~574 Hz, achieving neither: the DPC queue is empty and
+`NestingLevel` oscillates, both already measured.
+
+That is consistent with the phase-1 thread being the only runnable thing
+and being unable to make progress - the scheduler is asked on every tick
+and has nothing else to run, while the thread it resumes cannot advance.
+
+**Correction it forces to my own method:** the earlier hot-map readings in
+this session were all cumulative and were quoted as if they described the
+wedge. They described the boot. Any future hot-map claim must be
+differenced across two dumps of one boot, which costs nothing but a second
+dump and needs no reader change.
