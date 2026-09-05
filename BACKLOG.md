@@ -66472,3 +66472,64 @@ variance. That is the quantitative form of the retraction in `9bd4c31`,
 and it is a trap worth naming on its own: **a counter with a large fixed
 offset will always look tighter than the process it is measuring. Subtract
 the floor before quoting a spread.**
+
+## THE SPIN IS IN DRIVER CODE, not in ntoskrnl
+
+**A premise correction that unlocked this.** It was recorded here that the
+spinning thread "causes no exits, so it would never appear in the RIP
+census". That conflates *causing* an exit with *being interrupted by* one.
+The thread causes none - but it is interrupted 574.7 times a second by the
+clock, and on every one of those exits `vmcs.guest_rip()` **is the spin
+address**. The census could see it all along.
+
+Wedged boot 174, "where the guest was when an interrupt landed",
+279,308 samples, classified against ntoskrnl's range
+`[base, base+0xc83000)`:
+
+    ntoskrnl+0x6a6f8f   27.4%   HalProcessorIdle+0xf      (cpu 1, idle)
+    ntoskrnl+0x6b3692   22.7%   KiDpcInterruptBypass+0x12
+    0xfffff807107f001c  15.7%   *** DRIVER ***
+    ntoskrnl+0x2bb96b   10.8%   KiCheckForThreadDispatch+0x7f
+    ntoskrnl+0x6b32f0    4.5%   KiDpcInterrupt+0x390
+    0xfffff80716d1a548   3.1%   *** DRIVER ***
+    0xfffff807107f0003   3.0%   *** DRIVER ***
+
+**`0xfffff807107f001c` and `0xfffff807107f0003` are the same page, 25
+bytes apart, and together account for 18.7% of every sample.** Two
+addresses that close together, sampled by an asynchronous clock, is a
+tight `pause` loop - which is exactly what a spin that issues no
+hypercalls and takes no faults looks like from outside.
+
+### What this refutes
+
+Static analysis enumerated every unbounded memory-only spin reachable from
+phase 1 and gave exact instruction ranges for each. **None of them
+appears in the census:**
+
+    KeIpiGenericCall            rva 0x46192b-0x461942   ABSENT
+    KeSetSystemGroupAffinity    rva 0x30e749-0x30e762   ABSENT
+    KeRevertToUserGroupAffinity rva 0x30f33d            ABSENT
+    RtlGetInterruptTimePrecise  rva 0x311d51-0x311d5e   ABSENT
+
+So the wedge is **not** the cross-processor `KeIpiGenericCall` rendezvous
+(the most attractive candidate, being a no-op on one processor and
+mandatory on two), not the `KUSER_SHARED_DATA` seqlock, and not the
+`KTHREAD.ThreadLock` spin on the `KeGenericProcessorCallback` path.
+
+### What it establishes
+
+The phase-1 thread is spinning **inside a third-party driver's own code**,
+reached through `PnpCallDriverEntry` - which is precisely the shape of the
+single-core root cause already recorded for `VBoxSup.sys`, and it now has
+an instruction-level address rather than a call-chain inference.
+
+That also explains every negative result of this session at once: no
+hypercalls (the loop makes no calls), no faults (it touches mapped memory),
+no VTL calls, nothing blocked, the DPC path healthy, and both Hyper-V
+priority gates admitting a vector that is nonetheless never taken - the
+guest simply never returns to a state where it would take one.
+
+**Still to name: which driver.** The module walk needs the live guest;
+boot 174 was killed before it was run. The addresses to resolve on the
+next wedge are the two in the driver page, via
+`scripts/guest-modules.py <base> <cr3> <address>`.
