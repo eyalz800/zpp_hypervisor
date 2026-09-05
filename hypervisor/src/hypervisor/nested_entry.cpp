@@ -12919,12 +12919,14 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // VMM then does with the write. See
             // `nested_vmx::count_dropped_requests`.
             //
-            // The two spellings of "me" are the ones established
-            // below and measured there: destination shorthand 01, and
-            // shorthand 00 with a physical destination of APIC id 0,
-            // which is what this guest actually writes on every one of
-            // 297,465 recorded commands. Anything else is another
-            // processor's and not this account's.
+            // The two spellings of "me" are the ones established below:
+            // destination shorthand 01, and shorthand 00 with a physical
+            // destination naming this processor. The measured commands
+            // are the *first* spelling - `0x4002f` sets bit 18, so all
+            // 297,465 of them carry shorthand 01. This comment used to
+            // claim the second, which is the mis-decode corrected below.
+            // Anything else is another processor's and not this
+            // account's.
             //
             // Only vectors below the dispatch class, because the whole
             // question is a vector the priority can block. A clock
@@ -12941,8 +12943,10 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 auto destination = command >> destination_shift;
                 auto vector = command & 0xff;
 
-                auto to_self = (shorthand_self == shorthand) ||
-                               ((0 == shorthand) && (0 == destination));
+                auto to_self =
+                    (shorthand_self == shorthand) ||
+                    ((0 == shorthand) &&
+                     (destination == static_cast<std::uint64_t>(cpu)));
 
                 if ((cpu < max_cpus) && to_self && (0 != vector) &&
                     ((vector >> priority_class) <= dispatch_class)) {
@@ -12967,29 +12971,51 @@ hypervisor::on_l2_exit(std::size_t cpu,
             // vector in bits 7:0 and the destination shorthand in 19:18,
             // and 01 there is "self".
             //
-            // **The shorthand is not how this guest says "me".** Measured
-            // on the rig: every one of 297,465 writes of this register
-            // carries `0x4002f` in the low half and zero in the high one
-            // - vector 0x2f, fixed delivery, level asserted, destination
-            // shorthand **00**, and a physical destination of APIC id 0.
-            // Testing the shorthand alone therefore matched nothing at
-            // all, and the three `l2_self_ipi_*` counters would have read
-            // zero on a run with the switch on and been read as "the
-            // guest never asks", which is the opposite of the truth.
+            // **The shorthand IS how this guest says "me", and the
+            // paragraph that used to stand here decoded its own measured
+            // value wrongly.** It read `0x4002f` as "level asserted,
+            // destination shorthand 00, physical destination APIC id 0"
+            // and concluded that "testing the shorthand alone matched
+            // nothing at all". Neither field is what it says:
             //
-            // A physical destination naming this processor is the same
-            // request by the other spelling, and it is the spelling the
-            // Hyper-V synthetic register uses: its high half is the
-            // x2APIC destination field rather than a second shorthand.
+            //     0x4002f & (3 << 18) == 0x40000  -> shorthand 01, self
+            //     0x4002f & (1 << 14) == 0        -> level NOT asserted
             //
-            // `0` is taken as "this processor" because the second-level
-            // guest here has one virtual processor and its APIC id is
-            // zero. That is an assumption about the guest rather than
-            // about the architecture, so it is counted rather than
-            // trusted: `l2_ipi_not_self` rises for any command that is
-            // neither spelling, and a run where it is non-zero has found
-            // a destination this rule would deliver to the wrong
-            // processor.
+            // Bit 18 is the shorthand's low bit and bit 14 is the level
+            // bit; the old reading swapped them. So the shorthand clause
+            // matches every one of those 297,465 commands on its own, and
+            // the second clause below was added to fix a failure to match
+            // that was never happening. This is the second bit-18-for-
+            // bit-14 slip in this tree - CLAUDE.md records the first, a
+            // control-bit constant "justified" by 0x1050ae ^ 0x1010ae -
+            // and both survived because the wrong arithmetic agreed with
+            // the wrong conclusion.
+            //
+            // A physical destination naming this processor is still the
+            // same request by the other spelling, and it is a spelling
+            // the Hyper-V synthetic register can use: its high half is
+            // the x2APIC destination field rather than a second
+            // shorthand. So the clause stays - but it must name *this*
+            // processor, not the number zero.
+            //
+            // **That is a multi-processor correctness fix, not a
+            // tidy-up.** The old clause hardcoded `0 == destination`, on
+            // the stated premise that "the second-level guest here has
+            // one virtual processor and its APIC id is zero". With two,
+            // the premise is false in the only direction that matters: a
+            // command sent *from* cpu 1 to destination 0 is an interrupt
+            // for **cpu 0**, and treating it as cpu 1's own self-IPI
+            // routes another processor's wake-up to the wrong processor
+            // and drops it. `l2_ipi_not_self` was the counter meant to
+            // catch exactly that, and it cannot - it only rises for
+            // commands matching *neither* spelling, and this one matched
+            // the wrong spelling rather than none.
+            //
+            // Comparing against `cpu` is correct for both: this VMM
+            // reports the processor's own index as its VP index
+            // (`case vp_index_msr: value = cpuid;`), so destination `N`
+            // is processor `N` and the single-processor guest that
+            // motivated the original clause still matches at `cpu == 0`.
             if constexpr (nested_vmx::self_ipi_delivery) {
                 constexpr std::uint64_t shorthand_mask = 3ull << 18;
                 constexpr std::uint64_t shorthand_self = 1ull << 18;
@@ -12998,8 +13024,10 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 auto shorthand = command & shorthand_mask;
                 auto destination = command >> destination_shift;
 
-                auto to_self = (shorthand_self == shorthand) ||
-                               ((0 == shorthand) && (0 == destination));
+                auto to_self =
+                    (shorthand_self == shorthand) ||
+                    ((0 == shorthand) &&
+                     (destination == static_cast<std::uint64_t>(cpu)));
 
                 if (cpu < max_cpus) {
                     if (to_self) {
