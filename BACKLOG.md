@@ -65696,3 +65696,73 @@ rather than naming this processor's VP. The script derives and reports the
 index instead of asserting it; asserting it made a working walk look
 broken. The proofs that survive are the ones chance cannot satisfy:
 `*(VTL0) == VP` and the VTL-number byte reading 0.
+
+## RETRACTION: 3,955 removes is not "a structure that fills and blocks"
+
+`7007a95` read the tight `VslRemoveProtectedPage` clustering as "a
+fixed-size structure on the release path filling at ~3,950 entries and
+then refusing returns, after which every allocation blocks". **Three
+measurements kill that reading.**
+
+**1. A refusal on the release path bugchecks immediately.** All three
+ntoskrnl sites that call the remove do `KeBugCheckEx(0x1A, 0x5150B, pfn,
+0, 0)` on a negative status - `MiInsertPageInFreeOrZeroedList` twice and
+`MiClearPfnImageVerified` once - with no retry and no wait.
+`MiUpdateSlabPagePlaceholderState` likewise bugchecks `0x1A/0x5150F`. So a
+secure kernel refusing removes puts the guest on a bugcheck screen, not
+into a livelock. **`KiBugCheckData` reads zero on these wedges**, so a
+limit is incompatible with the symptom that is actually observed.
+
+**2. Nothing is blocked on free pages.** `MiWaitForAvailablePages` only
+waits when `AvailablePages < 0x420` (1,056). Measured on wedged boot 173:
+
+    AvailablePages         2,729,192
+    ResidentAvailablePages 2,737,182
+
+Two thousand times the threshold. The "allocation blocks behind the
+release path" half of the story has no mechanism.
+
+**3. A large part of the count is a Phase-0 constant.**
+`ExpRevokeBootLoaderPagePrivileges` - reached from `InitBootProcessor` via
+`KiInitializeKernel`, i.e. **before any driver loads** - walks the loader
+block and issues **one 0xf3 per MemoryType-4 page, blind**, without even
+testing the status. That is a machine constant, completed before Phase 1
+starts, and it puts a floor under every boot's count.
+
+What survives: the clustering is real and was measured correctly across
+six boots (3,916 / 3,919 / 3,958 / 3,963 / 3,965 / 3,970). What is
+withdrawn is the causal reading. The tight spread is most likely the
+signature of a **saturated** counter whose dominant producer is a one-shot
+Phase-0 sweep - which is the `clock_gap_buckets` failure mode again: low
+variance meaning *least informative*, not most causal.
+
+**The read that would settle it costs one boot**: take the 0xf3 count on a
+boot that reaches the login screen. If it also reads ~3,955, the number is
+a constant of the machine and carries no information about the wedge.
+
+Two related reads, both taken: `MiFlags` bit 14 = 1 (the reader proof -
+`VslSetPlaceholderPages` is gated on it and ~8,700 are observed) and bit
+12 = 1, so `MiGetPagePrivilege` is live and the other three remove sites
+are *not* dead code. So the count is not *entirely* Phase 0 - but that
+does not rescue the limit interpretation, which points 1 and 2 kill on
+their own.
+
+## Wedged versus healthy vAPIC: the lazy-EOI denial is NOT the discriminator
+
+Same boot 173, six samples in each state, same processor:
+
+    healthy    granted 0 (6/6)   0x2f pending (6/6)   highest 0xd1
+    WEDGED     granted 0 (6/6)   0x2f pending (6/6)   highest 0x2f in 3/6
+
+The grant is denied and `0x2f` is latched in **both** states, so neither
+distinguishes a wedged guest from a progressing one. That confirms the
+caveat filed with `03e7231` rather than overturning it: the denial is the
+steady-state cost, always paid.
+
+The one difference is sharper than expected. When wedged, `0x2f` is
+sometimes the **highest** pending vector, not the second - meaning at that
+instant nothing else is pending at all, the clock included, and the DPC
+vector *still* is not taken. A vector that is top of the IRR with an empty
+ISR stack (`depth 0`, measured in 5 of 6 wedged samples) and is still not
+delivered is not being out-prioritised by anything in hvix64's own APIC
+state.
