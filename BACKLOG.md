@@ -65529,3 +65529,75 @@ run here: read a value whose correct answer is known independently. There
 is no such value in a wait-reason census, which is precisely why the
 offset needed verifying against the PDB *before* the first reading, not
 after four of them.
+
+## The last driver loaded is VBoxSup.sys - three routes converge
+
+`scripts/guest-loading-driver.py` reads the **tail of
+`PsLoadedModuleList`**, which is the image being loaded right now.
+`MmLoadSystemImageEx` appends the entry *before* imports, before the copy
+loop and before `VslCompleteSecureDriverLoad`, and removes it again if the
+load fails - so there are no tombstones and the tail is unambiguous. At
+most one load exists at a time: `PnpDeviceActionWorker` is the sole
+drainer holding `PpDevNodeLockTree`, `IopLoadDriver` takes
+`IopDriverLoadResource` exclusive, and `MmLoadSystemImageEx` holds
+`PsLoadedModuleResource` exclusive across the whole thing.
+
+That turns "which driver is the 79th" into one pointer read - no counting,
+and no dependence on load order, which matters because the order here is
+**not** the boot-driver list: this path arrives through
+`PipCallDriverAddDeviceQueryRoutine`, PnP device enumeration, whose order
+follows hardware enumeration timing rather than `ServiceGroupOrder`.
+
+Boot 172, reader proven (`ntoskrnl.exe` at the base passed in):
+
+    netbios.sys    size  0x16000
+    Vid.sys        size  0xdc000
+    winhvr.sys     size  0x29000
+    rdbss.sys      size  0x8e000
+    VBoxSup.sys    size 0x12b000   <<< TAIL
+
+**Three independent routes now name `VBoxSup.sys`:** this live read, the
+project's own [[vboxsup-busy-poll-is-the-phase1-barrier]] and
+[[wedge-is-vboxsup-last-image-page]] notes from the single-core
+investigation, and a static analysis that ranked "a third-party
+`DriverEntry` busy-poll, and the walk stopped because its caller stopped
+calling" as its top candidate on the exit-rate evidence alone.
+
+**What is NOT yet claimed.** Boot 172 was still healthy when this was
+read, so this says VBoxSup is the most recently loaded driver, not that it
+causes the wedge. Its `Flags & 0x2000` is set, so
+`MiCompleteSecureDriverLoad` already ran for it and no image was mid-copy
+at that instant - which, if it still holds once wedged, would exonerate
+the image-copy path outright and point at what runs *after* the load: the
+`DriverEntry`. That is the read to take on the next wedged boot.
+
+### Instrument defect found and fixed: the monitor echoes its own command
+
+`xp_w` and `xp_b` matched the ECHO, not the data. The monitor returns the
+command text it was sent, and a physical address in it is 9-12 hex digits,
+so `0x([0-9a-f]{8})` matched the echoed address's first eight digits and
+returned it as the value. `xp_q`'s `{16}` was accidentally safe, because
+an echoed address is never that long - which is exactly why every pointer
+read looked correct while every dword and byte read was garbage.
+
+What it produced, and what gave it away:
+
+    printed          real        field
+    0x11c71c9d       0x12b000    SizeOfImage
+    0x11c71c9f       -           "Flags" == SizeOfImage + 2
+
+**Two independent fields cannot differ by two.** That is an impossibility,
+not an implausibility, and it is the check that caught it - the same rule
+already in CLAUDE.md from the wide-`xp`-over-a-BAR incident. The names
+also carried a spurious `5555` prefix from the same source.
+
+**This retracts a diagnosis made earlier today.** `guest-power-irps.py`
+read `PnpEnumerationInProgress` as 17 and `PopIrpWorkerCount` as
+296,159,351, and that was blamed on the RVAs coming from a disassembly
+rather than the PDB - the "segment 27" explanation. The RVAs may well be
+fine; **the regex was the fault**, and the same bug explains
+`PopWatchdogSleepTimeout` reading 296,207,625. The `PopIrpList` result is
+unaffected: it is read with `xp_q` throughout and proved structurally.
+
+All three scripts now filter to data rows (`^[0-9a-f]{6,}: `) before
+matching.

@@ -91,6 +91,24 @@ P1_9F = {
 }
 
 
+# **Filter to DATA ROWS before matching.** The monitor ECHOES the command
+# it was sent, so the response contains the literal text `xp /1xw
+# 0x351f61dd0`. A physical address there is 9-12 hex digits, so a regex of
+# `0x([0-9a-f]{8})` matches the ECHO's first eight digits and returns the
+# address as if it were the value. `{16}` happens to be safe because an
+# echoed address is never that long - which is exactly why pointer reads
+# looked fine while every dword and byte read was garbage.
+#
+# Measured: SizeOfImage printed 0x11c71c9d where the row-filtered read
+# gives 0x12b000, and Flags printed SizeOfImage+2 - two independent fields
+# cannot differ by 2, which is what gave it away. Ask whether a reading is
+# POSSIBLE before asking whether it is believable.
+def _rows(d):
+    import re as _re
+    return [l for l in d.splitlines()
+            if _re.match(r'^[0-9a-f]{6,}: ', l.strip())]
+
+
 def monitor(cmds):
     s = socket.create_connection((RIG, PORT), timeout=12)
     time.sleep(0.35)
@@ -115,12 +133,18 @@ def monitor(cmds):
 
 def xp_q(phys, n=1):
     d = monitor([f'xp /{n}xg 0x{phys:x}'])
-    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
+    out = []
+    for l in _rows(d):
+        out += [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', l)]
+    return out
 
 
 def xp_b(phys, n):
     d = monitor([f'xp /{n}xb 0x{phys:x}'])
-    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', d)]
+    out = []
+    for l in _rows(d):
+        out += [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', l)]
+    return out
 
 
 BASE = int(sys.argv[1], 16)
