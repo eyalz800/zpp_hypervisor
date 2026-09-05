@@ -67768,3 +67768,65 @@ about `+0x461` and `+0xd0f` (boot 184's cold rows); `+0x518`/`+0x538` are
 the hot ones and are the addresses to disassemble.
 
 **Held, not killed.** This is the only specimen of this shape.
+
+## Boot 185: DPCs are queued and NOT ONE retires, with QuantumEnd stuck set
+
+Three `guest-dpc-state.py` samples over ~150 s on the held boot-185
+specimen, `KPRCB.Number` proven against the array index on every sample:
+
+    member                cpu 0                    cpu 1
+    DpcCount            2,431 -> 2,431 -> 2,431   798 -> 798 -> 798   FROZEN
+    DpcQueueDepth[0]        2 ->     2 ->     2     1 ->   1 ->   1   FROZEN, NON-EMPTY
+    QuantumEnd              1                       1                 SET
+    ActiveDpc[0]         NULL                    NULL
+    NestingLevel            1 ->     0 ->     1     0 ->   0 ->   0
+    DpcRequestSummary    0x2a                    0x22   Gate B: RUNS
+    DpcWatchdogCount   35,085 -> 45,284 -> 58,049  37,565 -> 47,767 -> 60,529
+
+**VERIFIED: over 150 seconds, with a non-empty DPC queue and Gate B open,
+both processors executed ZERO DPCs.** `DpcCount` is the count of DPCs
+executed and it does not move; `DpcQueueDepth` does not move either, so
+nothing drained and nothing new was queued. `DpcWatchdogCount` climbs at
+~170/s on both.
+
+`NestingLevel` was observed **1 on cpu 0 twice** - so `KiRetireDpcList` *is*
+entered. It is entered and it retires nothing.
+
+### This contradicts the documented wedge, and the difference is the finding
+
+The settled account of the boot-184 shape has `DpcRequestSummary = 0` and
+concludes "`KiRetireDpcList` is never entered". Here the summary is **0x2a
+/ 0x22** - `NormalRequested`, `TimerExpiration`, `LocalInterrupt` - Gate B
+(`summary & 0xBF`) is open on both processors, and the drain *is* entered.
+So this is not the same failure wearing a different mask.
+
+### The mechanism these three readings agree on
+
+Independent instruments, same conclusion:
+
+1. the RIP census: cpu 1 spends **33.1%** of its samples at
+   `KiQuantumEnd+0x538` (`760bd3b`)
+2. `PRCB.QuantumEnd` is **set and never clears**
+3. `DpcCount` is frozen with a non-empty queue
+
+`KiRetireDpcList` consults `PRCB.QuantumEnd` and calls `KiQuantumEnd` when
+it is set. If that call returns without clearing the flag and without
+reaching the DPC list, the drain re-enters quantum-end processing every
+time and never retires a DPC - which is exactly the three observations
+above.
+
+**INFERRED, and flagged as such: the `KiRetireDpcList` -> `KiQuantumEnd`
+call relationship and the flag's clear site are from general Windows
+internals, NOT from disassembly of this build.** That disassembly is in
+progress and is what would promote this to verified. The prediction it must
+satisfy: a path through `KiQuantumEnd` reaching `+0x518`/`+0x538`/`+0x53c`
+that returns **without** clearing `PRCB.QuantumEnd` (+0x38b9).
+
+### cpu 1 is running the idle thread WITHOUT halting
+
+`CurrentThread == IdleThread` on cpu 1 across all three samples, with
+`IdleHalt = 0`. The settled escape is `HalProcessorIdle`'s `hlt` setting
+`IdleHalt`, which gates the interrupt loop off. **Here the idle thread is
+current and never reaches that `hlt`** - so the one instruction that ends
+this class of livelock is being approached and not taken. That is a second,
+independent handle on the same wedge and it is new.
