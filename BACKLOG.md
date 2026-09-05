@@ -65426,3 +65426,46 @@ Consequences worth carrying:
 Method note: read as `WaitReason` alone this would have looked like two
 different failures. Counting the *distribution* rather than grepping for
 one reason is what showed the counts were identical.
+
+## Correction: the tightest coordinate is VslRemoveProtectedPage, not copies
+
+The previous section called the copy count the better-conditioned
+coordinate. **That was premature - it was the tightest of the three
+quantities then compared, not of the ones available.** Adding
+`VslRemoveProtectedPage` (0x0f3) and `VslSetPlaceholderPages` (0x101) to
+the comparison across all four wedged boots:
+
+    quantity                       166      167      170      171    spread
+    drivers (0x0d9)                 78       91       89       86    15.1%
+    placeholders (0x101)         8,123    8,904    8,753    8,792     9.0%
+    copies (0x0f4)              10,172   10,863   10,701   10,743     6.5%
+    REMOVES (0x0f3)              3,919    3,958    3,970    3,965     1.3%
+    reserves (0x0d3)                88      113      109      104
+
+**`VslRemoveProtectedPage` stops at 3,953 +/- 25 every time**, and the
+last three boots agree to **0.3%**. Nothing else in the census is that
+well conditioned - it is five times tighter than the copy count and
+twelve times tighter than the driver odometer.
+
+That inverts the reading. The boots do not stop after a fixed amount of
+copy *work*; they stop after a nearly fixed number of page
+*un-protections*. Copies and placeholders vary around it because they are
+driven by whatever images happen to be loading; the removes do not.
+
+**What 0x0f3 is.** The undo edge of the protection state machine - a
+frame leaving VTL1 protection as it is freed or de-verified. Its
+ntoskrnl callers are `MiInsertPageInFreeOrZeroedList` (twice),
+`MiClearPfnImageVerified` and `KeSetPagePrivilege`. So the quantity that
+saturates is **pages being returned**, not pages being taken.
+
+That is the shape of a fixed-size structure on the *release* path: a
+free list, a de-protection queue, or a secure-kernel side table that
+fills at ~3,950 entries and then stops accepting returns - after which
+every subsequent allocation must block, which is exactly the entirely
+blocked thread pool observed in the section above.
+
+**Not yet established:** that 3,950 is a limit rather than a coincidence
+of four samples, and what structure would have that size. The cheap test
+is more samples - if the next two boots also land at 3,95x it is a
+constant, and if they scatter it is not. Worth noting 3,953 is not near
+any obvious power of two, so if it is a limit it is a derived one.
