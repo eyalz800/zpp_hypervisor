@@ -7515,6 +7515,45 @@ void hypervisor::publish_reference_tsc_page(std::size_t cpu)
             return;
         }
 
+        // **One publisher, partition wide.** The reference-TSC page is a
+        // property of the partition, not of a virtual processor: the
+        // guest hypervisor names one guest-physical page in
+        // `HV_X64_MSR_REFERENCE_TSC` and every processor reads that same
+        // page. Everything this function fits from, however, is
+        // per-processor - `reference_read_tsc[cpu]`,
+        // `reference_read_value[cpu]`, `reference_first_tsc[cpu]` - so
+        // with two processors enabled there are two independent fits
+        // writing the same page.
+        //
+        // That is not merely redundant, it breaks the interface. The
+        // page's protocol is a sequence counter the reader samples
+        // before and after reading the scale/offset pair, and it assumes
+        // a single writer: two processors stepping the same sequence
+        // concurrently can leave a reader with one processor's scale and
+        // the other's offset while the sequence looks stable. A guest
+        // hypervisor computing a deadline from a mismatched pair gets an
+        // arbitrary answer, and a far-future deadline reading as already
+        // expired is exactly what was measured - boot 147, cpu 0 asked
+        // for 2504.334 ms and was fired every 2.3 ms, `0.00x`, with the
+        // timer ring showing 32 clock injections against zero re-arms.
+        //
+        // It is also why this cannot happen on one processor, which is
+        // the shape the whole multicore investigation has been looking
+        // for: a single-processor guest has one fitter, no race, and its
+        // timer measures 1.05x on the same binary.
+        //
+        // The lowest-numbered processor that has the page enabled
+        // publishes; the others fit and count as before but do not
+        // write. Chosen over "cpu 0 only" because the enable is recorded
+        // per processor and nothing guarantees the boot processor is the
+        // one that wrote the MSR, and over a lock because a lock would
+        // serialise two writers that should not both exist.
+        for (std::size_t other{}; other < cpu; ++other) {
+            if (0 != (this->l2_reference_tsc_written[other] & 1)) {
+                return;
+            }
+        }
+
         auto count = this->reference_read_count[cpu];
         if (count < reference_sample_capacity) {
             return;

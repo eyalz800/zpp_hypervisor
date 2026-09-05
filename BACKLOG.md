@@ -64578,6 +64578,44 @@ So there is no share of cpu 1's exits that this VMM can decline to take.
 What is left is the per-exit *cost* of taking them, which is the general
 nesting tax and not specific to this wedge.
 
+> **WITHDRAWN 2026-09-05, by a control that took ten minutes.** The
+> paragraphs above conclude that what remains is throughput. A
+> single-processor boot of the same binary refutes it:
+>
+>     configuration            l2_run share   VtlCall rate   reaches
+>     single-core (works)          2.65%        223.96/s     user mode
+>     multicore cpu 0 / cpu 1   4.12% / 7.71%     0.09/s     never
+>
+> **The configuration that works gives the guest LESS processor than the
+> one that does not.** Multicore has roughly eleven points of
+> processor-equivalent against single-core's two and a half, and
+> advances 2,500 times slower. It is not starved; it executes more and
+> achieves less. The ~83 microseconds an exit is real, is shared by both
+> configurations, and is therefore not what separates them.
+>
+> So this is a **liveness** problem, not a speed problem, and the
+> exit-budget arithmetic above - while correct as arithmetic - answers a
+> question that turned out not to be the one that matters. Do not scope
+> VMCS-traffic work from it without re-establishing that throughput is
+> the barrier.
+>
+> The distinguishing fact, and the success test worth using because it
+> needs no display (the rig's screen is a passed-through GPU and
+> `screendump` is impossible): **the working configuration reaches a
+> user-mode second-level instruction pointer** - `l2-rip
+> 0x7ffd7b480665` in the exit ring - and no multicore boot has ever
+> produced one. Every multicore second-level RIP sits in ntoskrnl's
+> interrupt path.
+>
+> Three defects were found and fixed in the session that produced this
+> correction: a per-exit `log()` on application processors costing cpu 1
+> 90% of its wall clock, `ZPP_DELIVER_ON_DROP` costing a quarter of a
+> million reflected exits once the priority actually started dropping,
+> and a partition-wide reference-TSC page being published per processor.
+> All three are real and measured. **None of them opened the barrier**,
+> and the first two moved the symptom between processors rather than
+> removing it.
+
 Note the constraint that makes this hard rather than merely large: the
 obvious way to cut the MSR path is to answer EOI and EOM locally instead
 of reflecting them, and that is the `intercept_self_ipi` family, which
