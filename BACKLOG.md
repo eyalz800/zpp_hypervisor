@@ -68183,3 +68183,108 @@ boot behind it.
 Boot 185 differed slightly: its cpu 1 read **+0**, fully frozen. So 186
 stalled a step earlier in the same progression, which is consistent with
 the three-stage trajectory rather than a different failure.
+
+## RETRACTED: "+0x1b is itself a wait". It is `test %r8,%rax`
+
+`5c46be9` proposed that `KiUpdateThreadQosGroupingSummaries+0x1b` was
+itself a wait, making the wedge a two-lock cycle. **Refuted by
+disassembly.** The bytes at `+0x1b` are `49 85 c0` - `test %r8,%rax`,
+register-only ALU, no memory operand. It cannot fault, cannot spin, is not
+a call return, and **there is no `pause` anywhere in the function**. Its
+only synchronising instructions are a single-shot `lock or` at `+0x5e` and
+`lock and` at `+0x8d`, neither a retry.
+
+So there is **no second lock and no lock-order inversion.** That whole
+branch is closed. It was flagged INFERRED when proposed, which is the only
+reason it cost a disassembly rather than an experiment.
+
+### But the scanned frame was REAL, and that is worth recording
+
+`5c46be9` treated `KiAcquireThreadStateLockForWrite+0xc4` as a lead
+because it came from `sample_guest_stack`, a scan. It is **verified
+byte-for-byte**: at RVA `0x3ad79f` sits
+`call KiAcquirePrcbLocksForIsolationUnit`, so `+0xc4` = `0x3ad7a4` is
+exactly that call's return address. **`KiAcquireThreadStateLockForWrite`
+IS the PrcbLock acquire.**
+
+The caution was still right - a scan cannot prove liveness - but the
+resolution is that a scanned frame naming a call site that provably
+exists, at a stack depth that provably matches, is much stronger than one
+that merely looks coherent. That is the distinction `f899fe2` lacked.
+
+### The holder's region is now exact
+
+    +0x40b  call KiAcquireThreadStateLockForWrite   ACQUIRE both PrcbLocks
+    +0x41a  call KzRefreshWorkloadProperties        -> KiUpdateThreadQos...+0x1b
+    +0x434  call KiReleaseThreadStateLock           RELEASE
+
+The isolation unit is `_KCORE_CONTROL_BLOCK` (PDB: `ProcessorCount` at +0,
+`Prcbs[4]` at +8), which is why both processors share one descriptor: they
+are two Prcbs of one core control block.
+
+**The spinner holds NOTHING.** Its `rsi` is `CoreControlBlock+8`, the array
+*base*, and `rsi` only advances at `+0x543` after an acquisition succeeds.
+So it is stopped on element 0 having taken nothing, waiting for a lock the
+other processor holds. **`4fc1d2a`'s reading (a) - cpu 1 self-deadlock - is
+therefore wrong**, and it is independently refuted: `KiEndInterruptCycle
+Accumulation` refuses the DPC bypass when `PreviousIrql >= 2`
+(`+0x256 cmpb $2,%r15b ; jae return 0`), so `KiQuantumEnd` cannot be
+re-entered from the interrupt. **Reading (b) survives alone.**
+
+## Two instrument defects found, one of which corrupted a reading I published
+
+**1. `interrupted_context.rdi` is stale stack garbage on interrupt frames.**
+`KiIsrLinkage` writes only `Rax,Rcx,Rdx,R8,R9,R10,R11` into the
+`_KTRAP_FRAME`, plus `Rsi` via its `push %rsi`. **It never writes `Rbx`
+(+0x140) or `Rdi` (+0x148).** The offsets in `guest_windows.h` are right;
+the *fields* are not populated.
+
+**My own dump corroborates this independently**: the frozen QoS row printed
+`rdi = 0xfffff800def5eb84`, which symbolizes to
+`KiEndInterruptCycleAccumulation+0x274` - **a code address sitting in a
+register that should hold data**. That is exactly what leftover ISR stack
+looks like, and I read past it without noticing.
+
+`rcx`, `rdx`, `r8` and `rsi` are genuine. **`rsi` is the one carrying the
+spinner-holds-nothing proof, so that conclusion is unaffected** - but
+`rdi` must never be quoted from this instrument again. The printer should
+say so or stop printing it.
+
+**2. `interrupted_context` has no `cpu` field.** The ring is 16 entries
+**shared across processors**. So "7 samples / 8 samples / 1 sample" in
+`5c46be9` is *one 16-entry snapshot*, not 16 independent observations, and
+**the cpu-0/cpu-1 attribution I gave was inferred from context, not
+recorded.** The conclusion (one processor in the holding region, another
+spinning) does not depend on which is which, so it stands - but the
+attribution should not have been stated as flatly as it was. Adding
+`std::uint8_t cpu` to the record is one line and removes the inference.
+
+This is the same family as everything in "An instrument that cannot report
+its own failure": a record with an unpopulated field cannot say the field
+is unpopulated.
+
+## What is left: two survivors, and the test that separates them
+
+The holder has ~0x60 bytes of straight-line code and two non-blocking calls
+between `+0x1b` and the release at `+0x434`. Nothing in that code can
+block. So it is stopped **inside the interrupt it took at `+0x1b`**:
+
+- **(L) tick saturation.** It `iret`s to `+0x1b`, the next clock is already
+  pending, and it re-traps at the first instruction boundary - which is
+  `+0x1b` again - with byte-identical registers. It retires ~0 instructions
+  per tick and never reaches `+0x434`. **Needs no new bug**: it is
+  `62d8131`'s per-tick reflect saturation landing on a lock-holding window.
+- **(D) the handler never returns** - left VTL0, or stuck deeper.
+
+**(L) is the one that makes per-tick cost causal rather than cosmetic**, so
+this decides whether the removal work now in flight is the fix or merely
+hygiene. Discriminator, on the holder's *sampled* census: (L) predicts the
+ISR round trip present and `KiUpdateThreadQos...+0x1b` itself appearing at
+about one sample per tick; (D) predicts all of it absent and a single
+pinned address elsewhere, most likely in `securekernel.exe`.
+
+Frame-genuineness test, two `xp` reads on the next wedged boot:
+`record.rdx` must equal `*(KPRCB[0]+0xc0)` and `record.r8` must equal
+`*(KPRCB[0]+0xc8)`. **If either differs the frame is a fossil and the
+holder analysis is void.** Note the printer does not currently emit `r8`,
+so that half needs one line added first.
