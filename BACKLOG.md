@@ -67132,3 +67132,40 @@ once per iteration would give five equal shares. 33.3 / 24.7 / 18.8 / 16.1
 (`HvlEndSystemInterrupt`) the most expensive - which is consistent with
 the earlier exit-budget finding that the synthetic EOI costs one full
 reflection per tick and the lazy-EOI grant is denied 100% of the time.
+
+### CORRECTION: those percentages are not computable - the rows are top-N cut
+
+The five shares quoted just above sum to **106.3%**, which is impossible,
+and the impossibility is the tell. The differencing is invalid.
+
+Cause: the census printer emits a **top-N cut** of ntoskrnl rows - its own
+output says "*and every non-ntoskrnl row below the cut*", so a
+*non*-ntoskrnl row always prints while an ntoskrnl row below the cut does
+not. I treated "absent from the earlier printed list" as "was zero" for
+`HalpHvTimerAcknowledgeInterrupt+0x46` and
+`KiInterruptDispatchNoLockNoEtw+0x7c`. Both were almost certainly present
+below the cut, so both deltas are overstated, and the sum exceeded the
+window.
+
+**What survives:** the *set*. All five addresses appear in the final
+window's printed rows on a boot at 0.0/s, and together they dominate it -
+which is what identifies the loop, and matches CLAUDE.md's recorded
+sequence. `HalpHvTimerAcknowledgeInterrupt+0x46` in particular is named in
+that sequence and had not previously been measured here.
+
+**What is withdrawn:** every percentage in that section, and with it the
+inference that the EOI leg is the most expensive. The share ordering was
+computed from truncated data and says nothing.
+
+**What it would take to do properly:** a census printer that emits every
+row, or one that reports the cut explicitly so a reader can refuse to
+difference across it. CLAUDE.md already records this exact trap - "a top-N
+cut hides exactly the thing a census exists to find" - from the hot-address
+map, and the printer was changed then to emit every non-ntoskrnl row
+however cold. The ntoskrnl rows kept their cut, which is precisely where
+this bit.
+
+Seventh instrument lesson of the session, and the first where the
+arithmetic caught it rather than a second instrument: **a set of shares
+that sums past 100% is not a finding to explain, it is a reading to
+discard.**
