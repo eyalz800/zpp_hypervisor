@@ -68147,3 +68147,39 @@ is just not worth doing until something else motivates it, because the
 
 Note also `HvlEnlightenments` bit 6 is clear independently, so **two**
 gates would have to be opened, not one.
+
+## Two consecutive boots stall within ~1% of the same VTL coordinates
+
+Boot 186 (`ZPP_CPUS=2`, zpp resident, `VM status: running`) started
+healthy - `vtl_fresh_calls` 74.85/s on cpu 1, 19.59/s on cpu 0,
+`vtl_copy_calls` 11.89/s and 2.77/s - then stopped. Frozen at identical
+totals across two windows four minutes apart:
+
+    counter (cpu 0)      boot 185 wedged   boot 186 stalled   apart
+    vtl_fresh_calls           26,570            26,944         1.4%
+    vtl_copy_calls            10,677            10,782         1.0%
+    vtl_copy_calls (cpu 1)     1,710             1,605         6.5%
+
+**Caveat applied to my own reading, because this tree has been caught by
+it before**: both counters accumulate from boot and carry the whole of
+Phase 0, so a large common prefix makes any stall look tighter than the
+process it measures - the same defect that made `VslRemoveProtectedPage`
+cluster to 1.3% until its 3,010-call Phase-0 constant was subtracted.
+The agreement is therefore **suggestive of a reproducible coordinate, not
+proof of one**, and it would take differencing from the start of phase 1
+to promote it. Recorded at that strength deliberately.
+
+### cpu 1 keeps ticking at the same rate a previous boot recorded
+
+cpu 1's `vtl_fresh_calls` does not go to zero. It settles at **0.76-0.82/s**
+across both windows while everything else is frozen. Boot 166 recorded
+**0.84/s** in the same state, described then as "still entering VTL1".
+Three measurements on two boots agreeing at ~0.8/s is the secure kernel's
+periodic tick and nothing else - VTL1 is alive and idle, VTL0 has stopped
+asking. That is the same conclusion
+[[multicore-wedge-is-a-stopped-hvci-walk]] reached, now with a second
+boot behind it.
+
+Boot 185 differed slightly: its cpu 1 read **+0**, fully frozen. So 186
+stalled a step earlier in the same progression, which is consistent with
+the three-stage trajectory rather than a different failure.
