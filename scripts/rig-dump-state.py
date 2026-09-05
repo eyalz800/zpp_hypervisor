@@ -8649,8 +8649,24 @@ def main():
                         return f"  ntoskrnl+0x{r - kbase0:x}"
                     return ""
 
+                # **The cut used to be 14 and that hid the answer.** The
+                # census samples second-level ENTRIES, and on a wedged
+                # guest almost every entry happens inside the interrupt
+                # path - so the five clock-loop addresses take the top
+                # rows and the code the *thread itself* runs between
+                # interrupts sits below them. Those rows are a fraction
+                # of a percent each and were never printed, which is why
+                # "what is the spinning thread executing" could not be
+                # answered from a census that had the answer in it.
+                #
+                # Print every row at or above 0.05% instead, with 14 as
+                # the floor. On the dumps this was written against that
+                # is 40-60 rows, not hundreds - the tail is genuinely
+                # cold.
                 ordered = sorted(rows, reverse=True)
-                for h, r in ordered[:14]:
+                _floor = max(14, sum(1 for h, _ in ordered
+                                     if h >= 0.0005 * (tot or 1)))
+                for h, r in ordered[:_floor]:
                     print(f"  0x{r:016x}  {h:>10}  "
                           f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
                 # Everything NOT in ntoskrnl, however cold. The secure
@@ -8661,11 +8677,11 @@ def main():
                 # `SkpReturnFromNormalModeRaxSet+0x114` was found only
                 # because it happened to make the fourteen; the rest of
                 # VTL1 did not.
-                rest = [(h, r) for h, r in ordered[14:] if not _label(r)]
+                rest = [(h, r) for h, r in ordered[_floor:] if not _label(r)]
                 if rest:
                     print(f"  ... and every non-ntoskrnl row below the "
                           f"cut ({len(rest)} of "
-                          f"{len(ordered) - 14} remaining):")
+                          f"{len(ordered) - _floor} remaining):")
                     for h, r in rest:
                         print(f"  0x{r:016x}  {h:>10}  "
                               f"{100.0 * h / (tot or 1):5.1f}%")
@@ -8684,7 +8700,7 @@ def main():
                 # impossibility that was the only thing that caught it.
                 # A suppressed row is not a cold row; the fourteenth
                 # here has stood at 4% of the samples.
-                hidden = [(h, r) for h, r in ordered[14:] if _label(r)]
+                hidden = [(h, r) for h, r in ordered[_floor:] if _label(r)]
                 if hidden:
                     hsum = sum(h for h, _ in hidden)
                     print(f"  *** {len(hidden)} ntoskrnl row(s) below the "

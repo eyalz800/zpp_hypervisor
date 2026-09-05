@@ -67518,3 +67518,37 @@ rows below it and this census cannot be differenced across the cut.
 and no more.** The claim that a third-party driver is the thing spinning -
 carried from the single-core investigation and reasonable on that evidence
 - is **not** confirmed here, and one reading of this data contradicts it.
+
+## The census had the answer and the cut was hiding it
+
+`quiet_rip` samples second-level **entries**. On a wedged guest almost
+every entry lands in the *interrupt path*, so the five clock-loop
+addresses take all the top rows and the code the **thread itself** runs
+between interrupts is a fraction of a percent per address - below the
+printer's 14-row cut, and therefore never printed.
+
+That is why "what is the spinning thread executing" could not be answered
+from a census that contains the answer. It is the same top-N failure as
+`8dbee0f`, one level deeper: there the cut invalidated a *differencing*
+operation, here it hides the rows outright.
+
+Changed the ntoskrnl cut from a fixed 14 rows to **every row at or above
+0.05%**, with 14 as a floor. On the dumps this was written against that is
+40-60 rows rather than hundreds - the tail is genuinely cold, so the cost
+is a slightly longer section and the benefit is the rows that matter.
+
+**What to look for in the next wedged dump:** any ntoskrnl address that is
+*not* one of the five loop addresses
+(`HvlEndSystemInterrupt+0x1e`, `KiDpcInterruptBypass+0x12`,
+`KiInterruptDispatchNoLockNoEtw+0x7c`, `HvlWriteApicCommandRegister+0x1d`,
+`HalpHvTimerAcknowledgeInterrupt+0x46`) and not `HalpHvTimerArm+0x7a`.
+Those are candidates for where the thread actually is - in particular
+anything in `0x30e000`-`0x312000`, which holds
+`KeGenericProcessorCallback` (`0x30e0f0`), `KeSetSystemGroupAffinityThread`
+and its `ThreadLock` spin (`0x30e749`-`0x30e762`), and
+`KeRevertToUserGroupAffinityThread` (`0x30f33d`).
+
+Note the trap that region carries: **a nearest-symbol-below lookup labels
+all of them "the clock path"**, because `ExpUpdateTimerConfigurationWorker`
+(`0x30d2b0`) and `KeDelayExecutionThread` (`0x310cb0`) sit among them.
+Resolve against `ntkrnlmp_symbols.csv`, not the PE exports.
