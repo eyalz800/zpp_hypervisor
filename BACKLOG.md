@@ -66281,3 +66281,65 @@ the fourth.
 `tests/python_layout/test_monitor_echo.py` now enforces the parser half
 tree-wide, with a negative control that fails and names the line when the
 defect is reintroduced.
+
+## NAMED: the phase-1 thread is inside a driver's DriverEntry calling
+## ExSetTimerResolution, spinning in KeGenericProcessorCallback
+
+Wedged boot 174. Kernel-stack scan of the thread that holds cpu 0 in every
+sample (`StartAddress ntoskrnl+0x6fb520 = Phase1Initialization`, Cid 0x8):
+
+    PspSystemThreadStartup
+     -> Phase1Initialization                 0x6fb520
+       -> IoInitSystem+0x2c                  0xc1c9f4
+         -> IopInitializeSystemDrivers+0x1a6 0xc64cc2
+           -> IopLoadDriver+0x6f2            0x9b759e
+             -> PnpCallDriverEntry+0x54      0x9b9160
+               -> PnpEnableWatchdog+0x41     0x9b9805
+                 -> ExSetTimerResolution+0xbc        0x41662c
+                   -> ExpUpdateTimerResolution+0x1cd 0x41690d
+                     -> ExpUpdateTimerConfiguration+0xc6 0x416a42
+                       -> KeGenericProcessorCallback+0x14e 0x30e23e
+
+**The frame ordering is the proof this is a real chain, not scan noise.**
+Stack addresses ascend from `KeGenericProcessorCallback` (lowest, deepest)
+to `PspSystemThreadStartup` (highest, outermost), which is exactly how a
+call chain lies on a downward-growing stack. A scan that picked up stale
+frames would not order semantically.
+
+### What it says
+
+1. **`PnpCallDriverEntry`** - the phase-1 thread is *inside a third-party
+   driver's `DriverEntry`*, called synchronously by `IopLoadDriver` on its
+   own thread. So a driver initialising is what holds phase 1, which is
+   why the `PsLoadedModuleList` tail showed a *completed* load: the image
+   is loaded, and the thread is in its entry point.
+2. **`ExSetTimerResolution`** - that driver asked to change the system
+   timer resolution. This is precisely what the single-core root cause
+   note describes VBoxSup doing, and `VBoxSup.sys` is loaded on these
+   boots.
+3. **`KeGenericProcessorCallback` is the deepest frame** - the loop that
+   runs `KeSetSystemGroupAffinityThread` then a worker, per processor.
+
+### This closes a circle opened at the start of the session
+
+The session began by disassembling `ExpUpdateTimerConfiguration` to ask
+whether it ever selects cpu 1, and refuted "a per-processor callback that
+never selects the second processor" by showing it targets
+`KiClockTimerOwner` alone - one processor, by design. That refutation
+stands and is now *more* interesting, not less: the thread really is in
+that path, and the path really does target one processor. What was wrong
+was the inference that targeting one processor was the defect.
+
+### What it does NOT yet say
+
+Whether the thread is spinning *inside* `KeGenericProcessorCallback`, or
+inside the worker it invoked, or is simply passing through. A stack scan
+names frames, not the current instruction. The per-processor
+`interrupted_rip` census would name the instruction, and it is fixed on
+`develop` but **not deployed** - the rig deliberately still runs the
+known-good login-screen binary.
+
+Also unresolved: which driver. `PnpCallDriverEntry`'s argument would name
+it; the `PsLoadedModuleList` tail at the moment of the wedge is
+`dfsc.sys`, but that is the last *completed* load and the entry being run
+may be an earlier one.
