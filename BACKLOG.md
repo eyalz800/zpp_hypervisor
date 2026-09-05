@@ -66574,3 +66574,50 @@ deliberately allowed to diverge, the divergence must be *checked*, not
 assumed harmless. A member whose shape changed makes its whole section
 vanish silently, which reads as "that instrument had nothing to say"
 rather than "that instrument was not running".
+
+## CORRECTION: the hot spin addresses are not a VTL0 driver
+
+`eaa6a82` classified the hot census rows as "*** DRIVER ***" purely
+because they fell outside ntoskrnl's range. That inference was too weak,
+and the module walk refutes it: **105 loaded modules walked, and neither
+address is in any of them.**
+
+Re-classified against the secure kernel, whose base the dump prints
+(`caller 0xfffff80044571000 'securekernel.exe'`):
+
+    0xfffff8004464a548   15.0%   = securekernel + 0xd9548   VTL1
+    0xfffff800445d6bbc    0.0%   = securekernel + 0x65bbc   VTL1
+    0xfffff8003bd2001c   62.9%   below securekernel's base, in no VTL0
+    0xfffff8003bd20003    9.7%   module either - three offsets (+0x03,
+    0xfffff8003bd2000f    0.1%   +0x0f, +0x1c) inside ONE page
+
+`securekernel + 0xd9548` sits in the same region as the `HvCallVtlReturn`
+call site the dump prints at `securekernel + 0xd93a4` - the secure
+kernel's normal-mode call/return path.
+
+**The mistake was searching one address space for an address that may
+belong to another.** `PsLoadedModuleList` enumerates VTL0's modules; the
+RIP census samples `vmcs.guest_rip()` for entries at *both* trust levels,
+exactly as `l2_entry_vtpr` merges both. "Not in ntoskrnl" therefore does
+not imply "in a driver" - it can equally mean VTL1, and 15% of the
+samples demonstrably are.
+
+**What stands:** the three addresses at `0xfffff8003bd20xxx` are still a
+tight loop - three offsets inside 32 bytes of one page, 72.7% of samples -
+and the phase-1 thread is still the thing holding cpu 0, with the
+`PnpCallDriverEntry` -> `ExSetTimerResolution` chain reproduced on two
+boots. **What is withdrawn** is the claim that the loop is in a VTL0
+driver's code. It is in a page belonging to neither ntoskrnl nor any
+loaded VTL0 module nor securekernel's image.
+
+**What it most likely is**, and the next read: a page mapped in VTL1's
+address space that VTL0's module list cannot see - a secure-kernel-loaded
+module such as `skci.dll`, or a trampoline. The walk to settle it is the
+same one, done against the *secure kernel's* module list rather than
+`PsLoadedModuleList`, or simply reading the page's bytes and
+disassembling them - three offsets in 32 bytes will decode to a
+recognisable spin in a few instructions.
+
+This is the fifth instrument-shaped error of the session and the second
+of its exact kind: a classification made by *exclusion from one list*,
+where the correct answer lived in a list that was never consulted.
