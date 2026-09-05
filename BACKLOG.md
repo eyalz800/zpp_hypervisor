@@ -68633,3 +68633,71 @@ the window the spinner needs is too narrow."
 must be *entering* the worker repeatedly, so the worker's entry and its
 lock-acquire site should both be present and growing in cpu 0's census.
 If cpu 0 instead enters once and loops inside, they will be flat.
+
+## The worker runs 1,327 times a SECOND, and the empty body proves it
+
+Convoy discriminator from `dab38e6`, run on cpu 0's censuses across the
+whole of `ExpUpdateTimerConfigurationWorker` (`0x30d2b0..0x30d4a0`):
+
+    QUIET census        no row anywhere in the worker
+    INTERRUPTED census  +0x1c5 ONLY   62,594 -> 261,715   delta +199,121
+
+**One row in the entire function, and it is the epilogue.** No entry, no
+prologue, no RB-tree walk, no body.
+
+That looked at first like evidence against the convoy. It is the opposite,
+and the reason is the function's own IRQL discipline: **the body runs at
+IRQL 15** (`movq $0xf,%cr8` at `0x30d2de`), where the clock vector `0xd1`
+(class 13) is **masked**. No interrupt can land in the body *by
+construction*. Every pending clock waits until the epilogue's `mov cr8`
+lowers IRQL, and lands at `+0x1c5`.
+
+So the census is not saying "cpu 0 is stuck at one instruction" and not
+saying "cpu 0 never runs the body". It is saying:
+
+    one landing at +0x1c5  ==  one completed pass through the worker
+
+    199,121 landings / 150 s  =  1,327 completed passes per second
+
+**cpu 0 completes `ExpUpdateTimerConfigurationWorker` more than 1,300 times
+a second**, each pass taking the isolation-unit PrcbLocks
+(`KiDowngradeIsolationUnitLockHandle` at 10.1% and growing is inside that
+work). cpu 1 spins for the same locks and `+0x543..0x54f` shows it never
+wins. **That is the convoy, now quantified.**
+
+### The rate is itself the anomaly
+
+`ExpUpdateTimerConfigurationWorker` recomputes timer configuration. It is
+not a per-tick routine and there is no reason for it to run 1,327 times a
+second - that is **2.3 times per 574.7 Hz tick**. A healthy system runs it
+on timer-resolution changes, which are rare.
+
+So the question the wedge now reduces to is: **what makes Windows call
+this worker continuously?** That is a different and much more specific
+question than any asked so far, and it is on the guest side of the
+boundary.
+
+**A connection worth flagging without over-claiming.** The phase-1 stack
+this investigation chased for six sessions was `IopLoadDriver ->
+PnpCallDriverEntry -> ExSetTimerResolution -> ExpUpdateTimerResolution ->
+ExpUpdateTimerConfiguration -> KeGenericProcessorCallback`, and `f899fe2`
+retired it as a fossil - correctly, since the census showed no thread code
+executing. **But `ExpUpdateTimerConfigurationWorker` is the same
+subsystem.** The fossil finding said those *frames* were stale; it did not
+say the timer-resolution machinery was uninvolved, and this measurement
+says something in it is running continuously. Those are compatible, and
+the overlap is too specific to leave unrecorded.
+
+**Not asserting the connection** - the worker has other callers, and
+`f899fe2` stands. What would establish it: the worker's caller on cpu 0.
+The `+0x1c5` row cannot give it (the landing is after the return address is
+already consumed); a stack sample taken at that instant would.
+
+### Method note
+
+The empty body is a **masking artifact, not an absence of execution**, and
+the same shape will appear for any function that raises IRQL and lowers it
+at the end. Read "no samples in the body of a high-IRQL routine" as "the
+body cannot be sampled", never as "the body did not run". This is the
+third distinct way an interrupt-landing census has been misread in this
+investigation; the other two are in `dab38e6`.
