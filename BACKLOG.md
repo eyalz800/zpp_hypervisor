@@ -68039,3 +68039,70 @@ from its address.
 
 Four exits per cycle, three of which land in the quiet census - which is
 what makes the census's three equal thirds equal.
+
+## The short-quantum account, verified on the LIVE guest - seven for seven
+
+Every global the static analysis predicted, read off the running boot-185
+guest (three identical reads each). CLAUDE.md's rule that a value from a
+captured image is *that capture's* boot and must be re-read from the
+running machine before it is evidence - so this is that re-read.
+
+    global                       live value        predicted       verdict
+    KeQuantumEndTimerIncrement   0x43f8 = 17,400   17,400          MATCH
+    KiVelocityFlags              bit 18 SET        set uncondit.   MATCH
+    KeMaximumIncrement           156,250           156,250         MATCH
+    KiCyclesPerClockQuantum      1,729,166         1,729,166       MATCH
+    KiGroupSchedulingEnabled     0                 0               MATCH
+    HvlLongSpinCountMask         0xffffffff        on-disk value   MATCH
+    HvlEnlightenments            bit 6 CLEAR       -               (new)
+
+**The arithmetic closes on itself, which is the reader proof.** The static
+derivation is `KeMaximumIncrement x MHz / 10 / 18`:
+
+    156,250 x 1,992 / 10 = 31,125,000 ;  31,125,000 / 18 = 1,729,166
+
+and 1,992 MHz is the frequency `rig-dump-state.py` measured independently in
+this same window (1,992,326,321 Hz). Three values read from three unrelated
+places in guest memory, and one computed from the other two, agreeing
+exactly. That cannot happen with a wrong base or a misread offset.
+
+`KiGroupSchedulingEnabled = 0` matters beyond confirmation: `KiQuantumEnd
++0x4bc` tests it, and a nonzero value diverts to `KiGroupSchedulingQuantumEnd`
+and **jumps past the spin loop entirely**. Zero is what makes `+0x500`
+reachable at all.
+
+### Why zpp is never told about the spin - BOTH gates are shut
+
+`KiQuantumEnd+0x512` is `testl %ebx,HvlLongSpinCountMask ; jne +0x536`
+(straight to `pause`), and `+0x520` is `testb $0x40,%al` on
+`HvlEnlightenments`. Live:
+
+    HvlLongSpinCountMask = 0xffffffff  -> the test is nonzero for every
+                                          spin count except 0, so the
+                                          branch to `pause` is taken every
+                                          iteration but the first
+    HvlEnlightenments low byte = 0xb4  -> 0xb4 & 0x40 = 0, bit 6 CLEAR
+
+**Either one alone would block it; both are shut.** That is the mechanical
+explanation for the census range `+0x524..0x534` being absent, which was
+predicted as absent and observed absent. `HvCallNotifyLongSpinWait` is
+never issued, so **the one enlightenment designed to tell a hypervisor
+"this virtual processor is spinning, run someone else" never reaches us.**
+
+### A lever, with its uncertainty stated
+
+This is the first thing in a long time that is neither closed nor already
+tried. Hyper-V's CPUID leaf `0x40000004` carries the spinlock enlightenment
+recommendation and a retry count; a guest that receives it sets
+`HvlLongSpinCountMask` to a small value and enables the notify path. If the
+guest issued `HvCallNotifyLongSpinWait`, zpp would **see the spin** and
+could stop scheduling the spinner - the standard paravirtual answer to
+exactly this deadlock, and it requires **no modification to Windows**,
+which is out of bounds here.
+
+**The uncertainty, and it is large: hvix64 sits between zpp and Windows.**
+`HvlEnlightenments` is built from what *hvix64* tells VTL0, not from what
+zpp tells hvix64. So advertising the recommendation to hvix64 does not
+obviously reach Windows, and whether hvix64 forwards it is unknown and
+must be checked before any of this is built. Recorded as a lead with that
+condition attached, not as a plan.
