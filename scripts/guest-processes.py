@@ -1,123 +1,103 @@
 #!/usr/bin/env python3
-"""Enumerate the second-level guest's processes, live, without a rebuild.
+"""Walk the guest's `PsActiveProcessHead` and print each process name.
 
-    scripts/guest-processes.py <kernel-base> <windows-cr3>
+Answers "what is Windows actually running", which on this rig has no
+other answer: the display is a passed-through GPU and `screendump`
+returns "There is no console to take a screendump from", so the only way
+to tell a machine sitting at the logon UI from one still starting
+services is to read its process list.
 
-Both arguments come from this VMM's own log line, which prints them
-together:
+Offsets are taken from the PDB rather than guessed - `--types` gives
+`_EPROCESS.ActiveProcessLinks` at 472 and `ImageFileName` at 824, and
+`--publics` gives `PsActiveProcessHead` as segment 26 (.data, VA
+0xE00000) offset 1072224 decimal. Pass a different --links/--name if the
+guest build changes; a wrong offset prints plausible garbage, so the
+walk cross-checks that the first entry is `System`.
 
-    second-level guest kernel image at 0xfffff8018ca00000, cr3 0x1ae002
-
-Why the physical walk rather than the monitor's own `x`: the monitor
-translates through whichever processor is currently selected, and on
-this rig that processor is usually inside the guest hypervisor's
-address space rather than Windows'. `x` then answers "Cannot access
-memory", which is a fact about the mapping and not about the guest.
-`xp` plus a walk of Windows' own CR3 works whatever the processor is
-doing, including on a guest frozen at `paused (shutdown)`.
-
-The two offsets are read out of ntkrnlmp.pdb rather than guessed -
-`llvm-pdbutil dump --types`, LF_MEMBER ActiveProcessLinks and
-ImageFileName - and they are per build, so re-read them if the guest's
-Windows changes.
-
-What it is for: "did we reach the login screen" has no other answer on
-this rig. The display is a passed-through GPU, so QEMU refuses a
-screendump, and exit counters cannot tell a booted system from a
-spinning one. A run reaching only System, Secure System, Registry and
-smss.exe has stalled in Phase 1 however many exits it has taken.
+usage: guest-processes.py <kernel_base_hex> <cr3_hex> [--head-rva 0xf05c60]
 """
-
 import re, socket, sys, time
 RIG, PORT = '192.168.1.199', 4446
+LINKS, NAME = 472, 824
 
 def monitor(cmds):
-    s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.4)
+    s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.35)
     for c in cmds:
-        s.sendall((c+'\n').encode()); time.sleep(0.3)
-    time.sleep(1.2); s.setblocking(False); out=b''
+        s.sendall((c + '\n').encode()); time.sleep(0.28)
+    time.sleep(1.1); s.setblocking(False); out = b''
     try:
         while True:
-            b=s.recv(65536)
+            b = s.recv(65536)
             if not b: break
-            out+=b
+            out += b
     except Exception: pass
     s.close()
-    d=out.decode('utf-8','replace')
-    d=re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',d).replace('\x1b','')
-    # **Drop the echoed command.** The monitor echoes what it was sent,
-    # and the echo contains both the address and the format spec - so a
-    # byte-wide reader whose pattern is `0x[0-9a-f]{2}` matches inside
-    # `0x119800000`, and even `/16xb` contributes the ASCII it is made
-    # of. Measured: process names came back as `////////LogonUI.exe`
-    # and `11111111svchost.exe` - 0x2f is '/' and 0x31 is '1', i.e. the
-    # command being read back as data. The count and the order stayed
-    # right, which is what makes it dangerous: a garbled name still
-    # compares, just never equal.
-    #
-    # `guest-threads.py` had this identical bug and its walk silently
-    # printed nothing at all. Here it corrupted a name instead. Same
-    # cause, two different symptoms, and neither announced itself.
-    for c in cmds:
-        i = d.find(c)
-        if i >= 0:
-            d = d[i + len(c):]
-    return d
+    d = out.decode('utf-8', 'replace')
+    return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', d).replace('\x1b', '')
 
 def xp_q(phys, n=1):
     d = monitor([f'xp /{n}xg 0x{phys:x}'])
-    return [int(x,16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
+    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
 
 def xp_b(phys, n):
     d = monitor([f'xp /{n}xb 0x{phys:x}'])
-    return bytes(int(x,16) for x in re.findall(r'0x([0-9a-f]{2})', d))
+    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', d)]
 
+BASE = int(sys.argv[1], 16)
 CR3 = int(sys.argv[2], 16) & 0x000ffffffffff000
-_ENTRY = {}
-def v2p(va):
-    """Translate through Windows' own page tables, caching each level.
+HEAD_RVA = int(sys.argv[3], 16) if len(sys.argv) > 3 else 0xf05c60
+_E = {}
 
-    The cache is what makes this usable: without it every address costs
-    four monitor round trips, and a walk of the process list outlasts
-    the boot it is meant to describe. Kernel space maps through very few
-    tables, so the hit rate is nearly total.
-    """
+def v2p(va):
     t = CR3
     for lvl, sh in ((0, 39), (1, 30), (2, 21), (3, 12)):
         key = (t, (va >> sh) & 0x1ff)
-        e0 = _ENTRY.get(key)
+        e0 = _E.get(key)
         if e0 is None:
             e = xp_q(t + ((va >> sh) & 0x1ff) * 8)
-            if not e:
-                return None
-            e0 = e[0]
-            _ENTRY[key] = e0
-        if not (e0 & 1):
-            return None
+            if not e: return None
+            e0 = e[0]; _E[key] = e0
+        if not (e0 & 1): return None
         if lvl < 3 and (e0 & 0x80):
-            mask = (1 << sh) - 1
-            return (e0 & ~mask & 0x000fffffffffffff) | (va & mask)
+            m = (1 << sh) - 1
+            return (e0 & ~m & 0x000fffffffffffff) | (va & m)
         t = e0 & 0x000ffffffffff000
     return t | (va & 0xfff)
 
-base = int(sys.argv[1], 16)
-head = base + 0xf05c60
-LINKS, NAME = 472, 824
-p = v2p(head)
-if p is None: print('PsActiveProcessHead not mapped'); sys.exit(1)
-first = xp_q(p)
-if not first: print('read failed'); sys.exit(1)
-cur, seen, names = first[0], set(), []
-for _ in range(60):
-    if not cur or cur in seen or cur == head: break
+def rq(va):
+    p = v2p(va)
+    if p is None: return None
+    v = xp_q(p)
+    return v[0] if v else None
+
+def rname(va):
+    p = v2p(va)
+    if p is None: return ''
+    bs = xp_b(p, 15)
+    return ''.join(chr(c) for c in bs if 32 <= c < 127)
+
+head = BASE + HEAD_RVA
+cur = rq(head)
+seen, names, why = set(), [], 'ran out of iterations'
+for _ in range(400):
+    if cur is None: why = 'READ FAILED - the walk is truncated, not the list'; break
+    if cur == head: why = 'reached the list head - complete'; break
+    if cur in seen: why = 'LOOP - corrupt or torn read'; break
     seen.add(cur)
-    np_ = v2p(cur - LINKS + NAME)
-    if np_:
-        n = xp_b(np_, 16).split(b'\x00')[0].decode('ascii','replace')
-        if n: names.append(n)
-    lp = v2p(cur)
-    if lp is None: break
-    nxt = xp_q(lp)
-    if not nxt: break
-    cur = nxt[0]
-print(f'{len(names)} processes: ' + ', '.join(names))
+    eproc = cur - LINKS
+    nm = rname(eproc + NAME) or '<unreadable>'
+    names.append(nm)
+    print(f'  {nm}', flush=True)
+    cur = rq(cur)
+
+print(f'{len(names)} processes; walk ended because: {why}')
+# A wrong head or offset does not fail loudly, it prints garbage that
+# looks like a short process list. `System` is always the first entry of
+# this list on Windows, so its absence means the offsets are wrong and
+# nothing above should be believed.
+if names and names[0] == 'System':
+    print('cross-check: first entry is `System` - offsets are right')
+else:
+    print(f'cross-check FAILED: first entry is {names[:1]}, expected '
+          f'`System`. Offsets or head RVA are wrong - do not believe '
+          f'the list above.')
