@@ -2479,10 +2479,22 @@ private:
      * `cpu` is the processor's index, from the caller's own scope. It
      * used to be `vmcs.vpid() - 1`, which runs on every exit and reads a
      * field that has held `cpu + 1` since setup_vmcs wrote it.
+     *
+     * `rip` is the same shape of parameter and for the same reason.
+     * This function ran on every exit and read `guest_rip` for the ring,
+     * a field the census over our own reads puts at 18.6 accesses per
+     * round trip - the largest of any - while `resume_guest`, its only
+     * hot caller, had *just* settled the value in its own `resume_rip`.
+     * The caller says which address it means, which also removes the
+     * one thing the old read could get wrong silently: the terminal
+     * callers below record the pre-advance address deliberately, and
+     * that is now spelled at each of them instead of being a property
+     * of where they happen to sit relative to the advance.
      */
     void record_exit(std::size_t cpu,
                      arch::x86_64::vmx::exit_reason reason,
-                     const arch::x86_64::context & context);
+                     const arch::x86_64::context & context,
+                     std::uint64_t rip);
 
     /**
      * Ask the processor to deliver a general protection fault to the guest

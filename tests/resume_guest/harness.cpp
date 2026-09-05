@@ -107,6 +107,17 @@
 struct observations
 {
     std::uint64_t record_exits{};
+    /**
+     * The instruction pointer `resume_guest` handed to `record_exit`.
+     *
+     * Observed rather than assumed, because the ring used to read the
+     * field for itself and now takes the caller's `resume_rip`. Nothing
+     * could have caught that regressing: `exit_trace` is read from a
+     * debugger, both values are plausible addresses, and they differ by
+     * exactly one instruction length - which is the shape of wrong
+     * answer this tree already records for `low_rip_source`.
+     */
+    std::uint64_t record_exit_rip{};
     std::uint64_t controller_polls{};
     std::uint64_t shadow_ept_checks{};
 };
@@ -117,9 +128,11 @@ namespace zpp::hypervisor
 {
 void hypervisor::record_exit(std::size_t,
                              arch::x86_64::vmx::exit_reason,
-                             const arch::x86_64::context &)
+                             const arch::x86_64::context &,
+                             std::uint64_t rip)
 {
     g_observed.record_exits += 1;
+    g_observed.record_exit_rip = rip;
 }
 
 void hypervisor::arm_controller_poll(std::size_t, bool)
@@ -1334,6 +1347,22 @@ void rip_advances_only_when_asked()
                     reflected.state->resume_guest_rip[cpu],
                     "with RIP not advanced the record follows the VMCS "
                     "field and not context.rip");
+
+        // And the exit ring gets the same address. This is the check
+        // that makes handing `resume_rip` to `record_exit` safe rather
+        // than merely cheaper: the ring used to pay a VMREAD of its own
+        // precisely so a reflection recorded the guest hypervisor's
+        // resume site, and only this case can tell whether the value
+        // handed down still does.
+        check_equal(elsewhere,
+                    g_observed.record_exit_rip,
+                    "and the exit ring is handed the field's value, not "
+                    "the second-level guest's");
+
+        check_equal(elsewhere,
+                    reflected.state->last_resume_rip[cpu],
+                    "and so is the record the reader prints beside "
+                    "resume_count");
     }
 }
 
@@ -1815,6 +1844,10 @@ void the_resume_records_where_it_left_the_guest()
                 g_observed.record_exits,
                 "and the exit is recorded once, after the handlers have "
                 "had their say");
+    check_equal(guest_rip + exit_instruction_length,
+                g_observed.record_exit_rip,
+                "and the ring is handed the same address, not a second "
+                "read of the field");
     check_equal(1,
                 zpp::arch::x86_64::g_restore_count,
                 "and the guest is entered exactly once");

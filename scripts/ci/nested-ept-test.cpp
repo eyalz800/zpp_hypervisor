@@ -1687,7 +1687,8 @@ public:
 
     void record_exit(std::size_t cpu,
                      std::uint64_t reason,
-                     guest_context & context);
+                     guest_context & context,
+                     std::uint64_t rip);
     void on_unhandled_exit(std::uint64_t reason);
 
     struct page_table_stub
@@ -1695,8 +1696,31 @@ public:
         std::uint64_t virtual_to_physical(const void * address) const;
     };
 
+    /**
+     * Just enough VMCS for the extracted decision to compile.
+     *
+     * The refusal arm of `l2_fault_decision` records the exit before
+     * stopping the processor, and names the instruction pointer
+     * explicitly - `record_exit(cpu, reason, context, vmcs.guest_rip())`
+     * - because the caller that runs on *every* exit hands its own
+     * settled value down instead of paying a second VMREAD. That arm
+     * ends in `on_unhandled_exit`, which this harness stubs, so the
+     * value is never asserted here; the field exists so the extraction
+     * keeps compiling rather than so it can be read.
+     */
+    struct vmcs_stub
+    {
+        std::uint64_t guest_rip() const
+        {
+            return this->rip;
+        }
+
+        std::uint64_t rip{};
+    };
+
     // --------------------------------------------------------- state
     page_table_stub host_page_table{};
+    vmcs_stub vmcs{};
     std::map<std::uint64_t, std::uint64_t> module_physical_to_virtual{};
 
     alignas(page_size) arch::x86_64::vmx::epte
@@ -1778,7 +1802,10 @@ bool hypervisor::on_ept_violation(std::size_t,
     return this->something_here_watches;
 }
 
-void hypervisor::record_exit(std::size_t, std::uint64_t, guest_context &)
+void hypervisor::record_exit(std::size_t,
+                             std::uint64_t,
+                             guest_context &,
+                             std::uint64_t)
 {
 }
 

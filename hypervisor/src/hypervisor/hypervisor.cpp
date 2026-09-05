@@ -5201,7 +5201,8 @@ void hypervisor::start_up_on_this_processor(std::uint64_t slot)
 
 void hypervisor::record_exit(std::size_t cpu,
                              arch::x86_64::vmx::exit_reason reason,
-                             const arch::x86_64::context & context)
+                             const arch::x86_64::context & context,
+                             std::uint64_t rip)
 {
     auto & vmcs = this->vmcs;
 
@@ -5219,7 +5220,7 @@ void hypervisor::record_exit(std::size_t cpu,
 
     exit_trace_entry recorded{};
     recorded.reason = reason.value();
-    recorded.rip = vmcs.guest_rip();
+    recorded.rip = rip;
     recorded.repeated = 1;
 
     // Three fields, three VMCS reads, on every exit - and behind a switch
@@ -5234,11 +5235,14 @@ void hypervisor::record_exit(std::size_t cpu,
     // so nothing in the ring says the switch was off. The build manifest
     // does, `census=`, and `check-bootable.sh` prints it on every deploy.
     //
-    // The instruction pointer above is not gated, because `on_vm_exit`
-    // has already read it for this exit; this is a second read only
-    // because a reflection makes vmcs01 current and its guest RIP is a
-    // different quantity from `context.rip` - which is the whole of what
-    // `rip_owner` below is about.
+    // The instruction pointer above is not gated and costs nothing:
+    // **it is a parameter now**, not a read of its own. It used to be
+    // `vmcs.guest_rip()` here, justified on the grounds that a
+    // reflection makes vmcs01 current and its guest RIP is a different
+    // quantity from `context.rip` - which is the whole of what
+    // `rip_owner` below is about, and is still true. What changed is
+    // that `resume_guest` pays for that distinction once, in the branch
+    // where it matters, and hands the answer down.
     if constexpr (nested_vmx::census_exits) {
         recorded.qualification = vmcs.exit_qualification();
         recorded.activity_state = vmcs.guest_activity_state();

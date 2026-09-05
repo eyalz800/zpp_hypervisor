@@ -630,9 +630,24 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
     // Every resume, and what it is resuming to. See `resume_count`:
     // this is the counterpart to the launch-path trace, which fires
     // once per processor and cannot report a missing ordinary resume.
+    //
+    // **The RIP beside it is written further down, from `resume_rip`,
+    // and not here from a VMREAD of its own.** Two things were wrong
+    // with reading it here, and the cheaper one is the lesser: it was a
+    // second read of `guest_rip` on every exit the machine takes, the
+    // field the census over our own reads puts at 18.6 per round trip.
+    // The other is that it did not measure what its name says. Taken
+    // here it is the RIP the exit arrived at, *before* the advance past
+    // the faulting instruction fifty lines below - so on every ordinary
+    // exit "the RIP each processor was last resumed with" was the RIP
+    // it was last resumed *from*, short by one instruction length.
+    //
+    // The documented use is unaffected either way, and that is worth
+    // recording: after a start-up IPI `advance_rip` is false and
+    // `resume_rip` is the field, so the "reads 0 if it really was
+    // resumed into the trampoline" test reads exactly as before.
     if (cpuid < max_cpus) {
         this->resume_count[cpuid] = this->resume_count[cpuid] + 1;
-        this->last_resume_rip[cpuid] = vmcs.guest_rip();
 
         // **Which VMCS is current, asked on the processor itself.**
         // Only for the handful of resumes after a start-up, and only on
@@ -1189,7 +1204,20 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 
     // Record what is about to be resumed, now that the handlers have
     // had their say.
-    record_exit(cpuid, full_reason, context);
+    //
+    // **`resume_rip` is handed in rather than read again.** The ring's
+    // own comment used to justify a `guest_rip` read inside
+    // `record_exit` on the grounds that a reflection makes vmcs01
+    // current and `context.rip` is then the wrong level's address -
+    // which is true, and is the case the `else` branch above pays a
+    // VMREAD for. Once that read exists there is nothing left for a
+    // second one to learn: no VMCS is made current and no guest RIP is
+    // written between it and here.
+    //
+    // `tests/resume_guest` already documented this as the design -
+    // "`resume_guest` computes the value once and hands it to both
+    // `record_exit` and `resume_guest_rip`" - before the code did it.
+    record_exit(cpuid, full_reason, context, resume_rip);
 
     // `record_exit` alone, because it runs on every single exit and
     // reads up to five VMCS fields doing it - and it is the one thing on
@@ -1238,6 +1266,20 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 
         this->resume_guest_rip[slot - 1] = resume_rip;
         this->resume_guest_cs[slot - 1] = vmcs.guest_cs_selector();
+
+        // The same value under the name the reader prints beside
+        // `resume_count`. See the note at the top of this function for
+        // why it is written from `resume_rip` rather than from a
+        // VMREAD of its own, and for what that corrected.
+        //
+        // It is now a duplicate of `resume_guest_rip`, and is kept
+        // rather than deleted because `rig-dump-state.py` prints the
+        // *pair* `resumes N, last resumed with rip X` and the pair is
+        // what answers "was this processor resumed at all". Removing
+        // the member is a reader change as well as a hypervisor one,
+        // and belongs in whatever change retires the whole
+        // multicore-start-up census.
+        this->last_resume_rip[slot - 1] = resume_rip;
     }
 
     // Whether this processor is about to enter the *second-level* guest

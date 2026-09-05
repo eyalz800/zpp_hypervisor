@@ -10423,7 +10423,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                     access_write ? "write" : "access",
                     guest_physical,
                     guest_walk.physical_address);
-                record_exit(cpu, reason, context);
+                record_exit(cpu, reason, context, vmcs.guest_rip());
                 on_unhandled_exit(reason);
 
                 return finish(l2_ept_disposition::unwatched,
@@ -10469,7 +10469,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 pointer.error().code());
-            record_exit(cpu, reason, context);
+            record_exit(cpu, reason, context, vmcs.guest_rip());
             on_unhandled_exit(reason);
             return finish(l2_ept_disposition::pointer_failed,
                           l2_exit_outcome::handled);
@@ -10511,7 +10511,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 page,
                 installed.error().code());
-            record_exit(cpu, reason, context);
+            record_exit(cpu, reason, context, vmcs.guest_rip());
             on_unhandled_exit(reason);
             return finish(l2_ept_disposition::install_failed,
                           l2_exit_outcome::handled);
@@ -10612,7 +10612,7 @@ hypervisor::on_l2_ept_fault(std::size_t cpu,
                 cpu,
                 guest_physical,
                 guest_walk.physical_address);
-            record_exit(cpu, reason, context);
+            record_exit(cpu, reason, context, vmcs.guest_rip());
             on_unhandled_exit(reason);
 
             return finish(l2_ept_disposition::unwatched,

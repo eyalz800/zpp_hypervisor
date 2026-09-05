@@ -523,7 +523,8 @@ hypervisor::host_ept_lookup(std::uint64_t physical_address)
 
 void hypervisor::record_exit(std::size_t,
                              arch::x86_64::vmx::exit_reason,
-                             const arch::x86_64::context &)
+                             const arch::x86_64::context &,
+                             std::uint64_t)
 {
 }
 

@@ -821,27 +821,6 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             vmcs.guest_rip());
     }
 
-    // **Keyed on the RIP, not on the processor index.** The census
-    // above is gated on `cpuid != 0`, and every conclusion drawn from
-    // its silence assumes this VMM knows which processor it is on. If
-    // an INIT-SIPI leaves the application processor identified as cpu
-    // 0, the gate never opens, the exits land in cpu 0's half-million,
-    // and cpu 1's counters freeze - which is indistinguishable from the
-    // exits not happening, and is exactly what has been measured.
-    //
-    // hvix64's trampoline lives in one page at guest-physical 0x2000,
-    // so an exit taken anywhere in it is unambiguous whatever this VMM
-    // believes about the processor. `vpid` is printed beside `cpuid`
-    // because they are derived differently and disagreeing is the
-    // finding.
-    if (auto rip = vmcs.guest_rip(); (rip >= 0x2000) && (rip < 0x2200)) {
-        log("TRAMPOLINE exit: cpuid {} vpid {} reason {} rip {}",
-            cpuid,
-            vmcs.vpid(),
-            static_cast<std::uint64_t>(reason),
-            rip);
-    }
-
     // Which comparison this exit belongs to, for `bucket_phase_cycles`.
     // Here rather than beside the other per-exit facts above, because
     // the reason is not known until the VMCS has been read - and it has
@@ -877,6 +856,35 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // holds. `record_exit` and `resume_guest_rip` want the field for
     // exactly that reason and still read it.
     context.rip = vmcs.guest_rip();
+
+    // **Keyed on the RIP, not on the processor index.** The census
+    // above is gated on `cpuid != 0`, and every conclusion drawn from
+    // its silence assumes this VMM knows which processor it is on. If
+    // an INIT-SIPI leaves the application processor identified as cpu
+    // 0, the gate never opens, the exits land in cpu 0's half-million,
+    // and cpu 1's counters freeze - which is indistinguishable from the
+    // exits not happening, and is exactly what has been measured.
+    //
+    // hvix64's trampoline lives in one page at guest-physical 0x2000,
+    // so an exit taken anywhere in it is unambiguous whatever this VMM
+    // believes about the processor. `vpid` is printed beside `cpuid`
+    // because they are derived differently and disagreeing is the
+    // finding.
+    //
+    // **Moved below the one read, and reading `context.rip`.** It used
+    // to sit thirty lines above with a `vmcs.guest_rip()` of its own,
+    // which was a second VMREAD of the same field on every exit taken
+    // by the machine - the field the census over our own reads puts at
+    // 18.6 per round trip, the largest of any. Nothing between the two
+    // sites wrote the field or `context.rip`, so the value is the same
+    // one; the test is unchanged and only the source of its input is.
+    if ((context.rip >= 0x2000) && (context.rip < 0x2200)) {
+        log("TRAMPOLINE exit: cpuid {} vpid {} reason {} rip {}",
+            cpuid,
+            vmcs.vpid(),
+            static_cast<std::uint64_t>(reason),
+            context.rip);
+    }
 
     // Whether the exit was caused by an instruction the guest should
     // be resumed past. Cleared by the handlers for which it is not.
@@ -3018,7 +3026,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // and the log is what survives a restart and what CLAUDE.md
         // says to read first - so a second member would duplicate
         // the weaker half of the evidence.
-        record_exit(cpuid, full_reason, context);
+        record_exit(cpuid, full_reason, context, vmcs.guest_rip());
         this->unhandled_exit.guest_rdi = context.rdi;
         this->unhandled_exit.guest_rsi = context.rsi;
         this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
@@ -3188,7 +3196,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // and nothing else.
         bool re_execute = true;
         if (!on_io_instruction(context, re_execute)) {
-            record_exit(cpuid, full_reason, context);
+            record_exit(cpuid, full_reason, context, vmcs.guest_rip());
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
             this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
@@ -3250,7 +3258,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // register and to the shadow, and the guest reads back what
         // it wrote.
         if (((0 != number) && (4 != number)) || (0 != access)) {
-            record_exit(cpuid, full_reason, context);
+            record_exit(cpuid, full_reason, context, vmcs.guest_rip());
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
             this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
@@ -4064,7 +4072,7 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             // The flag is only ever armed by the watch above, so an
             // MTF exit with no step in progress means someone else
             // set it and there is no correct way to continue.
-            record_exit(cpuid, full_reason, context);
+            record_exit(cpuid, full_reason, context, vmcs.guest_rip());
             this->unhandled_exit.guest_rdi = context.rdi;
             this->unhandled_exit.guest_rsi = context.rsi;
             this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
@@ -4171,15 +4179,25 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
                 this->l1_vmcall_rcx[slot] = context.rcx;
                 this->l1_vmcall_rdx[slot] = context.rdx;
                 this->l1_vmcall_rax[slot] = context.rax;
-                // **`vmcs.guest_rip()`, not `context.rip`.** The
-                // context is the guest's general-purpose registers as
-                // the exit stub saved them; its `rip` is not the guest
-                // instruction pointer at the exit, and using it recorded
-                // addresses whose bytes disassembled to `WRMSR` and
-                // `VMRESUME` rather than the `0f 01 c1` of a VMCALL.
-                // The exit ring reads the field and was coherent
-                // throughout; this did not and was not.
-                this->l1_vmcall_rip[slot] = vmcs.guest_rip();
+                // **`context.rip`, and only because this function has
+                // already put `vmcs.guest_rip()` in it.**
+                //
+                // This used to read the field a second time, and the
+                // comment here used to say `context.rip` was not the
+                // guest instruction pointer - which was true of the raw
+                // capture the exit stub makes, and stopped being true
+                // the moment `on_vm_exit` started overwriting the field
+                // from the VMCS. The addresses that disassembled to
+                // `WRMSR` and `VMRESUME` were read before that
+                // assignment existed.
+                //
+                // Sound here for two reasons, both checkable: nothing
+                // between that assignment and this line writes
+                // `context.rip`, and this arm runs only when
+                // `from_above` is true - so no reflection has happened
+                // and vmcs01 is still the current VMCS, which is the
+                // one case the assignment's own comment excludes.
+                this->l1_vmcall_rip[slot] = context.rip;
             }
 
             // **The code histogram, and only for VMCALL.**
@@ -4739,7 +4757,18 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
         // Recorded and stopped on rather than resumed from, because
         // the resume below would advance RIP past an instruction that
         // never took effect.
-        record_exit(cpuid, full_reason, context);
+        //
+        // **The RIP is read here rather than taken from `context.rip`,
+        // and that is the shape every terminal `record_exit` in this
+        // tree uses.** They are on paths that end in
+        // `on_unhandled_exit`, which does not return, so a read costs
+        // nothing that will ever be measured - and reading the field
+        // keeps the record right on the one path where the two can
+        // differ, an exit `on_l2_exit` deferred with vmcs02 current
+        // after a handler moved its guest RIP. `resume_guest` is the
+        // caller that runs on every exit and it hands its own
+        // `resume_rip` down instead.
+        record_exit(cpuid, full_reason, context, vmcs.guest_rip());
         this->unhandled_exit.guest_rdi = context.rdi;
         this->unhandled_exit.guest_rsi = context.rsi;
         this->unhandled_exit.guest_rsp = vmcs.guest_rsp();
