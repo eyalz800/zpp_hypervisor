@@ -66721,3 +66721,49 @@ this session were all cumulative and were quoted as if they described the
 wedge. They described the boot. Any future hot-map claim must be
 differenced across two dumps of one boot, which costs nothing but a second
 dump and needs no reader change.
+
+## Two different wedge profiles, seen by differencing the approach
+
+Boot 178 was sampled four times from healthy to stalled, differencing each
+window against the last (cpu 0, per-processor census):
+
+    window              walk rate   HalProcessorIdle   hypercall page
+    baseline -> slowing    193/s        42.2%             27.4%
+    slowing  -> third      133/s        66.1%              8.4%
+    third    -> stalled      7/s        85.0%              5.3%
+
+**It wedges by going idle**, monotonically, while hypercall activity falls
+away. `KiDpcInterruptBypass` never rises above 1.4% on this boot.
+
+Boot 177, differenced the same way, is the opposite:
+
+    KiDpcInterruptBypass+0x12      50.2%
+    KiCheckForThreadDispatch+0x7f  34.5%
+    HalProcessorIdle+0xf            6.5%
+
+**So there are (at least) two wedge profiles, and the endpoint alone
+cannot tell them apart from the counters this investigation had been
+using.** Both present as: walk rate to zero, three processes, no bugcheck,
+VM running, DPC queue empty, nothing blocked. Only the differenced RIP
+census separates them:
+
+    boot 177   SPIN wedge   cpu 0 cycling in the dispatch path
+    boot 178   IDLE wedge   cpu 0 halting, nothing runnable at all
+
+That is a real distinction and it matters for what to look for next. An
+idle wedge means every thread is genuinely waiting - so there *is*
+something to wait on, and the question is what. A spin wedge means one
+thread is runnable and getting nowhere. The same fix is unlikely to
+address both.
+
+**Method note, and the reason this was invisible before:** the census is
+cumulative, so a single dump at the end mixes the healthy majority into
+the answer. Sampling the *approach* - four dumps across one boot - costs
+nothing but dumps and is the only way the transition is visible at all.
+Every previous characterisation in this file rests on endpoint readings
+and should be re-examined with that in mind.
+
+Boot 178's other counters, for the record: 83 drivers, 10,475 copies,
+removes 3,942 - an eighth value inside the saturated band, and early
+removes read 3,011 against 3,010 on boots 175 and 176, three boots within
+one of each other.
