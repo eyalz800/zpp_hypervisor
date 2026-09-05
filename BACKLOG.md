@@ -64640,3 +64640,102 @@ confident wrong answers that survived several commits.**
   three digits. It is periodic versus one-shot: `STIMER0_CONFIG` was
   written 13 times on cpu 1 and 4,485 times on cpu 0. The mode was one
   line above in the same census.
+
+## Boot 166: the multicore phase-1 wedge is a STOPPED secure-kernel walk
+
+Measured 2026-09-05, `ZPP_CPUS=2`, zpp resident, `VM status: running`,
+3 processes (`System`, `Secure System`, `Registry`).
+
+**The finding, from the instrument built for it.** The image-validation
+walk prints 233 epochs with the `pfn` column **frozen at 8,123** while
+`calls` climbs +18 per epoch at 2.0/s — about 35 minutes of it. Its own
+legend says what that means: *"a flat pfn column beside a climbing calls
+column is a walk that STOPPED"*. Differenced over 30 s:
+
+    cpu 0  vtl_fresh_calls     28   0.84/s      still entering VTL1
+    cpu 0  vtl_protect_count   41,818  +0       FROZEN
+    cpu 0  vtl_copy_calls      10,172  +0       FROZEN
+    cpu 1  vtl_fresh_calls        360  +0       FROZEN
+
+`VslCopyProtectedPage` covered frames `0x100000..0x11d749` in 10,172
+calls (`+1` 10,097, `back` 8, `skip` 66, partition OK) and stopped. Same
+shape as [[wedge-is-vboxsup-last-image-page]].
+
+**Everything previously called a barrier is downstream of this.** With
+the copy path stopped, 26 `System` threads sit in `WrVirtualMemory` and
+14 in `WrLpcReply`; phase 1 cannot finish; and the two processors settle
+into complementary idling:
+
+    cpu 0  KiInitialThread (idle), KiIdleLoop/PoIdle, hlt 868/s
+    cpu 1  an ExpWorkerThread in WrQuantumEnd, NEVER halts, 6,838 exits/s
+
+That inverts the reading in
+[[multicore-login-screen-reached-recipe]], which has cpu 0 busy in
+phase 1 and cpu 1 idle. Here it is the other way round. The per-cpu
+asymmetry that names it:
+
+    cpu 0        cpu 1
+    int-window   238/s   1,349/s
+    tpr-below   0.36/s     449/s     (1,250x)
+    hlt          868/s        ~0
+
+### Two hypotheses refuted on the way, both by one extra read
+
+**`ExpUpdateTimerConfiguration` does NOT fail to select cpu 1.**
+Disassembled at `nt+0x41697c` on the live guest: there is no loop, and no
+enclosing loop — the function reads **one** processor number and calls
+`KeGenericProcessorCallback` once, then checks its stack cookie and
+returns.
+
+    movl   0xb0adbb(%rip), %ecx    ; KiClockTimerOwner   = 0
+    movq   0xb0bf70(%rip), %rax    ; KiGlobalState       -> table
+    movl   (%rax,%rcx,4), %r8d     ; ONE processor number
+    movzwl 0x40(%rsp), %eax        ; KAFFINITY_EX.Count  = 1
+    andl   $0x3f, %r8d             ; bit   = proc % 64
+    shrl   $0x6, %ecx              ; qword = proc / 64
+    cmpl   %ecx, %eax
+    jbe    <skip the callback entirely>
+    btsq   %rax, %rcx              ; exactly ONE bit
+    callq  KeGenericProcessorCallback
+
+The globals were symbolised, not guessed: `KiClockTimerOwner` (rva
+`0xf217a4`) and `KiGlobalState` (rva `0xf22960`), and
+`KiClockTimerOwner` reads **0**. Targeting one processor — the clock
+owner — is the *design*, so "a per-processor callback that never selects
+the second processor" is wrong, and the absent cross-processor IPI is
+correct behaviour rather than the wedge. Retracts the framing in
+`a6c8818` and in [[multicore-login-screen-reached-recipe]].
+
+**cpu 1's synthetic timer is NOT starved.** Cumulative counters read
+`41,608` arms answered on cpu 0 against `12` on cpu 1, which looks
+exactly like a clock that never fires. Differenced, both are answered:
+
+    cpu 0  asked 962  given 961    (99.9%)
+    cpu 1  asked   3  given   3    (100%)
+
+cpu 1 asks almost never because its timer is **periodic** — one arm,
+many fires — so `stimer_given_arms` undercounts it by construction. Its
+clock is running: 571.6/s stagings of `0xd1`, 74% in the 1.054 ms bucket,
+matching the 17,400-unit (1.74 ms) `KeQuantumEndTimerIncrement` period it
+asked for. The configs differ and that is the whole explanation:
+
+    cpu 0  config 0x30008  periodic 0   one-shot, absolute deadline
+    cpu 1  config 0x3000a  periodic 1   periodic, count 17,400
+
+This is the "total is not a rate" trap in CLAUDE.md, caught once more.
+The check that made it catchable is the SINT3 read: `stimer_given_arms`
+closes on a **hardcoded** `synthetic_interrupt_3 = 0xd1`, and both
+processors program SINT3 = `0xd1`, so the instrument is aimed correctly
+and the asymmetry it showed was in *asking*, not answering. That check
+already existed in `rig-dump-state.py` but only on the `--delta` path,
+so the cumulative run never printed it.
+
+### What to measure next, and the cheaper instrument
+
+The open question is **why the walk stops at frame `0x11d749`**, not
+what happens afterwards. Note the frozen `pfn` value 8,123 equals the
+`VslSetPlaceholderPages` count exactly.
+
+For triage, watch the walk's `pfn` column rather than the process list:
+it distinguishes progress from wedge in one dump and minutes earlier,
+where `guest-processes.py` only ever reports 3 processes either way.
