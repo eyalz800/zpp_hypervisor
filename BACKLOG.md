@@ -67716,3 +67716,55 @@ Left: **why does the clock path consume 100% of a processor's entries.**
 running and DPCs are retiring - the machinery works, it just never yields
 a slice to anything else. That is the per-tick cost question, and it is
 the only avenue with anything left in it.
+
+## Boot 185: a SECOND wedge shape, and it is KiQuantumEnd
+
+Boot 185, `ZPP_CPUS=2`, zpp resident (2 `allocate_rwx`), `VM status:
+running`, no bugcheck. `vtl_fresh_calls +0 on BOTH processors` over 31.8 s
+- no trust-level call at all - so it is wedged by the goal's own test.
+
+Two uncut censuses 150 s apart, differenced (`ZPP_CENSUS_ALL=1`):
+
+    cpu 0   delta 447,075          cpu 1   delta 312,166
+    33.6% HvlEndSystemInterrupt+0x1e     33.3% HvlEndSystemInterrupt+0x1e
+    32.5% HalpHvTimerAcknowledge+0x46    33.3% HvlWriteApicCommandReg+0x1d
+    31.6% HvlWriteApicCommandReg+0x1d    33.1% KiQuantumEnd+0x538
+     2.2% KiIsrThunkShadow+0x688          0.2% KiQuantumEnd+0x518
+    everything else <= 0.02%             everything else <= 0.02%
+
+**97.7% of cpu 0 and 99.9% of cpu 1 in three addresses each**, and cpu 1's
+row set did not grow at all (701 -> 701 rows).
+
+### This is NOT the boot-184 livelock
+
+The documented five-address livelock has `KiDpcInterruptBypass+0x12` and
+`KiInterruptDispatchNoLockNoEtw+0x7c` as major terms - on boot 184 the
+bypass alone took 22.9% of the delta. Here they are **absent**:
+`KiDpcInterruptBypass` does not appear in either processor's top ten, and
+`KiInterruptDispatchNoLockNoEtw+0x52` (a *different* offset) contributes 32
+samples of 447,075.
+
+So there are **two distinct end states**, not one, and the earlier
+retraction of "two wedge profiles" (`d4f7467` era) does not apply - that
+one was withdrawn because it differenced across a cut and because the
+transient was mistaken for an end state. This is differenced with **no
+cut**, on a **frozen** row set, and the discriminating address is not a
+share of a shared loop but a function that is absent from the other shape
+entirely.
+
+### cpu 1 is inside KiQuantumEnd
+
+`KiQuantumEnd+0x538` at 33.1%, with `+0x518` and `+0x53c` beside it, is one
+leg of a three-address cycle whose other two legs are the synthetic EOI and
+ICR writes. Those two exit by construction (`HV_X64_MSR_EOI`,
+`HV_X64_MSR_ICR`), so the cycle is: quantum-end code -> writes the APIC
+command register -> EOIs -> back.
+
+**The scheduler is not failing to run - it is running quantum-end
+processing continuously and getting back to the same instruction.** That
+is a much sharper target than "the clock path consumes the processor",
+and it is directly checkable: the agent analysing `KiQuantumEnd` was asked
+about `+0x461` and `+0xd0f` (boot 184's cold rows); `+0x518`/`+0x538` are
+the hot ones and are the addresses to disassemble.
+
+**Held, not killed.** This is the only specimen of this shape.
