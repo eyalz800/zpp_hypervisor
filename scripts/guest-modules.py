@@ -77,6 +77,18 @@ def name_at(entry):
     p=v2p(buf)
     if not p or not (0 < n <= 64): return ''
     return ''.join(chr(w) for w in xp_w(p, n) if 32 <= w < 127)
+# Optional third argument: an address to place. Prints the module whose
+# [DllBase, DllBase+SizeOfImage) contains it, which is how a bare pointer
+# out of a KDPC, a stack frame or an exit trace becomes a driver name.
+# Without it the walk behaves exactly as before.
+#
+# `DllBase` is at +0x30 and `SizeOfImage` at +0x40 in
+# _LDR_DATA_TABLE_ENTRY, beside the `BaseDllName` at +88 this already
+# reads. Costs two more reads per module, both through the same cached
+# page tables.
+want = int(sys.argv[3], 16) if len(sys.argv) > 3 else None
+found = None
+
 cur=rq(head); seen=set(); names=[]; why='ran out of iterations'
 for _ in range(400):
     if cur is None: why='READ FAILED walking Flink - the walk is truncated, not the list'; break
@@ -85,8 +97,31 @@ for _ in range(400):
     seen.add(cur)
     nm = name_at(cur)
     names.append(nm or '<name unreadable>')
-    print(' ', names[-1], flush=True)
+    if want is None:
+        print(' ', names[-1], flush=True)
+    else:
+        dll = rq(cur + 0x30)
+        siz = rq(cur + 0x40)
+        siz = (siz & 0xffffffff) if siz is not None else None
+        if dll and siz:
+            print(f'  {names[-1]:28s} {dll:#018x} + {siz:#x}', flush=True)
+            if dll <= want < dll + siz:
+                found = (names[-1], dll, siz)
     cur=rq(cur)
+
+if want is not None:
+    print()
+    if found:
+        nm, dll, siz = found
+        print(f'{want:#x} is in {nm}  (base {dll:#x}, size {siz:#x}, '
+              f'offset +{want - dll:#x})')
+    else:
+        # Say so rather than printing nothing: an address in no module is
+        # a real answer (pool, a dynamically generated thunk, or a
+        # truncated walk - check the completion line below before
+        # believing the first two).
+        print(f'{want:#x} is in NO module on this walk - check the walk '
+              f'completed before reading that as "not a driver"')
 print(f'{len(names)} modules; walk ended because: {why}')
 # The forward walk cannot report its own truncation: a page that fails to
 # translate ends it silently, and the result is indistinguishable from a
