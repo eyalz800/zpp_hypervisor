@@ -1996,8 +1996,8 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     //
     // which withholds the window at any priority at or above DISPATCH
     // *whatever vector is waiting*, and that is measurably wrong. SDM
-    // 12.8.4 admits a vector when its priority class strictly exceeds
-    // the task priority's class, so at a task priority of 0x20 - class
+    // 13.8.3.1 admits a vector when its priority class strictly exceeds
+    // the inhibiting class, so at a task priority of 0x20 - class
     // 2, and 22.0% of one measured processor's entries - the clock
     // vector 0xd1 at class 13 is perfectly deliverable. The old test
     // withheld the window there anyway, and the window is this VMM's
@@ -2028,6 +2028,16 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         if ((cpu < max_cpus) &&
             (0 != (primary & primary_interrupt_window))) {
             auto pending = this->pending_vector_now[cpu];
+
+            // **SAFE on VTPR, and it must stay on VTPR.** The true
+            // branch withholds, and PPR >= TPR (SDM 13.8.3.1), so a
+            // vector whose class is not above the task priority's is
+            // not above the processor priority's either: everything
+            // withheld here really was masked. It errs towards
+            // withholding too little, which is the default build's
+            // behaviour. The threshold that re-opens the window is also
+            // compared against VTPR alone (SDM 29.2.1.1), so there is
+            // no other field this could be keyed on coherently.
             auto masked =
                 (0 != pending) &&
                 ((pending >> 4) <= (this->l2_entry_priority[cpu] >> 4));
@@ -2288,6 +2298,20 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                 // everything, so an unreadable page arms nothing -
                 // failing safe here means leaving the machine exactly
                 // as the default build leaves it.
+                //
+                // **VTPR is the right field here twice over, and this
+                // test must NOT be changed to a processor priority.**
+                // Once because the threshold the arming below writes is
+                // checked against VTPR and nothing else - SDM 29.2.1.1,
+                // quoted just under this - so any other field would arm
+                // against a quantity the processor does not compare.
+                // And once because the true branch is "inhibited":
+                // PPR = max(TPR class, ISRV class) (SDM 13.8.3.1) gives
+                // PPR >= TPR, so `dispatch_class <= entry_vtpr` implies
+                // the same of PPR and every arming is over a genuinely
+                // blocked vector. The error is one-sided towards arming
+                // too rarely, which costs an exit and never an
+                // interrupt.
                 auto blocked =
                     entry_vtpr_read && (dispatch_class <= entry_vtpr);
 
@@ -2381,7 +2405,7 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             // **dead in this configuration** and is sampled to prove
             // it rather than to be read.
             //
-            // SDM 12.8.3.1 makes PPR the maximum of the task priority
+            // SDM 13.8.3.1 makes PPR the maximum of the task priority
             // and the highest in-service vector's class, and it is PPR
             // that an arriving interrupt's class must exceed - so it
             // is the reading this investigation wants and TPR is a
@@ -3323,6 +3347,26 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                        rflags_interrupt_enable)) &&
                 (0 == (blocking & (blocking_by_sti | blocking_by_mov_ss)));
 
+            // **This is the one place in the tree where the VTPR
+            // bound decides whether an interrupt goes into a guest, and
+            // it is over-permissive.** The architecture inhibits on
+            // PPR = max(TPR class, ISRV class) (SDM 13.8.3.1,
+            // `.references/sdm.txt:171709`), and PPR >= TPR, so
+            // `admitted` is true on a superset of the moments the
+            // processor would have delivered on. Where the level above
+            // has an unacknowledged in-service vector - which zpp
+            // cannot see, SDM 32.1.1 gives VISR only under
+            // "virtual-interrupt delivery" - this injects into a guest
+            // that a real local APIC would have kept waiting.
+            //
+            // Recorded, not repaired: the exact test needs ISRV and
+            // there is no path to it in this configuration. It is one
+            // more reason the switch is off by default, alongside the
+            // two boots recorded on `intercept_self_ipi`. The
+            // consequence for the counters is that
+            // `l2_self_ipi_delivered` is an UPPER BOUND on
+            // architecturally deliverable moments and
+            // `l2_self_ipi_held` a lower bound on the inhibited ones.
             auto admitted = (vector >> priority_class) >
                             (std::uint64_t{vtpr} >> priority_class);
 
@@ -9460,10 +9504,39 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     //
     // Against the **task** priority, which the processor maintains,
     // rather than the processor priority, which in this configuration
-    // it does not - SDM 32.1.1, cited where the sample is taken. TPR is
-    // a lower bound on PPR, so this undercounts rather than over: every
+    // it does not - SDM 32.1.1, cited where the sample is taken.
+    //
+    // **This is an UPPER BOUND. It over-counts, and the comment that
+    // used to stand here said the exact opposite.** It read "TPR is a
+    // lower bound on PPR, so this undercounts rather than over: every
     // entry it counts is one the interrupt certainly could have been
-    // delivered on.
+    // delivered on." The premise is right and the conclusion inverts
+    // it - a bound on the *threshold* is not a bound on the *count*,
+    // and a lower threshold blocks less and therefore counts more.
+    //
+    // SDM 13.8.3.1 (`.references/sdm.txt:171709`): "PPR[7:4] (the
+    // processor-priority class) the maximum of TPR[7:4] ... and
+    // ISRV[7:4]", and the processor "will deliver only those interrupts
+    // that have an interrupt-priority class higher than the
+    // processor-priority class in the PPR". So PPR >= TPR always, and
+    // therefore `{PPR < X}` is a *subset* of `{TPR < X}`. Testing TPR
+    // admits every entry the real rule admits **plus** every entry
+    // where an unacknowledged in-service vector held PPR up while TPR
+    // was down. Those extra entries are ones the interrupt could
+    // **not** have been delivered on.
+    //
+    // The direction is not a property of the register, it is a property
+    // of which branch is being counted: this branch is "deliverable",
+    // so reading TPR inflates it. See `deliver_on_drop` and
+    // `intercept_self_ipi`, whose true branch is "inhibited" and which
+    // are sound on VTPR for the same inequality read the other way.
+    //
+    // No fix is available here rather than declined: zpp cannot see
+    // ISRV at all. SDM 32.1.1 gives VISR (100H-170H) and VPPR (0A0H)
+    // only under "virtual-interrupt delivery", which is not offered
+    // here - which is why the measured VPPR of `0x00` on 100% of 15,812
+    // entries is specified behaviour and not a reading. So this stays a
+    // bound and is labelled as one.
     constexpr std::uint64_t dispatch_class = 0x20;
 
     if (this->l2_entry_priority[cpu] < dispatch_class) {
@@ -9965,7 +10038,7 @@ std::uint8_t hypervisor::record_interrupt_request(std::size_t cpu,
     this->interrupt_request_count[cpu] =
         this->interrupt_request_count[cpu] + 1;
 
-    // SDM Figure 12-12 puts the vector in bits 7:0 of the interrupt
+    // SDM Figure 13-12 puts the vector in bits 7:0 of the interrupt
     // command register, and the Hyper-V interface keeps that layout for
     // its synthetic one.
     constexpr std::uint64_t interrupt_command_vector_mask = 0xff;
@@ -13033,7 +13106,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
                     if (0 != this->pending_vector_now[cpu]) {
                         // Already in the level above's request
                         // register, so this is architecturally the
-                        // same request - SDM 12.8.4 - and counting it
+                        // same request - SDM 13.8.4 - and counting it
                         // as a second one is how `asked` against
                         // `delivered` came to look like a loss.
                         this->pending_vector_coalesced[cpu] += 1;
@@ -13045,7 +13118,7 @@ hypervisor::on_l2_exit(std::size_t cpu,
             }
 
             // Held until the guest's own priority allows it. See
-            // `nested_vmx::deliver_self_ipi`; SDM Figure 12-12 puts the
+            // `nested_vmx::deliver_self_ipi`; SDM Figure 13-12 puts the
             // vector in bits 7:0 and the destination shorthand in 19:18,
             // and 01 there is "self".
             //
@@ -13118,15 +13191,28 @@ hypervisor::on_l2_exit(std::size_t cpu,
                 // And withheld from the level above, when the level
                 // above could not have delivered it either.
                 //
-                // The rule is the processor's own, SDM 12.8.4: an
+                // The rule is the processor's own, SDM 13.8.3.1: an
                 // interrupt is admitted only when its priority class is
-                // **strictly greater** than the task priority's, which
-                // is why vector 0x2f - class 2 - is refused at task
-                // priority 0x20 and at everything above it. `vtpr` is
-                // the byte `record_interrupt_request` just sampled, from
-                // the virtual-APIC page of the trust level that is
-                // running, so the histogram it recorded and the decision
-                // taken here cannot disagree.
+                // **strictly greater** than the inhibiting priority's,
+                // which is why vector 0x2f - class 2 - is refused at
+                // task priority 0x20 and at everything above it. `vtpr`
+                // is the byte `record_interrupt_request` just sampled,
+                // from the virtual-APIC page of the trust level that is
+                // running, so the histogram it recorded and the
+                // decision taken here cannot disagree.
+                //
+                // **Keying the swallow on VTPR is SAFE and
+                // deliberate.** The architecture inhibits on
+                // PPR = max(TPR class, ISRV class), so PPR >= TPR and
+                // `!admitted` against VTPR implies `!admitted` against
+                // PPR: everything swallowed here really was
+                // undeliverable. The error is one-sided in the
+                // direction of swallowing too little, which reflects
+                // the write to the level above - the failing safe
+                // behaviour the third bullet below relies on. Do not
+                // "correct" this to a PPR test; there is none to make,
+                // and the counters that *do* over-count are the ones
+                // whose true branch is "deliverable".
                 //
                 // Three conditions, and each is a place this could do
                 // harm if it were dropped:

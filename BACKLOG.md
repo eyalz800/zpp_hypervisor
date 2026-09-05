@@ -16737,7 +16737,7 @@ From the state dump on the wedged guest:
 
 **Vector `0x2f` is `KiDpcInterrupt`, priority class 2. Task priority `0xd0`
 is class 13.** 2 is below 13, so *every one of those 412,824 requests is
-architecturally undeliverable at the moment it is made* - SDM 12.8.3.1, and
+architecturally undeliverable at the moment it is made* - SDM 13.8.3.1, and
 the dump agrees: 3.9% of `0x2f` ever gets delivered, in the windows where the
 priority happens to have dropped. The guest is sitting at IRQL 13,
 CLOCK_LEVEL, asking for a DPC interrupt it has itself masked.
@@ -17755,7 +17755,12 @@ Measured as the delta it asks for, on a settled guest:
 
 **Not residue. The guest goes below DISPATCH about thirty-one times a
 second**, and on every one of those entries nothing was delivered while the
-vector it had asked for was outstanding. The counter **undercounts** by
+vector it had asked for was outstanding. **The bound claimed in the rest of
+this paragraph is inverted and is withdrawn** - the counter **over**counts
+by construction, because the site tests the task priority and the processor
+inhibits on PPR = max(TPR class, ISRV class), so `{TPR < X}` contains
+`{PPR < X}`. See "The VTPR-keyed priority counters are upper bounds" below.
+The withdrawn text read: the counter **undercounts** by
 construction - the site tests the task priority, a lower bound on the
 processor priority - so every entry it counts is one the interrupt certainly
 could have taken.
@@ -31297,7 +31302,7 @@ hand over - none of which is wanted here.
   `resume.cpp` so `tests/resume_guest` can drive them with the switch
   off - what the switch removes is the two call sites.
 - A 256-bit pending bitmap per processor, delivered highest vector first.
-  SDM 12.8.4 makes a vector's interrupt priority its value divided by
+  SDM 13.8.4 makes a vector's interrupt priority its value divided by
   sixteen with the higher vector winning inside a class, so descending
   order is the order the APIC would have used.
 - The deliverability test is `event_allowed_on_entry`, which already
@@ -31818,7 +31823,7 @@ Still to settle, and read the counters carefully here:
 - Vector `0x2f` is still injected 6 times against a request on every
   cycle. **Tested, and it is not the blocker.** `ZPP_DELIVER_SELF_IPI`
   delivers it when the guest hypervisor will not, by the guest's own
-  local-APIC rule - priority class strictly greater, SDM 12.8.4 - and only
+  local-APIC rule - priority class strictly greater, SDM 13.8.4 - and only
   when the level above staged nothing. It works and it almost never
   fires: `l2_self_ipi_delivered` 1 against `l2_self_ipi_held` **2,005**.
   The guest's own virtual task priority blocks it nearly every time,
@@ -33026,7 +33031,7 @@ The central symptom of the last several sessions has been read wrongly,
 and the arithmetic that shows it is one line.
 
 Delivery of a vector requires its priority class to be **strictly
-greater** than the task priority class - SDM 12.8.4, and the class is
+greater** than the task priority class - SDM 13.8.4, and the class is
 the high nibble. Vector 0xd1 is class 13. A virtual task priority of
 0xd0 is class 13. So at VTPR 0xd0 the clock interrupt is refused too.
 
@@ -35434,7 +35439,7 @@ that return and the next call. Both halves are already identifiable -
 ### The processor priority is not maintained here, and reading it looked exactly like an answer
 
 The reading this investigation has wanted throughout is **PPR**, not
-TPR. SDM 12.8.3.1 makes PPR the maximum of the task-priority class and
+TPR. SDM 13.8.3.1 makes PPR the maximum of the task-priority class and
 the highest in-service vector's class, and it is PPR that an arriving
 interrupt's class must exceed - so a guest that raised its own priority
 and a guest holding an in-service interrupt it never acknowledged are
@@ -35478,9 +35483,14 @@ entries.
 Two consequences:
 
 - The crossing counter `l2_low_priority_no_event` is now taken against
-  **VTPR**, which the processor does maintain. TPR is a lower bound on
-  PPR, so it undercounts rather than over - every entry it counts is
-  one where the priority certainly would have admitted the interrupt.
+  **VTPR**, which the processor does maintain. **The sentence that
+  followed this was wrong in both directions and is withdrawn - see
+  "The VTPR-keyed priority counters are upper bounds" below.** It read
+  "TPR is a lower bound on PPR, so it undercounts rather than over -
+  every entry it counts is one where the priority certainly would have
+  admitted the interrupt." The premise is right; the conclusion inverts
+  it. A lower threshold blocks less, so `{TPR < X}` *contains*
+  `{PPR < X}` and the counter **over**-counts.
 - **The real PPR of the second-level guest is not reachable from here
   at all.** With no APIC virtualization the guest hypervisor emulates
   its guest's local APIC entirely in software, so the in-service
@@ -43170,7 +43180,7 @@ guest hypervisor's own virtual-APIC page at each second-level entry,
 ```
 
 **Eighty-eight percent of entries are at IRQL 13 or 15.** Vector `0x2f`
-is priority class 2, and SDM 12.8.4 delivers only where the class is
+is priority class 2, and SDM 13.8.4 delivers only where the class is
 strictly greater than the task priority's - so it is deliverable on
 0.9% of entries and masked on the rest.
 
@@ -46652,7 +46662,7 @@ the derived constant the delivery site keys on.
 **Not a lie about time.** The four interventions that bugchecked all
 misrepresented clocks. Here the interrupt is genuinely undeliverable when
 asked for, by the guest's own priority, and delivered at the first
-instant it is deliverable, by SDM 12.8.4 - the rule the processor itself
+instant it is deliverable, by SDM 13.8.4 - the rule the processor itself
 applies. The honest risk is bookkeeping above us that depends on seeing
 the write, which is why it is off by default and why only self-directed,
 currently-undeliverable commands are withheld.
@@ -57979,7 +57989,7 @@ Both halves of the only lever on this side are recorded as tried:
 
 And the priority refusals are **architecturally correct**: the virtual
 task priority was never once below `0x20` across 630,418 entries, and
-`0x2f` is class 2 under a strictly-greater rule (SDM 12.8.4). There is
+`0x2f` is class 2 under a strictly-greater rule (SDM 13.8.4). There is
 no misreporting here to fix.
 
 So the cycle cannot be broken by delivering `0x2f` - it is genuinely
@@ -59694,7 +59704,7 @@ instruction pointer from its low 21 bits without knowing a base.
 
 The deadlock account this file has built rests on one claim: Windows
 sits at task priority class 2, `0x2f` is class 2, delivery needs
-strictly greater (SDM 12.8.4), so the vector can **never** be delivered
+strictly greater (SDM 13.8.4), so the vector can **never** be delivered
 and the cycle cannot break. It was supported by a figure quoted from
 `intercept_self_ipi`'s comment - "the virtual task priority never once
 below `0x20` across 630,418 second-level entries".
@@ -59754,7 +59764,7 @@ From decompiling hvix64 (artefacts in `.references/hyperv/vina.md`).
               it, reads task-priority register 0x41004 and requires
               tpr < pending_class.        **checks priority correctly**
 
-Gate (b) is exactly SDM 12.8.4, so a class-2 vector under class-2
+Gate (b) is exactly SDM 13.8.4, so a class-2 vector under class-2
 priority is correctly judged undeliverable and (b) does not fire for it.
 Gate (a)'s write path - `FUN_0x2f9240` setting `CF8=1`, `FUN_0x2fd328`
 setting `CF8=2` with the vector at `+0xCFC` - is guarded only by "a
@@ -59965,7 +59975,7 @@ self-IPI turns out to have been chasing the wrong vector.
     vector 0xd1   priority class 13   deliverable at TPR class 2?  YES
 
 Delivery requires the vector's class **strictly greater** than the task
-priority class (SDM 12.8.4). Windows sits at class 2. So:
+priority class (SDM 13.8.4). Windows sits at class 2. So:
 
 - **`0x2f` is correctly blocked** - and VINA's priority-checking gate
   will therefore never fire for it. All the effort spent on "the
@@ -64531,7 +64541,7 @@ Windows zeroes `DpcWatchdogCount` on every clock tick taken *below*
 DISPATCH, so a climbing value means that never happens. This VMM's own
 census agrees independently: cpu 1's task priority is at DISPATCH or
 above on **99.96%** of 529,127 entries, reaching PASSIVE 205 times.
-Vector `0x2f` is priority class 2, and SDM 12.8.4 admits a vector only
+Vector `0x2f` is priority class 2, and SDM 13.8.4 admits a vector only
 when its class strictly exceeds the task priority's - so it is refused
 at `0xd0` (13) **and at `0x20` (2)**. Only PASSIVE admits it.
 
@@ -65006,3 +65016,142 @@ section. `PnpEnumerationInProgress` was likewise `0xf8a190`, not
 `0xf8a1a0`. Both would have been quoted as findings. The walk therefore
 proves itself **structurally** instead - a LIST_ENTRY whose neighbour
 points back at it - which needs no constant and no build agreement.
+## The VTPR-keyed priority counters are upper bounds, not lower bounds
+
+**Settled by citation, not by a boot. No hypervisor behaviour changed -
+this is comments and instrument labels only.**
+
+Every priority decision and every priority counter in this tree keys on
+the *virtual task priority*, VTPR at offset `080H` of the virtual-APIC
+page. That is not a choice, it is the only field there is: SDM 32.1.1
+(`.references/sdm.txt:206554`) says "The VTPR field virtualizes the TPR
+whenever the 'use TPR shadow' VM-execution control is 1. The other
+fields indicated above virtualize the corresponding APIC registers
+whenever the **'virtual-interrupt delivery'** VM-execution control is
+1." VPPR (`0A0H`) and VISR (`100H`-`170H`) are among those other fields,
+virtual-interrupt delivery is not offered here, and the layer below does
+not permit it to this VMM either. So the measured VPPR of `0x00` on 100%
+of 15,812 entries is *specified behaviour*, not a reading - which
+`l2_entry_ppr` already records.
+
+The architecture does not gate on TPR. SDM 13.8.3.1
+(`.references/sdm.txt:171709`): "PPR[7:4] (the processor-priority class)
+the maximum of TPR[7:4] (the task-priority class) and ISRV[7:4]", and
+(`:171716`) the processor "will deliver only those interrupts that have
+an interrupt-priority class higher than the processor-priority class in
+the PPR". CR8 is the same register from the other side - SDM 2.5
+(`:153628`) gives CR8[3:0] read/write access to TPR[7:4] only.
+
+**Therefore PPR >= TPR always, and `{TPR < X}` is a superset of
+`{PPR < X}`.** A test keyed on TPR admits everything the architecture
+admits *plus* every moment an unacknowledged in-service vector was
+holding PPR up.
+
+### The direction depends on which branch the test gates
+
+This is the part three comments in this tree got backwards, all three
+saying "TPR is a lower bound on PPR, so this undercounts rather than
+over". The premise is correct and the conclusion inverts it: a bound on
+the *threshold* is not a bound on the *count*, and **a lower threshold
+blocks less and therefore counts more**.
+
+| site | true branch | direction |
+|---|---|---|
+| `l2_low_priority_no_event` (`nested_entry.cpp`) | deliverable | **UPPER BOUND** |
+| `l2_eligible_no_event` | deliverable | **UPPER BOUND** |
+| `note_pending_vector`'s `admitted` (`resume.cpp`) | deliverable | **UPPER BOUND** on `pending_vector_dropped`, `_drop_moments`, `_window_already_armed` |
+| `self_ipi_delivery`'s `admitted` (`nested_entry.cpp`) | injects | **over-permissive**; `l2_self_ipi_delivered` is an upper bound |
+| `pending_vector_blocked` | refused | lower bound, **sound** |
+| `l2_masked_no_event` | refused | lower bound, **sound** |
+| `deliver_on_drop`'s `blocked` | inhibited | **sound**, do not change |
+| `window_on_tpr`'s `masked` | withhold | **sound**, do not change |
+| `intercept_self_ipi` / `hold_self_ipi_in_vtl1` swallow | swallow | **sound**, do not change |
+
+`!admitted` against VTPR implies `!admitted` against PPR, so the
+"inhibited" side is exact-or-conservative and errs only towards doing
+nothing - which is the default build's behaviour. The "deliverable" side
+inflates.
+
+**Two of the sound sites are also required to key on VTPR** and must not
+be "fixed" even if a PPR became readable. SDM 29.2.1.1
+(`.references/sdm.txt:202124`) states the VM-entry consistency check as
+"the value of bits 3:0 of the TPR threshold VM-execution control field
+should not be greater than the value of bits 7:4 of VTPR", and SDM
+32.1.2 (`:206565`) makes the TPR-below-threshold exit itself
+`IF VTPR[7:4] < TPR threshold`. `deliver_on_drop` and `window_on_tpr`
+arm that threshold, so VTPR is the only field the processor will compare
+them against.
+
+### What this weakens, and what it strengthens
+
+Weakened - every figure below is a **ceiling**, and the reading that
+treated it as a population does not follow:
+
+- `BACKLOG.md` "In the settled regime the priority is never below
+  DISPATCH": the cumulative 14,924 is an upper bound. The *delta* result
+  is unaffected - a zero delta is a zero delta whichever bound it is, and
+  a bound of zero is exact.
+- `BACKLOG.md` "The tree's, which was hiding a live fault": the 30.9/s
+  growth is an upper bound on the crossings. Corrected in place.
+- `BACKLOG.md` "The live fault ... the DPC interrupt is deliverable and
+  is not delivered": 16.3/s is a ceiling. This entry was **already
+  withdrawn** by the "Correction" section under it, for the independent
+  and larger reason that the site never tests whether anything is
+  outstanding. The bound makes it weaker still; it does not revive it.
+- `BACKLOG.md` "One instrument already points at a live fault": the
+  24,110 is a ceiling and was never a fault.
+- Any non-zero `DROPPED` in `dump_dropped_requests`. Zero remains proof;
+  a figure is a ceiling. The `instrument_entries` sum identity is
+  unaffected - what a PPR-exact test would move is the split between
+  `dropped` and `blocked`, not the total.
+
+Strengthened - a refusal keyed on VTPR is *more* certain under PPR, since
+PPR >= TPR:
+
+- `nested_vmx.h`'s `intercept_self_ipi`: "the virtual task priority never
+  once below `0x20` across 630,418 second-level entries ... so the vector
+  was refused correctly every time". VTPR >= `0x20` implies PPR >= `0x20`,
+  so `0x2f` at class 2 was refused by the architecture on every one of
+  those entries. The claim is now unconditional.
+- `l2_masked_no_event` at 30.5/s against `l2_eligible_no_event` at 0.0/s:
+  the masked half can only grow under a PPR-exact test and the eligible
+  half can only shrink from zero, which it cannot. "100% of the misses
+  were illegal" is a floor of 100% and therefore exact.
+
+### What was rejected
+
+Making the tests exact. There is nothing to make them exact *with*: ISRV
+is unreachable from here twice over - the processor does not maintain
+VISR without virtual-interrupt delivery (SDM 32.1.1), and with no APIC
+virtualization the guest hypervisor emulates its guest's local APIC in
+software, so the in-service register lives in its private memory. The
+fix is therefore to label the bound, which is what was done.
+
+### The citation defect found in the same sweep
+
+Every APIC citation in this tree that read `SDM 12.x` was pointing at the
+wrong chapter. Seventeen in the source tree and twelve in this file's own
+history. In `.references/sdm.txt`, Vol 3A chapter 12 is "Processor
+Management and Initialization" (`:167813`) and chapter 13 is "Advanced
+Programmable Interrupt Controller (APIC)" (`:170186`); Vol 1 chapter 12
+is the SSE chapter. Seventeen occurrences corrected, each checked against
+the line it now points at rather than renumbered. Two were not simple
+renumberings:
+
+- `SDM 12.12.3` for the x2APIC logical destination register's layout.
+  13.12.3 is "MSR Access in x2APIC Mode" and says nothing about it; the
+  derivation `[(x2APIC ID[19:4] << 16) | (1 << x2APIC ID[3:0])]` is in
+  **13.12.10.2** (`:172543`).
+- `SDM 11.6.1` for "all including self" being illegal for INIT and
+  start-up. 11.6.1 is Hyper-Threading initialization; the restriction is
+  Table 13-4 in **13.6.1** (`:171327`).
+
+This file's dated entries were renumbered mechanically, chapter only -
+several of them cite `13.8.4` for the strictly-greater admission rule,
+which is stated in `13.8.3.1`; 13.8.4 is the adjacent acceptance section
+and is not wrong, only less precise. The historical prose is otherwise
+untouched.
+
+`SDM 12.1`, `SDM 12.9.1`, `Table 12-1` and the `SDM 11.4.x` citations
+were checked and are **correct** - they really are Processor Management
+and Multiple-Processor Management. Do not sweep them.

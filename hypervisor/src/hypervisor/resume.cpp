@@ -191,7 +191,7 @@ void hypervisor::queue_external_interrupt(std::size_t cpu,
         // between. A bitmap cannot represent two, so this is a real
         // loss - and it should be unreachable: the first acknowledge set
         // the in-service bit for that vector in the physical local APIC,
-        // and SDM 12.8.4 has the APIC deliver only an interrupt of
+        // and SDM 13.8.4 has the APIC deliver only an interrupt of
         // *higher* priority while an in-service bit is set, which the
         // same vector is not. Counted rather than hidden because if it
         // ever fires, the model this whole path rests on is wrong.
@@ -223,7 +223,7 @@ bool hypervisor::deliver_pending_external_interrupt(std::size_t cpu)
     constexpr std::uint64_t type_external_interrupt = 0ull << 8;
 
     // Highest vector first. The local APIC's own delivery order is by
-    // interrupt priority, which SDM 12.8.4 defines as the vector divided
+    // interrupt priority, which SDM 13.8.3 defines as the vector divided
     // by sixteen, with the higher vector winning inside a class - so
     // scanning down from the top word reproduces the order the hardware
     // would have used had these never been taken away from it.
@@ -534,8 +534,22 @@ void hypervisor::note_pending_vector(std::size_t cpu, std::uint64_t staged)
             (0 != (vmcs.guest_rflags() & interrupt_enable)) &&
             (0 == (blocking & blocking_sti_or_mov_ss));
 
-        // SDM 12.8.4: admitted only where the vector's priority class
-        // is **strictly greater** than the task priority's.
+        // SDM 13.8.3.1 (`.references/sdm.txt:171716`): the processor
+        // delivers "only those interrupts that have an
+        // interrupt-priority class higher than the processor-priority
+        // class in the PPR" - strictly greater, and against **PPR**,
+        // which the same section defines as the maximum of the task
+        // priority's class and the highest in-service vector's.
+        //
+        // **This tests VTPR, so `admitted` is over-permissive and the
+        // counters on its true side are UPPER BOUNDS.** PPR >= TPR
+        // always, so a vector this admits may still be inhibited by an
+        // in-service interrupt zpp cannot see: SDM 32.1.1 maintains
+        // VISR only under "virtual-interrupt delivery", which is not
+        // available in this configuration. `pending_vector_dropped`,
+        // `pending_vector_drop_moments` and
+        // `pending_vector_window_already_armed` therefore over-count.
+        // Zero of them is proof; a figure is a ceiling.
         auto admitted = (vector >> priority_class) >
                         (std::uint64_t{vtpr} >> priority_class);
 
@@ -545,6 +559,12 @@ void hypervisor::note_pending_vector(std::size_t cpu, std::uint64_t staged)
             // is owed. Keeping this apart from the fault below is the
             // whole reason a single "not delivered" counter would have
             // been useless.
+            //
+            // **This branch is SAFE on VTPR and must stay on it.**
+            // `!admitted` against VTPR implies `!admitted` against
+            // PPR, so everything counted here really was refused - the
+            // counter under-counts, which is the direction that cannot
+            // manufacture a fault. Only the complement inflates.
             this->pending_vector_blocked[cpu] += 1;
             return;
         }

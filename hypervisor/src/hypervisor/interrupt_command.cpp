@@ -400,10 +400,13 @@ hypervisor::on_interrupt_command(std::uint64_t command)
     // neither today.
     if (0 != (command & destination_logical)) {
         // x2APIC makes the match arithmetic rather than bookkeeping.
-        // SDM 12.12.3: in x2APIC mode the logical destination register
-        // is read-only and derived from the x2APIC id - bits 31:16 are
-        // the cluster, `id >> 4`, and bits 15:0 carry a single bit,
-        // `1 << (id & 0xf)`. There is no DFR and nothing is written, so
+        // SDM 13.12.10.2 (`.references/sdm.txt:172543`): in x2APIC mode
+        // the logical destination register is read-only and derived
+        // from the x2APIC id - bits 31:16 are the cluster, `id >> 4`,
+        // and bits 15:0 carry a single bit, `1 << (id & 0xf)`. (This
+        // cited 13.12.3 as "12.12.3" until the APIC-chapter sweep;
+        // 13.12.3 is MSR access semantics and says none of it.)
+        // There is no DFR and nothing is written, so
         // the LDR this VMM "sees neither" of does not need to be seen:
         // it is computable from an id already known. This path is the
         // x2APIC form - `destination_shift` is 32, the whole upper
@@ -487,9 +490,12 @@ bool hypervisor::start_up_broadcast(std::uint64_t vector)
     auto self = local_apic_id();
 
     // "All excluding self", the only broadcast a start-up IPI may use.
-    // The other two forms include the sender, which SDM 11.6.1 does not
-    // allow for INIT or start-up delivery modes - both references agree,
-    // and the guest sends the legal one.
+    // The other two forms include the sender, which SDM 13.6.1's
+    // Table 13-4 (`.references/sdm.txt:171327`) marks Invalid for INIT
+    // and start-up delivery modes - both references agree, and the guest
+    // sends the legal one. (This cited 11.6.1 until the APIC-chapter
+    // sweep; 11.6.1 is Hyper-Threading initialization and says nothing
+    // about shorthands.)
     for (std::size_t i{}; i < this->number_of_platform_processors; ++i) {
         auto destination = this->platform_apic_id[i];
         if (destination == self) {

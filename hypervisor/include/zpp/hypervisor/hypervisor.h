@@ -3314,7 +3314,7 @@ private:
      * Highest vector first, because that is the order the local APIC
      * itself would have delivered them in: the interrupt priority of a
      * vector is `vector / 16` and, within a class, the higher vector
-     * wins (SDM 12.8.4).
+     * wins (SDM 13.8.3).
      *
      * Same caveat as `queue_external_interrupt` about being compiled
      * with the switch off.
@@ -6322,7 +6322,7 @@ private:
      * the guest makes tens of thousands of them.
      *
      * **The processor priority was sampled here first and it was the
-     * dead field again.** SDM 12.8.3.1 makes PPR the value an arriving
+     * dead field again.** SDM 13.8.3.1 makes PPR the value an arriving
      * interrupt's class must exceed, so PPR is the reading this
      * question wants - but SDM 32.1.1 only has the processor maintain
      * VPPR under "virtual-interrupt delivery", which is not offered
@@ -8220,19 +8220,24 @@ private:
      *   actually act on rather than what was meant to be written.
      * - **requested and dropped.** That is the two disagreeing.
      * - **queued and never eligible.** `l2_entry_ppr` is the processor
-     *   priority register, not the task priority: SDM 12.8.3.1 makes
+     *   priority register, not the task priority: SDM 13.8.3.1 makes
      *   PPR the value an interrupt's class must exceed, and it is the
      *   maximum of TPR and the highest in-service vector - so a guest
      *   that raised to DISPATCH and never lowered, and a guest with an
      *   unacknowledged in-service interrupt, are different faults and
      *   TPR alone cannot tell them apart.
      *
-     * `l2_low_priority_no_event` is the crossing that decides it: an
-     * entry made with PPR below the DISPATCH class and no event
-     * injected is a moment the guest hypervisor *could* have delivered
-     * `0x2f` and did not. Many of those and the fault is above us; none
-     * of them and the priority never drops, which is a deadlock with a
-     * different fix and not a cost.
+     * `l2_low_priority_no_event` is the crossing that decides it, **as
+     * an upper bound and not as a population**. It is keyed on VTPR,
+     * not on PPR - the paragraph here used to say "an entry made with
+     * PPR below the DISPATCH class", and no such entry is recorded
+     * anywhere, because SDM 32.1.1 maintains VPPR only under
+     * "virtual-interrupt delivery" and that is not offered here. Since
+     * PPR >= TPR, every genuine crossing is counted and so are the
+     * entries an in-service vector was still holding up. Many of them
+     * and the fault *may* be above us; none of them and the priority
+     * never drops, which is a deadlock with a different fix and not a
+     * cost. Only the second reading is sound on this counter alone.
      * @{
      */
     std::uint32_t l2_given_vector[max_cpus][256]{};
@@ -8255,6 +8260,15 @@ private:
     std::uint64_t last_hypercall_count[max_cpus]{};
     /** @} */
 
+    /**
+     * **UPPER BOUND.** Entries carrying no event while the *virtual
+     * task* priority was below the dispatch class. The architecture
+     * inhibits on PPR = max(TPR class, ISRV class) (SDM 13.8.3.1), so
+     * this counts every entry the real rule would count plus every
+     * entry an unacknowledged in-service vector was holding up. See
+     * `l2_entry_priority` for why the direction is a property of the
+     * branch and not of the register.
+     */
     std::uint64_t l2_low_priority_no_event[max_cpus]{};
 
     /**
@@ -8421,21 +8435,28 @@ private:
      * - `coalesced` - asks made while one was already outstanding. A
      *   local APIC's interrupt request register is a bitmap, so a
      *   second request for a vector already in it is *architecturally*
-     *   the same request - SDM 12.8.4 - and this is expected to be
+     *   the same request - SDM 13.8.4 - and this is expected to be
      *   most of `asked`. It exists so the gap between `asked` and
      *   `delivered` is not read as loss.
      * - `entries_pending` - entries into the second-level guest made
      *   while one is outstanding.
      * - `delivered` - entries whose entry-interruption field carries
      *   it, which retires the outstanding request.
-     * - `dropped` - **the number this exists to take to zero.**
-     *   Outstanding requests that reached a second-level entry made at
-     *   a virtual task priority that admits the vector, with the guest
-     *   interruptible, with no event staged, and with neither an
-     *   interrupt window in vmcs02 nor a TPR threshold of this VMM's
-     *   armed. Nothing in the machine can produce an exit at which the
-     *   level above could deliver it, so the request is not deferred,
-     *   it is lost until something unrelated happens to exit.
+     * - `dropped` - **the number this exists to take to zero, and an
+     *   UPPER BOUND on it.** Outstanding requests that reached a
+     *   second-level entry made at a virtual task priority that admits
+     *   the vector, with the guest interruptible, with no event staged,
+     *   and with neither an interrupt window in vmcs02 nor a TPR
+     *   threshold of this VMM's armed. Nothing in the machine can
+     *   produce an exit at which the level above could deliver it, so
+     *   the request is not deferred, it is lost until something
+     *   unrelated happens to exit.
+     *
+     *   The `admitted` test is against VTPR and the processor inhibits
+     *   on PPR = max(TPR class, ISRV class) (SDM 13.8.3.1), so a
+     *   request the guest was still in service against is counted here
+     *   as a drop when the architecture would have refused it anyway.
+     *   Zero is therefore proof; a non-zero figure is a ceiling.
      * - `drop_moments` - the same condition counted per entry rather
      *   than per request, so it can be many times `dropped`. The pair
      *   is deliberate and follows the rule this tree learned the hard
@@ -8449,6 +8470,13 @@ private:
      * one outstanding at a priority that refuses it. Those are correct
      * behaviour and must not be confused with `dropped`, which is what
      * a single "not delivered" counter would have done.
+     *
+     * **`blocked` is a LOWER BOUND and is sound as it stands.** Its
+     * test is `!admitted`, and `!admitted` against VTPR implies
+     * `!admitted` against PPR, since PPR >= TPR. Every entry it counts
+     * really was refused; some entries it does not count were refused
+     * too, and those land in `dropped`. That is the safe direction and
+     * it is why this site keys on VTPR deliberately - do not "fix" it.
      *
      * `pending_vector_now` is the outstanding vector itself, zero when
      * none, and `instrument_entries` is the proof of life - it counts
@@ -8487,6 +8515,12 @@ private:
      * `unreadable`, `blocked`, `window_already_armed` and
      * `drop_moments`, and a mismatch is a reader bug rather than a
      * finding.
+     *
+     * **UPPER BOUND, for the same reason as `dropped`**: it is on the
+     * admissible side of a VTPR test that the architecture takes
+     * against PPR (SDM 13.8.3.1). The sum identity above is unaffected
+     * - what moves under a PPR-exact test is the split between this
+     * pair and `blocked`, not the total.
      */
     std::uint64_t pending_vector_window_already_armed[max_cpus]{};
     std::uint64_t pending_vector_instrument_entries[max_cpus]{};
@@ -8521,6 +8555,13 @@ private:
      * Both are read inside the existing low-priority branch, so the two
      * extra VMREADs are paid on about thirty entries a second rather
      * than on every one.
+     *
+     * **Both inherit the VTPR bound of the branch they sit inside.**
+     * `l2_eligible_no_event` is an UPPER BOUND on the level above's
+     * choices - it can only shrink if PPR were readable - and
+     * `l2_masked_no_event` is a LOWER BOUND on the entries that were
+     * genuinely not allowed. RFLAGS.IF and the interrupt shadow are
+     * exact; the priority half is not.
      */
     /**
      * Clock interrupts withheld and delivered under
@@ -8568,10 +8609,25 @@ private:
      *
      * It is the **task** priority and not the processor priority,
      * because the processor priority is not maintained in this
-     * configuration - see the sample site for the SDM citation. TPR is
-     * a lower bound on PPR, so an entry this counts is one where the
-     * priority certainly would have admitted the interrupt, which is
-     * the direction that makes the count mean something. */
+     * configuration - see the sample site for the SDM citation.
+     *
+     * **Every "could have been delivered" test keyed on this is an
+     * UPPER BOUND**, and this declaration used to claim the reverse:
+     * "TPR is a lower bound on PPR, so an entry this counts is one
+     * where the priority certainly would have admitted the interrupt".
+     * The premise holds - PPR = max(TPR class, ISRV class), SDM
+     * 13.8.3.1 - and the conclusion inverts it. A *lower* threshold
+     * blocks *less*, so `{TPR < X}` contains `{PPR < X}` and a counter
+     * gated on the first over-counts the second.
+     *
+     * The direction follows the branch, not the register. Used to gate
+     * "deliverable" it inflates (`l2_low_priority_no_event`,
+     * `l2_eligible_no_event`, `pending_vector_dropped`). Used to gate
+     * "inhibited" it is sound and under-counts, because `!admitted`
+     * against VTPR implies `!admitted` against PPR - which is why
+     * `deliver_on_drop`, `intercept_self_ipi` and
+     * `hold_self_ipi_in_vtl1` are correct on this field and must not be
+     * "fixed". */
     std::uint8_t l2_entry_priority[max_cpus]{};
 
     /**

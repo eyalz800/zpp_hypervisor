@@ -1757,7 +1757,7 @@ def dump_priority(args, elf, instance):
                 print(line)
 
         # PPR, not TPR, is what an arriving interrupt's class must
-        # exceed - SDM 12.8.3.1 - so this is the reading that says
+        # exceed - SDM 13.8.3.1 - so this is the reading that says
         # whether the DISPATCH_LEVEL request could ever be granted.
         def packed(member, index):
             pair = word(member, (cpu * 256 + index) // 2)
@@ -1799,10 +1799,17 @@ def dump_priority(args, elf, instance):
         # above staged no event while the deferred-call vector it had
         # asked for was outstanding.
         #
-        # The counter undercounts by construction - the site tests the
-        # task priority, which is a lower bound on the processor
-        # priority - so every entry counted is one the interrupt
-        # certainly could have been delivered on.
+        # **The counter OVER-counts by construction, and this note used
+        # to say it undercounts.** The site tests the task priority, and
+        # PPR = max(TPR class, ISRV class) (SDM 13.8.3.1,
+        # `.references/sdm.txt:171709`), so PPR >= TPR and `{TPR < X}`
+        # contains `{PPR < X}`. A lower threshold blocks less and
+        # therefore counts more: every entry where an unacknowledged
+        # in-service vector held PPR at or above the dispatch class
+        # while TPR was below it is counted here and was **not** a
+        # moment the interrupt could have been delivered. Read the
+        # number as a ceiling, never as a population.
+        #
         # **This is NOT evidence of a fault, and it used to say it was.**
         # Read the site before believing the label: `on_l2_entry_event`
         # increments this whenever an entry carries no event and the task
@@ -1815,10 +1822,12 @@ def dump_priority(args, elf, instance):
         # Left in because the quantity is still worth watching; the claim
         # attached to it was not.
         print(f"\n  entries carrying no event while the task priority was "
-              f"below the dispatch class: "
+              f"below the dispatch class [UPPER BOUND]: "
               f"{word('l2_low_priority_no_event', cpu):,} "
               f"(cumulative - read as a delta. NOT a fault by itself: the "
-              f"site does not check that anything was pending)")
+              f"site does not check that anything was pending, and it "
+              f"keys on VTPR while the processor inhibits on "
+              f"PPR = max(TPR, ISRV), SDM 13.8.3.1 - so it over-counts)")
 
         for member, what in (
                 ("interrupt_request_vector",
@@ -1886,9 +1895,12 @@ def dump_interrupt_window(args, elf, instance):
       the opposite: the requests are real, and the level above is being
       woken at a moment it can deliver nothing.  A software interrupt is
       delivered only when its class exceeds the processor priority's
-      (SDM 12.8.3.1), so a window taken at `0x20` cannot carry the
+      (SDM 13.8.3.1), so a window taken at `0x20` cannot carry the
       `0x2f` deferred-procedure-call vector, and the level above will
-      re-arm the window on the very next entry.  That is a livelock with
+      re-arm the window on the very next entry.  `int_window_vtpr` is
+      VTPR, and this direction is the sound one: PPR >= TPR, so a VTPR
+      of `0x20` guarantees a PPR class of at least 2 and the refusal is
+      certain rather than probable.  That is a livelock with
       one instruction retired per round trip, and it is what
       `ZPP_WINDOW_ON_TPR` exists to break.
 
@@ -2091,18 +2103,28 @@ def dump_dropped_requests(args, elf, instance):
 
     - `coalesced` is expected to be most of `asked`.  A local APIC's
       request register is a bitmap, so a second request for a vector
-      already in it is architecturally the same request (SDM 12.8.4).
+      already in it is architecturally the same request (SDM 13.8.4).
       The gap between asked and delivered is therefore not loss by
       itself, and reading it as loss is how this ratio got its
       reputation.
     - `blocked` is correct behaviour: the guest was at a priority that
-      refuses the vector, or had interrupts off.  Nothing is owed.
+      refuses the vector, or had interrupts off.  Nothing is owed.  It
+      is a **lower bound and sound**: the test is `!admitted` against
+      VTPR, and `!admitted` on VTPR implies `!admitted` on PPR.
     - `DROPPED` is the fault, and it is the only one of the five that
       is.  The guest could have taken it, nothing was staged, and
       nothing in vmcs02 could produce an exit at which the level above
       might stage it - no interrupt window, no TPR threshold.  The
       request is not deferred; it is lost until something unrelated
       happens to exit.
+
+      **It is an UPPER BOUND.** The admissibility test is against VTPR
+      and the processor inhibits on PPR = max(TPR class, ISRV class)
+      (SDM 13.8.3.1), so PPR >= TPR and this counts every genuine drop
+      plus every moment an unacknowledged in-service vector was still
+      holding the priority up.  zpp cannot narrow it: SDM 32.1.1
+      maintains VISR only under "virtual-interrupt delivery", which is
+      not available here.  Zero is proof; a figure is a ceiling.
 
     `dropped` counts requests and `drop_moments` counts entries, and the
     pair is the point: one request abandoned for a million entries and a
@@ -2199,16 +2221,26 @@ def dump_dropped_requests(args, elf, instance):
         print(f"  delivered  {delivered:>12,}   "
               f"entries whose entry-interruption field carried it")
         print(f"  blocked    {blocked:>12,}   "
-              f"entries the priority or RFLAGS.IF correctly refused")
+              f"entries the priority or RFLAGS.IF correctly refused "
+              f"[lower bound - sound]")
         if unreadable:
             print(f"  unreadable {unreadable:>12,}   "
                   f"*** the virtual-APIC page could not be read, so "
                   f"these entries have no verdict either way - not a "
                   f"drop and not a block ***")
 
+        # UPPER BOUND. The `admitted` test in `note_pending_vector`
+        # is against VTPR, and the processor inhibits on
+        # PPR = max(TPR class, ISRV class) (SDM 13.8.3.1). PPR >= TPR,
+        # so a request the guest was still in service against lands
+        # here as a drop when the architecture would have refused it
+        # anyway. Zero is proof; a figure is a ceiling. `blocked` is
+        # the complement and is a sound lower bound, because
+        # `!admitted` on VTPR implies `!admitted` on PPR.
         print(f"  DROPPED    {dropped:>12,}   "
               f"requests abandoned with nothing armed "
-              f"({moments:,} entry-moments)")
+              f"({moments:,} entry-moments) [UPPER BOUND: keyed on "
+              f"VTPR, not PPR]")
 
         if not dropped:
             print("  *** THIS NEVER HAPPENED: not one request was "
@@ -2219,14 +2251,16 @@ def dump_dropped_requests(args, elf, instance):
                   "***")
         else:
             share = 100.0 * dropped / distinct if distinct else 0.0
-            print(f"  *** {dropped:,} of {distinct:,} distinct requests "
-                  f"({share:.1f}%) reached a moment the guest could "
-                  f"have taken the vector with NOTHING armed to deliver "
-                  f"it. Each averages {moments / dropped:.0f} entries "
-                  f"abandoned. This is the defect ZPP_DELIVER_ON_DROP "
-                  f"exists to remove - check `drop=` in the build "
-                  f"manifest before reading it as evidence the fix "
-                  f"failed. ***")
+            print(f"  *** AT MOST {dropped:,} of {distinct:,} distinct "
+                  f"requests ({share:.1f}%) reached a moment the guest "
+                  f"could have taken the vector with NOTHING armed to "
+                  f"deliver it. Each averages {moments / dropped:.0f} "
+                  f"entries abandoned. A CEILING, not a count: the "
+                  f"admissibility test keys on VTPR and the processor "
+                  f"inhibits on PPR = max(TPR, ISRV), SDM 13.8.3.1. "
+                  f"This is the defect ZPP_DELIVER_ON_DROP exists to "
+                  f"remove - check `drop=` in the build manifest "
+                  f"before reading it as evidence the fix failed. ***")
 
         # **The cost line, and it is read before the benefit line.**
         # Two interventions have now taken the dispatch vector from

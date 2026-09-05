@@ -332,7 +332,7 @@ void hypervisor::on_local_apic_write(void * context,
     //
     // **This gate used to test delivery status, and that made the whole
     // path dead.** Bit 12 of the interrupt command register is Delivery
-    // Status and it is *read only*: SDM 12.6.1 describes it as "Delivery
+    // Status and it is *read only*: SDM 13.6.1 describes it as "Delivery
     // Status (Read Only)", with 0 meaning either no activity for this
     // source *or* that the previous interrupt from it "was delivered to
     // the processor core and accepted". Software cannot set it, so it was

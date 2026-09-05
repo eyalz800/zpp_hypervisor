@@ -358,9 +358,9 @@ inline constexpr bool enabled =
  *
  * With this on, the vector is delivered on the next entry where the
  * guest's own virtual task priority permits it, by the rule its local
- * APIC would use: priority class strictly greater, SDM 12.8.4. Only when
- * the guest hypervisor has staged nothing itself, so its own injections
- * always win.
+ * APIC would use: priority class strictly greater, SDM 13.8.3.1. Only
+ * when the guest hypervisor has staged nothing itself, so its own
+ * injections always win.
  *
  * Off by default. It puts an interrupt into a guest that the level owning
  * that guest did not ask for, which is defensible only because the guest
@@ -395,7 +395,13 @@ inline constexpr bool deliver_self_ipi =
  * - the virtual task priority never once below `0x20` across 630,418
  *   second-level entries, at either trust level, so the vector was
  *   refused correctly every time - `0x2f` is class 2 and the rule is
- *   strictly greater, SDM 12.8.4;
+ *   strictly greater, SDM 13.8.3.1. **This one is unconditional even
+ *   though it is measured on VTPR**: the architecture inhibits on
+ *   PPR = max(TPR class, ISRV class), so PPR >= TPR and a VTPR never
+ *   below `0x20` guarantees a processor-priority class of at least 2
+ *   on every one of those entries. A refusal keyed on VTPR only gets
+ *   stronger under PPR; it is the "could have been delivered" tests
+ *   that become ceilings. See `hypervisor::l2_entry_priority`;
  * - and the guest hypervisor asserted its virtual interrupt
  *   notification into VTL1 on **1.0032 of every `HvCallVtlCall`**,
  *   because the vector it will not deliver is nevertheless pending.
@@ -500,7 +506,7 @@ inline constexpr bool intercept_self_ipi =
  * diagnostic.
  *
  * **This is an architectural violation and nothing here pretends
- * otherwise.** The guest masked the vector; SDM 12.8.4 admits an
+ * otherwise.** The guest masked the vector; SDM 13.8.3.1 admits an
  * interrupt only when its priority class is strictly greater than the
  * task priority's, and vector `0x2f` is class 2 against a task priority
  * of `0x20`, which is also class 2. `deliver_self_ipi` computes that
@@ -1715,10 +1721,11 @@ inline constexpr bool hand_over_pending_event =
  * X2APIC_LVT_TIMER (0x832) and X2APIC_INIT_COUNT (0x838), and the APIC
  * page is never written at all - and in x2APIC mode the logical
  * destination register is **read-only and derived from the x2APIC id**
- * (SDM 12.12.3): bits 31:16 are the cluster, `id >> 4`, and bits 15:0
- * hold a single bit, `1 << (id & 0xf)`. There is no DFR and there are
- * no writes to track, so the match is arithmetic on an id this VMM
- * already knows.
+ * (SDM 13.12.10.2, `.references/sdm.txt:172543` - this cited "12.12.3"
+ * until the APIC-chapter sweep, and 13.12.3 is MSR access semantics):
+ * bits 31:16 are the cluster, `id >> 4`, and bits 15:0 hold a single
+ * bit, `1 << (id & 0xf)`. There is no DFR and there are no writes to
+ * track, so the match is arithmetic on an id this VMM already knows.
  *
  * On, a logical destination naming exactly one processor is decoded
  * back to that id and handed to the same path a physical destination
