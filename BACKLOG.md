@@ -64559,8 +64559,24 @@ ICR/EOI/EOM loop at 1.02 to 1. Removing that storm **entirely** is worth
 The synthetic MSR reflect path is **~62.8%**: each guest write of EOM,
 EOI or ICR costs one `wrmsr` exit plus the paired `vmresume` when the
 level above re-enters, and the loop makes three of them per iteration
-over about 116,213 iterations. That is where the headroom is, and any
-work aimed at the window storm is aimed at a sixth of it.
+over about 116,213 iterations. That is the largest share by far - but
+**it is required work, not waste, and this was checked rather than
+assumed.**
+
+This VMM does not add those exits. Its own MSR intercept set is static
+and small - `IA32_APIC_BASE`, `IA32_FEATURE_CONTROL` and `0x480-0x491` -
+and contains none of the synthetic registers. The vmcs02 bitmap is the
+guest hypervisor's own page plus those bits, so every one of the 361,009
+`wrmsr` exits is one hvix64 asked for. Not intercepting them is not
+available: they are how it drives its own APIC.
+
+The merge that builds that bitmap is separately measured at 18,063
+cycles per round trip against ~610,000 spent inside this VMM - "removing
+the whole of it is 3.0%. Worth having and not a lever."
+
+So there is no share of cpu 1's exits that this VMM can decline to take.
+What is left is the per-exit *cost* of taking them, which is the general
+nesting tax and not specific to this wedge.
 
 Note the constraint that makes this hard rather than merely large: the
 obvious way to cut the MSR path is to answer EOI and EOM locally instead
