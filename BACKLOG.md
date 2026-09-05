@@ -67590,3 +67590,56 @@ on a wedged dump, not a finding.
 100-250 samples. That is enough to say the address was executed, not
 enough to say it is where time goes. The wedged dump, where the census
 runs to millions of samples, is where these rows become quantitative.
+
+## In the livelock the thread executes almost nothing - there is no spinning instruction
+
+Boot 184, livelock confirmed on the control, **542,826 samples**, cut
+raised to a 0.05% floor so cold rows print:
+
+    the five loop addresses + HalpHvTimerArm      ~97%
+    KiIsrThunkShadow+0x688                          0.9%
+    HalpHvTimerArm+0x69                             0.3%
+    HalpInterruptSendIpi+0x9a                       0.1%
+    KiDpcInterrupt+0x390, +0x3b8                    0.1% each
+    569 ntoskrnl rows below the cut, TOTAL          0.7%
+
+**The thread's own code is under 1% of entries, spread across 569
+addresses.** There is no hot non-interrupt address, because there is no
+single instruction the thread is stuck on - **the thread barely executes
+at all.**
+
+`KeZeroPages+0x10` and `HalpPciReadMmConfigUshort+0x3`, the two
+non-interrupt rows visible during the *transient*, **drop out entirely**
+in the livelock. So the PCI-config lead flagged in `ff57493` is a
+transient-phase observation and not the wedge; recorded as closed unless
+it reappears.
+
+### What this settles
+
+The framing "the thread is spinning on something" was wrong in emphasis.
+The measurement is that **the interrupt path consumes essentially every
+entry**, and the runnable thread gets under 1% of them. That is the
+saturation reading, and it is now quantitative rather than inferred:
+
+- 4 reflections / 8 exits per tick at 574.7 Hz
+- 99%+ of second-level entries land in the tick's own servicing
+- the thread stays Running and Ready, and is simply not reached
+
+It also explains why no stack read ever found a driver frame, and why the
+`ExSetTimerResolution` chain looks stale: **it is stale.** The thread's
+last real progress was that call; since then it has been preempted at
+~574 Hz and has retired almost nothing, so its stack is a fossil of where
+it was when the tick rate overtook it.
+
+**This is consistent with every earlier measurement and contradicts
+none.** `KiEndInterruptCycleAccumulation`'s gate keeps the loop running
+because the thread never blocks; the thread never blocks because it never
+runs long enough to reach whatever would block it. The two sustain each
+other, which is what a livelock is.
+
+**And it closes the "which driver" question as unanswerable this way.**
+The driver whose `DriverEntry` was called is `VBoxSup.sys`; whether it
+would have returned cannot be determined from a guest that is not
+executing it. The question is not "what is the driver waiting for" but
+"why does one tick cost enough that the thread never advances" - and that
+is the per-tick cost avenue, already measured and closed in `b711510`.
