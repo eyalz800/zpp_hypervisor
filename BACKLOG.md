@@ -65867,3 +65867,60 @@ four wrong readings in this tree already):
 
 `KeNumberProcessors` read 2, matching the launch. The wedged comparison is
 the next reading.
+
+## The DPC path is HEALTHY. The phase-1 thread itself is spinning
+
+Wedged boot 174, four samples of both processors' DPC state, plus the
+healthy baseline from the same boot:
+
+    healthy   cpu 0 idle (IdleHalt 1, nesting 0)   cpu 1 running, QuantumEnd 1
+    WEDGED    cpu 0 running, nesting 1/0/1/0       cpu 1 IDLE throughout
+
+**cpu 0's `NestingLevel` oscillates 1, 0, 1, 0 across the four samples**,
+with `DpcQueueDepth` 0 and `ActiveDpc` NULL every time. So cpu 0 is
+entering and leaving `KiRetireDpcList` repeatedly and finding nothing to
+retire.
+
+That refutes the entire DPC-blockage family **by measurement**, not by
+argument:
+
+- not "DPCs requeued faster than they retire" - the queue is empty;
+- not "one DPC never returned" - `ActiveDpc` is NULL and the nesting
+  oscillates;
+- not "`KiRetireDpcList` is never entered" - the nesting reaches 1.
+
+The DPC machinery is working. Several sessions of "the DPC queue never
+drains" can be closed.
+
+### And the thread holding cpu 0 is named
+
+The same thread pointer is current on cpu 0 in every sample. Resolved:
+
+    thread 0xffffb2099d493040
+    StartAddress  ntoskrnl+0x6fb520  =  Phase1Initialization
+    Cid.UniqueThread 0x8
+    Process       System
+
+**The phase-1 thread itself is spinning.** It is `Running`, holds cpu 0
+continuously, issues essentially no hypercalls (`vmcall` ~0.05/s), and
+does so while cpu 1 sits idle and the DPC path underneath it is healthy.
+
+That is a much narrower statement than the wedge has had before, and it
+agrees with the single-core root cause already recorded in
+[[vboxsup-busy-poll-is-the-phase1-barrier]]: *"nothing refusing, nothing
+retrying, the caller stopped calling."* Here the caller has not stopped
+calling - it is in a loop that makes no calls at all.
+
+**What this makes the remaining question.** Not "why is the DPC not
+delivered" and not "what is blocked", but: **what is `Phase1Initialization`
+looping on that requires no hypercall, no VTL call, and no page fault?**
+A loop that touches only memory it already has mapped is invisible to
+every counter zpp owns, which is exactly why the exit census could account
+for 100% of exits and still not see it.
+
+The instrument that can answer it is the guest instruction pointer census
+- and that census is currently **not per-processor**
+(`interrupted_rip`/`quiet_rip` lack a `[max_cpus]` dimension while the
+reader labels them "cpu 0"), so with one processor spinning and one idle
+its rows cannot be attributed. Fixing that is now on the critical path
+rather than being hygiene.
