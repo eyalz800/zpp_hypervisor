@@ -2119,6 +2119,10 @@ def dump_dropped_requests(args, elf, instance):
                "window_armed_at_drop", "window_already_armed_at_drop",
                "window_threshold_arm_entries",
                "window_threshold_refused", "l2_given_vector",
+               # window_on_tpr's OWN arming account. Resolved elsewhere
+               # in this reader and printed nowhere until now, which is
+               # the same as reading zero - see the note at the print.
+               "window_threshold_withheld", "window_threshold_disarmed",
                "l2_tpr_threshold_seen"]
     off = gdb_offsets(elf, members)
 
@@ -2306,6 +2310,38 @@ def dump_dropped_requests(args, elf, instance):
         print(f"  window withheld {deferred:,} (MUST be 0), threshold "
               f"armed on {arm_entries:,} entries, priority drops "
               f"reported {granted:,}")
+
+        # **`arm_entries` above is a ZPP_DELIVER_ON_DROP counter and
+        # reads zero in any `windowtpr=1` build**, because a static
+        # assertion refuses the two switches together. It is therefore
+        # NOT an answer to "did window_on_tpr arm its threshold", and
+        # reading it as one cost a wrong conclusion about boot 139.
+        #
+        # window_on_tpr has its own arming: it sets
+        # `window_threshold_armed` when it withholds
+        # (`nested_entry.cpp:2056`) and consumes it at `:2228`, where the
+        # write into vmcs02 is gated on the virtual task priority having
+        # been READ. If that read fails the threshold is never written,
+        # the withheld window is never re-opened, and the processor
+        # starves with nothing recorded anywhere visible. These two
+        # counters are that gate's account, and until now the reader
+        # resolved both members and printed neither - which is
+        # indistinguishable from their reading zero.
+        w_withheld = word("window_threshold_withheld", cpu)
+        w_disarmed = word("window_threshold_disarmed", cpu)
+
+        if (deferred or w_withheld or w_disarmed):
+            print(f"    window_on_tpr's OWN arming: threshold not written "
+                  f"{w_withheld:,}, taken back down {w_disarmed:,}")
+            if deferred and not w_withheld:
+                print("      <- every withheld window did get a threshold "
+                      "written; the withholding is not what starves it")
+            elif w_withheld:
+                print("      *** THE WITHHOLDING HAS NO WAKE-UP on "
+                      f"{w_withheld:,} entries: the virtual task priority "
+                      "could not be read, so no threshold was written and "
+                      "nothing re-opens the window. This starves the "
+                      "processor. ***")
         # **"written by this VMM" is scoped to the drop exit only.** It
         # is `window_armed_at_drop` (`nested_entry.cpp:9840`), which
         # counts only the tpr-below-threshold exits under
