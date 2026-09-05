@@ -66767,3 +66767,74 @@ Boot 178's other counters, for the record: 83 drivers, 10,475 copies,
 removes 3,942 - an eighth value inside the saturated band, and early
 removes read 3,011 against 3,010 on boots 175 and 176, three boots within
 one of each other.
+
+## The TPR-below lead is DEAD, and the premise behind it was false
+
+I proposed that zpp might be failing to answer a TPR-below notification
+hvix64 armed - one `tpr-below` exit in 63 s against a guest reaching
+PASSIVE on 24.7% of entries. Audited, and it does not hold.
+
+**`on_nested_cr8_access` is unreachable in the shipping build.**
+`ZPP_NESTED_TPR_SHADOW` defaults ON, `tpr_shadow_refused` and
+`tpr_shadow_absent` both read zero, so `honour_tpr_shadow` is true on
+every entry and **the processor** performs TPR virtualization. The premise
+"zpp emulates CR8 and might miss a path" is false: the MOV never exits,
+because with the shadow honoured hvix64 does not set CR8-load exiting.
+
+**The threshold is armed, rarely, and answered correctly.** Measured
+`l2_tpr_threshold_seen` = `{0: 1,585,799, 2: 63, 4: 3, 13: 22}` against
+`tpr_shadow_honoured` 1,585,908. Writing 0 is *disarming*, and hvix64
+disarms 99.994% of the time. The 63 arms at class 2 are exactly
+`0x2f >> 4`, which corroborates the gate-4 disassembly. And
+`window_granted_on_drop` 998 with `window_threshold_refused` 0 proves the
+plumbing works end to end.
+
+**Only one of SDM 32.1.2's three TPR-virtualization triggers exists
+here**, and that is by design rather than omission. The section lists
+exactly three: `mov cr8`, a write to offset 0x80 of the APIC-access page,
+and `wrmsr 0x808`. zpp offers neither *virtualize APIC accesses* nor
+*virtualize x2APIC mode*, so only `mov cr8` can fire the exit. Every other
+route to a lower VTPR is **hvix64's own software write into a page**, and
+no processor checks a plain memory write. There is nothing owed: hvix64
+performed the emulation, so it already holds the information a
+notification would carry. The tree had already measured hvix64 adapting -
+`nested_vmx.h:2448` records it reading the capability MSRs, finding these
+absent, and taking the polling path.
+
+**And my quoted evidence proved the opposite of what I claimed.** The
+24.7%-at-PASSIVE figure comes from `l2_entry_vtpr`, which increments at
+`nested_entry.cpp:2397` - *inside* the honour branch. Its existence is
+proof that `honour_tpr_shadow` was true and `on_nested_cr8_access` did not
+run.
+
+### The "empty histogram" diagnostic was about a different member
+
+The dump's warning - *"the priority was never sampled ... Do not read this
+as evidence against a TPR-threshold fix"* - prints about
+**`int_window_vtpr`**, not `l2_tpr_threshold_seen`, which has its own
+printer and its own banner. `int_window_vtpr` is empty because its only
+increment site is gated on `census_exits`, which is **OFF** in this build.
+The reader checks `census=` in the manifest in two other places and not
+there, so it reported a mystery where the answer was a switch. The same
+silence hides `l2_tpr_would_fire` and `l2_tpr_armed_above` - the two
+counters built precisely to answer "is an exit owed and not delivered".
+
+### A latent bug found on the way
+
+`nested_entry.cpp:6100` - `general_purpose_register` returns
+`&context.rsp` for encoding 4. That is the **exact** defect CLAUDE.md
+records and that `exit_dispatch.cpp` was already fixed for: `context.rsp`
+holds the address of the context structure, put there by the exit stub.
+`mov cr8, rsp` would inject a spurious `#GP`; `mov rsp, cr8` would write
+the priority class over the `iretq` frame pointer. Latent only because the
+function is unreachable today and no compiler emits either form. The fix
+is to use the existing `guest_register`/`set_guest_register` members.
+
+### The one measurement that would close it
+
+One boot with `-DZPP_CENSUS_EXITS=ON`, reading `l2_tpr_would_fire` against
+`l2_tpr_armed_above`. Non-zero with no matching reason-43 exits means
+vmcs02 is not doing what the VMCS says and the fault is here; zero means
+hvix64 only ever arms a threshold while already at or above it and the
+line is confirmed dead. Given `{0: 1.58M, 2: 63}`, zero is expected.
+**That reading has never been taken, because the census is off.**
