@@ -67339,3 +67339,82 @@ guest is still making progress. Killing in the livelock costs nothing.
 of which distinguishes the transient from the livelock. That is the most
 likely reason seventeen boots produced no success, and it is a procedural
 fault rather than a change in the machine.
+
+## NAMED: the driver is VBoxSup.sys, proven from the stack with no unwind
+
+`PnpCallDriverEntry` spills the `DRIVER_OBJECT` to a **fixed slot at a
+fixed distance from the return address already visible on the stack**.
+With `R` = the slot holding `nt+0x9b9160`:
+
+    [R]        nt+0x9b9160    the anchor
+    [R+0x30]   DRIVER_OBJECT  (mov [r11-0x20], rcx in the prologue)
+    [R+0x38]   the KTHREAD    (from gs:0x188)
+    [R+0x48]   DRIVER_OBJECT  again (push rdi)
+    [R+0x50]   nt+0x9b759e    IopLoadDriver's return address
+
+Executed on boot 183, phase-1 thread (`StartAddress` `ntoskrnl+0x6fb520`,
+Cid 8). **All four cross-checks passed**, then the object proved itself:
+`*(u32)DRIVER_OBJECT == 0x01500004`, the `Type=4, Size=0x150` that
+`IopLoadDriver` writes at creation - one dword a wrong pointer cannot
+pass.
+
+Three independent name routes, all agreeing:
+
+    DriverName      (+0x38)          \Driver\VBoxSup
+    ServiceKeyName  (ext+0x18)       VBoxSup
+    BaseDllName     (section+0x58)   VBoxSup.sys
+    KLDR.EntryPoint == DriverInit    0xfffff802236d9190   MATCH
+
+**`VBoxSup.sys`** - which is exactly what
+[[vboxsup-busy-poll-is-the-phase1-barrier]] recorded from the single-core
+investigation. The multicore wedge and the single-core barrier are the
+same driver.
+
+### The nuance that matters
+
+This read was taken on a **healthy, progressing** boot - cpu 0 idle, cpu 1
+running the phase-1 thread inside `VBoxSup`'s `DriverEntry`. **So being
+there is normal.** Every boot runs this driver's entry point on the
+phase-1 thread; the wedge is not its presence but its *failure to return*.
+That is consistent with the 1-in-10-to-16 escape rate: the same code runs
+every time and sometimes finishes.
+
+It also corrects a earlier inference here. Boot 172's
+`PsLoadedModuleList` tail was `VBoxSup.sys` while healthy and `dfsc.sys`
+once wedged, and that was read as "four more drivers loaded behind it, so
+its DriverEntry did not block the loader". The tail is **not** a reliable
+proxy: `IopDriverLoadResource` is released at `nt+0x9b71bd`/`0x9b7490`,
+**before** the `call PnpCallDriverEntry` at `0x9b7599`, so other loads can
+proceed while a `DriverEntry` runs. The stack slot is the authority; the
+tail is not.
+
+## And the cost avenue is closed, on the tree's own evidence
+
+The remaining zpp-side lever was making each tick cheaper. Inventoried:
+**4-15% of per-tick work is removable and provably guest-invisible** - the
+ungated phase-31 exit ring (2.7-3.1%), four duplicate/ungated diagnostic
+VMREADs per exit plus one per reflection (2.1-9.9%), the VMCS census
+(>=3%), a documented-dead VPPR read, a duplicate `guest_activity_state`
+write.
+
+**But the tree already ran the experiment this avenue rests on.** One
+processor, 431 s each, single variable:
+
+    zpp's duty        0.771  ->  0.371   (2.08x reduction)
+    Hyper-V's share   15.4%  ->  55.4%
+    Windows' share     7.6%  ->   7.6%   (unchanged)
+
+**A 2.08x cut in zpp's own consumption gave Windows nothing** - Hyper-V
+absorbed all forty points. The tree's own threshold statement is that it
+sits "somewhere above a 15% improvement". A 4-15% shave is a fifth of an
+experiment that already produced zero.
+
+Worse, the outcome that matters is unmeasurable: distinguishing 1/13 from
+1/8 at p<0.05 needs ~100 boots at ~10 minutes each, and boot-to-boot turbo
+variation alone moved `nested_run/s` by +6.7% and -9.7% on consecutive
+boots. **The KVM counters could prove the work was removed; nothing
+available could prove it changed the odds.**
+
+So the honest position: the inventory is real and worth landing as
+hygiene, gated behind `census_exits` where it is diagnostic - but not as a
+route to the login screen.
