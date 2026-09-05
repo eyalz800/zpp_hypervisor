@@ -66393,3 +66393,28 @@ another experiment: the 1.3% spread across six boots is the spread of a
 the wedge. A counter that is nearly saturated before the interesting phase
 begins is the least informative coordinate available, not the most causal -
 which is the opposite of how it was first read.
+
+### Qualified: 78 drivers / 10,172 copies is a WAYPOINT, not a wall
+
+Boots 166 and 169 stopped at exactly 78 completed driver loads and exactly
+10,172 copy calls, and that exact agreement was recorded as evidence of a
+"strongly preferred, contended step". **Boot 175 passed straight through
+the same point at 640/s** and went on to 85 drivers / 10,753 copies before
+decelerating.
+
+So those values are a natural waypoint in the boot sequence rather than a
+barrier. Two boots stopping there is a good deal less remarkable than it
+looked - the driver-load sequence passes through it every time, so any
+stall in that neighbourhood lands on it.
+
+What survives: the *band* is real. Every wedge lands between 78 and 91
+drivers and 10,172 and 10,863 copies, which is a narrow slice of a boot
+that loads far more than 91 drivers. What does not survive is reading the
+repeated exact value as a fingerprint of one contended object.
+
+This is the third quantity this session that looked like a fingerprint and
+turned out to be a coordinate the boot passes through anyway - after the
+`0x0f3` count (a Phase-0 constant) and the `pfn` column (a call count).
+The pattern is worth naming: **a counter that every boot must pass through
+will cluster at whatever value the boot happens to stall near, and the
+clustering says more about the counter's rate than about the stall.**
