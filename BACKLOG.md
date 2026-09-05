@@ -64800,3 +64800,66 @@ one means it is keeping up. cpu 0 is the loaded one.
 
 Same lesson as the rest of the family: the counter could not report which
 direction it meant, and one narrow `xp` of the actual slot could.
+
+## Why the interrupt-window storm cannot be fixed from inside zpp
+
+Two facts, both verified today, that together close off the obvious fix.
+
+**1. zpp relays the window faithfully — the storm is hvix64's policy.**
+`int_window_stale` has been measured at **zero across 3,055,183 window
+requests** (`nested_entry.cpp:1980`). And on boot 166 the per-processor
+exit reasons sum to the `vmresume` rate to within 0.1% —
+cpu 0: 1,643+239+868+208 = 2,958 against 2,960/s; cpu 1:
+1,350+1,349+450+271 = 3,420 against 3,419/s. One VMRESUME per L2 exit
+means zpp claimed essentially **no** L2 exit for itself in that window.
+The reflection path is a pass-through, so the 1,349/s window requests and
+450/s TPR-below exits on cpu 1 are hvix64's arming decisions relayed
+correctly, not zpp mishandling them.
+
+For reference, KVM as L1 would not produce that ratio: it PPR-gates the
+window request (`apic_has_interrupt_for_ppr`, `lapic.c:943-952`, refuses
+when `(highest_irr & 0xF0) <= ppr`) and clears the control on every
+window exit (`handle_interrupt_window`, `vmx.c:5653-5661`). cpu 1's 3:1
+window-to-delivery ratio is what a level that does *not* PPR-gate looks
+like. As L0 for a nested guest, KVM's forwarding is byte-identical to
+zpp's (`prepare_vmcs02_early`, `nested.c:2368-2372`), and neither KVM's
+nor zpp's L0 claims the exit.
+
+**2. The structural fix — virtual-interrupt delivery — is unavailable
+from underneath, and the reason is the rig's KVM, not zpp.** With VID the
+held vector would sit in VIRR and be delivered by hardware when VPPR
+admits it (SDM 32.1.2), costing zero window and zero TPR-below exits.
+zpp does not offer it (`ZPP_NESTED_VID` default OFF, manifest `vid=0`),
+and it could not use it anyway:
+
+    rig host:  /sys/module/kvm_intel/parameters/enable_apicv = N
+
+KVM only offers `SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY` to a nested guest
+when APICv is enabled, so bit 9 is not available to zpp. The i7-8565U
+supports APICv in hardware and there is no `modprobe.d` entry disabling
+it, so this is KVM's own default on this host.
+
+**Verified by an independent route on purpose.** The comment at
+`nested_entry.cpp:2398` justifies the same conclusion from a recorded
+PROCBASED_CTLS2 allowed-1 mask of `0x1378ff`. That constant was *not*
+re-checked here and must not be quoted as if it were: the value visible
+in the state dump, `0x1138ee`, is a **different quantity** — what zpp
+answers *to hvix64* (`0x48b PROCBASED_CTLS2`, under "VMX capabilities
+answered to the guest hypervisor"), not what the layer below offers zpp.
+Both happen to have bit 9 clear, which is exactly the kind of agreement
+that lets a wrong number confirm itself. The `enable_apicv` read settles
+it without depending on either.
+
+**Consequence.** Nothing inside zpp can remove this cost. Enabling APICv
+on the rig would be an **L0 configuration change** that invalidates every
+measurement taken so far, including the baseline that reached the login
+screen, so it is a deliberate experiment and not a fix to apply quietly.
+`kvm_intel` is a loadable module (live, refcnt 5) and several rig scripts
+already `rmmod` it, so it is doable without a reboot — but `boot-zpp.sh`
+does not reload it, so today's runs use KVM's defaults.
+
+Note also CLAUDE.md's warning against this class of fix: four
+interventions aimed at interrupt delivery have already failed, all of
+them aimed at a saturation that is not happening. VID differs in kind —
+it changes the delivery *mechanism* rather than lying about time — but
+the prior is against it.
