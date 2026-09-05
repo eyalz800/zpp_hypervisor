@@ -7016,7 +7016,8 @@ def main():
         # deployed binary predates would take the whole dump down
         # instead of one section.
         "handler_reason_exits", "handler_reason_from_l2",
-        "hlt_reflect_count", "reference_read_count",
+        "hlt_reflect_count", "hlt_reflect_rflags",
+        "hlt_reflect_interruptibility", "reference_read_count",
         # The cost rows that go with the two counts above, and the
         # per-processor exit count the split has to sum to. Optional for
         # the same reason: a deployed binary predating one of them must
@@ -8880,6 +8881,36 @@ def main():
     # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
     # above it, bugchecks with HvpHandleHostException (crash code 0x11).
     # `read-channel-state.sh` prints this and this reader never did.
+    # **Can an interrupt wake the halted processor at all?** The state
+    # captured at the moment a second-level HLT is reflected upward.
+    # RFLAGS.IF clear at that instant means the processor cannot take
+    # the IPI that is meant to wake it, and the sender spins for ever.
+    if "hlt_reflect_rflags" not in off:
+        print("\nHLT reflect state: MEMBER ABSENT from this reader.")
+    else:
+        hm = Monitor(args.rig, args.port)
+        for _m in ("hlt_reflect_rflags", "hlt_reflect_interruptibility"):
+            if _m in off:
+                hm.queue(instance + off[_m], args.cpus)
+        hgot = hm.run()
+        shown = False
+        for cpu in range(args.cpus):
+            fl = hgot.get(instance + off["hlt_reflect_rflags"] + 8 * cpu, 0)
+            ib = hgot.get(instance + off.get("hlt_reflect_interruptibility", 0)
+                          + 8 * cpu, 0) if "hlt_reflect_interruptibility" in off else 0
+            if not (fl or ib):
+                continue
+            if not shown:
+                print("\nstate at the last second-level HLT reflected up")
+                shown = True
+            iff = 1 if (fl & (1 << 9)) else 0
+            print(f"  cpu {cpu}  rflags 0x{fl:x}  IF {iff}  "
+                  f"interruptibility 0x{ib:x}"
+                  + ("" if iff else
+                     "   <- IF CLEAR: no interrupt can wake this halt"))
+        if not shown:
+            print("\nno second-level HLT was reflected on any processor")
+
     # The two refusals in `on_vmx_instruction` that had no counter: the
     # MODE check (real mode / v86 / IA-32e with a non-64-bit CS) and
     # VMXON without CR4.VMXE in the read shadow. KVM makes neither in
