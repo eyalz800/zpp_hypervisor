@@ -858,7 +858,7 @@ inline constexpr bool tpr_shadow_offered = (0 != ZPP_NESTED_TPR_SHADOW);
 inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
 
 /**
- * Whether the exit ring records the three fields that cost a VMCS read.
+ * Whether the exit rings record the fields that cost a VMCS read.
  *
  * `record_exit` runs once on every exit and read four fields for the
  * ring: the exit qualification, the guest activity state, the guest CS
@@ -870,6 +870,19 @@ inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
  * 1,000 reads of a shadow-listed field timed at 2,687 cycles against
  * 2,801 for a field that is not listed - identical.
  *
+ * **Rings, plural, and it was singular for too long.** The second-level
+ * ring in `reflect_l2_exit` reads the activity state and the CS selector
+ * on every reflection and was not gated by this at all, so `census=0`
+ * described one ring while the other went on paying. A manifest field
+ * that is true of half of what it names is the failure the manifest
+ * exists to prevent, not an instance of it working. Two differences
+ * from the vmcs01 ring, both deliberate: the qualification there is a
+ * parameter of `reflect_l2_exit` and costs nothing, so it stays; and
+ * the instruction pointer stays because `f8e5435` makes a user-mode
+ * second-level RIP in that ring the only observable "did it reach the
+ * login screen" test on a rig with a passed-through GPU and no
+ * `screendump`.
+ *
  * Off by default, and what that costs is bounded on purpose:
  *
  * - The ring keeps the **reason**, the **instruction pointer**, the
@@ -880,6 +893,8 @@ inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
  *   and zero is a legal value for all three. Nothing in the ring can
  *   tell you the switch was off; the build manifest can, and
  *   `check-bootable.sh` prints it on every deploy. That is the trade.
+ *   In the second-level ring the same is true of `activity_state` and
+ *   `cs_selector`; its `qualification` is unaffected.
  * - `cpl_seen` is empty, so the "did the guest ever reach ring 3"
  *   question needs this on.
  * - **The terminal records are untouched.** `unhandled_exit` and

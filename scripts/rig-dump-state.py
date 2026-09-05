@@ -11177,6 +11177,15 @@ def main():
         reaches them, so they print through the same code - which also
         means the working ring cannot drift into a second, subtly
         different reader.
+
+        **The activity state and the `cs=` column are behind
+        `census=` in `zpp switches`, as they are for the first-level
+        ring.**  Off - which is the default - both read zero, and zero
+        is a legal value for both: `active` is activity state 0 and a
+        null selector is 0.  So a ring full of `active cs=0x0000` says
+        nothing about the guest until the manifest has been read.  The
+        `rip=` and `reason` columns are never gated and are what the
+        ring is read for.
         """
         count = read(counter, cpu)
         show = min(args.l2_entries, count, capacity)

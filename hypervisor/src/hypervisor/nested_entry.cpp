@@ -4742,10 +4742,20 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // "IA-32e mode guest" is a guest state bit wearing a control's
     // clothing, and SDM 30.3 has a VM exit update it. KVM says the same
     // in `sync_vmcs02_to_vmcs12`.
+    //
+    // **Read once into a local, because the census below wanted the
+    // same field.** It read it a second time, unconditionally, on every
+    // reflection - and a VMREAD is an exit to the layer below at 1.4-1.8
+    // microseconds here. Nothing between the two writes vmcs02's entry
+    // controls: `shadow.write` is a store into the guest's own vmcs12
+    // region in module memory, not a VMWRITE, so the field the
+    // processor holds is untouched between them.
+    auto entry_controls02 = vmcs.vm_entry_controls();
+
     shadow.write(
         field::vm_entry_controls,
         (shadow.read(field::vm_entry_controls) & ~entry_ia32e_mode_guest) |
-            (vmcs.vm_entry_controls() & entry_ia32e_mode_guest));
+            (entry_controls02 & entry_ia32e_mode_guest));
 
     // Whether bit 9 is *ever* seen set on this processor. The failing
     // boot ends with it clear in both VMCSes, and the store above is the
@@ -4754,7 +4764,7 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // and one sample at the failure cannot tell them apart. Once per
     // processor per value, so a boot reports at most six lines.
     if (cpu < max_cpus) {
-        auto set = 0 != (vmcs.vm_entry_controls() & entry_ia32e_mode_guest);
+        auto set = 0 != (entry_controls02 & entry_ia32e_mode_guest);
         auto & reported =
             set ? this->ia32e_set_seen[cpu] : this->ia32e_clear_seen[cpu];
 
@@ -5549,11 +5559,44 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
             (basic_reason::ept_violation == reason.basic()) ||
             (basic_reason::ept_misconfiguration == reason.basic());
 
+        // The same two fields `record_exit` gates, gated by the same
+        // switch and for the same measured reason.
+        //
+        // `nested_vmx::census_exits` was added for the vmcs01 ring and
+        // named the three fields that cost a VMCS read there - the exit
+        // qualification, the guest activity state and the guest CS
+        // selector, at 6.1, 7.9 and 9.1 accesses per round trip. This
+        // ring reads two of the same three on **every reflection** and
+        // was never gated with it, so `census=0` described only half of
+        // what it claims to describe. A manifest field that is true of
+        // one ring and not the other is worse than none: it is the
+        // thing the manifest exists to prevent.
+        //
+        // The qualification is free here, unlike in `record_exit` - it
+        // is a parameter of `reflect_l2_exit`, already read by the
+        // dispatch - so it stays ungated.
+        //
+        // **`.rip` stays ungated, and that is deliberate.** It is the
+        // one observable success test this rig has: `f8e5435` records
+        // that a user-mode second-level instruction pointer in this ring
+        // is how "did it reach the login screen" is answered on a
+        // machine whose display is a passed-through GPU and where
+        // `screendump` is impossible. The address alone distinguishes
+        // user mode from kernel mode; the CS selector only corroborates
+        // it.
+        std::uint64_t activity_state{};
+        std::uint64_t cs_selector{};
+
+        if constexpr (nested_vmx::census_exits) {
+            activity_state = vmcs.guest_activity_state();
+            cs_selector = vmcs.guest_cs_selector();
+        }
+
         slot = exit_trace_entry{
             .reason = reason.value(),
             .qualification = qualification,
-            .activity_state = vmcs.guest_activity_state(),
-            .cs_selector = vmcs.guest_cs_selector(),
+            .activity_state = activity_state,
+            .cs_selector = cs_selector,
             .rip = vmcs.guest_rip(),
             .guest_physical = reports_an_address
                                   ? vmcs.guest_physical_address()
