@@ -64863,3 +64863,82 @@ interventions aimed at interrupt delivery have already failed, all of
 them aimed at a saturation that is not happening. VID differs in kind —
 it changes the delivery *mechanism* rather than lying about time — but
 the prior is against it.
+
+## Boot 168 bugchecked 0x9F and NAMED A DRIVER: \Driver\IntcAudioBus
+
+First time any multicore failure in this investigation has named a
+component. Reported from the screen (the display is a passed-through GPU,
+so the user is the sensor), then confirmed by reading `KiBugCheckData`.
+
+    STOP CODE  0x9f    DRIVER_POWER_STATE_FAILURE
+    param 1    0x3     a device object has been blocking an IRP too long
+    param 2    0xffff8f03256f7dd0   DEVICE_OBJECT
+    param 3    0xfffff8010e4b49f0   TRIAGE_9F_POWER
+    param 4    0xffff8f032584f8f0   the blocked IRP
+
+`KiBugCheckData` resolves as PDB segment 26 (`.data`, VA `0xE00000`)
+offset 1190336 **decimal** = `0x1229c0`, so RVA `0xf229c0` — cross-checked
+against `PsActiveProcessHead`, whose published 1072224 gives `0xf05c60`
+and matches the value already in use. Read by walking Windows' own cr3
+with `xp`; VM was `paused (shutdown)` with memory intact.
+
+The driver came from the device object, not from a guess:
+`DEVICE_OBJECT+0x08` -> `DRIVER_OBJECT`, `+0x38` `DriverName` ->
+**`\Driver\IntcAudioBus`**, `DriverStart 0xfffff80111270000`,
+`DriverSize 0x46000`. Intel Smart Sound audio bus — hardware that is
+**not passed through to this VM**.
+
+This sits exactly on the phase-1 path already mapped:
+`ExpWorkerThread -> PnpDeviceActionWorker -> IopLoadDriver ->
+MmLoadSystemImageEx`. A power IRP that never completes blocks that
+worker, which is the thread the whole wedge has been traced to.
+
+**Not yet established: cause or consequence.** Bugcheck 0x9F fires on a
+timeout, so a machine livelocked for ten minutes would produce it too.
+Against that reading, boot 168 was clearly *progressing*: 125,246 secure
+calls against boot 166's 25,203, and 148 `VslCompleteSecureDriverLoad`
+against 78. It got much further and then stopped on this.
+
+**The rig's Windows install must not be modified**, so disabling the
+driver is not available. What is available is the VM's device set.
+
+## Correction: the epoch table's `pfn` column is a CALL COUNT
+
+Three commits in this file, mine included, read it as a page frame
+number. It is not:
+
+    nested_entry.cpp:11261   vtl_code0_epoch_pfn[cpu][slot]
+                                 = vtl_code0_pfn_calls[cpu]
+    nested_entry.cpp:12561   vtl_code0_pfn_calls[cpu] += 1
+
+incremented once per block whose low dword is `0x01010002` — one per
+`VslSetPlaceholderPages`. So "the walk froze at pfn 8,123" means *8,123
+placeholder calls*, and the observation that it "equals the
+VslSetPlaceholderPages count exactly" is `n == n` by construction, not a
+coincidence needing explanation. Another instance of *a number borrowing
+its neighbour's measurement*, and it confirmed itself.
+
+**The conclusions built on it stand** — a flat call count beside a
+climbing hypercall count is still a stopped walk, and the freeze points
+(8,123 on 166, 8,904 on 167) still differ, so it is still a race and not
+a bad page. Only the units were wrong. The real last frame is
+`vtl_code0_last_pfn`, which the epoch table never samples.
+`rig-dump-state.py` now prints the column as `0x101` and says so in the
+header.
+
+## Refuted: "no HVCI image validation has run"
+
+Proposed on the strength of boot 166's six-entry service mix. Boot 168's
+census refutes it outright — the image-validation services are all
+present and busy:
+
+    0x002d  VslApplySecureImageFixups        21,500   17.2%
+    0x00c1  VslValidateSecureImagePages      19,895   15.9%
+    0x001d  VslPrepareSecureImageRelocations     81
+    0x0019  VslCreateSecureImageSection          78
+    0x001a  VslFinalizeSecureImageHash           77
+    0x001e  VslRelocateImage                     77
+
+So the `0x0f4` traffic really is the image-validation walk and the label
+is right. Boot 166's narrower mix was a boot that had not got that far,
+not evidence about the mechanism.

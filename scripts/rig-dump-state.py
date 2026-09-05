@@ -9657,9 +9657,28 @@ def main():
                 # Progress against wall-clock time. One dump, not two.
                 ec = read('vtl_code0_epoch_count', 0)
                 if ec:
+                    # The column named `0x101` here is a CALL COUNT, not
+                    # a page frame number, however much "pfn" suggested
+                    # otherwise - `nested_entry.cpp` samples
+                    # `vtl_code0_pfn_calls`, which counts blocks whose
+                    # low dword is `0x01010002`, i.e. one per
+                    # `VslSetPlaceholderPages`. It was labelled `pfn`
+                    # and read as a frame number in three commits, and
+                    # the mistake confirmed itself: "the frozen pfn
+                    # equals the VslSetPlaceholderPages count exactly"
+                    # is `n == n` by construction, not a coincidence
+                    # worth explaining. The real last frame is
+                    # `vtl_code0_last_pfn`, which this table never
+                    # samples.
+                    #
+                    # The column is still the right thing to watch: a
+                    # flat call count beside a climbing hypercall count
+                    # is a walk that stopped. Only its units changed.
                     print(f"  the walk's RATE over time ({ec:,} epochs, "
-                          f"newest last) - a flat pfn column beside a "
-                          f"climbing calls column is a walk that STOPPED:")
+                          f"newest last) - a flat 0x101 column beside a "
+                          f"climbing calls column is a walk that STOPPED. "
+                          f"0x101 is a COUNT of VslSetPlaceholderPages "
+                          f"calls, NOT a page frame number:")
                     n_slots = min(ec, 64)
                     prev = None
                     for n in range(n_slots):
@@ -9681,13 +9700,13 @@ def main():
                         # it, and the opposite of "calls keep arriving".
                         gap = 0 if prev is None else (t - prev[3])
                         d = "" if prev is None else (
-                            f"  (+{pf - prev[0]:,} pfn, "
+                            f"  (+{pf - prev[0]:,} 0x101, "
                             f"+{c0e - prev[1]:,} code0, "
                             f"+{ca - prev[2]:,} calls"
                             + (f", x{gap / float(1 << 34):.1f} threshold"
                                f", {(ca - prev[2]) * 2e9 / gap:,.1f}/s"
                                if gap else "") + ")")
-                        print(f"    tsc {t:>18,}  pfn {pf:>8,}  "
+                        print(f"    tsc {t:>18,}  0x101 {pf:>8,}  "
                               f"code0 {c0e:>8,}  calls {ca:>8,}{d}")
                         prev = (pf, c0e, ca, t)
                 # Which codes are still arriving, as a delta over the
