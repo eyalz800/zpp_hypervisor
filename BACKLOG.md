@@ -75021,3 +75021,27 @@ is still what is being hunted.
 
 Rate so far: **one healthy in six** (212), five stalled (211, 213, 214,
 215, 216), four of them state A.
+
+## Stalled A, fifth sample: vmcall = 125 exactly, four boots running
+
+    boot 213   cpu0 8,773.02/s   cpu1 1,185.20/s   vmcall 124
+    boot 215   cpu0 8,783.46/s   cpu1 1,196.33/s   vmcall 125
+    boot 216   cpu0 8,787.00/s   cpu1 1,189.00/s   vmcall 125
+    boot 217   cpu0 8,794.76/s   cpu1 1,186.40/s   vmcall 125
+
+Boot 217 adds `int-window` 21.2% and `wrmsr` 14.0%, both inside the
+band. **Four consecutive boots produce exactly 125 trust-level calls in a
+~62-second window**, and the fifth produced 124.
+
+125 in 62.06 s is 2.0145/s. A free-running 2 Hz source would give 124.1,
+so the count is not merely "about two a second" - it is **more regular
+than 2 Hz**, which points at a source clocked off the same thing the
+measurement window is, rather than an independent timer. That is worth
+one line and no more, because distinguishing "a 2.0145 Hz timer" from "a
+2 Hz timer plus a boundary effect" needs a longer window, and the
+question that matters is not the frequency but whether the calls carry
+work.
+
+Tally over seven boots: **one healthy (212), five stalled A (211, 213,
+215, 216, 217), one stalled B (214)**. One in seven against the recipe's
+7 in 20 - low, but seven boots cannot distinguish 14% from 35%.
