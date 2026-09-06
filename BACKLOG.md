@@ -74952,3 +74952,40 @@ exits), is now the most conspicuous unexplained quantity in stalled B and
 has no counterpart measurement in stalled A. It is not pursued here
 because a single window on a single boot is what produced the claim being
 retracted three paragraphs up.
+
+## Stalled A is real and tight: three boots, 0.36%. Boot 214 was a second state, not a refutation of the first
+
+Boot 215, triaged at 12 minutes, lands on stalled A:
+
+    boot 211   cpu0 8,804.45/s   cpu1 1,191.81/s   vmcall 2.16/s
+    boot 213   cpu0 8,773.02/s   cpu1 1,185.20/s   vmcall 2.00/s
+    boot 215   cpu0 8,783.46/s   cpu1 1,196.33/s   vmcall 2.01/s
+    spread          0.36%              0.93%
+
+with `int-window` 21.1% against 211's 21.3% and `wrmsr` 14.2% against
+14.0%. **Three independent boots, four quantities, agreement inside 1%.**
+
+This refines the previous entry rather than reversing it again, and the
+distinction is worth stating carefully because I have now written three
+positions on this in an hour:
+
+- **"Stalled A is a reproducible operating point" - supported**, now by
+  three samples where it had two. The tight agreement was not a
+  coincidence between two runs.
+- **"There is no *single* stalled state" - still true.** Boot 214 is
+  balanced across processors (0.98:1 against A's 7.4:1) with a different
+  `wrmsr` share, and one sample of it stands.
+
+So the retraction was right about what it retracted - the claim that
+8,780/1,188 characterises *the* stalled state - and wrong to imply the
+signature itself was coincidental. The correct statement is: **there are
+at least two stalled states; A is well characterised and has appeared
+three times out of four stalled boots; B has appeared once.**
+
+### Rate so far, and it matches the recipe
+
+Five boots triaged this way: 211, 213, 214, 215 stalled, 212 healthy -
+**one in five**, against `login-screen-reached-recipe`'s measured 7 in 20.
+Consistent, and the triage now costs ~13 minutes per boot rather than the
+53 and 28 that boots 210 and 211 took, so the same odds are being sampled
+about four times faster.
