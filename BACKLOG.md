@@ -71392,3 +71392,78 @@ every reason appearing above 1% in any histogram in this file.
 - **`nested_evmcs.cpp:250,258`** copies both fields out unconditionally
   on the enlightened path. Different function, `evmcs=0` in the shipped
   manifest, left alone.
+
+## The three exit-information gates are in, and the honest saving is 1.7%
+
+`87b091d` / `d516c65` gate `guest_linear_address`,
+`vm_exit_instruction_information` and `vm_exit_instruction_length` so each
+VMREAD is taken only for the exit reasons the SDM defines the field for -
+citations at `sdm.txt:203824-203851` (30.2.1) and `:204159-204175` (30.2.5),
+looked up rather than recalled.
+
+**Predicted, falsifiable on the rig against boot 194's 25.36 reads/exit:**
+
+    reads/exit    25.36 -> 24.25   (-4.4%)
+    misses/exit   19.46 -> 18.35   (-5.7%)
+    hit rate      23.3% -> 24.3%   (the denominator moving, not the cache)
+    3,192 cycles an exit = **1.7%** of a 186,210-cycle vmresume exit
+
+**That is far less than the 11.7% I estimated when tasking it**, and the
+difference is entirely mine: I multiplied the inventory's *full* 14.2
+reads/RT by the new price, when only 2.22 of those were the
+definedness-gated class. The other twelve were declined, each with a
+reason, and the reasons are good ones.
+
+### What was declined, and one of them is now the biggest item in the tree
+
+- **four shadowed fields -> write-intercepted** (4.0 reads/RT). A bitmap
+  trade against an *estimated* exit count, and it carries the
+  `deferrable_field_is_shadowed` trap - hvix64 reading back what it did
+  not write, with nothing faulting.
+- **`guest_cr0`/`guest_cr4`/`bndcfgs`** (3.0). Defined on *every* exit, so
+  no SDM argument exists; the case would rest on a dynamic property.
+- **`l1_host_audit_batch` 4->1** (3.0). Its own comment records that
+  gating it once cost the whole `host_field_elidable` elision.
+- **`guest_cs_selector` at `resume.cpp:1268`** - **2.0 reads/RT ≈ 5,750
+  cycles a round trip, larger than everything gated here combined.**
+  Already settled against **with a test**: `tests/resume_guest` asserts
+  `0x28` and fails when it is gated, and `BACKLOG.md` records the gate
+  being tried and reverted for exactly that. The agent recorded the new
+  arithmetic and left the decision alone, which is right - but **at 2,876
+  cycles a read the trade is 48x more attractive than when it was
+  rejected**, and that is worth re-deciding deliberately rather than by
+  inheritance.
+
+### Three sub-claims that needed checking and were not obvious
+
+- the SDM's "prematurely busy shadow stack" clause would add three reasons
+  to the linear-address list, and **cannot bite here**: `build_vmcs02`
+  composes vmcs02's exit controls from vmcs01 plus the acknowledge-interrupt
+  bit, never from vmcs12, so only zpp could set that control and nothing
+  does.
+- LOADIWKEY / TPAUSE / UMWAIT are on the instruction-information list and
+  have no enumerator in `vmx_exit_reason.h` - their exits need secondary
+  controls this tree does not offer, and `tests/nested_exit` already
+  records 67 and 68 as KVM divergences for the same reason.
+- **KVM reads all three unconditionally** (`nested.c:4570`, `:4627-4628`).
+  That is evidence *against*, and it was weighed rather than ignored: both
+  behaviours are architecturally permitted because the field is undefined
+  either way, so KVM's choice is about cost, not correctness.
+
+### The test is the part that makes this safe
+
+37 new checks, **two per case** - the vmcs12 value and a new per-encoding
+read counter in the VMX shim. Neither alone is sufficient: the length gate
+hands over a byte-identical value, so a value-only test cannot see it at
+all. Negative-controlled **three ways**, each gate reverted separately:
+
+    gated                                   1,249 checks, 1 pre-existing failure
+    guest_linear_address reverted           +7 failures
+    vm_exit_instruction_information rev.    +8 failures
+    vm_exit_instruction_length reverted     +1 failure
+
+Positive cases run after a reflection that left a sentinel in vmcs12, so a
+gate that stopped *writing* instead of writing zero also fails.
+
+Integrated, built, host suite showing only the two pre-existing failures.
+**Not deployed** - boot 194 is mid-flight.
