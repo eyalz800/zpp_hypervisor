@@ -70128,3 +70128,73 @@ that installs leaves.
 
 That is worth more than the boot: it says where to look for the 3-process
 phase's cost, and it is not the EPT path.
+
+## Where the 3-process phase's time actually goes - measured, and it is VMCS copying
+
+Boot 191, zpp resident, **in the 3-process phase** (the one that occupies
+most of every boot), `--delta --delta-phases`, cpu 0: **130,050 round
+trips, 348,046 handler cycles per round trip = 174.7 us at 1.992 GHz.**
+
+The tree closes on itself, which is the reader proof:
+
+    adjacent intervals   348,018
+    handler_cycles delta 348,047
+    outside the split         29      (0.0%)
+
+Self cost per round trip, largest first:
+
+    build: after vmptrld        52,416   15.1%   writes into vmcs02
+    on_guest_vmlaunch (self)    52,389   15.0%
+    save_l2_state               48,193   13.8%   reads out of vmcs02
+    load_l1_host_state          40,253   11.6%   writes vmcs01 host state
+    exit: prologue              22,574    6.5%
+    exit information            18,042    5.2%
+    resume: entry census        11,723    3.4%   <- instrumentation
+    copy out: field writes      10,132    2.9%
+    merge: guest page read       9,254    2.7%   3 guest page reads per RT
+    enter_or_park_l2             7,421    2.1%
+    vmptrld->vmcs01              6,138    1.8%
+    merge_nested_bitmaps (self)  6,820    2.0%
+    vmptrld->vmcs02              5,733    1.6%
+    copy out: vmptrld shadow     5,386    1.5%
+    resume: events               4,612    1.3%
+    copy out: vmptrld back       4,727    1.4%
+    reflect: msr load + invvpid  4,848    1.4%
+    copy out: vmclear            4,076    1.2%
+
+**The top four are 193,251 cycles - 55.5% of the whole handler - and all
+four are VMCS field movement**: writing vmcs02, reading vmcs02, writing
+vmcs01's host state. That is the nesting tax in its purest form, and it is
+where the boot's time goes.
+
+### What this rules in and out
+
+- **Not the EPT path.** `shadow_ept_leaves_filled` was 1 in 32 seconds
+  here. `eagerept`'s 18% was real but is measured on a round trip that
+  installs leaves, and this phase installs none.
+- **Not instrumentation.** `resume: entry census` is 3.4% and
+  `reflect: exit ring` 0.1%. Even removing every diagnostic in the tree
+  cannot reach the top four.
+- **Not the shadow-VMCS copy machinery.** The whole `copy out:` family -
+  vmptrst, vmptrld shadow, field writes, vmclear, vmptrld back - sums to
+  **7.1%**.
+- **It IS the four bulk copies**, and `defer=1` already collapses one of
+  them (44 VMREADs/exit saved, 1.136x, per its own comment).
+
+### The number that frames everything after this
+
+**174.7 us per round trip, 2.00 exits per round trip.** So an exit costs
+~87 us here. The tick is 574.7 Hz = 1.74 ms, and the guest takes ~4
+reflections per tick, so **~700 us of every 1,740 us tick is this
+handler** - which is the 65% VMM share seen from the other side, now
+decomposed.
+
+To make the guest boot at a useful speed, those four phases have to get
+dramatically cheaper. Removing redundant reads did not touch them
+(`1ec74e3`); the cache does not (most fields are read once); enlightened
+VMCS would have, and is unavailable (`a1ac974`).
+
+**This is the first measurement that says what would have to change, in
+cycles, in the phase that matters.** Every previous cost reading was taken
+in a wedged or transient state and could not be attributed to the boot's
+critical path.
