@@ -70612,3 +70612,326 @@ than a snapshot is the **zero svchost processes after 45 minutes** - that
 is a cumulative fact, not an instant. Sampling `services.exe`'s
 `ContextSwitches` (`_KTHREAD+0x154`) twice would settle it outright, and
 that field is already documented in this tree.
+
+## A `vmresume` exit's 186,210 cycles, accounted - and the 60-cycle read price is an artefact of the VMCS field cache
+
+`f38f78f` left "what are the other 144,186 cycles" open and said nothing
+had looked at it. This looks at it. **Nothing was rebuilt and nothing was
+booted** - every number below is already in this file, already in a dump
+this tree has printed, or read out of the source.
+
+### 0. First: `handler_cycles` does NOT bracket the hardware transition
+
+**VERIFIED, and it decides whether any of the rest is addressable.**
+
+- Opened at `exit_dispatch.cpp:646-658`, inside `on_vm_exit`, after the
+  assembly stub has already captured context.
+- Closed at `resume.cpp:1554` (`mark_phase(cpuid, 30)`); `resume.cpp:1558`
+  reuses that same instant rather than taking a second one.
+- `restore_context` - and therefore the `VMRESUME`/`VMLAUNCH` itself - is
+  at `resume.cpp:1710`, **156 lines after the span closes**.
+
+So the span is **pure root-mode software**. It contains no VM entry, no
+guest execution and no VM exit of ours. `apply_time_dilation`,
+`discard_stale_shadow_ept` and the entry-stub selection sit *outside* it,
+so if anything `handler_cycles` under-counts.
+
+**But the interesting half of that answer is the opposite of "so it is all
+software".** zpp runs as KVM's guest. Every `VMREAD`, `VMWRITE`,
+`VMPTRLD`, `VMCLEAR` and `INVVPID` zpp executes *inside* that span is
+itself a hardware VM exit to L0 and a full KVM software round trip. **The
+cycles are hardware transitions - just not ours.** That is addressable in
+software, by executing fewer of those instructions, which is the opposite
+conclusion from "the transition is the hardware and there is nothing to
+do".
+
+### 1. The residue, closed to 1.5%
+
+`on_guest_vmlaunch` is `nested_vmx.cpp:2360` (**not** `nested_entry.cpp`),
+reached from `exit_dispatch.cpp:4163` -> `4389` -> `on_vmx_instruction`
+(`nested_vmx.cpp:544`) -> `nested_vmx.cpp:672-673`. For a vmresume exit,
+`exit: dispatch` (slot 26) contains essentially the whole handler: the
+`on_l2_exit` fast path is skipped because `running_l2` is false when *L1*
+executes VMRESUME.
+
+Per vmresume exit, using boot 191's phase tree (`51d64d2`, 348,046 cyc/RT,
+2.00 exits/RT) for the shape and boot 192 for `build_vmcs02`:
+
+| term | cycles | slot |
+|---|---|---|
+| `build_vmcs02` | 87,326 | 2 |
+| `copy_shadow_to_vmcs12` | ~52,400 | 5 (**CROSS**) |
+| `resume:` 27-30, one exit's worth | ~25,000 | 27-30 |
+| `exit: prologue`, one exit's worth | ~11,300 | 25 |
+| `enter_or_park_l2` | 7,421 | 35 |
+| **total** | **~183,400** | against 186,210 |
+
+**So the "other ~99,000 cycles" are, largest first: `copy_shadow_to_vmcs12`
+~52,400, the resume phases ~25,000, the prologue ~11,300, and
+`enter_or_park_l2` 7,421.** Mixing two boots is flagged rather than
+hidden; the shape is what the reconciliation turns on, not the third
+digit.
+
+### 2. `on_guest_vmlaunch (self)` was never unexplained. It is the shadow copy, and this file already said so once
+
+**VERIFIED, twice over.**
+
+`copy_shadow_to_vmcs12` is called from `on_guest_vmlaunch` at
+`nested_vmx.cpp:2408`, inside slot 36's bracket. Its own slot 5 is
+`PHASE_CROSS` in `PHASE_PARENT` (`rig-dump-state.py:108`) because it has
+two callers - the other is `flush_guest_vmcs12`, `nested_vmx.cpp:1177`.
+`dump_phase_tree` subtracts only a slot's *children*
+(`rig-dump-state.py:3367`), and a CROSS slot is nobody's child, so its
+cycles sit inside slot 36 and are never taken out of it.
+
+The printer says this in as many words at `rig-dump-state.py:3396-3407`:
+
+> "A cross-cutting phase is inside one of the rows above -
+> `copy_shadow_to_vmcs12` is inside `on_guest_vmlaunch` on one call ... So
+> those two `self` figures are **upper bounds by exactly this much**."
+
+And `18608` in this file already made and corrected the same mistake: self
+75,916 against `copy_shadow_to_vmcs12` at 58,046, "genuinely unexplained
+residue there is about 17,870", ending "**That warning earned its
+place.**"
+
+**This is the second time the same self column has been read as an
+unexplained residue, and the second time the answer was printed three
+lines below it.** The measurement needed is not new: read the
+cross-cutting rows the dump already prints. `--delta --delta-phases`
+prints slots 5 and 45-49 with no rebuild.
+
+What `copy_shadow_to_vmcs12` does (`nested_shadow_vmcs.cpp:881`): VMPTRLD
+the shadow region (`:931`), read back every `shadow_read_write_fields`
+entry with a real `vmcs.read` (`:944-945`), VMCLEAR (`:994`), VMPTRLD back
+(`:1022`). `37979` prices it at 52,605 for "~19 accesses" - **2,768 cycles
+an access**, and `18630` at ~3,500 a field. It did not move at all across
+a change that made copying 4.8x cheaper (`37962`), so it is not
+copy-bound.
+
+### 3. The price of a VMCS read is not 60 cycles. The benchmark measures its own cache
+
+**This is the load-bearing correction, and it re-opens what `9c97e8e`
+closed.**
+
+`price_read` (`exit_dispatch.cpp:171-177`) reads **one field, one thousand
+times**, through `vmcs.read()`. `vmcs::read` (`vmcs.h:989`) consults the
+per-processor field cache and on a tag hit does `return
+current.value[slot]` at `vmcs.h:1048` **without executing `vmread` at
+all**. Nothing between iterations moves the epoch or forgets the row.
+
+So `price_read` is **one real VMREAD plus 999 cache hits, divided by
+1,000.** 57.3 cyc/access is the cache-hit price. It would report ~57
+whatever a VMREAD costs.
+
+- `vcache=1` is in the deployed manifest (`69821`), and `vmcs.h:275` calls
+  it "load bearing until that is disproved" - the default is OFF and OFF
+  has never booted. So this applies to **every boot every number in this
+  file was taken from.**
+- `price_write` (`exit_dispatch.cpp:181-188`) does **not** have the flaw:
+  `vmcs::write` executes `vmwrite` at `vmcs.h:921` and only *then* writes
+  through to the cache. **So 2,040 is a real instruction price and 57.3 is
+  not.** That asymmetry is exactly why the two came out 34x apart for what
+  is the same trap-to-L0 mechanism, and the asymmetry was read as a
+  finding instead of as a symptom of the instrument.
+- The benchmark also runs at the **first exit of the boot**
+  (`vmread_benchmark_done`, `exit_dispatch.cpp:165`), when zpp has never
+  executed a VMPTRLD and there is no vmcs12, so L0 has no shadow VMCS set
+  up for it either. Its own comment names that caveat; nobody named the
+  cache one.
+
+**Therefore "read shadowed 57.3 vs unshadowed 60.4, ratio 1.05x, so
+shadowing is not in play" cannot mean that.** 999 of every 1,000 samples
+bypass the instruction. The 3.1 cyc/access difference, if real, is **3,100
+cycles on the single instruction each loop actually executed** - which is
+suggestive rather than settled, and is the same order as the "~3,100 a
+read" constant `f38f78f` removed as stale. The *write* ratio (1.00x) is a
+valid comparison, since every write is real, and it does say shadowing
+does not help writes.
+
+**The tree's own best read price is 991 cycles**, from `30545` - "A VMCS
+access costs 991 cycles at the margin", measured by a **controlled removal
+of 23 known accesses** (22,800 cycles / 23). That is a difference of two
+configurations, not a quotient and not a loop, and it is the strongest
+instrument here. `18638` independently prices a single `VMPTRLD` at 5,673
+"against a VMREAD's 991", and `build_vmcs02`'s own split slot 4 - "the
+VMPTRLD itself" - reads **6,495**.
+
+### 4. The access census has a hole five instructions wide
+
+**VERIFIED.** `vmcs_reads_taken` / `vmcs_writes_taken` are incremented
+only at `vmcs.h:902` and `vmcs.h:991`, i.e. in `vmcs::read` and
+`vmcs::write`. The region instructions are invisible. On a **vmresume
+exit** specifically:
+
+| instruction | site | measured by |
+|---|---|---|
+| VMPTRLD shadow region | `nested_shadow_vmcs.cpp:931` | slot 46 |
+| VMCLEAR shadow region | `nested_shadow_vmcs.cpp:994` | slot 48 |
+| VMPTRLD back | `nested_shadow_vmcs.cpp:1022` | slot 49 |
+| VMPTRLD vmcs02, `point_at_vmcs(cpu,true)` | `nested_entry.cpp:1829` | slot 6 - **6,495** |
+| INVVPID, `nested_transition_flush` | `nested_entry.cpp:3938` | inside split slot 7 |
+
+**Five uncounted VMX instructions per vmresume exit**, at 4,000-6,500
+each: **20,000-32,000 cycles, 11-17% of the exit, that the "33.1 reads and
+20.6 writes" line does not contain.** `18635` recorded the blind spot and
+nothing was added; it still is not counted.
+
+### 5. Recomputed budget, with both candidate read prices
+
+Per vmresume exit: 33.1 counted reads, 20.6 counted writes, 5 region
+instructions. Cache hit rate measured **23.1% in the healthy phase**
+(`69075`), so **76.9% of counted reads are real VMREADs** = 25.5.
+
+| price model | reads | writes | regions | total | share of 186,210 |
+|---|---|---|---|---|---|
+| read 991, write 991, region 6,000 | 25,270 | 20,415 | 30,000 | 75,685 | **41%** |
+| read 991, write 2,040, region 6,000 | 25,270 | 42,024 | 30,000 | 97,294 | **52%** |
+| read 2,040, write 2,040, region 6,000 | 52,020 | 42,024 | 30,000 | 124,044 | **67%** |
+
+**Against `f38f78f`'s 24%, every one of these is a different
+investigation.** The retraction's conclusion - "88.3% of the handler is
+something other than VMCS access" - rests entirely on the 60-cycle read
+price, and that price is the cache answering itself.
+
+**So the honest statement is: between 41% and 67% of a `vmresume` exit is
+VMX instructions trapping to KVM, and this tree cannot currently say
+which.** That is one three-line fix away from being settled.
+
+### 6. `merge_nested_bitmaps` - 17,940 cycles for 0.88 accesses, and why the obvious cache is wrong
+
+`build_vmcs02` split slot 3 ("bitmaps merged, own controls in hand") is
+the interval `nested_entry.cpp:1732 -> 1812`, containing
+`merge_nested_bitmaps` (called at `nested_entry.cpp:1734`) and a
+once-per-cpu host cache fill. Its own phase slot 8 measured **20,387
+cyc/RT** after the word-at-a-time memcpy (`37939`), of which `merge: guest
+page read` (slot 10) is 9,254 and the rest is the union. **0.88 accesses
+is right and means nothing is wrong** - the merge takes no VMCS access at
+all, because it reads vmcs12 out of the in-memory `guest_vmcs12[cpu]`
+cache, not the region.
+
+Per call, on the Hyper-V shape: **one** `read_guest_physical` of 4,096
+bytes plus **512 quadword ORs** (`nested_entry.cpp:1063-1065`), plus two
+flag checks that return immediately. The 3.00 `merge: guest page read`
+calls per *round trip* are the three areas across both halves; only
+enabled ones read.
+
+**It is recomputed every entry, and an address-keyed cache is unsound.**
+The code says why at `nested_entry.cpp:929-941`: the inputs are the three
+guest-physical addresses out of vmcs12 *and the contents of those guest
+pages*, which the guest hypervisor writes **directly, with no VMWRITE and
+no exit**. Keyed on the address, this VMM "would have gone on trapping
+what the guest hypervisor stopped asking for and, worse, gone on *not*
+trapping what it started asking for" - a correctness failure in the
+unsafe direction.
+
+**A sound cache exists and the tree already has the mechanism.** Key it on
+the page *contents* by write-protecting the three guest pages through
+`watch_guest_page_writes` and invalidating on the fault - which
+`nested_entry.cpp:970-976` already names as "the optimisation". The full
+invalidation set, and all four are needed:
+
+1. a guest write to any of the three watched pages;
+2. the vmcs12 address fields (`msr_bitmap`, `io_bitmap_a`, `io_bitmap_b`)
+   changing;
+3. the enable bits in vmcs12's primary controls changing - a bitmap that
+   becomes unused must stop being merged, and one that becomes used must
+   start;
+4. **our own** bitmap changing - `forget_nested_bitmaps()` already exists
+   (`hypervisor.h:13334`) with exactly two callers, `local_apic.cpp:111`
+   and `hypervisor.cpp:3545`, and `hypervisor.cpp:3523-3544` records why
+   missing one livelocks: "a skipped merge leaves vmcs02's bitmap with the
+   bit still set - so the same instruction takes the same exit, and
+   neither level claims it, for ever."
+
+Cross-processor visibility needs the `ept_generation` shape, not a plain
+per-cpu flag.
+
+**Worth 17,940 cycles - 9.6% of a vmresume exit.** Real, and not the
+lever; `nested_entry.cpp:965-968` already said "removing the whole of it
+is 3.0%". **And it is currently unmeasurable**: there is no hit/skip
+counter for `nested_bitmap_is_ours` anywhere, and `rig-dump-state.py` does
+not read it. Add the counter before the cache.
+
+### 7. What one guest page read costs - it *is* measured
+
+**VERIFIED, answering the question as asked.** `read_guest_physical`
+(`guest_memory.cpp:91-167`), per 4 KB page:
+
+- `mapping_window_lock.lock()` at `guest_memory.cpp:132` - a **globally
+  shared** `zpp::spin_lock`, one locked RMW per page;
+- **one store to a host page-table entry** - `hypervisor.cpp:1478-1480`,
+  fast path, with the leaf `pte *` cached in `window_entry[slot]`;
+- **one INVLPG** - `hypervisor.cpp:1517`, unconditional;
+- one 4,096-byte `memcpy` through a just-invalidated window;
+- **no INVEPT, no INVVPID, and no VMREAD at all** - `this_processor()` is a
+  GS load, put there precisely to stop this path reading `vmcs.vpid()`
+  (`hypervisor.h:12073`).
+
+Measured: `guest read: map_window` (slot 11) **278 cycles a call**
+(`guest_memory.cpp:49-73`); `guest read: whole call` (slot 38) is the whole
+thing at **4,173 cycles** after the memcpy fix (`37938`). So the mapping
+repoint is 7% of it and the copy is the rest - which is why
+`guest_memory.cpp:135-138` times the two apart, and why keeping the
+mapping is worth 0.9% rather than the phase.
+
+**There is deliberately no same-page fast path.** It was built, measured
+and reverted: `hypervisor.cpp:1508-1516` - "it fired on 11.5% of 11.4
+million calls and moved this phase's cost by nothing, because a four-level
+walk asks one slot for four *different* table frames in a row." Do not
+re-propose it.
+
+### 8. Ranking, with what breaks and how to check
+
+**0. Fix `price_read` first. It is three lines and it decides the order of
+everything below.** Call the raw `arch::x86_64::vmx::vmread` from
+`vmx/asm.h` instead of `vmcs.read`, or read 1,000 *different* fields. Keep
+the cached figure beside it as a second row - the pair is what `CLAUDE.md`'s
+"census two fields, not one" asks for, and the pair also prices the cache,
+which nothing does today. **Breaks nothing**: it is a startup-only
+diagnostic. **Verified by** the read row moving off ~57 and the
+shadowed/unshadowed ratio becoming a real ratio. If it stays at 57, this
+whole section is wrong and `9c97e8e` stands.
+
+Then, by cycles saved per vmresume exit:
+
+| | change | saves | what breaks | how it is checked |
+|---|---|---|---|---|
+| 1 | **Trim `shadow_read_write_fields`** so `copy_shadow_to_vmcs12` reads back fewer fields | up to ~52,400 (28%), realistically a fraction | a field removed from the shadow list becomes *intercepted*: hvix64's write to it takes a `vmwrite` exit instead. Net win only for fields it writes **less than once per entry**; wrong for a hot one | `vmcs_write_hits`, the per-field census in `vmcs.h` that is compiled in and has never been read, against the `l1_vmwrite` exit count; then slots 5 and 47 per RT |
+| 2 | **Content-keyed bitmap-merge cache** (section 6) | ~17,940 (9.6%) | the four invalidations above; missing (4) livelocks per `hypervisor.cpp:3523-3544` | slots 8 and 10 per RT, plus a **new** `nested_bitmap_is_ours` hit/skip counter that does not exist yet |
+| 3 | **Stop the VMCS pointer churn.** `point_at_vmcs(cpu,true)` at `nested_entry.cpp:1829` (slot 6, 5,733/RT) and `point_at_vmcs(cpu,false)` at `nested_entry.cpp:6047` (slot 7, 6,138/RT) are one VMPTRLD each way, every round trip | ~11,900/RT (~6%) | whichever reflection-path access needs vmcs01 current. A design question, not a tweak: it needs the list of vmcs01 accesses on the reflect path first | slots 6 and 7 falling to zero calls/RT |
+| 4 | **Compile-gate `sample_guest_thread`.** `nested_vmx.cpp:2745` does a **guest page-table walk on the entry path**, rate-limited but not behind an `if constexpr` | part of the ~12,000/RT entry census (3.4%) | loses the thread census; nothing else | slot 30 and slot 38 calls/RT |
+| 5 | **Count the region instructions** (section 4) | 0 - it is an instrument | nothing | five counters beside `vmcs_reads_taken` |
+
+**Item 5 is not optional if 1 or 3 are attempted**, because their whole
+saving is in instructions no counter in this tree can see.
+
+### What this closes and what it does not
+
+- **Closed: "is it the hardware transition?"** No - `handler_cycles`
+  brackets software only (section 0). But the software it brackets is
+  dominated by instructions that each provoke a hardware transition *to
+  KVM*, so the avenue is open rather than shut. **This does not close the
+  cost investigation; it redirects it.**
+- **Closed: `on_guest_vmlaunch`'s self time.** It is
+  `copy_shadow_to_vmcs12`, marked CROSS, printed three lines below in the
+  same dump, and this is the second time it has been read as unexplained.
+- **Closed: what one guest page read costs.** 4,173 cycles, 278 of it the
+  window repoint, measured, with the fast path already tried and reverted.
+- **Closed: whether the bitmap merge can be cached.** Not on the address -
+  the code's own argument stands. On the contents, with write-watching,
+  and the invalidation set is enumerated above.
+- **Re-opened: whether VMCS traffic is the cost.** `9c97e8e`'s 11.7% and
+  `f38f78f`'s 24% both rest on a 60-cycle read price that is the field
+  cache answering itself. At the tree's own controlled-removal price of
+  991 it is 41%; at the write price, 67%.
+- **Not settled, and settleable in three lines:** what a real VMREAD costs
+  on this machine in steady state with a nested VMCS current. **Every
+  ranking above is conditional on it.**
+
+**The pattern, and it is the one `CLAUDE.md` already names four times: an
+instrument that cannot report its own failure.** `price_read` cannot
+report that it never executed the instruction it is named after. It has no
+second reading to disagree with - and `price_write`, sitting six lines
+below it and structurally unable to have the same flaw, was the
+disagreement all along.
