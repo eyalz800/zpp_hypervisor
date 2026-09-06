@@ -70935,3 +70935,73 @@ report that it never executed the instruction it is named after. It has no
 second reading to disagree with - and `price_write`, sitting six lines
 below it and structurally unable to have the same flaw, was the
 disagreement all along.
+
+## RETRACTED AGAIN: the 60-cycle read is the CACHE price, not the VMREAD price
+
+`9c97e8e` read `vmread_shadowed_cycles` = 57,299 per 1,000 accesses and
+concluded reads cost ~57 cycles. **The benchmark cannot measure that while
+`vcache=1`.**
+
+`price_read` (`exit_dispatch.cpp:171`) reads **one field** 1,000 times
+through `vmcs::read`, and `vmcs::read` returns from the field cache
+without executing `vmread`:
+
+    vmcs.h:1044   } else if (current.tag[slot] == tag) {
+    vmcs.h:1045       vmcs_cache_hits = vmcs_cache_hits + 1;
+    vmcs.h:1046       return current.value[slot];
+
+So 57.3 = **one real VMREAD plus 999 cache hits, divided by 1,000.** It
+would report ~57 whatever a VMREAD costs. **`price_write` does not have
+the flaw** - `vmcs::write` executes `vmwrite` at `vmcs.h:921` on every
+call - which is exactly why the two came out 34x apart for what should be
+the same mechanism. **The asymmetry was a symptom and I read it as a
+finding**, and then built "shadowing is not in play, ratio 1.05x" on top
+of it - a ratio computed from 999 samples that never touched the
+instruction.
+
+**What survives**: the write price of ~2,040 cycles is sound, and the
+57 cycles is a real measurement of *a cache hit*. What does not survive
+is every read-side conclusion in `9c97e8e` and `f38f78f`.
+
+### The share, recomputed against the tree's best available price
+
+The soundest read price in this tree is **991 cycles** (`BACKLOG.md:30545`
+- a controlled removal of 23 accesses, i.e. a difference between two
+configurations rather than a quotient). Against a 186,210-cycle
+`vmresume` exit with 33.1 reads and 20.6 writes:
+
+    at   991/read   33,000 + 42,024 =  75,024   40.3% of the exit
+    at 2,040/read   67,524 + 42,024 = 109,548   58.8%
+
+against `f38f78f`'s 24% and `9c97e8e`'s implied ~1%. **And that still
+excludes five region instructions per `vmresume` exit** - three VMPTRLDs,
+a VMCLEAR and an INVVPID at 4,000-6,500 cycles each, 20,000-32,000
+together - which `vmcs_reads_taken`/`vmcs_writes_taken` **cannot see**,
+because they count field accesses only.
+
+So VMCS traffic is roughly **half** of a `vmresume` exit, not a quarter
+and not four fifths.
+
+### And the "144,000 unaccounted cycles" never existed
+
+`3f9a73f` called `on_guest_vmlaunch`'s 52,389 self cycles unexplained.
+It is `copy_shadow_to_vmcs12`, called from `nested_vmx.cpp:2408`, whose
+slot is `PHASE_CROSS` - and `dump_phase_tree` subtracts only *children*
+(`rig-dump-state.py:3367`), so a cross-cutting slot stays inside its
+parent's self time. **The printer states this three lines below the
+number**, and `BACKLOG.md:18608` records the identical mistake being made
+and corrected once already.
+
+Second time the same column has been read as a residue with the answer
+printed underneath it. The residue for a `vmresume` exit closes to
+**1.5%** once it is counted: 87,326 + ~52,400 + ~25,000 + ~11,300 + 7,421
+= ~183,400 against 186,210.
+
+### The benchmark needs three lines, and it gates everything else
+
+While `vcache=1`, `price_read` measures the cache. Reading a *different*
+field each iteration, or bypassing the cache for the benchmark, would
+give the real number - and every cost decision in this file depends on
+it. **Recorded as the next change, ahead of any optimisation**, because
+ranking work by a price that is wrong by 17x is how three of this
+session's conclusions came to be retracted.
