@@ -73061,3 +73061,62 @@ call ever returns, which the pair's ratio hints at (2,936 before against
 It is 84% of the "before" count, so **the call completes and is simply
 made very often.** That is a repeat-call pattern, not a hang - which
 narrows it further and is the opposite of what a first glance suggests.
+
+## THE GUEST USES `int 0x2e` FOR EVERY SYSTEM CALL, not `syscall`
+
+The hot user-mode pair was never a spin and never a `syscall`. Decoding
+the bytes read out of `win32u.dll` at the hot address:
+
+    0x7ffdde7d32d8  f6 04 25 08 03 fe 7f 01  test byte ptr [0x7ffe0308], 1
+    0x7ffdde7d32e0  75 03                    jne +3
+    0x7ffdde7d32e2  0f 05                    syscall        <- FAST path
+    0x7ffdde7d32e4  c3                       ret
+    **0x7ffdde7d32e5  cd 2e                    int 0x2e       <- the HOT address**
+    **0x7ffdde7d32e7  c3                       ret            <- the other one**
+
+`0x7ffe0308` is `SharedUserData->SystemCall`. Read from the live guest:
+
+    SharedUserData->SystemCall = 1   (01 00 00 00)
+    bit 0 set -> the `int 0x2e` branch is TAKEN
+
+**Every user-mode system call in this guest goes through `int 0x2e` - a
+software interrupt through the IDT - instead of the `syscall`
+instruction.** The two hot addresses are the `int 0x2e` and the `ret`
+after it, which is why they are two bytes apart and why both are hot.
+
+### What this costs
+
+`syscall` is a single instruction that does not exit under
+virtualisation. `int 0x2e` is an interrupt-gate traversal, and it is the
+path Windows uses only when it believes fast system calls are
+unavailable. **This applies to every system call in every process** - it
+is not a fontdrvhost problem, and fontdrvhost is merely the process that
+makes the most of them.
+
+That reframes three things at once:
+
+- the 106,743 user-mode samples are **syscall stubs across the whole
+  system**, which is why they are spread over 1,973 addresses
+- `lsass.exe` at 21.2%, `csrss` at 11.8%, `services.exe` at 9.1% are all
+  paying the same tax
+- and the "~100x slower than real hardware" figure now has a candidate
+  mechanism that is **system-wide and architectural**, rather than a sum
+  of small VMM inefficiencies
+
+### The cause is a hypothesis with a named check
+
+Windows sets `SharedUserData->SystemCall` when it concludes the processor
+has no usable fast system call. The obvious candidate is **CPUID leaf
+`0x80000001` EDX bit 11 (SYSCALL/SYSRET)** not reaching the guest, or
+`IA32_EFER.SCE` not being set.
+
+**INFERRED, and it must be checked before anything is built.** zpp
+answers the whole hypervisor CPUID range and filters leaves elsewhere;
+hvix64 sits between zpp and Windows and synthesises its own. Either could
+be responsible, and so could neither - Windows also sets this flag for
+reasons unrelated to CPUID.
+
+**This is the first mechanism found this session that could plausibly
+account for the guest being slow by a large factor rather than a few
+per cent**, and unlike every cost lever pursued earlier it is not about
+zpp's own exit handling at all.
