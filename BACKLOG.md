@@ -69059,3 +69059,54 @@ that is not a member of the singleton is invisible to every instrument in
 this tree, however diligently the singleton is dumped. That is a third
 class of "an instrument that cannot report its own failure" - here the
 instrument cannot report its own *existence*.
+
+## Boot 189 runs the removal build - and I destroyed my own baseline
+
+Deployed the eight-site removal (`census=0 closed=0` verified in the
+on-disk manifest, hashes matched from a fresh mount). Boot 189, zpp
+resident, `VM status: running`, **healthy** at `vtl_fresh_calls` 87.35/s
+and 31.14/s.
+
+Measured on it, reading the non-singleton globals directly:
+
+    vmcs_reads_taken   296,407 /s
+    exit_total           9,752 /s   (6,377 cpu 1 + 3,374 cpu 0)
+    reads per exit        30.4
+    cache hits/misses   23.1% hit   -> 188,054 real VMREADs/s
+
+**This cannot be compared to anything.** The pre-removal number I took on
+boot 188 was in the **wedged** state; this one is in the **healthy**
+state. The hit rates alone prove the phases differ - 36.2% wedged against
+23.1% healthy - and CLAUDE.md's own rule is to compare steady state with
+steady state.
+
+**The error was procedural and it was mine.** Boot 188 was sitting wedged,
+with the pre-removal binary, and I read `vmcs_cache_hits`/`misses` off it
+and stopped. `vmcs_reads_taken` and `exit_total` were three lines away and
+I did not take them. A before/after that needed one extra read now needs a
+rollback boot to reconstruct.
+
+**What is not lost.** The removal's count reduction is verified
+*statically on the shipped ELF* - call sites counted in the binary at
+`e53b81c` against the branch, per site, with one row rising for a
+documented reason (nine terminal `record_exit` calls now naming the RIP
+themselves, all immediately before `[[noreturn]] on_unhandled_exit`). So
+"6.5 fewer reads per exit" does not depend on the runtime comparison I
+failed to set up.
+
+**What is lost** is the wall-clock effect in the wedged state, which was
+the whole point: whether cpu 0's `vmm%` falls from 65.07% and whether the
+convoy loosens. That needs either a rollback boot or acceptance that the
+outcome test - does the guest still wedge at the same coordinates - is the
+only evidence this run can produce.
+
+**Taking the outcome test**, since it is the one that matters for the goal
+and costs nothing extra: boot 189 either wedges at ~27,000 fresh calls
+and ~10,700 copies like boots 185-188, or it does not. Four boots have now
+landed in a 2.8% band, so a fifth landing outside it would be
+informative on its own.
+
+**Rule, recorded because it has now cost a comparison:** take the *whole*
+before-set while the specimen is in hand. A wedged guest is the expensive
+thing to obtain; the marginal cost of three more counter reads while it is
+sitting there is seconds, and the cost of missing one is a boot.
