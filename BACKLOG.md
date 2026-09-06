@@ -72656,3 +72656,168 @@ facts are not contradictory - different instruments, different
 populations, different windows - but they have not been reconciled, and
 until they are, "the guest is making win32k calls at high rate" rests on
 one instrument that cannot name who.
+
+## The hot-RIP census now names the address space, and what it cost
+
+`a622eef` ended with the only route left being "the hot-RIP census would
+have to record cr3 beside the RIP". Built, and this records the four
+decisions it needed, including the two that were rejected - because
+`108d445` and `a622eef` were both written as "the obvious next step" and
+both of those steps turned out to be closed.
+
+### What was added
+
+`hypervisor/include/zpp/hypervisor/user_rip_census.h`, three free
+functions over spans, and four member arrays keyed on the processor. The
+sample is taken in `record_l2_entry_event` beside `interrupted_rip` and
+`quiet_rip`, on **user-mode addresses only** - `rip < 1 << 47`. Kernel
+addresses are shared by every process, so attributing one says nothing
+and censusing them would multiply the table by the population it cannot
+help.
+
+Two tables over the same stream, deliberately different shapes:
+
+- `user_rip_cr3` / `user_rip_rip` / `user_rip_hits`, 512 rows per
+  processor, direct-mapped on a hash of the **pair** and evicting by
+  decay - `note_hot_rip`'s rule, so one address executed by two
+  processes is two rows. That is the whole point: a module walk cannot
+  separate them, since ASLR gives a system DLL one base per *boot*.
+- `user_cr3_seen` / `user_cr3_hits`, 24 slots, **linear and
+  non-evicting**, over the same samples. It counts every sample against
+  its address space whatever the hashed table did with the addresses, so
+  the two can disagree - and a process with a large share here and no
+  row in the pair table is the pair table reporting its own saturation.
+  A hashed table with decay cannot say that about itself.
+
+### The byte cost, measured on the built ELF
+
+`llvm-nm -S` on `zpp_hypervisor`, before and after:
+
+    singleton  62,545,920 -> 62,951,424   +405,504   (+0.65%)
+    .bss       83,841,240 -> 84,246,744   +405,504
+
+1,024 bytes under the declared size, so the counters were absorbed by
+padding. **The module base moves with it** - re-read
+`allocate_rwx done at ...` for this build rather than carrying one over.
+
+What was rejected, and why, so it is not re-proposed:
+
+- **One more word on `interrupted_rip` and `quiet_rip`.** Two arrays at
+  `2048 * 8 * max_cpus` is **1,048,576 bytes**, 2.6x this, and it would
+  attribute kernel addresses - the population that gains nothing.
+- **2048 rows for the pair table.** Three words a row at `max_cpus` 32 is
+  1.5 MiB alone. `max_cpus` is 32, so *every word per row costs
+  256 KiB*, and the per-processor dimension already cost +2,031,616
+  bytes and a session's readings when the base moved under a hardcoded
+  script.
+- **256 rows.** Half the cost, and the hot rows would survive it - decay
+  means a row with n hits survives n collisions - but the *medium* rows
+  would not, and a distribution whose head is all that survives is the
+  shape that produced "the control is flat" once already.
+
+Measured, not argued: **`userip=0` leaves the singleton at exactly
+`0x3c09000` too.** The arrays are members whether or not anything writes
+them, so switching the census off saves cycles and not one byte. That is
+why it defaults ON.
+
+### The cr3 source is a VMREAD, and it is priced rather than hidden
+
+There is no free source of the second-level guest's CR3 on the entry
+path. Both candidates were read and both refused:
+
+- **`l2_exit_cr3`** is a real `guest_cr3` read already taken - on
+  **every exit**, behind `census_exits`, which is off by default. Using
+  it would make this census depend on a second switch and cost strictly
+  more.
+- **`guest_state_cache[cpu][<the guest_cr3 index>]`** is what
+  `build_vmcs02` last wrote. CR3 is deferrable, so that slot is stale
+  for exactly this field by the loop's own comment - and it is the wrong
+  *kind* of source: `record_l2_entry_event` already refuses
+  `hot_state_saved[cpu][0]` for the guest RIP on the grounds that a
+  census fed from this VMM's elision bookkeeping agrees with a bug
+  instead of exposing it. CR3 is the sharpest case, because a guest
+  `mov cr3` **does not exit**, so the cache cannot follow a context
+  switch and would attribute every sample to whichever process the level
+  above last wrote into vmcs12.
+
+So: one `guest_cr3` VMREAD, **gated on the address before the VMCS is
+touched**. Verified on the artifact rather than by inspection -
+`llvm-objdump` of `record_l2_entry_event` shows `is_user_address` called
+first and the branch jumping past the `guest_cr3` call entirely when it
+is false, and the `userip=0` build has no such call at all. The entry
+path already pays two VMREADs at about 4,340 cycles each by that site's
+own measurement; `65334f3` measured a cache-missing `guest_cr3` read at
+2,876.
+
+### The failure mode it can report
+
+`note_user_rip` **returns false and writes nothing** when the CR3 masks
+to zero, and `user_rip_unattributed` counts the refusals. So no row can
+carry cr3 zero, and "not recorded" is a different reading from "recorded
+as zero" - the property every instrument in the list under "an
+instrument that cannot report its own failure" was missing. The reader
+prints the unattributed count whenever the census ran at all, including
+when it is zero, because the absence of a refusal is itself a reading.
+
+`user_cr3_overflow` does the same for the dictionary: `cr3_seen`
+truncated silently until it grew that counter, and the effect was that
+"no page table maps it" and "the one that did was the ninth" were the
+same output.
+
+### The mask, which is where the join silently fails
+
+The pair table stores the CR3 masked to bits 12..51, its page frame.
+Every `DirectoryTableBase` observed in this guest ends `...002` - the
+system process reads `0x1ae002` - so **both sides carry low bits and
+both must be masked or the compare matches nothing**, which reads as "no
+process executes" rather than as a reader bug. `rig-dump-state.py` says
+what it masked, prints the mask constant, and names
+`guest-user-module.py` as the other half of the join. The dictionary
+keeps the value **unmasked**, so the identifier can be read rather than
+assumed - the second field, again.
+
+### What the reader prints
+
+Per processor, under `cpu N user-mode address spaces`: every cr3 seen
+executing user-mode code with its raw value, its masked value, its
+sample count and its share; then whether the dictionary saturated; then
+the unattributed count as a share; then every `(cr3, rip)` row with **no
+top-N cut**, since the population is the user half only and a cut over a
+census is what hid the whole secure-kernel tail for a week; then the
+contention count with a note that a high rate is expected at 512 slots
+and suppresses the medium rows and not the hot ones.
+
+`user_rip_samples` and `user_rip_unattributed` are in
+`DELTA_PER_CPU_COUNTERS`, so `--delta N` differences them. That matters
+for the same reason it mattered for `clock_gap_buckets`: a boot that
+spent its first minute in user mode leaves a cumulative census reading
+healthy for ever after user mode stops.
+
+### The test, and its negative controls
+
+`tests/user_rip_census`, 53 checks. It exists because `note_hot_rip` is
+a member of a class no host can construct, so its eviction rule has
+never been executed by anything but a real boot - and the first version
+of that rule lost 93% of a run and printed the remainder as a finding.
+
+Both negative controls were **run**, not reasoned about:
+
+- mask widened to `~0`: 7 checks fail, including "a cr3 whose page frame
+  is zero is refused" and both context-identifier cases.
+- cr3 dropped from the hash key - the module-walk failure mode: 3 checks
+  fail, and "the same address in two address spaces is two rows" reports
+  1 row with csrss's 10 samples decayed to 6 and WerFault's 4 gone.
+
+### The next read
+
+Boot the guest to the same wall with `userip=1`, dump, and join the
+printed cr3s against `guest-user-module.py`'s process list. Three
+outcomes and all three are informative:
+
+- one of the fourteen processes carries the win32u rows - the question
+  is answered,
+- only hvix64's cr3s appear - the 106,743 user-mode samples are not what
+  they have been read as, which `a622eef` already flagged as
+  unreconciled,
+- `user_rip_unattributed` is most of `user_rip_samples` - the instrument
+  failed, and it says so instead of printing an empty table.

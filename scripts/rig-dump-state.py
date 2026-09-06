@@ -5758,6 +5758,14 @@ DELTA_PER_CPU_COUNTERS = [
     # show.
     ("interrupted_samples", "interrupted-context samples"),
     ("quiet_samples", "quiet samples"),
+    # The user-mode census's denominator, and the count of samples it
+    # could not attribute.  Both here rather than only in the printer
+    # because the interesting question is a *rate*: "is the guest in
+    # user mode at all right now" is a delta, and a cumulative figure
+    # from a boot that spent its first minute in user mode reads as
+    # health for ever after user mode stops.
+    ("user_rip_samples", "user-mode census samples"),
+    ("user_rip_unattributed", "user-mode samples with no cr3"),
 ]
 
 # Monotonic counts that are single words, not per-processor rows.  Read
@@ -8162,6 +8170,15 @@ def main():
                "stall_restaged_total", "stall_restage_blocked",
                "quiet_rip", "quiet_hits",
                "quiet_samples", "quiet_overflow",
+               # The user-mode census, which is the only thing here that
+               # names the *address space* a sampled address ran in. The
+               # two above name the code and can never name whose - a
+               # system DLL sits at one base in every process that maps
+               # it, so a module walk cannot separate them either.
+               "user_rip_cr3", "user_rip_rip", "user_rip_hits",
+               "user_rip_samples", "user_rip_overflow",
+               "user_rip_unattributed",
+               "user_cr3_seen", "user_cr3_hits", "user_cr3_overflow",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
                # The interrupted thread's own registers and its own
@@ -9677,6 +9694,181 @@ def main():
                     print(f"  contention: {lost:,} colliding samples "
                           f"decayed a resident entry (a rate, not lost "
                           f"hot addresses)")
+
+    # The same population, keyed on the ADDRESS SPACE as well as the
+    # address - which is the one question the census above cannot
+    # answer and no post-hoc reader of it can recover.
+    #
+    # Why it had to move into the hypervisor. A hot user-mode address
+    # resolves to a module by walking a process's PEB, and that names
+    # *what code* and never *whose*: ASLR randomises a system DLL's base
+    # once per boot, not per process, so `win32u.dll` was found at the
+    # identical address in `csrss.exe` and in `WerFault.exe` with both
+    # walks proof-passing. The exit ring cannot do it either - a few
+    # hundred entries, zero user-mode addresses in them, and a snapshot
+    # cannot be joined to a cumulative census after the fact.
+    #
+    # **What this prints is a cr3 and what to do with it.** The join is
+    # deliberately not done here: `guest-user-module.py` already reads
+    # `_KPROCESS.DirectoryTableBase` for every process by walking
+    # `PsActiveProcessHead`, and duplicating that walk into this file
+    # would make two readers of one guest structure that can disagree.
+    #
+    # **The mask is stated because a silent mismatch reads as "no
+    # process executes".** The hypervisor stores the cr3 masked to bits
+    # 12..51, its page frame; every `DirectoryTableBase` observed in
+    # this guest ends `...002`, so the reader of the process list must
+    # mask its side the same way before comparing. The dictionary below
+    # keeps the value UNMASKED, so the low bits can be read rather than
+    # assumed.
+    if "user_rip_cr3" in off:
+        try:
+            UCAP = gdb_lengths(args.elf, ["user_rip_cr3"])["user_rip_cr3"]
+            DCAP = gdb_lengths(args.elf,
+                               ["user_cr3_seen"])["user_cr3_seen"]
+        except SystemExit:
+            UCAP = None
+            DCAP = None
+            print("note: user_rip_cr3 is flat in this ELF; the user-mode "
+                  "attribution census is skipped rather than printed "
+                  "under a processor it cannot be attributed to")
+
+        if UCAP and DCAP:
+            for _c in range(args.cpus):
+                for _n in ("user_rip_cr3", "user_rip_rip",
+                           "user_rip_hits"):
+                    monitor.queue(instance + off[_n] + _c * UCAP * 8,
+                                  UCAP)
+                for _n in ("user_cr3_seen", "user_cr3_hits"):
+                    monitor.queue(instance + off[_n] + _c * DCAP * 8,
+                                  DCAP)
+            for _n in ("user_rip_samples", "user_rip_overflow",
+                       "user_rip_unattributed", "user_cr3_overflow"):
+                monitor.queue(instance + off[_n], args.cpus)
+            words.update(monitor.run())
+
+            for _c in range(args.cpus):
+                tot = words.get(
+                    instance + off["user_rip_samples"] + _c * 8, 0)
+                lost = words.get(
+                    instance + off["user_rip_overflow"] + _c * 8, 0)
+                none = words.get(
+                    instance + off["user_rip_unattributed"] + _c * 8, 0)
+                dlost = words.get(
+                    instance + off["user_cr3_overflow"] + _c * 8, 0)
+
+                # The dictionary first, because it is the control. It
+                # is linear and does not evict, so it counts every
+                # sample against its address space whatever the hashed
+                # pair table did with the addresses - and a process
+                # carrying a large share here while appearing in no
+                # pair row below is the pair table saturating.
+                dict_rows = []
+                for i in range(DCAP):
+                    v = words.get(instance + off["user_cr3_seen"]
+                                  + (_c * DCAP + i) * 8, 0)
+                    h = words.get(instance + off["user_cr3_hits"]
+                                  + (_c * DCAP + i) * 8, 0)
+                    if v:
+                        dict_rows.append((h, v))
+
+                print(f"\ncpu {_c} user-mode address spaces "
+                      f"({tot:,} user-mode samples)")
+
+                if not tot:
+                    # Say which of the two it is. An empty census and a
+                    # guest that never reached user mode are the same
+                    # zeroes, and only the build manifest separates
+                    # them - so name the field to look at.
+                    print("  no user-mode samples at all. That is either "
+                          "a guest that never left kernel mode or a "
+                          "build with userip=0 - check `strings "
+                          "<hypervisor> | grep 'zpp switches'` before "
+                          "reading it either way.")
+                elif not dict_rows:
+                    print("  samples counted but NO address space "
+                          "recorded - see the unattributed count below")
+                else:
+                    for h, v in sorted(dict_rows, reverse=True):
+                        print(f"  cr3 0x{v:016x}  masked 0x"
+                              f"{v & 0x000ffffffffff000:012x}  "
+                              f"{h:>10,}  {100.0 * h / tot:5.1f}%")
+                    dsum = sum(h for h, _ in dict_rows)
+                    print(f"  {len(dict_rows)} of {DCAP} slots used, "
+                          f"rows sum to {dsum:,} of {tot:,} samples")
+
+                if dlost:
+                    print(f"  *** the address-space dictionary "
+                          f"SATURATED: {dlost:,} samples found no slot, "
+                          f"so the shares above are of the {DCAP} "
+                          f"address spaces seen first, not of all of "
+                          f"them ***")
+
+                # The instrument reporting its own failure. Printed
+                # whenever the census ran at all, including when it is
+                # zero, because "no sample was refused" is a reading
+                # and its absence is not.
+                if tot:
+                    print(f"  unattributed: {none:,} of {tot:,} "
+                          f"({100.0 * none / tot:.1f}%) user-mode "
+                          f"samples had a cr3 that masked to zero and "
+                          f"were NOT recorded. No row above or below "
+                          f"can carry cr3 0 - 'not recorded' and "
+                          f"'recorded as zero' are different readings "
+                          f"here.")
+
+                rows = []
+                for i in range(UCAP):
+                    c = words.get(instance + off["user_rip_cr3"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    r = words.get(instance + off["user_rip_rip"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    h = words.get(instance + off["user_rip_hits"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    if h:
+                        rows.append((h, c, r))
+
+                if not rows:
+                    print(f"cpu {_c} user-mode (address space, address) "
+                          f"pairs: no rows")
+                else:
+                    print(f"\ncpu {_c} user-mode (address space, "
+                          f"address) pairs ({len(rows)} distinct of "
+                          f"{UCAP} slots)")
+                    # Every row, no cut. The population is the user half
+                    # only - one dump held 1,973 distinct addresses -
+                    # and a top-N cut over a census is what hid the
+                    # whole secure-kernel tail for a week. `_floor` in
+                    # the census above exists because that one holds
+                    # tens of thousands of kernel rows; this one cannot.
+                    for h, c, r in sorted(rows, reverse=True):
+                        print(f"  cr3 0x{c:012x}  rip 0x{r:016x}  "
+                              f"{h:>10,}  {100.0 * h / (tot or 1):5.1f}%")
+                    seen = sum(h for h, _, _ in rows)
+                    print(f"  rows sum to {seen:,} of {tot:,} samples "
+                          f"({100.0 * seen / (tot or 1):5.1f}%); the "
+                          f"shortfall is eviction")
+
+                if lost:
+                    print(f"  contention: {lost:,} colliding samples "
+                          f"decayed a resident entry. This table is "
+                          f"{UCAP} slots over a key space of (address "
+                          f"space x address), so a HIGH rate here is "
+                          f"expected and means the medium rows are "
+                          f"suppressed - the hot rows are not, since a "
+                          f"row with n hits survives n collisions. "
+                          f"Compare the shares above against the "
+                          f"address-space dictionary before quoting "
+                          f"either.")
+
+                print("  join: mask both sides with 0x000ffffffffff000 "
+                      "and look the cr3 up with "
+                      "scripts/guest-user-module.py, which reads "
+                      "_KPROCESS.DirectoryTableBase (+0x28) for every "
+                      "process on PsActiveProcessHead. Every "
+                      "DirectoryTableBase in this guest ends ...002, so "
+                      "an unmasked compare matches nothing and reads "
+                      "as 'no process executes'.")
 
     # The interface's own crash report. HV_X64_MSR_CRASH_P0..P4 are
     # 0x40000100-0x40000104 and the control is 0x40000105; the guest

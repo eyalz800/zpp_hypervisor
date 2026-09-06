@@ -146,6 +146,21 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // report their absence by looking odd.
         ' ', 'c', 'l', 'o', 's', 'e', 'd', '=',
         digit(nested_vmx::census_closed),
+        // The user-mode (CR3, instruction pointer) census. On by
+        // default, and the field is here in the first commit that has
+        // the switch - which is the whole lesson of `windowtpr=`, which
+        // had three of its four edits and let a cache reading ON stand
+        // as proof.
+        //
+        // Off, `user_rip_*` and `user_cr3_*` all read zero, and zero is
+        // exactly what a guest that never reached user mode leaves
+        // there. Those two readings are the same six zeroes in a dump
+        // and this is the field that separates them. It is also a
+        // *tuning* field - one `guest_cr3` VMREAD on entries whose RIP
+        // is in the user half - so two runs that differ in it should
+        // not be compared for rate.
+        ' ', 'u', 's', 'e', 'r', 'i', 'p', '=',
+        digit(nested_vmx::census_user_rip),
         // Off hands application processors to the guest unvirtualized,
         // so this is a correctness field and not a tuning one. It was
         // stale-OFF in `build/debug` for a session with nothing on the

@@ -6003,6 +6003,117 @@ private:
     std::uint64_t quiet_overflow[max_cpus]{};
 
     /**
+     * How many (address space, instruction pointer) pairs the user-mode
+     * census holds per processor.
+     *
+     * **512 and not 2048, and the arithmetic is the argument.** The two
+     * censuses above cost `2048 * 8 * max_cpus` each, and the pair table
+     * needs three words a row rather than two - the CR3, the address and
+     * the count - so at 2048 it would be 1.5 MiB on its own and the
+     * naive alternative of hanging one more word off `interrupted_rip`
+     * and `quiet_rip` would be 1 MiB. Both are refused. `max_cpus` is
+     * 32, so **every word per row costs 256 KiB**, and the module base
+     * moves whenever the binary's size changes - the per-processor
+     * dimension already cost +2,031,616 bytes and a session's readings
+     * with it.
+     *
+     * 512 is enough because of what this table is for and how it evicts.
+     * The population is the **user half only**: one dump held 1,973
+     * distinct user-mode addresses against the whole census's tens of
+     * thousands, and the question is which address space executes the
+     * dozen hottest of them. Eviction is by decay, so a pair with `n`
+     * hits survives `n` collisions - the hot rows are stable at any
+     * capacity and only the cold tail churns. What 512 buys over 256 is
+     * that the *medium* rows survive too, which is what makes the
+     * distribution readable rather than only its head.
+     *
+     * The honest cost of that choice is a high collision rate on a table
+     * whose key space is larger than itself, and `user_rip_overflow`
+     * below is what reports it. Read it before quoting a percentage from
+     * these rows.
+     */
+    static constexpr std::size_t user_rip_capacity = 512;
+
+    /**
+     * Where the second-level guest was **and whose address space it
+     * was**, for user-mode addresses only.
+     *
+     * See `zpp/hypervisor/user_rip_census.h` for the mechanism and
+     * `nested_vmx::census_user_rip` for the cost. The short version of
+     * why it exists: `interrupted_rip` and `quiet_rip` name *what code*
+     * runs and can never name *whose*, and the two ways of recovering
+     * that after the fact are both closed - a module walk finds a system
+     * DLL at the same base in every process that maps it (`108d445`),
+     * and the exit ring is a few hundred entries deep with no user-mode
+     * address in it (`a622eef`).
+     *
+     * `user_rip_cr3` holds the CR3 **masked to its page frame**, bits 12
+     * through 51, so that a process-context identifier cannot split one
+     * address space across two rows. Both sides of the join carry low
+     * bits - every `DirectoryTableBase` observed in this guest ends
+     * `...002` - so the reader must mask `DirectoryTableBase` the same
+     * way. `user_cr3_seen` beside it keeps the **unmasked** value, which
+     * is where the identifier survives.
+     *
+     * **No row can carry CR3 zero.** `note_user_rip` refuses the sample
+     * instead, and `user_rip_unattributed` counts the refusals, so "the
+     * CR3 could not be obtained" and "the CR3 was zero" are not the same
+     * reading. That distinction is required of every instrument here and
+     * this is where it is made structural rather than documented.
+     *
+     * Per processor for the reasons on `interrupted_rip`: the rows are
+     * read-modify-written with no lock, and the index removes the race
+     * by construction.
+     */
+    std::uint64_t user_rip_cr3[max_cpus][user_rip_capacity]{};
+    std::uint64_t user_rip_rip[max_cpus][user_rip_capacity]{};
+    std::uint64_t user_rip_hits[max_cpus][user_rip_capacity]{};
+
+    /**
+     * The three counters that let the table above be read honestly.
+     *
+     * `user_rip_samples` is every second-level entry whose instruction
+     * pointer was in the user half - the population the rows are a
+     * distribution *of*, and the denominator of every percentage.
+     *
+     * `user_rip_overflow` counts colliding samples that decayed a
+     * resident entry. A rate of contention, not a count of lost hot
+     * addresses, which is the distinction the first version of
+     * `note_hot_rip` got wrong and published a flat distribution on.
+     *
+     * `user_rip_unattributed` counts user-mode samples whose CR3 masked
+     * to zero and were therefore not recorded at all. **This is the
+     * instrument reporting its own failure**, and it is the field to
+     * read first: a run where it is most of `user_rip_samples` has an
+     * empty table for a reason that has nothing to do with the guest.
+     */
+    std::uint64_t user_rip_samples[max_cpus]{};
+    std::uint64_t user_rip_overflow[max_cpus]{};
+    std::uint64_t user_rip_unattributed[max_cpus]{};
+
+    /**
+     * The second field, and the control on the table above.
+     *
+     * Every user-mode sample's **unmasked** CR3 against a small linear
+     * dictionary, so an address space is counted whatever the hashed
+     * pair table did with its addresses. The pair table evicts; this
+     * does not, so the two can disagree - and a process that carries a
+     * large share here while appearing in no printed pair row is the
+     * pair table saturating, which is exactly the failure a single-field
+     * instrument cannot report about itself.
+     *
+     * 24 slots because the population is small and known: the dump this
+     * was built for listed fourteen processes plus the guest
+     * hypervisor's own two page tables. `user_cr3_overflow` counts
+     * samples that found no slot, so a saturated dictionary says so.
+     */
+    static constexpr std::size_t user_cr3_capacity = 24;
+
+    std::uint64_t user_cr3_seen[max_cpus][user_cr3_capacity]{};
+    std::uint64_t user_cr3_hits[max_cpus][user_cr3_capacity]{};
+    std::uint64_t user_cr3_overflow[max_cpus]{};
+
+    /**
      * The stall breaker's state and its two counters. See
      * `nested_vmx::stall_breaker`.
      *

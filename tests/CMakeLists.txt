@@ -253,6 +253,26 @@ zpp_add_host_test(elf_relocate
 zpp_add_host_test(small_map
     SOURCES small_map/harness.cpp)
 
+# The user-mode (address space, instruction pointer) census.
+# zpp/hypervisor/user_rip_census.h depends on <cstdint>, <cstddef> and
+# <span> and on nothing else, so the header under test compiles here
+# exactly as the hypervisor compiles it - which is why the functions are
+# free functions rather than members in the first place.
+#
+# What it exists to pin: `note_hot_rip`, the census this one is modelled
+# on, is a member of a class no host can construct, so its eviction rule
+# has never been executed by anything but a real boot - and the first
+# version of that rule lost 1,300,610 of 1,399,906 samples and printed
+# the remainder as a flat distribution that read as a finding. The
+# checks here are that rule's arithmetic with a negative control on
+# each side of it, plus the two properties this census adds: a cr3 that
+# could not be obtained is refused rather than stored as zero, and one
+# address executed by two address spaces is two rows - which is the
+# whole reason it exists, since a module walk finds a system DLL at one
+# base in every process that maps it.
+zpp_add_host_test(user_rip_census
+    SOURCES user_rip_census/harness.cpp)
+
 # The MTRR memory-type derivation. zpp/arch/x86_64/mtrr.h depends on
 # memory_type.h, msr.h and the standard library and on nothing else, so
 # the header under test compiles here exactly as the hypervisor compiles

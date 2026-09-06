@@ -444,6 +444,10 @@ option(ZPP_CENSUS_CLOSED
     "The two censuses kept from investigations that have since closed: cr3_seen/gdtr_seen, one guest_cr3 read on every exit, and control_pin_granted/control_primary_granted, two control read-backs on every second-level entry. Neither has a reader in scripts/ and neither is cited by any live conclusion. OFF: they read zero, and zero is a legal value for all four - the manifest's closed= field is what says which. See nested_vmx.h."
     OFF)
 
+option(ZPP_CENSUS_USER_RIP
+    "The user-mode (CR3, instruction pointer) census. ON: every second-level entry whose guest RIP is in the user half of the address space records the address AND the CR3 that executed it, so a hot user-mode address can be joined to a process by DirectoryTableBase. One guest_cr3 VMREAD on those entries only - the entry path already pays two - and no read at all on kernel-mode entries. OFF: user_rip_* and user_cr3_* read zero, which is indistinguishable from a guest that never reached user mode; the manifest's userip= field is what says which. See nested_vmx.h and zpp/hypervisor/user_rip_census.h."
+    ON)
+
 # The loader's edit of the guest's DMAR table to declare a reserved
 # window for the storage controller, plus the EFI system partition
 # reservation and the restart that picks it up.
@@ -557,6 +561,7 @@ ExternalProject_Add(hypervisor
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_CENSUS_CLOSED=${ZPP_CENSUS_CLOSED}
+        -DZPP_CENSUS_USER_RIP=${ZPP_CENSUS_USER_RIP}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
         -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_DELIVER_ON_DROP=${ZPP_DELIVER_ON_DROP}
@@ -691,6 +696,7 @@ ExternalProject_Add(uefi_loader
         -DZPP_PROFILE_L2=${ZPP_PROFILE_L2}
         -DZPP_CENSUS_EXITS=${ZPP_CENSUS_EXITS}
         -DZPP_CENSUS_CLOSED=${ZPP_CENSUS_CLOSED}
+        -DZPP_CENSUS_USER_RIP=${ZPP_CENSUS_USER_RIP}
         -DZPP_SAMPLE_L1=${ZPP_SAMPLE_L1}
         -DZPP_WINDOW_ON_TPR=${ZPP_WINDOW_ON_TPR}
         -DZPP_DELIVER_ON_DROP=${ZPP_DELIVER_ON_DROP}

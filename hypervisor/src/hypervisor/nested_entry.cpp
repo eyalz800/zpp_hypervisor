@@ -9,6 +9,7 @@
 #include "zpp/diag/log.h"
 #include "zpp/hypervisor/nested_vmx.h"
 #include "zpp/hypervisor/reference_tsc.h"
+#include "zpp/hypervisor/user_rip_census.h"
 #include "zpp/scope_exit.h"
 #include <cstddef>
 #include <cstdint>
@@ -9834,12 +9835,18 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     //   named the wedge's hot addresses. A saving that costs accuracy
     //   here is a bad trade at any price.
     if (cpu < max_cpus) {
+        // One read, used three times. It was two reads of the same field
+        // in two arms before, so hoisting it changes no behaviour and
+        // costs no VMREAD - and the comment above still holds: this is
+        // `guest_rip` out of vmcs02, not `hot_state_saved[cpu][0]`.
+        auto guest_rip = this->vmcs.guest_rip();
+
         if (0 != (staged & valid)) {
             this->interrupted_samples[cpu] += 1;
             note_hot_rip(this->interrupted_rip[cpu],
                          this->interrupted_hits[cpu],
                          this->interrupted_overflow[cpu],
-                         this->vmcs.guest_rip());
+                         guest_rip);
         } else {
             // Where the guest is on an entry the level above staged
             // nothing on - the control for `interrupted_rip`. See
@@ -9848,7 +9855,53 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
             note_hot_rip(this->quiet_rip[cpu],
                          this->quiet_hits[cpu],
                          this->quiet_overflow[cpu],
-                         this->vmcs.guest_rip());
+                         guest_rip);
+        }
+
+        // And whose address space that address belongs to, which the two
+        // tables above cannot say and no reader of them can recover. See
+        // `user_rip_cr3` and `nested_vmx::census_user_rip`.
+        //
+        // **Gated on the address before the VMCS is touched, and that
+        // ordering is the whole cost argument.** There is no free source
+        // of the second-level guest's CR3 here - `l2_exit_cr3` is a read
+        // on every exit behind a second switch, and
+        // `guest_state_cache`'s copy is `build_vmcs02`'s own
+        // bookkeeping, stale for CR3 by its own comment and unable to
+        // follow a guest `mov cr3`, which does not exit. So this is a
+        // third VMREAD, taken only on entries that have something to
+        // attribute. The entry path already pays two at about 4,340
+        // cycles each; `65334f3` measured a cache-missing `guest_cr3`
+        // read at 2,876.
+        //
+        // Both tables are fed from one read, and they are deliberately
+        // different shapes: the pair table is hashed and evicts, the
+        // dictionary is linear and does not, so a disagreement between
+        // them is the pair table reporting its own saturation.
+        if constexpr (nested_vmx::census_user_rip) {
+            if (is_user_address(guest_rip)) {
+                this->user_rip_samples[cpu] += 1;
+
+                auto guest_cr3 = this->vmcs.guest_cr3();
+
+                if (!note_user_rip(this->user_rip_cr3[cpu],
+                                   this->user_rip_rip[cpu],
+                                   this->user_rip_hits[cpu],
+                                   this->user_rip_overflow[cpu],
+                                   guest_cr3,
+                                   guest_rip)) {
+                    // The CR3 masked to zero, so this sample names no
+                    // address space. Counted rather than stored, so that
+                    // an empty table can say which of the two reasons it
+                    // is empty for.
+                    this->user_rip_unattributed[cpu] += 1;
+                }
+
+                note_user_cr3(this->user_cr3_seen[cpu],
+                              this->user_cr3_hits[cpu],
+                              this->user_cr3_overflow[cpu],
+                              guest_cr3);
+            }
         }
     }
 

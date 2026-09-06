@@ -984,6 +984,62 @@ inline constexpr bool census_exits = (0 != ZPP_CENSUS_EXITS);
 inline constexpr bool census_closed = (0 != ZPP_CENSUS_CLOSED);
 
 /**
+ * Whether the user-mode (CR3, instruction pointer) census runs. **On by
+ * default**, which is unusual here and argued rather than assumed.
+ *
+ * What it buys: `interrupted_rip` and `quiet_rip` say *what code* the
+ * second-level guest executes and can never say *whose*. Filtered to
+ * the user half, one dump held 106,743 samples over 1,973 addresses
+ * whose hottest is a win32k system-call stub, and the two routes to a
+ * process name are both closed - a module walk finds the same DLL at
+ * the same base in every process that maps it (`108d445`), and the exit
+ * ring is a few hundred entries with no user-mode address in them
+ * (`a622eef`). Recording the address space beside the address is what
+ * is left. See `zpp/hypervisor/user_rip_census.h`.
+ *
+ * **What it costs, stated as a VMREAD because that is what it is.**
+ * There is no free source of the second-level guest's CR3 on the entry
+ * path, and this was looked for rather than assumed:
+ *
+ * - `l2_exit_cr3` is one, but it is `census_exits`'s, off by default,
+ *   and it is a read on **every** exit - strictly more expensive than
+ *   this and gated on a second switch.
+ * - `guest_state_cache[cpu][<the guest_cr3 index>]` holds what
+ *   `build_vmcs02` last wrote, and CR3 is deferrable, so the cache is
+ *   stale for exactly this field by its own comment. It is also the
+ *   wrong *kind* of source: `record_l2_entry_event` already refuses
+ *   `hot_state_saved[cpu][0]` for the guest RIP on the grounds that a
+ *   census fed from this VMM's elision bookkeeping agrees with a bug
+ *   instead of exposing it. CR3 is the sharpest case of that - a guest
+ *   `mov cr3` does not exit, so the cache cannot follow a context
+ *   switch and would attribute every sample to the last process the
+ *   level above wrote into vmcs12.
+ *
+ * So: one `guest_cr3` VMREAD, **taken only when the sampled RIP is in
+ * the user half**. The entry path already pays two - the entry
+ * interruption information and the guest RIP, measured at that site as
+ * about 4,340 cycles each - so this is a third read on the minority of
+ * entries that have anything to attribute, and nothing at all on the
+ * rest. `65334f3` measured a cache-missing `guest_cr3` read at 2,876
+ * cycles, which is the number to price a regression against.
+ *
+ * On by default because the storage is spent either way - the arrays
+ * are members whether or not anything writes them, so switching it off
+ * saves cycles and not bytes - and because an empty census and an
+ * absent one are the same reading. The manifest's `userip=` field is
+ * what separates them, and `check-bootable.sh` prints it on every
+ * deploy.
+ *
+ * Off, for a cost measurement that must not carry an instrument, or
+ * once the question is answered.
+ */
+#ifndef ZPP_CENSUS_USER_RIP
+#define ZPP_CENSUS_USER_RIP 1
+#endif
+
+inline constexpr bool census_user_rip = (0 != ZPP_CENSUS_USER_RIP);
+
+/**
  * Step the trust-level loop with the monitor trap flag. Off unless
  * asked for, and that is a correctness requirement rather than tidiness.
  *
