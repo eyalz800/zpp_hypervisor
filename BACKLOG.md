@@ -75131,3 +75131,69 @@ takes minutes, and at a 20-second cadence the guest is being read
 essentially continuously. `CLAUDE.md`'s existing entry - a gdb breakpoint
 held for seconds trips Hyper-V's synthetic watchdog - is the same
 phenomenon one layer up.
+
+## The VTL loop CARRIES WORK. The livelock hypothesis is dead
+
+Boot 218 - the unpolled, measured-healthy boot - stopped at **1,476.7 s**
+with `0x9F` / `\Driver\IntcAudioBus`. Its VTL census, the instrument
+`3bb1ae9` said had never been read here:
+
+    what VTL1 ANSWERED at HvCallVtlReturn (121,155 returns)
+      answers that differed from the one before: 74,298
+      "the reply moves, so a re-asked request is being answered
+       differently each time"
+
+    fresh calls 119,095   re-entries 2,041   (partition OK)
+
+    HvCallModifyVtlProtectionMask  158,571
+    HvCallVtlReturn                148,382
+    HvCallVtlCall                  148,342
+
+**61% of VTL1's answers differ from the previous one, and 98.3% of calls
+are fresh rather than re-entries.** The header's own reading is "all zero
+is a livelock; whichever rows are not zero say what the loop carries" -
+and these rows are emphatically not zero. The re-entries that do occur
+are charged to real secure work: `VslCompleteSecureDriverLoad` 799,
+`VslFastFlushSecureRangeList` 224, `VslCopyProtectedPage` 138,
+`VslValidateSecureImagePages` 137.
+
+**So the trust-level loop is doing HVCI work, not spinning.** That kills
+the reading `d0579ee` proposed and that this investigation has carried in
+various forms for weeks: the hypercall-page alternation is what
+*progress* looks like here, not what a stall looks like. A guest making
+119,095 fresh secure calls and getting 74,298 distinct answers is
+working.
+
+**And it died anyway, to the same 300-second power watchdog.** That is
+the important part. The failure survives a boot that is healthy by every
+measure this session built:
+
+    vmcall rate    471/s   (against 2.0/s stalled)
+    fresh calls    98.3%
+    answers moving 61%
+    unpolled       no monitor contact before 13 min
+
+So whatever stalls a power IRP for 300 seconds is **not** the VTL
+livelock, is **not** a starved VTL machinery, and is **not** an artefact
+of my polling. Three explanations eliminated by one boot.
+
+### What the driver name is worth, for the third time
+
+    boot 209  \Driver\USBHUB3
+    boot 212  \Driver\IntcAudioBus
+    boot 218  \Driver\IntcAudioBus
+
+Two of three now name IntcAudioBus, which is *weak* evidence and worth
+exactly that: with five names across the investigation
+(`VBoxSup.sys`, `IntcAudioBus`, `fontdrvhost`, `USBHUB3`) and a bugcheck
+that names whoever holds an IRP when a flat timer fires, a repeat is what
+you expect from the commonest IRP holder, not from the culprit.
+
+### Where this leaves the target
+
+The `0x9F` is reached from a *healthy, progressing* guest. The next thing
+to identify is what the blocked IRP was waiting on at the moment the
+watchdog armed - `1,176.7 s`, 300 s before the stop. `guest-power-irps.py`
+reads the IRP and its device; what it does not read is the IRP's stack
+location and pending completion, which is what would say who was supposed
+to complete it.
