@@ -2582,6 +2582,29 @@ bool hypervisor::on_guest_vmlaunch(std::size_t cpu,
     // Distinct values with counts, not a ring: a ring of a hundred
     // thousand identical entries answers nothing and "how many different
     // ones are there" is the whole question.
+    //
+    // **This read is load bearing and stays.** It is one VMREAD per
+    // second-level entry and `hot_state_saved[cpu][0]` holds the same
+    // number for free, so it looks removable and is not: the very next
+    // lines compare `rip` against vmcs12's, and `hot_state_saved` is
+    // what `build_vmcs02` *wrote* into vmcs02 from vmcs12. Sourced from
+    // there the comparison becomes `what we copied == what we copied
+    // from` and can never disagree - destroying the one check in this
+    // tree that is described, correctly, as proof rather than evidence.
+    // The mismatch record below already keeps `hot_state_rip` as a
+    // *third* value beside `rip02` and `rip12`, precisely because all
+    // three can differ.
+    //
+    // There is a real redundancy here and it is a different one, left
+    // for a change that can carry its own guard: `record_l2_entry_event`
+    // reads the same field a few hundred instructions earlier on this
+    // same call chain, for `interrupted_rip` / `quiet_rip`, and nothing
+    // between the two writes vmcs02's guest RIP. Carrying that value
+    // across `enter_or_park_l2`'s return needs a per-processor slot and
+    // a stamp against `l2_entries` so a future `return entered` that
+    // skips the census cannot silently feed this comparison a stale
+    // address - which is more machinery than the saving is worth today.
+    // See BACKLOG.md.
     if (cpu < max_cpus) {
         auto rip = this->vmcs.guest_rip();
 

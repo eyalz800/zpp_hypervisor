@@ -68847,3 +68847,64 @@ Also absent on the healthy boot and worth noting for the same reason:
 the timer block's epilogue `+0x1c5` and
 `KiDowngradeIsolationUnitLockHandle`. Both are **wedge-only**, so both are
 usable as secondary confirmations - they have a measured zero at one end.
+## The per-exit VMCS census: what came out, what stayed, and why - 2026-09-06
+
+Ten ungated diagnostic VMCS reads were audited against a standing
+question - is the per-tick cost the *cause* of the multicore wedge, via
+a lock holder saturated at 574.7 Hz, or only an inefficiency? Eight came
+out. Two stayed, and the two negatives are the useful part of this
+entry, because both look removable and are not.
+
+Landed, with the counts they change:
+
+| site | class | frequency |
+|---|---|---|
+| `exit_dispatch` trampoline log | redundant | per exit |
+| `exit_dispatch` `l1_vmcall_rip` | redundant | per L1 VMCALL |
+| `resume.cpp` `last_resume_rip` | redundant | per exit |
+| `record_exit` ring RIP | redundant | per exit |
+| `save_l2_state` `vm_entry_controls` | redundant | per reflection |
+| l2 exit ring activity + CS | gated `census=` | per reflection |
+| `cr3_seen` `guest_cr3` | gated `closed=` | per exit |
+| control pin/primary read-backs | gated `closed=` | per L2 entry |
+
+Predicted, and falsifiable on the rig with `--delta`: at the default
+`census=0 closed=0`, `vmcs_reads_taken / exits` should fall by **4** -
+three per exit plus the ring's - and `vmcs_reads_taken / l2-entries` by
+a further **5** (three per reflection, two per entry). Anything short of
+that means a site is reached by a path this audit did not walk.
+
+### Negative 1: the hot-RIP census must keep reading the field
+
+`record_l2_entry_event`'s `interrupted_rip` / `quiet_rip` sampler reads
+`guest_rip` once per second-level entry, and `hot_state_saved[cpu][0]`
+holds that number for free. Refused. That array is `build_vmcs02`'s
+elision bookkeeping - what `put_hot` believes vmcs02 holds - so a census
+fed from it reports intention, and agrees with the elision if the
+elision is ever wrong. Two slots of the same array are already
+documented in `nested_entry.cpp` as going stale (slot 4 in
+`enter_or_park_l2`, slot 3 in `save_l2_state`), benign only by call
+order. And this is the *live* instrument: it is what named the wedge's
+hot addresses.
+
+### Negative 2: `l2_entry_rip` is proof, and proof needs the field
+
+`nested_vmx.cpp`'s `l2_entry_rip_agreed` / `_differed` compares vmcs02's
+guest RIP against vmcs12's on every entry. Sourced from
+`hot_state_saved[0]` the comparison becomes "what we copied == what we
+copied from" and can never disagree. Its own mismatch record already
+keeps `hot_state_rip` as a *third* value beside `rip02` and `rip12`,
+because all three can differ.
+
+### The one saving deliberately left on the table
+
+`record_l2_entry_event` and `nested_vmx.cpp:2586` read `guest_rip` a few
+hundred instructions apart on the same call chain, and nothing between
+them writes vmcs02's guest RIP. That is one genuinely redundant VMREAD
+per second-level entry. Taking it needs the value carried across
+`enter_or_park_l2`'s return in a per-processor slot, **stamped against
+`l2_entries`** so that a future `return l2_entry_outcome::entered` which
+skips the census cannot silently feed the comparison a stale address,
+with a counter on the fallback so the instrument can report its own
+failure. Three new members and a guard for one read; recorded rather
+than taken.

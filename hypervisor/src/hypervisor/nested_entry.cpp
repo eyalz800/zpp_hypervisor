@@ -9536,6 +9536,32 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // heading "cpu 0". The guard matches the ones above it: a
     // processor beyond `max_cpus` is absent from every census in this
     // function alike, which is at least self-consistent.
+    //
+    // **The `guest_rip` read below is deliberate and stays. Do not
+    // replace it with `hot_state_saved[cpu][0]`** - the value is
+    // available there, it is one VMREAD per second-level entry, and it
+    // was examined for exactly that and refused. Three reasons, any one
+    // sufficient:
+    //
+    // - `hot_state_saved` is `build_vmcs02`'s *elision bookkeeping*: it
+    //   holds what `put_hot` believes vmcs02 holds. A census fed from
+    //   it reports this VMM's intention, and if the elision is ever
+    //   wrong the census agrees with the bug instead of exposing it.
+    //   The neighbouring instrument twelve lines up commits to the
+    //   opposite principle in as many words - "read back out of vmcs02
+    //   rather than remembered from where it was written, which is the
+    //   whole point".
+    // - That array is *known* to go stale, twice, in this file. Slot 4
+    //   is corrected by hand in `enter_or_park_l2` because
+    //   `put_hot(4, ...)` elides and the HLT path then writes the field
+    //   underneath it, and slot 3's identical break is argued at length
+    //   in `save_l2_state` where it was reachable and wrong. Both are
+    //   documented as benign only by call order. Trusting slot 0 for a
+    //   census would be the third instance.
+    // - `quiet_rip` and `interrupted_rip` are the live instrument of
+    //   the current investigation, not a closed one - they are what
+    //   named the wedge's hot addresses. A saving that costs accuracy
+    //   here is a bad trade at any price.
     if (cpu < max_cpus) {
         if (0 != (staged & valid)) {
             this->interrupted_samples[cpu] += 1;
