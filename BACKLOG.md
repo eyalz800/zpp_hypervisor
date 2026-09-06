@@ -74160,3 +74160,38 @@ boots, at the same tiny offset past the same module.** That is not a
 coincidence and it is not a mapping error at this rate; it is most likely
 `SizeOfImage` under-reporting the last section, or a region mapped
 immediately after. Recorded so the next reader does not treat it as noise.
+
+## RESOLVED, and there was never a discrepancy: user-mode samples vs the exit ring
+
+An open item read "106,743 user-mode samples exist yet no user-mode RIP
+appears in the exit ring - reconcile". It reconciles two ways, and each
+one alone is sufficient. **Neither needed a boot**; both are readable in
+the source, which is where this should have been checked first.
+
+**They count different populations.** `note_user_rip` is called from
+`nested_entry.cpp:9916` - on second-level *entries*, gated on
+`is_user_address(guest_rip)`. `exit_trace` records L1 *exits*. Entries and
+exits are not the same events and were measured at 2,653/s against
+5,319/s, a factor of two apart, so the two numbers were never comparable
+in the first place.
+
+**And even matched, an empty ring is the expected outcome.**
+`exit_trace_capacity` is **32** per CPU. For a population appearing at
+rate `p`, the expected number of user-mode slots in the ring is `32p`, so
+**`p` would have to exceed 3.1% before you should expect even one**. At
+the sub-1% rates measured here the modal contents of a 32-slot ring is
+exactly zero user-mode entries - which is what was seen, and what was
+briefly written down as something needing explanation.
+
+So the ring did not disagree with the census. It has no power to agree or
+disagree at this rate, and a reading with no power is not evidence.
+
+**This is a new member of the instrument-failure family in `CLAUDE.md`,
+and it deserves its own line because it is the mirror image of the
+others.** The catalogued failures are instruments that report a *number*
+when they should report "I failed". This one is an instrument that
+reported *nothing* and had that absence read as a finding. The check is
+the same in both directions and takes one division: **before treating a
+zero as informative, compute what the instrument would have shown if the
+hypothesis were true.** Thirty-two slots at one percent would have shown
+zero either way.
