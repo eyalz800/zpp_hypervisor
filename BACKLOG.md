@@ -72491,3 +72491,64 @@ Walk `services.exe`'s PEB module list (or `_EPROCESS` -> `Peb` ->
 `0x7ffe0eb132e5` in a module. That turns a plausible range into a name,
 and the two-byte pair into an instruction that can be disassembled off
 disk.
+
+## The "tight loops" are win32u.dll SYSCALL stubs, not spins
+
+`a948a1d` read three pairs of hot user-mode addresses two bytes apart as
+"the signature of a two-byte instruction in a tight loop", flagged the
+module guess as INFERRED, and refused to name anything without a module
+walk. **The walk was done and the inference was wrong in an instructive
+way.**
+
+`guest-user-module.py` walks a process's own PEB using
+`_KPROCESS.DirectoryTableBase` as cr3, and refuses to print unless the
+first module on `InMemoryOrderModuleList` is the executable itself.
+Against boot 200's stopped guest:
+
+    services.exe   11 modules, PROOF PASS
+      0x7ff69d564180  -> services.exe + 0x14180
+      0x7ffe0eb132e5  -> in NO module of this process
+
+    WerFault.exe   45 modules, PROOF PASS
+      0x7ffe0eb132e5  -> **win32u.dll + 0x32e5**  (base 0x7ffe0eb10000)
+
+**`win32u.dll` is the user-mode stub library for win32k system calls, and
+it is almost nothing but stubs**, each of the shape
+`mov r10,rcx / mov eax,<n> / syscall / ret`. **`syscall` is two bytes
+(`0F 05`).** So a pair of hot addresses two bytes apart in win32u is not a
+loop at all - it is **the `syscall` instruction and the instruction after
+it**, which is exactly where samples land on either side of a system call.
+
+Three pairs in one module means **three different win32k syscalls being
+made heavily**, not three spin loops.
+
+### What this corrects, and what survives
+
+**Corrected**: "user-mode spinning" as the reading of those addresses.
+They are syscall sites. The `pause`-loop interpretation was the obvious
+one and it was wrong, which is why `a948a1d` refused to record a module
+name on it - that refusal is the only reason this cost a walk rather than
+a wrong entry in the record.
+
+**Survives**: `services.exe` runs at 39.8 context switches a second and
+starts nothing (`d23d54e`). That measurement is untouched, and
+`0x7ff69d564180` -> `services.exe + 0x14180` at 2,007 samples shows its
+own image executing.
+
+### The new reading, stated at the strength it deserves
+
+Something in the guest is making **win32k GUI system calls at high rate**.
+`win32u.dll` is loaded in `WerFault.exe` - which is present on **every**
+boot that reaches this wall, alongside 14 processes and zero `svchost.exe`
+- and it is the process Windows starts to report a crash. A crash reporter
+trying to put a dialog on a machine whose display is a passed-through GPU
+with no session is a plausible source of exactly this.
+
+**INFERRED, and deliberately not more.** The RIP census records no
+process, so "WerFault is making these calls" does not follow from
+"WerFault has win32u loaded" - `csrss`, `winlogon` and `fontdrvhost` are
+GUI processes too and were not walked (the `lsass` walk timed out before
+finishing). What would settle it: walk the remaining processes and see how
+many map `win32u.dll` at that base, then attribute by elimination or by a
+per-process sampler. **Two drivers have already been named wrongly this
+session; this one waits for the walk.**
