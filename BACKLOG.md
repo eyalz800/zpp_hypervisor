@@ -73429,3 +73429,88 @@ If a boot shows the exits fall *and* the round trip get cheaper, one of
 the two measured prices above is wrong and this entry should be
 reopened - most likely `copy in: field reads`, which is the number
 carrying the whole result.
+
+## RETRACTED: "services.exe is NOT starved" is true of ONE boot, not of the wall
+
+`d23d54e` was titled SETTLED. The catcher fired on boot 203 at the same
+14-process wall and got **the opposite answer**:
+
+    boot 200   services.exe main thread  2,291 -> 4,680   +2,389   39.8/s
+               2 of 3 threads scheduled, a 4th thread APPEARED
+    boot 203   services.exe main thread  3,718 -> 3,718       +0    0.0/s
+               **0 of 3 threads scheduled in 60 s**
+
+Same instrument, same wall, same 3-thread process, opposite readings.
+**The wall has at least two states**, and `d23d54e`'s conclusion holds for
+the boot it was taken on and not for the wall in general.
+
+What survives is narrower and still useful: **`WrQuantumEnd` alone cannot
+tell them apart** - both boots show it - which is exactly why the counter
+was added. The counter works; it is the generalisation from one sample
+that was wrong, and "SETTLED" was the wrong word for an n=1 reading.
+
+**This is the fourth time this session** a confident reading has come from
+a single observation: `9c97e8e`, `6c1dab1`, `5491c5a`, and now this. The
+first three were caught by a disconfirming measurement already on disk;
+this one needed a second boot, which is why it survived a commit titled
+SETTLED.
+
+**Both readings are kept.** A wall that sometimes runs the SCM hard and
+sometimes freezes it is a more interesting object than either alone, and
+the next question is what distinguishes them - not which one is "right".
+
+## NEGATIVE: extending the shadow VMCS list costs 2.2x what it saves
+
+`8c23baa` found 2.38M exits - 9.8% of all of them - where hvix64 touches
+a field the shadow list does not cover, and called it the strongest
+actionable lead. **Priced, and it does not work.**
+
+    current list   12 fields: 3 read-only + 9 read-write
+    the copy is PROPORTIONAL to list length, both directions
+    copy in  (slot 47, brackets exactly the read-write loop)
+        34,118 cyc/RT / 9 = **3,791 per entry, marginal**
+    copy out (slot 42, both lists)
+        10,494 / 12 = 875 per entry
+    one read-write entry = **4,666 cyc on all 8,758,448 round trips**
+
+    benefit, priced GENEROUSLY at the vmread exit's own 106,488 cyc
+    (vmwrite has no by-reason row and is lighter; both priced high)
+
+    **25,663 saved against 55,992 spent.**
+
+At the cost *floor* - 2,876 and copy-out free - it is still 34,512 spent
+against 25,663 saved. **Break-even is one use per 22.8 round trips; the
+hottest candidate, `vm_exit_controls`, runs once per 32.7.** So the
+break-even list length is the length the list already has, and no subset
+is profitable.
+
+### Safety was never the blocker, and that matters for the record
+
+**None of the twelve is unsafe, including `ept_pointer`.**
+`on_guest_vmwrite` does nothing per-encoding but mark dirty and store, and
+every EPTP consumer reads `guest_vmcs12` *after* `copy_shadow_to_vmcs12`
+runs at the top of `on_guest_vmlaunch_or_resume`. **The blocker is
+arithmetic.** Recorded explicitly because "it was unsafe" is the wrong
+thing to remember if a price ever changes.
+
+### The KVM comparison, which is the durable insight
+
+Our list is a strict subset of KVM's plus `guest_dr7`; KVM shadows 33
+where we shadow 12. **KVM's list is longer because KVM's VMREAD is an
+instruction and ours is a trap.** The same list is right for KVM and wrong
+for us, and **the reason is nesting depth, not fields.**
+
+That generalises past this decision: **a shadowing list tuned by a
+hypervisor running on hardware is not evidence for one running inside
+another hypervisor**, and the tree should not reach for KVM's list as a
+target again.
+
+### Found on the way
+
+`shadow_read_only_fields` lived in `nested_shadow_vmcs.cpp` where
+`deferrable_field_is_shadowed` could not see it - so a field on that list
+would have been treated as unshadowed. Negative-controlled **both ways**:
+the old tree compiles cleanly with `guest_gdtr_base` on that list, and
+after moving the list to `nested_vmx.h` the same edit is a compile error.
+Three guards added, 7 new checks, and two `priced_at` static_asserts so
+the arithmetic above cannot rot silently.
