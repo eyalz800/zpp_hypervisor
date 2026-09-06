@@ -71251,3 +71251,144 @@ across the epoch boundary rather than re-read. `control_cache` and
 Whether a read may trust them is a correctness question and not a tuning
 one - and it is the same question `record_l2_entry_event`'s "read it back
 out of vmcs02" principle answers *no* to for instruments.
+
+## Implemented: the three exit-information reads are gated on the exit reason
+
+`d461aa6` inventoried them and judged the class worth ~2% of the handler
+at a 60-cycle read price. `65334f3` measured a real VMREAD at **2,876
+cycles** and `ed0197b` showed the cache window ends once per exit, so
+these are guaranteed misses and the class is worth **48x more** than the
+figure it was set aside on. Implemented on
+`worktree-agent-a8075e724d175e051`, one commit, with both negative
+controls run.
+
+### What each gate rests on
+
+| field | SDM | reasons it is read on now |
+|---|---|---|
+| `guest_linear_address` | 30.2.1, `.references/sdm.txt:203824-203851` | `control_register_access`, `io_instruction`, `ept_violation`, `ept_misconfiguration`, `spp_related_event` |
+| `vm_exit_instruction_information` | 30.2.5, `:204159-204175` | the section's instruction list mapped onto reasons - `io_instruction`, `invept`, `invpcid`, `invvpid`, `gdtr_or_idtr`, `ldtr_or_tr`, `rdrand`, `rdseed`, the six VMX instructions, `xsaves`, `xrstors` |
+| `vm_exit_instruction_length` | 30.2.5, through the existing `exit_length_defined_for` | every reason that is not in its `no` list |
+
+Both new lists live in `hypervisor.h` beside `exit_length_defined_for`
+rather than as inline switches, because one of them is sixteen reasons
+long. The value written where the field is undefined is **zero**, not
+vmcs12's previous contents.
+
+**Three sub-claims that had to be checked and are not obvious:**
+
+- The linear address's "prematurely busy shadow stack" clause would add
+  three more reasons if that VM-exit control were ever 1. It cannot be:
+  `build_vmcs02` composes vmcs02's exit controls as `exit02 = exit01`
+  plus the acknowledge-interrupt bit, **not** from vmcs12, so only this
+  VMM could set it and nothing in the tree names it.
+- LOADIWKEY, TPAUSE and UMWAIT are on SDM 30.2.5's instruction list and
+  have no enumerator in `vmx_exit_reason.h`. Their exits need secondary
+  controls `nested_vmx::supported_secondary_controls` does not offer, and
+  `secondary01` does not set them, so they cannot be a reflected reason.
+  `tests/nested_exit` already records reasons 67 and 68 as divergences
+  from KVM for the same reason.
+- KVM reads all three unconditionally - `sync_vmcs02_to_vmcs12`
+  (`.references/kvm/nested.c:4570`) and `prepare_vmcs12` (`:4627-4628`).
+  That is evidence **against**, and it was weighed: both choices are
+  architecturally permitted because the field is undefined either way,
+  so KVM's is a statement about cost, not correctness, and the cost is
+  a VMREAD per reflection.
+
+### Zero, not "leave vmcs12 alone"
+
+The `guest_physical_address` gate five lines above leaves vmcs12's field
+untouched. These two do not, and the difference is not inconsistency:
+**KVM never writes vmcs12's guest-physical address at all**, so leaving
+it untouched is literally matching KVM, whereas these two are written on
+every ordinary exit today. Stopping the write would leave the previous
+reflection's value - a live-looking kernel address from an unrelated
+exit, which is the hardest shape of wrong value to attribute. Zero is
+what `honest_exit_length` already chose three statements below, and for
+the instruction-information field it is the value the processor itself
+writes on an exit in enclave mode.
+
+The test enforces this rather than assuming it: every positive case runs
+*after* a reflection that left a sentinel in vmcs12, so a gate that
+merely stopped writing would pass the negative cases and fail nothing.
+
+### The read counter, and why the value was not enough
+
+`tests/shim/.../vmx/asm.h` now counts fetches per encoding. Without it
+the instruction-length gate is **untestable**: `honest_exit_length`
+already zeroed the field after reading it, so the value handed over is
+byte-identical before and after and no value assertion can see the
+change. The negative controls, run one gate at a time:
+
+    gated                                1249 checks, 1 failure (pre-existing)
+    guest_linear_address reverted        +7 failures
+    vm_exit_instruction_information       +8 failures
+    vm_exit_instruction_length            +1 failure
+
+**One check** is the whole of what the length gate can be caught by, and
+that is the point: a value-only suite would have passed it either way.
+
+### The prediction, to falsify on the rig
+
+Against boot 194 (`ed0197b`): 25.36 reads an exit, 5.90 hits, 19.46
+misses. Removed: 1.0 + 1.0 reads a reflection for the two undefined
+fields on the reflected population (`wrmsr`, `interrupt_window`,
+`vmcall` - none on either list; EPT violations are claimed by
+`l0_wants_l2_exit` and not reflected), plus ~0.22 for the length.
+
+    2.22 reads a round trip, 1.11 an exit
+    reads/exit    25.36 -> 24.25   (-4.4%)
+    misses/exit   19.46 -> 18.35   (-5.7%)
+    hits/exit      5.90 -> 5.90    unchanged
+    hit rate      23.3% -> 24.3%   the denominator, not the cache
+
+    1.11 x 2,876 = 3,192 cycles an exit, 1.7% of a 186,210-cycle
+    vmresume exit; 6,385 a round trip, 1.8% of 348,046
+
+**The hit-rate line is there to stop a misreading**: a rate that rises
+because reads were removed is not the cache performing better, and
+`ed0197b` already withdrew "raise the hit rate" as a knob.
+
+The `~0.22` is the only soft number, carried from `BACKLOG.md:62369`'s
+reflected mix, which is cumulative and from a boot that ended in a
+`0x133`. The two 1.0s do not depend on it: those fields are undefined for
+every reason appearing above 1% in any histogram in this file.
+
+### What was NOT gated, and why
+
+- **The four shadowed fields moved to write-intercepted** (4.0 reads/RT,
+  the largest item in `d461aa6`'s ranking). Not a definedness question at
+  all - it is a shadow-bitmap trade of reads for exits, whose exit count
+  is estimated rather than measured, and it carries the
+  `deferrable_field_is_shadowed` trap `d461aa6` documents: the assert
+  silently stops covering two fields the guest hypervisor still reads
+  from the region. Its failure mode is hvix64 reading back a value it did
+  not write, with nothing faulting. Different mechanism, different
+  evidence needed.
+- **`guest_cr0` / `guest_cr4` / `guest_ia32_bndcfgs` into
+  `defer_guest_state`** (3.0 reads/RT). These are guest state, not exit
+  information: they are defined on **every** exit, so there is no SDM
+  argument available and the whole case rests on "nothing reads them
+  before the materialisation point", which is dynamic. A deferral, not a
+  gate.
+- **`l1_host_audit_batch` 4 -> 1** (3.0 reads/RT). Its own comment
+  records that gating it once cost the whole `host_field_elidable`
+  elision - *"it is the elision's evidence, with a diagnostic
+  attached."* Nothing to do with definedness.
+- **`guest_cs_selector` at `resume.cpp:1268`** (2.0 reads/RT, ~5,750
+  cycles a round trip at the new price - more than everything above put
+  together). Already settled *against* in the tree, with a test:
+  `tests/resume_guest` asserts the segment is `0x28`, gating the read
+  fails the suite, and the comment says so in terms. The price change
+  makes this the largest remaining single read item and the arithmetic is
+  recorded here so somebody can decide; it is not reopened by this
+  commit.
+- **Narrowing the linear-address gate on the qualification.** SDM 30.2.1
+  defines it for LMSW with a *memory operand* and for EPT violations that
+  set *bit 7*, so a MOV to CR and a bit-7-clear EPT violation both read a
+  field that is undefined for them. Narrowing means decoding a
+  qualification to save one read on reasons that are a rounding error in
+  the reflected mix.
+- **`nested_evmcs.cpp:250,258`** copies both fields out unconditionally
+  on the enlightened path. Different function, `evmcs=0` in the shipped
+  manifest, left alone.
