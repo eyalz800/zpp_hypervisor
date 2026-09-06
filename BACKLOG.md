@@ -74989,3 +74989,35 @@ Five boots triaged this way: 211, 213, 214, 215 stalled, 212 healthy -
 Consistent, and the triage now costs ~13 minutes per boot rather than the
 53 and 28 that boots 210 and 211 took, so the same odds are being sampled
 about four times faster.
+
+## Stalled A, fourth sample - and the VTL calls look like a 2 Hz heartbeat
+
+    boot 211   cpu0 8,804.45/s   cpu1 1,191.81/s   vmcall 2.16/s
+    boot 213   cpu0 8,773.02/s   cpu1 1,185.20/s   vmcall 2.00/s  (124)
+    boot 215   cpu0 8,783.46/s   cpu1 1,196.33/s   vmcall 2.01/s  (125)
+    boot 216   cpu0 8,787.00/s   cpu1 1,189.00/s   vmcall 2.01/s  (125)
+
+Four boots, cpu0 spread **0.36%**, `int-window` 21.1%/21.1%/21.3% and
+`wrmsr` 14.1%/14.2%/14.0%.
+
+**The detail worth having is the absolute count: 124, 125, 125 in a
+~62-second window.** Not a rate that happens to land nearby - the same
+number of calls. Two per second, on three independent boots, is the
+shape of a **periodic timer, not of work**: something ticks at ~500 ms
+and makes one trust-level call each time, and nothing else calls at all.
+
+That is a different claim from "VTL calls are rare here". Rare could be a
+slow producer. **A constant 2 Hz is a clock**, and it says the VTL
+machinery is alive and being driven by a timer while no actual work
+crosses it. Consistent with `multicore-wedge-is-a-stopped-hvci-walk`'s
+"VTL0 stops asking, VTL1 only ticks", which is the same observation from
+the other side and was recorded before this session.
+
+Not established: which timer, and whether the 2 Hz is the guest's or
+ours. The `l2_entry_vector` and the synthetic-timer members could say,
+and `vtl_differed` would say whether those 125 calls carry changing
+registers - but `vtl_differed` needs a boot that reaches the wall, which
+is still what is being hunted.
+
+Rate so far: **one healthy in six** (212), five stalled (211, 213, 214,
+215, 216), four of them state A.
