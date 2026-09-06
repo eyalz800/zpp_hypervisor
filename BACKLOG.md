@@ -75321,3 +75321,46 @@ than switching to analysis: both remaining questions need one.
 `a4db23e`'s `IntcOED` finding rests on a single IRP read and wants a
 second; and the goal itself - the login screen - has only ever been
 reached from the healthy state.
+
+## Stalled A executes essentially NO user-mode code, measured directly
+
+Boot 223 (stalled A, tenth sample: cpu0 8,710.57/s, cpu1 1,187.77/s,
+`vmcall` 134) carries a reading nothing else in this session took:
+
+    user_rip_samples   cpu0   178 total,  +0 in this window
+
+**178 user-mode instruction pointers over the whole boot, and zero in a
+measured 62-second window** during which the processor took 540,180
+exits. For comparison, boot 208 - which reached the 14-process wall -
+had **106,743**.
+
+This is an independent confirmation of what the process count says, from
+a different instrument: `n=3` means `System`, `Secure System` and
+`Registry` and no `smss.exe`, so there should be almost no user-mode
+execution, and there is almost none. Two instruments that share no code
+agreeing is worth more than either alone - and this file records the
+cheapness of that check often enough that taking it should be routine.
+
+**It also sharpens what stalled A is.** The processor is not idle: 8,710
+exits/s, 21.2% of them interrupt-window. All of that is **kernel-mode**
+work, in a guest that has never run a user-mode process. So stalled A is
+not "Windows is slow to start services" - it is a kernel that never gets
+far enough to start one, while spinning hard.
+
+### Why the hot-address census cannot answer the obvious next question
+
+The obvious follow-up is *which* kernel code, and the manifest says it
+cannot be had from this build:
+
+    zpp switches: ... census=0 ...
+
+The address census is compiled out. Getting it means a rebuild and a
+redeploy, which would **break the one property that makes the last twelve
+boots comparable** - `16809d6` established they all ran one binary,
+sha `0c7219c2…`, and that is what licenses pooling stalled A's ten
+samples into a band. Rebuilding now trades a characterised baseline for
+one measurement.
+
+Recorded as the decision it is: **not rebuilding while the login screen
+is the goal.** When the cycling stops, `census=1` on a fresh binary with
+its own baseline is the first thing to build.
