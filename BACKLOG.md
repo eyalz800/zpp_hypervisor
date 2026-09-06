@@ -69477,3 +69477,57 @@ it is quantitative and has a deadline: the guest needs to reach a settled
 user mode inside 600 s of the power IRP being issued. Every microsecond
 removed from the stall is now measurable against a known budget rather
 than against an unknown one.
+
+## The 0x9F driver name is CONFIRMED arbitrary - six power IRPs aging together
+
+Read on the stopped boot-189 guest, memory intact, reader proven
+(`head->Flink->Blink` points back at head):
+
+    [1] age 2,881.5 s of 600 s (480.3%)   CurrentDevice <null>
+    [2] age 2,881.5 s of 600 s (480.3%)   CurrentDevice <null>
+    [3] age   300.0 s of 600 s ( 50.0%)   CurrentDevice \Driver\IntcOED
+    [4] age 2,881.5 s of 600 s (480.3%)   CurrentDevice <null>
+    [5] age 2,881.5 s of 600 s (480.3%)   CurrentDevice <null>
+    [6] age   278.9 s of 600 s ( 46.5%)   CurrentDevice \Driver\USBHUB3
+                                          WatchdogState 1 (armed, running)
+    6 power IRPs in flight
+
+`guest-power-irps.py` states the discriminator **before** the data, so it
+cannot be fitted after: *several entries aging together, nothing
+completing -> the wedge is upstream; whichever entry wins the race to
+600 s gets named, and the name is arbitrary (CONSEQUENCE).*
+
+**Four IRPs share an age of 2,881.5 s to the tick** - issued at the same
+instant, ~4 minutes into a 51.9-minute boot, and never advanced since.
+Two more are aging behind them. Nothing is completing.
+
+**And `\Driver\IntcAudioBus` - the name in the bugcheck - is not the
+`CurrentDevice` of any of the six.** It was the *enumerator* on the entry
+that happened to be armed and reach the deadline. So the accusation is
+doubly indirect: an arbitrary winner of a race, reported by its parent bus.
+
+**That closes cause-versus-consequence.** `7286bca` flagged it INFERRED;
+it is now measured, by an instrument that published its decision rule in
+advance.
+
+### The unexplained part, recorded rather than smoothed
+
+Four IRPs sat at **480% of the 600 s budget** without bugchecking, while
+the machine died on one at 100%. Entry 6 is the only one whose
+`WatchdogState` reads armed, so the likely account is that the watchdog is
+armed per IRP and the four oldest were never armed - but that is a guess,
+and `WatchdogState` was only printed for one entry in this read. **Do not
+quote "the guest survived 4.8x the watchdog budget" as a fact about the
+watchdog until every entry's state is read.**
+
+### What it means for the goal
+
+The power subsystem stopped completing IRPs about **four minutes into the
+boot** and never resumed, while the guest went on to start 14 processes
+including `LsaIso.exe`. So the stall is **not** in the path that starts
+user mode - user mode started fine, slowly - it is in the path that
+completes device power transitions, and the boot died when a watchdog on
+that path ran out.
+
+That is a much narrower target than "the guest is slow": something in
+device power IRP completion is not making progress from ~4 minutes in.
