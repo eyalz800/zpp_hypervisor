@@ -596,29 +596,46 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
     // when an application processor triple faults with its global
     // descriptor table unreachable, the question is whether that table
     // was reachable under a table it held *earlier*.
-    if (cpuid < max_cpus) {
-        auto current = vmcs.guest_cr3();
-        auto & count = this->cr3_seen_count[cpuid];
-        auto known = false;
+    //
+    // **Behind `nested_vmx::census_closed`, off by default**, because
+    // that triple fault is not the failure any more: the application
+    // processor reaches `Phase1Initialization`, and the wedge `4fc1d2a`
+    // and `5c46be9` name is a `KiQuantumEnd` PrcbLock spin whose holder
+    // is frozen at `KiUpdateThreadQosGroupingSummaries+0x1b`. Nothing in
+    // that involves a descriptor table, nothing in `scripts/` reads
+    // either member, and it cost one `guest_cr3` read on every exit the
+    // machine took - a VMREAD being an exit to the layer below at
+    // 1.4-1.8 microseconds here.
+    //
+    // The `guest_gdtr_base` read beside it is bounded to eight per
+    // processor and was never the cost; it goes with its own census
+    // because a CR3 history with no descriptor table beside it answers
+    // neither half of the question the pair was built for.
+    if constexpr (nested_vmx::census_closed) {
+        if (cpuid < max_cpus) {
+            auto current = vmcs.guest_cr3();
+            auto & count = this->cr3_seen_count[cpuid];
+            auto known = false;
 
-        for (std::size_t i{}; (i < count) && (i < 8); ++i) {
-            if (this->cr3_seen[cpuid][i] == current) {
-                known = true;
-                break;
+            for (std::size_t i{}; (i < count) && (i < 8); ++i) {
+                if (this->cr3_seen[cpuid][i] == current) {
+                    known = true;
+                    break;
+                }
             }
-        }
 
-        if (!known && (count < 8)) {
-            this->cr3_seen[cpuid][count] = current;
-            this->gdtr_seen[cpuid][count] = vmcs.guest_gdtr_base();
-            count = count + 1;
-        } else if (!known) {
-            // Silently truncating made "none of the page tables maps it"
-            // indistinguishable from "the one that did was the ninth".
-            // Every other census here carries an overflow field; this
-            // one did not.
-            this->cr3_seen_overflow[cpuid] =
-                this->cr3_seen_overflow[cpuid] + 1;
+            if (!known && (count < 8)) {
+                this->cr3_seen[cpuid][count] = current;
+                this->gdtr_seen[cpuid][count] = vmcs.guest_gdtr_base();
+                count = count + 1;
+            } else if (!known) {
+                // Silently truncating made "none of the page tables
+                // maps it" indistinguishable from "the one that did was
+                // the ninth". Every other census here carries an
+                // overflow field; this one did not.
+                this->cr3_seen_overflow[cpuid] =
+                    this->cr3_seen_overflow[cpuid] + 1;
+            }
         }
     }
 

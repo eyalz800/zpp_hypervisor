@@ -230,6 +230,10 @@ option(ZPP_ANNOUNCE_HYPERVISOR_BIT
 option(ZPP_CENSUS_EXITS
     "Fill the exit ring's qualification, activity state and CS selector, and the CPL census beside them. Three VMCS reads on every exit, which is 7.8 per round trip at the measured 2.61 exits per round trip, and every one of them is an exit to KVM on a host without VMCS shadowing. OFF: the ring still records the reason, the instruction pointer and the guest-physical address, and the terminal records keep their full detail. See nested_vmx.h."
     OFF)
+
+option(ZPP_CENSUS_CLOSED
+    "The two censuses kept from investigations that have since closed: cr3_seen/gdtr_seen, one guest_cr3 read on every exit, and control_pin_granted/control_primary_granted, two control read-backs on every second-level entry. Neither has a reader in scripts/ and neither is cited by any live conclusion. OFF: they read zero, and zero is a legal value for all four - the manifest's closed= field is what says which. See nested_vmx.h."
+    OFF)
 cmake_minimum_required(VERSION 3.28)
 project(zpp_hypervisor LANGUAGES CXX ASM)
 
@@ -390,6 +394,7 @@ target_compile_options(zpp_hypervisor PRIVATE
     -DZPP_VIRTUALIZE_APIC=$<BOOL:${ZPP_VIRTUALIZE_APIC}>
     -DZPP_PROFILE_L2=$<BOOL:${ZPP_PROFILE_L2}>
     -DZPP_CENSUS_EXITS=$<BOOL:${ZPP_CENSUS_EXITS}>
+    -DZPP_CENSUS_CLOSED=$<BOOL:${ZPP_CENSUS_CLOSED}>
     -DZPP_SAMPLE_L1=$<BOOL:${ZPP_SAMPLE_L1}>
     -DZPP_WINDOW_ON_TPR=$<BOOL:${ZPP_WINDOW_ON_TPR}>
     -DZPP_DELIVER_ON_DROP=$<BOOL:${ZPP_DELIVER_ON_DROP}>

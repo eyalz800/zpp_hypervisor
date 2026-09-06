@@ -99,6 +99,14 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // "nobody paid to ask".
         ' ', 'c', 'e', 'n', 's', 'u', 's', '=',
         digit(nested_vmx::census_exits),
+        // The two censuses from closed investigations - `cr3_seen` and
+        // the pin/primary control read-backs. Same trade as `census=`
+        // and the same reason it needs a field: off, all four members
+        // read zero, and zero is a legal CR3 and a legal control word.
+        // Neither has a reader in `scripts/`, so a dump cannot even
+        // report their absence by looking odd.
+        ' ', 'c', 'l', 'o', 's', 'e', 'd', '=',
+        digit(nested_vmx::census_closed),
         // Off hands application processors to the guest unvirtualized,
         // so this is a correctness field and not a tuning one. It was
         // stale-OFF in `build/debug` for a session with nothing on the

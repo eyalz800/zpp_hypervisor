@@ -912,6 +912,53 @@ inline constexpr bool profile_l2 = (0 != ZPP_PROFILE_L2);
 inline constexpr bool census_exits = (0 != ZPP_CENSUS_EXITS);
 
 /**
+ * Whether the two censuses left behind by closed investigations run.
+ *
+ * Both were built to answer a specific question, both answered it, and
+ * both went on costing a VMCS access per exit or per entry afterwards.
+ * Neither has ever had a reader in `scripts/`, which is the check that
+ * separates "a diagnostic somebody consults" from "a diagnostic somebody
+ * wrote":
+ *
+ * - `cr3_seen` / `gdtr_seen`, one `guest_cr3` read on **every exit**.
+ *   Its declaration states its question outright - an application
+ *   processor triple faults with its own global descriptor table
+ *   unreachable, and the value at the fault does not say whether the
+ *   table was ever reachable under an earlier page table. That failure
+ *   is superseded: the application processor now runs
+ *   `Phase1Initialization`, and the multicore wedge as of `4fc1d2a` and
+ *   `5c46be9` is a `KiQuantumEnd` PrcbLock spin with a frozen holder,
+ *   which has nothing to do with a descriptor table.
+ * - `control_pin_granted` / `control_primary_granted`, two control
+ *   read-backs on **every second-level entry**. They were added to
+ *   compare what the guest hypervisor asked for against what its guest
+ *   was run with. `control_secondary_granted`, the third of the set, is
+ *   composed from a local and costs nothing - and it is the only one of
+ *   the three `rig-dump-state.py` reads.
+ *
+ * **Read-backs on purpose, not the values this VMM intended to write.**
+ * Turning them on has to keep meaning "ask the field", or the comparison
+ * becomes `what we wrote == what we wrote` and cannot fail. That is why
+ * this is a switch rather than a rewire onto the composed locals sitting
+ * three lines above them: the cheap version would have answered, and
+ * answered agreement, for ever.
+ *
+ * Off, all four read zero, and **zero is a legal value for all four** -
+ * a processor really can hold CR3 zero, and a control word really can be
+ * empty. Nothing in a dump distinguishes that from the switch being off.
+ * The manifest's `closed=` field does, and `check-bootable.sh` prints it
+ * on every deploy.
+ *
+ * On, when an application-processor start-up or a control-stripping
+ * question comes back.
+ */
+#ifndef ZPP_CENSUS_CLOSED
+#define ZPP_CENSUS_CLOSED 0
+#endif
+
+inline constexpr bool census_closed = (0 != ZPP_CENSUS_CLOSED);
+
+/**
  * Step the trust-level loop with the monitor trap flag. Off unless
  * asked for, and that is a correctness requirement rather than tidiness.
  *

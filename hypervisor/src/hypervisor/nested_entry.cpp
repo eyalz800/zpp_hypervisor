@@ -2794,15 +2794,43 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     }
 
+    // **The two read-backs are behind `nested_vmx::census_closed`, off
+    // by default; the four free members are not.**
+    //
+    // The `requested` three are vmcs12 words already in hand and
+    // `control_secondary_granted` is the composed local, so those four
+    // cost nothing and stay unconditional - which also keeps the one
+    // member of the set `rig-dump-state.py` actually reads
+    // (`control_secondary_granted`, beside `control_secondary_-
+    // requested`) available in every build.
+    //
+    // The pin and primary words are two VMREADs on **every second-level
+    // entry**, at 1.4-1.8 microseconds each on a host with no VMCS
+    // shadowing, and nothing in `scripts/` has ever read either. The
+    // comparison they were built for - "a control the guest hypervisor
+    // set and did not get back is a promise broken silently" - was made
+    // and closed; `tpr_shadow_honoured` / `refused` / `absent` beside
+    // them carry what it found.
+    //
+    // Rejected: taking them from the composed locals a few lines up,
+    // which would be free. `adjust_msr(msr, pin02)` is what this VMM
+    // *asked* for; the point of the pair is what the field ended up
+    // holding, and a "granted" recorded from the request agrees with it
+    // by construction and can never report the layer below refusing a
+    // write. A cheap instrument that cannot fail is the failure mode
+    // this file has a section about.
     if (cpu < max_cpus) {
         this->control_pin_requested[cpu] = pin12;
-        this->control_pin_granted[cpu] =
-            vmcs.pin_based_vm_execution_controls();
         this->control_primary_requested[cpu] = primary12;
-        this->control_primary_granted[cpu] =
-            vmcs.primary_processor_based_vm_execution_controls();
         this->control_secondary_requested[cpu] = secondary12;
         this->control_secondary_granted[cpu] = secondary02;
+
+        if constexpr (nested_vmx::census_closed) {
+            this->control_pin_granted[cpu] =
+                vmcs.pin_based_vm_execution_controls();
+            this->control_primary_granted[cpu] =
+                vmcs.primary_processor_based_vm_execution_controls();
+        }
     }
 
     // Every control either side has *ever* asked for, and every one this
