@@ -68801,3 +68801,49 @@ optimism: `b711510` halved zpp's duty (0.771 -> 0.371) and Windows' share
 did not move. That measured throughput on a *different* boot shape and
 did not check `+0x543`. It is not evidence either way about the convoy,
 but it is the reason to state the falsifier up front rather than after.
+
+## The "+0x543 binary test" is INVALID - the control refuted it
+
+`b216a27` proposed `KiQuantumEnd+0x543..0x54f` going from absent to
+non-zero as the binary test for the removal work. **Ran the control on a
+healthy boot before relying on it, and it fails.**
+
+Boot 188, zpp resident, **healthy and progressing** (`vtl_fresh_calls`
+64.39/s and 18.55/s, copies 10.33/s and 5.47/s):
+
+    cpu 0 QUIET 178,058   +0x543..0x54f  ABSENT
+    cpu 0 INTR   78,742   +0x543..0x54f  ABSENT
+    cpu 1 QUIET 259,927   +0x543..0x54f  ABSENT
+    cpu 1 INTR  120,107   +0x543..0x54f  ABSENT
+
+**Absent on a healthy guest too.** So its absence on three wedged boots
+was never evidence of anything - the two instructions after a successful
+`lock btsq` are executed briefly and rarely relative to the clock loop, and
+a few hundred thousand samples do not land on them in either state. An
+instrument that reads the same in both conditions has no discriminating
+power, and I had committed it as "binary".
+
+This is the negative-control rule doing its job: **run every control both
+ways and report both results.** Cost: one dump on a boot that was already
+running.
+
+### The control also supplied the test that DOES work
+
+Same healthy dump, the spinner's own address:
+
+    KiQuantumEnd+0x538   healthy boot 188   =        1 sample
+    KiQuantumEnd+0x538   wedged  boot 187   =   62,204 -> 98,756, GROWING
+
+**Four to five orders of magnitude**, and it moves in the right direction
+with a measured value at both ends. That is the discriminator, and unlike
+the one it replaces it has a control.
+
+Corrected test for the removal work, and for any future change:
+
+    healthy  KiQuantumEnd+0x538 ~ 1 sample, not growing
+    wedged   KiQuantumEnd+0x538 tens of thousands, growing per window
+
+Also absent on the healthy boot and worth noting for the same reason:
+the timer block's epilogue `+0x1c5` and
+`KiDowngradeIsolationUnitLockHandle`. Both are **wedge-only**, so both are
+usable as secondary confirmations - they have a measured zero at one end.
