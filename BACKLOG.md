@@ -74059,3 +74059,55 @@ growth observed within it; a stop at the *start* does, which is what
 `e8cfdd5` caught on boot 207. **The instrument now distinguishes those two
 cases, and this run is the first where that distinction was needed and
 made.**
+
+## WerFault is running `-k -c`: a KERNEL report, not a crashed application
+
+Boot 208, stopped with memory intact, PEB walk with the `System` anchor
+proven:
+
+    services.exe    CommandLine: C:\WINDOWS\system32\services.exe
+    WerFault.exe    CommandLine: C:\WINDOWS\system32\WerFault.exe **-k -c**
+
+**`-k` is the kernel-report path.** What matters and is *certain* is the
+negative: it is **not** `-u -p <pid> -s <n>`, which is the form WerFault
+takes when reporting a **crashed user-mode process**. So the thing being
+reported is not an application that died - **Windows is collecting a
+kernel report**, and `-c` asks it to create/collect one.
+
+`WerFault -k` is the live-kernel-report path Windows uses when a kernel
+component reports a serious but non-fatal condition - the mechanism behind
+a live kernel dump. **Collecting one means writing a large amount of
+memory out**, which is exactly the shape of a process burning **30.7% of
+user-mode execution** while the machine makes no progress.
+
+### The sequence this suggests, and it fits all seven walls
+
+1. a device power transition takes too long
+2. Windows notices and starts a **live kernel report** (`WerFault -k -c`)
+3. generating that report consumes the machine - 30.7% of user-mode
+   execution, second only to `services.exe` at 40.5%
+4. the flat **600-second** power-IRP watchdog expires and bugchecks `0x9F`
+   (`bd904d9`: naming whichever driver happened to hold an IRP)
+
+**`WerFault.exe` is present on all seven walls** (`7e72b25`), which under
+this reading is not incidental - it is the same mechanism firing every
+time, and its presence is a *symptom of the stall being detected*, not of
+a process crashing.
+
+### What is certain and what is not
+
+**Certain**: the command line reads `-k -c`; it is not the `-u -p` form;
+WerFault is 30.7% of differenced user-mode execution at the wall; it
+appears on every wall.
+
+**INFERRED**: that `-k` here is specifically a *live kernel dump* and that
+its I/O is what consumes the machine. The flag's meaning is from Windows
+documentation rather than from anything read on this guest, and **this
+tree has named three innocent parties from plausible readings already**
+(`VBoxSup.sys`, `IntcAudioBus`, and fontdrvhost one commit ago). What
+would settle it: WerFault's own hot addresses from the differenced pair
+table, and whether they land in a module doing file or memory-dump work.
+
+**That read needs no new boot** - boot 208 is stopped with memory intact
+and the pair table already holds `(cr3, rip)` rows for
+`0x1bbaab000`.
