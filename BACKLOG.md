@@ -75197,3 +75197,63 @@ watchdog armed - `1,176.7 s`, 300 s before the stop. `guest-power-irps.py`
 reads the IRP and its device; what it does not read is the IRP's stack
 location and pending completion, which is what would say who was supposed
 to complete it.
+
+## The IRP is parked at `\Driver\IntcOED`, and the bugcheck names someone else
+
+Boot 218's blocked IRP, read from its own stack location rather than from
+the bugcheck's parameters:
+
+    IRP 0xffff998f672bc8b0
+    PROOF: IRP+0xb8 -> 0xffff998f672bc9c8, MajorFunction 0x16
+           = IRP_MJ_POWER -> PASS
+    MinorFunction 0x02 (IRP_MN_SET_POWER)   Control 0xe1
+    stack DeviceObject      0xffff998f67106b30 -> **\Driver\IntcOED**
+    stack CompletionRoutine 0xfffff802acc127d0  (ntoskrnl + 0x4127d0)
+
+    bugcheck DEVICE_OBJECT  0xffff998f67530dd0 -> \Driver\IntcAudioBus
+
+**Three things, and the third is the point.**
+
+`Control 0xe1` has bit `0x01` set - **`SL_PENDING_RETURNED`**. A lower
+driver marked this IRP pending and has not completed it. That is not an
+inference about a stall; it is the IRP saying so about itself.
+
+The completion routine is in **ntoskrnl**, `+0x4127d0`, so the party
+waiting is the kernel's own power manager, not another driver.
+
+And **the device on the current stack location is not the device the
+bugcheck names.** The `0x9F` reports `IntcAudioBus`, the device the power
+manager dispatched to; the IRP has since been passed *down* and now sits
+at `IntcOED`'s stack location. **`IntcOED` is the driver holding it.**
+
+### Why this name is worth more than the previous five
+
+`e664ee5` and its predecessors recorded four driver names -
+`VBoxSup.sys`, `IntcAudioBus`, `fontdrvhost`, `USBHUB3` - and dismissed
+each, correctly, because a `0x9F` names whoever holds an IRP when a flat
+timer expires. **This name is not from the bugcheck.** It is read out of
+the IRP's `CurrentStackLocation`, which is Windows' own record of which
+driver the IRP is currently with, and it *disagrees* with the bugcheck on
+the same boot. A name that disagrees with the arbitrary one is not
+produced by the mechanism that makes the arbitrary one arbitrary.
+
+The offset was **proved rather than assumed**: `guest-irp.py` scans the
+IRP header for a pointer landing on `MajorFunction == 0x16` and refuses
+to print anything if none does. It found `+0xb8`, which is the documented
+`Tail.Overlay.CurrentStackLocation`, so the scan and the layout agree.
+
+### What is NOT established
+
+**One boot.** Boots 209 and 212 died the same way and their memory is
+gone, so it is unknown whether their IRPs also sat at `IntcOED`. Until a
+second boot's IRP is read the same way, this is one observation, and this
+file records five claims retracted for being one or two.
+
+It is also not established that `IntcOED` is *at fault*: a driver can
+hold a pending IRP legitimately while waiting on something else. What is
+established is **where the IRP is** and that **nobody completed it**,
+which is strictly more than any previous name in this investigation
+carried.
+
+The read costs one command on any boot that dies, and it is now the first
+thing to run after `guest-bugcheck.py`.
