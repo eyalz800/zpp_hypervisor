@@ -69005,3 +69005,57 @@ against a 1.4 us-per-VMREAD model again without checking `vcache=` first.
 The measurement that would settle the real per-read cost is the pair
 `vmcs_cache_hits` / `vmcs_cache_misses`, which exists for exactly this and
 which no reading in this investigation has used.
+
+## The VMCS cache hit rate, measured: 36.2%. Two thirds of reads are still real VMREADs
+
+`7905347` said `vmcs_cache_hits` / `vmcs_cache_misses` exist for exactly
+this question and that no reading in this investigation had used them.
+Taken now, on wedged boot 188, by reading the two globals straight out of
+the hypervisor's `.bss` at `module base + symbol offset` - the same
+mechanism `rig-dump-state.py` uses for the singleton:
+
+    llvm-nm .rig-deployed-hypervisor.elf
+      014eee60  zpp::arch::x86_64::vmx::vmcs_cache_hits
+      014eee68  zpp::arch::x86_64::vmx::vmcs_cache_misses
+
+    module base 0x66e6a000, two samples 45 s apart:
+      hits    121,448,302 -> 126,604,843    +5,156,541
+      misses  108,412,273 -> 117,488,833    +9,076,560
+      total                                +14,233,101
+
+    HIT RATE 36.2%   -> 63.8% of VMCS reads are REAL VMREADs
+
+**Differenced, not cumulative** - the cumulative pair reads 52.8% hits and
+would have overstated the cache by half again, because it averages in
+phases with different access patterns.
+
+### What it settles
+
+The cache is **on and working**, but two thirds of reads still miss and
+still exit. So neither extreme was right:
+
+- `7905347` said the removal's time prediction "does not hold" because the
+  cache is on. **Too strong.** 63.8% of the removed reads were real exits.
+- The original analysis assumed **every** read is an exit at 1.4-1.8 us.
+  Also wrong, by a factor of ~1.6.
+
+**Corrected expectation for the removal work**: 6.5 fewer reads per exit,
+of which ~63.8% would have been real VMREADs, so **~4.1 fewer exits to the
+layer below per exit taken**. At ~14.2M reads per 45 s against roughly
+6,400 exits/s that is ~49 reads per exit, so the removal takes out about
+**13%** of the real VMREAD traffic - not the 17.8% claimed against an
+all-miss model, and not nothing.
+
+### The reader does not know these counters exist
+
+`rig-dump-state.py` has no reference to either name, which is why the
+number is new despite the counters being `constinit` globals that have
+been incrementing since the first boot. They are namespace-scope in
+`vmcs.h` rather than singleton members, and the reader resolves offsets
+from the singleton - so they fell outside everything it walks.
+
+**Worth adding to the reader**, and worth stating as a pattern: a counter
+that is not a member of the singleton is invisible to every instrument in
+this tree, however diligently the singleton is dumped. That is a third
+class of "an instrument that cannot report its own failure" - here the
+instrument cannot report its own *existence*.
