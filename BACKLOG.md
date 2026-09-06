@@ -72376,3 +72376,58 @@ dies is now fully informative** rather than a missed window.
 immediately, whether the guest is running or stopped**, and record the
 absolute counts with the process's age. The catcher does this for a live
 guest; for a stopped one it is a single command and needs no window at all.
+
+## SETTLED: services.exe is NOT starved. It runs at 40 switches/s and starts nothing
+
+The catcher (`af2e631`) fired on boot 200 - zpp resident, 2 vCPUs - the
+moment the guest reached the wall, and took the measurement three previous
+boots denied. **`services.exe`, two samples 60 seconds apart:**
+
+    thread              wait            ctxsw            delta    rate
+    0xffffce01c9b38080  WrQuantumEnd    2,291 -> 4,680   +2,389   **39.8/s**
+    0xffffce01c9c0c040  WrQueue           167 ->   282     +115     1.9/s
+    0xffffce01c9b10080  WrQueue             2 ->     2       +0     idle
+    0xffffce01c9b6d040  WrQueue         (appeared)          18     NEW THREAD
+
+**The SCM's main thread took 2,389 context switches in one minute.** For
+scale, the busiest `System` thread measured on boot 193 ran at **8.3/s**;
+this is **39.8/s**, five times faster. And a **fourth thread appeared
+between the two samples**, so `services.exe` is creating threads while
+being measured.
+
+**It is running hard, and it starts nothing.** The process list at the
+same moment: 14 processes, **zero `svchost.exe`.**
+
+### This overturns 5871b1e
+
+`5871b1e` read one `WrQuantumEnd` sample and concluded the wall was
+"`services.exe` failing to accumulate enough processor time to start
+services, on a machine where the clock path consumes the processor". It
+recorded the caveat that a snapshot cannot separate a just-preempted
+thread from a starved one, and named `ContextSwitches` as the fix. **The
+fix says the opposite of the guess.**
+
+`WrQuantumEnd` beside a *rising* count does not mean starved - it means
+the thread is being given the processor and using its whole quantum, over
+and over. The SCM is not waiting for CPU. **It is doing something, at
+speed, that never completes.**
+
+### What this closes and what it opens
+
+**Closed**: starvation, and with it the last thread connecting the clock
+livelock to the 14-process wall. `eb6a337` already showed the 5.2% cycle
+saving changed no scheduling rate, and `6cc2ba1` showed four boots across
+a 2.4x speed spread stopping at the same place. **The wall has nothing to
+do with how fast the machine is** - three independent measurements now say
+so, and this is the sharpest.
+
+**Opened**: what is `services.exe` doing 2,389 times a minute that never
+produces a service? That is a guest-side question with a specific,
+runnable subject - unlike every previous formulation, which was about a
+thread that could not be observed running. The stack of thread
+`0xffffce01c9b38080` at the wall would name it, and
+`scripts/guest-thread-stack.py` exists for exactly that.
+
+**Boot 200 is `paused (shutdown)` with memory intact**, so that stack is
+readable now, and `00ed35c`'s rule applies - a stopped guest at the wall
+is fully informative.
