@@ -74449,3 +74449,61 @@ The corollary is the useful one: **a single failing boot is not evidence
 about a change**, and neither is a single passing one. Anything claimed
 about a code change on this rig needs several boots per arm, because the
 noise is larger than most effects being chased.
+
+## Boot 211 differenced: cpu0 is in an interrupt-window loop with NO VTL activity
+
+A **measured 62.051 s window** (`--delta 60`), per CPU, on boot 211 at
+~28 minutes with `n=3` and no `smss.exe`. This is the measurement boot
+210 lacked - differenced, not cumulative, and split by processor:
+
+    cpu 0    546,327 exits    8,804.45/s
+      vmresume    273,185   50.0%    4,402.57/s
+      int-window  116,193   21.3%    1,872.53/s
+      wrmsr        76,337   14.0%    1,230.23/s
+      tpr-below    52,507    9.6%      846.19/s
+      ext-int      28,143    5.2%      453.54/s
+      vmcall            3    0.0%        0.05/s      <- three. in a minute.
+
+    cpu 1     73,953 exits    1,191.81/s
+      vmresume     36,810   49.8%      593.22/s
+      wrmsr           486    0.7%        7.83/s
+      int-window      371    0.5%        5.98/s
+      vmcall          131    0.2%        2.11/s
+
+**Three things this establishes that the cumulative dump could not.**
+
+**1. The interrupt-window storm is live, not an averaging artifact.**
+Boot 210's cumulative 20.2% could have been any phase; the differenced
+rate here is **21.3%, 1,872/s, right now**. And the ratio that names the
+shape: **116,193 interrupt-window exits against 28,143 external
+interrupts actually taken - 4.1 windows requested per interrupt
+delivered.** An interrupt-window exit means "wake me when the guest can
+take an interrupt"; asking four times per delivery is the signature of a
+pending interrupt that keeps being deferred.
+
+**2. VTL activity is essentially zero.** `vmcall` is the trust-level
+switch, and it ran **3 times in 62 seconds on cpu0** and 131 on cpu1 -
+2.16/s combined. The boots that reach the wall show tens of thousands of
+VTL calls. So this is not a slow VTL round trip, it is a guest that has
+almost stopped making them.
+
+**3. The two processors are not doing the same work at all.** cpu0 takes
+**7.4x** the exits of cpu1, and every hot reason - int-window, wrmsr,
+tpr-below - is cpu0's alone; cpu1's are all under 1%. A single-CPU
+figure, or a figure averaged across both, would have hidden this
+completely. `5ea5503` already fixed eight instruments that reported one
+processor's data as another's; this is why that mattered.
+
+**Cross-check, and it passed.** 546,327 + 73,953 = 620,280 exits over
+62.05 s = **9,996/s**, against KVM's own `nested_run/s` of **9,909** and
+**9,763** measured from the host earlier on boot 210. Two instruments
+that share no code - one inside zpp, one in the host kernel - agree to
+under 1%. That is the first time in this investigation two independent
+counters have been checked against each other, and it is cheap enough
+that it should be routine.
+
+**The control is still missing and this is not a conclusion.** No
+differenced profile exists from a boot that *did* reach the wall, so
+"21.3% int-window is abnormal" remains uncompared. What has changed is
+that the failing state is now measured properly, so the next boot that
+reaches the wall needs only the same one command to complete the pair.
