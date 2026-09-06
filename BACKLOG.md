@@ -71071,3 +71071,59 @@ The general form, which this file already carries in other words: **a
 state field says where a thread is, a counter says whether it is going
 anywhere.** Prefer the counter whenever the question is "is this
 progressing", and difference it.
+
+## Measured: the guest schedules 4-8 context switches a second, and preempted threads never come back
+
+Live boot 193, zpp resident, **3-process phase**, 43.6 min elapsed. Forty
+`System` threads sampled twice, 75 seconds apart, `ContextSwitches`
+differenced:
+
+    thread            wait          ctxsw          delta   rate
+    0xffffe306ff5ba480 WrQueue      4,909 -> 5,530   +621   8.3/s
+    0xffffe306ff51b040 Executive    3,089 -> 3,439   +350   4.7/s
+    0xffffe306ff5f5040 Executive    2,699 -> 3,006   +307   4.1/s
+    0xffffe306ff6ef080 Executive    2,709 -> 3,016   +307   4.1/s
+    0xffffe306ff7a1040 Executive    2,731 -> 3,037   +306   4.1/s
+    0xffffe306ff51c040 Executive      351 ->   392    +41   0.5/s
+    0xffffe306ff521040 WrQueue        332 ->   337     +5   0.07/s
+    0xffffe306ff4f8280 Executive       76 ->    78     +2   0.03/s
+
+    **0xffffe306ff4a4040 WrPreempted   892 ->   892     +0   FROZEN**
+
+    8 of 40 threads scheduled in the window, 32 frozen
+
+**The guest is scheduling, at 4-8 context switches a second on its busiest
+threads.** A healthy Windows system does thousands. That is the "~100x
+slow" figure turned into a scheduler-level number for the first time.
+
+**And a thread sitting in `WrPreempted` took ZERO context switches in 75
+seconds.** `WrPreempted` means preempted and waiting to run - runnable,
+not blocked. So it wants the processor and does not get it, for at least
+75 seconds. **That is starvation, measured rather than inferred**, and it
+is the same shape `5871b1e` saw in `services.exe`'s `WrQuantumEnd` thread
+at the 14-process wall, now confirmed one phase earlier with a counter
+instead of a state field.
+
+### Why this matters more than the wall it was built for
+
+`2fd08e8` added `ContextSwitches` to answer the 14-process question and it
+answered the 3-process one on the way, which is the phase that consumes
+most of every boot. The picture is consistent across both:
+
+- a few threads cycle slowly
+- at least one runnable thread never runs at all
+- nothing is deadlocked
+
+So the boot is **not** blocked anywhere; it is running at a few percent of
+scheduling speed, and threads that lose the processor may not get it back
+for over a minute. At that rate the 45-60 minutes a boot takes, and the
+600-second power-IRP budget it eventually misses, both follow arithmetically.
+
+### The instrument, end to end
+
+Anchor passed (`PsActiveProcessHead` first entry is `System`), counts are
+small plausible integers, 32 frozen threads read the same value twice -
+which is itself a check, since a broken read would jitter. **A frozen
+counter that stays frozen across two reads is evidence; a frozen counter
+read once is not**, and this is the first reading in the investigation
+where that distinction was available.
