@@ -70414,3 +70414,73 @@ At ~183,000 cycles an exit, with reads at 60 and writes at 2,040:
 is has not been measured, and every cost avenue this session pursued was
 aimed at the quarter. That is the next question, and it now starts from
 measured prices rather than a hardcoded constant.
+
+## The cost is localized: vmcall's 1.01M-cycle residue, and build_vmcs02's writes
+
+Two sections of the boot-192 dump, both already generated and neither read
+until now.
+
+### `build_vmcs02`, 87,326 cycles a call over 5,171,693 calls
+
+    slot                                    cyc/call  share  rd    wr    cyc/acc
+    host state once, then every control       30,678  35.2%  1.56  9.71    2,723
+    every guest-state field                   18,395  21.1%  1.03  6.18    2,550
+    bitmaps merged, own controls in hand      17,940  20.6%  0.64  0.24   20,500
+    the event to inject, transition flush      9,707  11.1%  0.54  1.72    4,294
+    the VMPTRLD itself                         6,495   7.5%  0.28  0.09   17,431
+
+The top two slots are **15.9 writes a call** between them, and at the
+measured 2,040 cycles a write that is 32,436 of their 49,073 cycles - so
+**those two are genuinely write-bound**, and the write price is the thing
+that makes them expensive.
+
+**But "bitmaps merged" takes 17,940 cycles on 0.88 accesses - 20,500
+cycles per access.** That is not VMCS traffic. It is software: the bitmap
+merge plus the three guest page reads the phase tree already showed
+(`merge: guest page read`, 3.00 calls a round trip). The printer's own
+summary line - *"100.0% of the phase is slots that touch the VMCS, 0.0% is
+software that touches nothing"* - classifies by whether a slot takes **any**
+access, not by whether its cycles are access cycles, and it misleads here.
+
+### vmcall against wrmsr, and this is the finding
+
+    vmcall (245,857 exits, 1,236,592 cyc, 492.7 accesses an exit)
+      save_l2_state        45,548 cyc   16.1rd   0.7wr
+      reflect_l2_exit     157,381 cyc   32.9rd  12.0wr
+      exit information     20,534 cyc    6.3rd   0.4wr
+      residue           1,013,130 cyc  409.4rd  14.8wr    <- 82% of the cost
+      -> the three phases hold 18.1% of the cycles
+
+    wrmsr (2,123,354 exits, 190,334 cyc, 54.3 accesses an exit)
+      same three phases, near-identical cycles
+      residue             -30,919 cyc  -11.4rd  -0.5wr
+      -> the three phases hold 116.2% of the cycles
+
+**A `wrmsr` reflection is entirely accounted for by the three instrumented
+phases. A `vmcall` spends 1,013,130 cycles - 82% of its cost - somewhere
+those phases do not cover**, and takes 409.4 reads there. At 60 cycles a
+read those reads are 24,564 cycles, **2.4% of the residue.**
+
+So the residue is ~1M cycles of software, on the path only `vmcall` takes.
+**The largest known code on that path is the `trace_vtl && vmcall` block at
+`nested_entry.cpp:11348-12933` - 1,585 lines, gated by `vtltrc=1`.** And
+`vtltrc` **cannot simply be turned off**: it is the only writer of
+`vtl_latest`, whose EPTP slot anchors `entering_vtl1_space()`, so
+`novina=1 vtltrc=0` is now refused by a `static_assert` (`3d64308`).
+
+That makes it the sharpest target in the tree: a 1,585-line block, on 5.3%
+of exits, holding 12.2% of all handler time, which is load-bearing for two
+guest-visible behaviours and therefore cannot be removed - only split, so
+the parts `novina`/`nosdma` need stay and the tracing does not.
+
+### The exit mix, for scale
+
+cpu 0, 3,942,009 exits: `ept-violation` **47.1%** but the cheapest reason
+at 75,582 cyc; `vmresume` 22.5%; `wrmsr` 8.6%; `hlt` 6.4%; `vmcall` 5.3%.
+
+So the expensive reasons are rare and the common ones are cheap - which is
+why no single change has moved the boot. **`vmresume` at 38.6% of handler
+time is the largest single consumer**, at 186,210 cycles an exit of which
+writes explain 42,024 (22.6%). The remaining 144,186 cycles an exit is the
+biggest unexplained quantity in this investigation and nothing has looked
+at it.
