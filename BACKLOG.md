@@ -74909,3 +74909,46 @@ characterised; a third stalled boot measured the same way would settle
 whether 8,780/1,188 is the state's signature or a coincidence between two
 runs. That measurement is free - it is the same triage command already
 being run on every boot.
+
+## The attractor claim does not survive its third sample. Two stalled profiles exist
+
+The previous entry recorded that boots 211 and 213 agreed to 0.4% and
+added: "two samples is two samples ... a third stalled boot measured the
+same way would settle whether 8,780/1,188 is the state's signature or a
+coincidence". **Boot 214 is that third sample, and it says coincidence.**
+
+    stalled A (211, 213)   cpu0 8,790/s   cpu1 1,188/s   ratio 7.4:1
+                           wrmsr 14.0%    int-window 21.3%
+    stalled B (214)        cpu0 6,781/s   cpu1 6,887/s   ratio 0.98:1
+                           wrmsr 29.9%/19.8%   int-window 10.7%/19.3%
+    healthy   (212)        cpu0 6,552/s   cpu1 8,791/s   vmcall 435/s
+
+Boot 214 is unambiguously stalled - **`vmcall` does not appear in its
+exit-reason table at all**, so it is below even the display threshold and
+therefore under 211's 2.16/s. But its load is **balanced across the two
+processors**, where stalled A runs 7.4:1, and `wrmsr` is its largest
+non-`vmresume` reason at a combined **3,388/s** where stalled A's was
+14%.
+
+So there is no single stalled operating point. There are at least two,
+and the only property they share is the one the triage criterion uses:
+**near-zero VTL calls.**
+
+**The criterion survives; the characterisation does not.** That split
+matters, because the criterion is what decides whether to kill a boot and
+it rests on `vmcall` alone, which is at or below 2.16/s in all three
+stalled boots and 435/s in the healthy one. Nothing about exit-rate
+symmetry or `wrmsr` share entered that decision.
+
+Worth noting what saved this from becoming a fourth false finding: the
+caveat was written into the same commit as the claim, naming the exact
+measurement that would refute it and observing that it was free. It then
+ran on the next boot and refuted it. **Writing the refuting test down
+beside the claim is cheap and it worked** - the alternative was carrying
+"the stalled state has signature 8,780/1,188" forward as fact.
+
+`wrmsr` at 3,388/s, essentially all `from_l2` (210,550 of 210,546
+exits), is now the most conspicuous unexplained quantity in stalled B and
+has no counterpart measurement in stalled A. It is not pursued here
+because a single window on a single boot is what produced the claim being
+retracted three paragraphs up.
