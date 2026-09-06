@@ -70,11 +70,28 @@ inline int vmread(std::uint64_t field, void * out)
     return 0;
 }
 
+/**
+ * How many times each encoding has been written into a region, ever.
+ *
+ * The write side of `g_vmread_field_count`, and needed for the same
+ * reason it was: an elided write leaves vmcs02 holding the value the
+ * write would have put there, so the *value* is identical either way and
+ * a case comparing only vmcs02 cannot tell an elision from a write. That
+ * is the whole property `hot_state_saved` exists for.
+ *
+ * `vmcs_writes_taken` counts every field together and `hot_state_writes_
+ * skipped` counts the family together, so neither can say *which* field
+ * was skipped - and a gate aimed at CR0 that silently also skipped
+ * IA32_EFER would pass both. This assumes nothing.
+ */
+inline std::uint64_t g_vmwrite_field_count[0x8000]{};
+
 inline int vmwrite(std::uint64_t field, std::uint64_t value)
 {
     if (!g_vmcs_valid || (field >= 0x8000)) {
         return 1;
     }
+    g_vmwrite_field_count[field] = g_vmwrite_field_count[field] + 1;
     g_vmcs_loaded[field] = value;
     return 0;
 }

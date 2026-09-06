@@ -14247,10 +14247,18 @@ private:
     /** @} */
 
     /**
-     * The five guest-state fields the processor saves into vmcs02 on
-     * every VM exit, as `save_l2_state` read them out - so that
-     * `build_vmcs02` can skip writing back a value vmcs02 demonstrably
-     * still holds.
+     * The guest-state fields the processor saves into vmcs02 on every VM
+     * exit, as `save_l2_state` read them out - so that `build_vmcs02`
+     * can skip writing back a value vmcs02 demonstrably still holds.
+     *
+     * Slots, in the order `save_l2_state` records them:
+     *
+     *     0 guest RIP                    5 guest CR0
+     *     1 guest RSP                    6 guest CR4
+     *     2 guest RFLAGS                 7 guest DR7
+     *     3 interruptibility state       8 guest IA32_PAT
+     *     4 activity state               9 guest IA32_EFER
+     *                                   10 guest IA32_BNDCFGS
      *
      * **Why this is sound without tracking who wrote what.** The
      * comparison is against the *value*, not against a dirty bit, so it
@@ -14263,8 +14271,50 @@ private:
      * reads these while vmcs02 is current, immediately after the exit;
      * vmcs01 is then made current to run the guest hypervisor; and the
      * only VMPTRLD of vmcs02 in the tree is the one in `build_vmcs02`
-     * itself. So between the record and the use, no instruction can
-     * write vmcs02's guest state.
+     * itself and the read-only borrow in `materialise_l2_guest_state`.
+     * So between the record and the use, no instruction can write
+     * vmcs02's guest state.
+     *
+     * **This is the family, and not `control_cache`, that slots 5 to 10
+     * had to join.** SDM 30.3.1 (`.references/sdm.txt:204496-204512`)
+     * has every VM exit save CR0, CR3 and CR4 into the guest-state area
+     * unconditionally, DR7 under "save debug controls", IA32_PAT under
+     * "save IA32_PAT", IA32_EFER under "save IA32_EFER", and
+     * IA32_BNDCFGS on any processor that offers either BNDCFGS control.
+     * A record of *what this VMM last wrote* therefore describes a field
+     * hardware has since moved - which is exactly why
+     * `vm_entry_controls` is excluded from `control_fields`, and exactly
+     * why `l1_host_written` needs `host_field_elidable`'s measurement
+     * before it may elide anything. What makes this family immune is the
+     * read-back: `save_l2_state` re-reads every slot from vmcs02 on
+     * every reflection, so the record is what the *processor* left, not
+     * what we hoped it left.
+     *
+     * Three of the writers that would otherwise sink slots 5 to 7 are
+     * real and in this tree: `exit_dispatch.cpp` writes vmcs02's guest
+     * CR0 (`mov cr0` handling, `numeric_error` forced in), guest CR4
+     * (VMXE forced in, SMXE forced out) and guest DR7 (`mov dr`), all
+     * with vmcs02 current, on an L2 exit this VMM answers itself. They
+     * cannot invalidate a record, because the only route from such an
+     * exit back to `build_vmcs02` is through the level above, and the
+     * only route to the level above is `reflect_l2_exit`, whose first
+     * act is `save_l2_state` - which re-reads all three. A `deferred` or
+     * `handled` outcome resumes the second-level guest directly and
+     * never reaches `build_vmcs02` at all.
+     *
+     * `hot_state_slot_valid` is a bitmask over the slots, and it exists
+     * for the three whose read-back is conditional. `save_l2_state`
+     * reads DR7, IA32_PAT and IA32_EFER only where **vmcs12's** exit
+     * controls ask for the save, while the processor writes vmcs02's
+     * copies under **vmcs02's** - two different control words, so a slot
+     * that was not read is a slot whose record may describe a value
+     * hardware has replaced. The rule is therefore "record only what was
+     * read back this time, and clear the bit otherwise", which is sound
+     * whichever way the two control words disagree. `build_vmcs02` sets
+     * a slot's bit again when it performs the write, so an entry that
+     * fails and is retried still elides: SDM 29.8
+     * (`.references/sdm.txt:203333-203335`) says an entry failure leaves
+     * the guest-state area unmodified.
      *
      * The two preconditions are the ones the deferred read copy already
      * pays for and `tests/nested_exit` already covers: vmcs02 must have
@@ -14272,8 +14322,9 @@ private:
      * being entered must be the one that was saved from, since vmcs02 is
      * reused per processor.
      */
-    static constexpr std::size_t hot_state_count = 5;
+    static constexpr std::size_t hot_state_count = 11;
     std::uint64_t hot_state_saved[max_cpus][hot_state_count]{};
+    std::uint64_t hot_state_slot_valid[max_cpus]{};
     std::uint64_t hot_state_vmcs[max_cpus]{};
     bool hot_state_valid[max_cpus]{};
     std::uint64_t hot_state_writes_skipped[max_cpus]{};

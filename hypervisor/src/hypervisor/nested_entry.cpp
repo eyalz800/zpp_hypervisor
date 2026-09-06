@@ -1166,6 +1166,7 @@ void hypervisor::forget_vmcs02_contents(std::size_t cpu)
     // the belt to that braces - but the recording is the thing being
     // invalidated, so it is invalidated here.
     this->hot_state_valid[cpu] = false;
+    this->hot_state_slot_valid[cpu] = 0;
 
     for (auto & valid : this->control_cache_valid[cpu]) {
         valid = false;
@@ -3047,11 +3048,80 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         effective_control_register(
             cr4_12, shadow.read(field::cr4_read_shadow), cr4_mask12));
 
+    // The fields the processor itself saves into vmcs02 on every VM
+    // exit, written back only when they differ from what it saved. See
+    // `hot_state_saved`: the comparison is against the value, so it
+    // covers the guest hypervisor's VMWRITEs, this VMM's own RIP
+    // advance, and the injection path alike, and vmcs02 provably still
+    // holds the recorded value because `save_l2_state` read it out of
+    // vmcs02 on the reflection that let the level above run at all.
+    //
+    // Measured before this existed: the ten writes after the VMPTRLD
+    // that never went through any elision were most of `build_vmcs02`'s
+    // post-switch 79,687 cycles a call, which was 20% of the whole exit
+    // - while the elision that does exist covered only the cold fields,
+    // the segments and bases that never change.
+    //
+    // Declared here rather than beside the RIP/RSP/RFLAGS calls further
+    // down so that the two control-register writes below can go through
+    // it without moving, which would have moved them across `stamp(5)`
+    // and made every phase-split reading before this commit
+    // incomparable with every one after it.
+    auto reuse_hot_state = (cpu < max_cpus) && this->hot_state_valid[cpu] &&
+                           this->vmcs02_launched[cpu] &&
+                           (this->hot_state_vmcs[cpu] ==
+                            this->guest_current_vmcs[cpu]);
+
+    auto put_hot = [&](std::size_t slot,
+                       std::uint64_t value,
+                       auto && write) {
+        // The slot's own bit, which is not the same question as
+        // `reuse_hot_state`. That one asks whether *this vmcs02* was
+        // ever saved from; this one asks whether *this field* was read
+        // back on that save. Three of them are read under vmcs12's exit
+        // controls while the processor writes them under vmcs02's, so
+        // the answer differs per field - see `hot_state_slot_valid`.
+        auto recorded =
+            (cpu < max_cpus) &&
+            (0 != (this->hot_state_slot_valid[cpu] & (1ull << slot)));
+
+        if (reuse_hot_state && recorded &&
+            (this->hot_state_saved[cpu][slot] == value)) {
+            this->hot_state_writes_skipped[cpu] += 1;
+            return;
+        }
+
+        write(value);
+
+        // Kept in step so a second build without an intervening entry -
+        // an entry that fails, and is retried - compares against what
+        // vmcs02 now holds rather than against what it held before. SDM
+        // 29.8 is what makes that sound: an entry failure leaves the
+        // guest-state area unmodified.
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][slot] = value;
+            this->hot_state_slot_valid[cpu] |= 1ull << slot;
+            this->hot_state_writes_done[cpu] += 1;
+        }
+    };
+
     // VMXE is forced into the real register for the same reason it is for
     // the guest hypervisor: IA32_VMX_CR4_FIXED0 requires it in VMX
     // operation, so a guest-state area without it fails VM entry. The read
     // shadow above answers for the bit, so nothing sees it.
-    vmcs.guest_cr0(cr0_12);
+    //
+    // Elided against slot 5, whose record is the *raw* value
+    // `save_l2_state` read out of vmcs02 - not the masked composition it
+    // wrote into vmcs12. The two are different quantities and only the
+    // first answers "does this VMWRITE change anything": the write puts
+    // `cr0_12` there, so it is a no-op exactly when vmcs02 already holds
+    // `cr0_12`. In steady state it does, because the bits vmcs12's mask
+    // owns are the ones a second-level guest cannot change without
+    // exiting, and the bits it does not own are read straight back out
+    // of vmcs02 into vmcs12 by `save_l2_state`.
+    put_hot(5, cr0_12, [&](std::uint64_t value) {
+        vmcs.guest_cr0(value);
+    });
 
     // VMXE forced in, SMXE forced out, for the two reasons stated where
     // vmcs01 does the same: a processor in VMX operation must have VMXE
@@ -3061,7 +3131,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // not offer the feature and a guest hypervisor was never told its
     // guest had it either, since the CPUID concealment applies to every
     // level below this one.
-    vmcs.guest_cr4((cr4_12 | cr4_vmxe) & ~cr4_smxe);
+    //
+    // The value compared is the composed one, VMXE and SMXE included,
+    // because that is what the VMWRITE would put there. Comparing
+    // `cr4_12` instead would elide a write that does change vmcs02
+    // whenever the guest has managed to set SMXE.
+    put_hot(6, (cr4_12 | cr4_vmxe) & ~cr4_smxe, [&](std::uint64_t value) {
+        vmcs.guest_cr4(value);
+    });
 
     {
         stamp(5);   // host state written once, then every control
@@ -3155,43 +3232,6 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // interrupts, NMIs, INIT and SMIs (SDM 29.7.2) with nothing in vmcs02
     // able to end it - not even this VMM's preemption timer, which
     // build_vmcs02 strips.
-    // The five the processor itself saves into vmcs02 on every VM exit,
-    // written back only when they differ from what it saved. See
-    // `hot_state_saved`: the comparison is against the value, so it
-    // covers the guest hypervisor's VMWRITEs, this VMM's own RIP
-    // advance, and the injection path alike, and vmcs02 provably still
-    // holds the recorded value because nothing else ever makes it
-    // current.
-    //
-    // Measured before this existed: the ten writes after the VMPTRLD
-    // that never went through any elision were most of `build_vmcs02`'s
-    // post-switch 79,687 cycles a call, which was 20% of the whole exit
-    // - while the elision that does exist covered only the cold fields,
-    // the segments and bases that never change.
-    auto reuse_hot_state = (cpu < max_cpus) && this->hot_state_valid[cpu] &&
-                           this->vmcs02_launched[cpu] &&
-                           (this->hot_state_vmcs[cpu] ==
-                            this->guest_current_vmcs[cpu]);
-
-    auto put_hot = [&](std::size_t slot,
-                       std::uint64_t value,
-                       auto && write) {
-        if (reuse_hot_state && (this->hot_state_saved[cpu][slot] == value)) {
-            this->hot_state_writes_skipped[cpu] += 1;
-            return;
-        }
-
-        write(value);
-
-        // Kept in step so a second build without an intervening entry -
-        // an entry that fails, and is retried - compares against what
-        // vmcs02 now holds rather than against what it held before.
-        if (cpu < max_cpus) {
-            this->hot_state_saved[cpu][slot] = value;
-            this->hot_state_writes_done[cpu] += 1;
-        }
-    };
-
     put_hot(4,
             arch::x86_64::vmx::activity_state::active,
             [&](std::uint64_t value) {
@@ -3207,10 +3247,27 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     put_hot(2, shadow.read(field::guest_rflags), [&](std::uint64_t value) {
         vmcs.guest_rflags(value);
     });
-    vmcs.guest_dr7(shadow.read(field::guest_dr7));
-    vmcs.write(field::guest_ia32_pat, shadow.read(field::guest_ia32_pat));
-    vmcs.write(field::guest_ia32_efer,
-               shadow.read(field::guest_ia32_efer));
+    // The three whose record is conditional. `put_hot` writes whenever
+    // the slot's bit is clear, which is what happens on every reflection
+    // where vmcs12's exit controls did not ask for the save - so a guest
+    // hypervisor that does not save DR7 back pays exactly what it paid
+    // before this commit, and one that does gets the write elided. The
+    // value is still copied unconditionally either way: what changed is
+    // whether the VMWRITE is performed, never what vmcs02 ends up
+    // holding.
+    put_hot(7, shadow.read(field::guest_dr7), [&](std::uint64_t value) {
+        vmcs.guest_dr7(value);
+    });
+    put_hot(8,
+            shadow.read(field::guest_ia32_pat),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_pat, value);
+            });
+    put_hot(9,
+            shadow.read(field::guest_ia32_efer),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_efer, value);
+            });
 
     // Carried because the entry control that loads it is now offered.
     //
@@ -3222,8 +3279,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
     // IA32_EFER above are: the processor ignores the field when the
     // control is clear, so there is nothing to gate and a gate would
     // only be another thing to get wrong.
-    vmcs.write(field::guest_ia32_bndcfgs,
-               shadow.read(field::guest_ia32_bndcfgs));
+    //
+    // Its slot is the one of the six that has no gate at all, because
+    // `save_l2_state`'s read of it has none either.
+    put_hot(10,
+            shadow.read(field::guest_ia32_bndcfgs),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_bndcfgs, value);
+            });
     put_hot(3,
             shadow.read(field::guest_interruptibility_state),
             [&](std::uint64_t value) {
@@ -3751,6 +3814,39 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
         }
     }
 
+    // **Deliberately not elided, and this is the record of why.** It is
+    // the seventh unconditional write after the VMPTRLD and the only one
+    // of the seven left performing on every entry; the other six went
+    // into `hot_state_saved` in the same commit that wrote this comment.
+    //
+    // It fails both of the two tests that admitted those six.
+    //
+    // The processor moves it. SDM 27.8.3
+    // (`.references/sdm.txt:200260-200261` and `:200271`): "The valid bit
+    // in this field is cleared on every VM exit", and again "VM exits
+    // clear the valid bit (bit 31) in the injected-event identification
+    // field" - except after a VM-entry failure, where SDM 29.8
+    // (`:203333`) lists "The valid bit in the injected-event
+    // identification field is not cleared" among the steps that do not
+    // happen. So predicting what vmcs02 holds means modelling hardware
+    // *and* branching on whether the entry succeeded, which is the
+    // `vm_entry_controls` mistake with an extra case.
+    //
+    // And others write it. With vmcs02 current, on an L2 exit this VMM
+    // answers itself, the field is written by `hypervisor.cpp`'s three
+    // injection helpers, by `exit_dispatch.cpp`'s NMI injection and by
+    // `record_l2_entry_event`'s VINA drop and restage in this file -
+    // none of which goes through any elision family. That is the
+    // `control_cache` hazard verbatim: "the cache would describe a field
+    // somebody else had moved."
+    //
+    // Neither is unfixable. `save_l2_state` could read the field back
+    // the way it reads CR0, which would put it in this family properly -
+    // but that trades a 2,876-cycle VMREAD on every reflection for a
+    // 2,131-cycle VMWRITE on the entries where the value repeats, and at
+    // roughly two exits per second-level entry that is a loss before the
+    // hit rate is even argued. Left alone until somebody has a reason
+    // that is not arithmetic.
     vmcs.write(field::vm_entry_interruption_information_field, injection);
 
     if (0 != (injection & interruption_valid)) {
@@ -4745,6 +4841,13 @@ void hypervisor::save_l2_state(std::size_t cpu)
         this->hot_state_saved[cpu][4] = activity12;
         this->hot_state_vmcs[cpu] = this->guest_current_vmcs[cpu];
         this->hot_state_valid[cpu] = true;
+
+        // Slots 5 to 10 are filled below, as each field is read back.
+        // Started empty rather than carried, because a slot this call
+        // does not read is a slot whose previous record may describe a
+        // value the processor has since saved over - see
+        // `hot_state_slot_valid`.
+        this->hot_state_slot_valid[cpu] = 0x1f;
     }
 
     // The control registers, put back through the same masks they were
@@ -4756,16 +4859,32 @@ void hypervisor::save_l2_state(std::size_t cpu)
     auto cr0_mask12 = shadow.read(field::cr0_guest_host_mask);
     auto cr4_mask12 = shadow.read(field::cr4_guest_host_mask);
 
+    // **Read into locals, and recorded, because this is the read-back
+    // that licenses eliding the write.** SDM 30.3.1 has every VM exit
+    // save CR0 and CR4 into the guest-state area unconditionally, so
+    // what vmcs02 holds now is the processor's value and not this VMM's
+    // - and it is the only quantity `build_vmcs02`'s elision may compare
+    // against. No extra VMREAD: both were already read here, once each,
+    // inside the two expressions below.
+    auto cr0_02 = vmcs.guest_cr0();
+    auto cr4_02 = vmcs.guest_cr4();
+
     shadow.write(field::guest_cr0,
-                 (vmcs.guest_cr0() & ~cr0_mask12) |
+                 (cr0_02 & ~cr0_mask12) |
                      (shadow.read(field::guest_cr0) & cr0_mask12));
 
     // VMXE is removed on the way back for the same reason it was forced in
     // on the way out: the bit is this VMM's, and a guest hypervisor that
     // never set it in its own guest's CR4 must not find it there.
     shadow.write(field::guest_cr4,
-                 ((vmcs.guest_cr4() & ~cr4_vmxe) & ~cr4_mask12) |
+                 ((cr4_02 & ~cr4_vmxe) & ~cr4_mask12) |
                      (shadow.read(field::guest_cr4) & cr4_mask12));
+
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][5] = cr0_02;
+        this->hot_state_saved[cpu][6] = cr4_02;
+        this->hot_state_slot_valid[cpu] |= (1ull << 5) | (1ull << 6);
+    }
 
     // "IA-32e mode guest" is a guest state bit wearing a control's
     // clothing, and SDM 30.3 has a VM exit update it. KVM says the same
@@ -4812,20 +4931,47 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // controls. SDM 30.4, "Saving MSRs", and SDM 30.3 for DR7.
     auto exit12 = shadow.read(field::vm_exit_controls);
 
+    // **Each of the three records its slot only where it read the
+    // field.** The gate here is vmcs12's exit controls; the gate on the
+    // processor's own save into vmcs02 is *vmcs02's* (SDM 30.3.1), and
+    // `build_vmcs02` composes those from vmcs01 rather than from vmcs12
+    // - so the two can disagree in either direction, and a record made
+    // from a read that did not happen would describe a field hardware
+    // may have replaced. See `hot_state_slot_valid`: not recording is
+    // the safe direction, and costs only the elision.
     if (0 != (exit12 & exit_save_debug_controls)) {
-        shadow.write(field::guest_dr7, vmcs.guest_dr7());
+        auto dr7_02 = vmcs.guest_dr7();
+
+        shadow.write(field::guest_dr7, dr7_02);
         shadow.write(field::guest_ia32_debugctl,
                      vmcs.read(field::guest_ia32_debugctl));
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][7] = dr7_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 7;
+        }
     }
 
     if (0 != (exit12 & exit_save_ia32_pat)) {
-        shadow.write(field::guest_ia32_pat,
-                     vmcs.read(field::guest_ia32_pat));
+        auto pat_02 = vmcs.read(field::guest_ia32_pat);
+
+        shadow.write(field::guest_ia32_pat, pat_02);
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][8] = pat_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 8;
+        }
     }
 
     if (0 != (exit12 & exit_save_ia32_efer)) {
-        shadow.write(field::guest_ia32_efer,
-                     vmcs.read(field::guest_ia32_efer));
+        auto efer_02 = vmcs.read(field::guest_ia32_efer);
+
+        shadow.write(field::guest_ia32_efer, efer_02);
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][9] = efer_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 9;
+        }
     }
 
     // The other half of carrying it in. Unconditional for the same
@@ -4834,8 +4980,19 @@ void hypervisor::save_l2_state(std::size_t cpu)
     // so a guest hypervisor reading it back expects what its guest left
     // there, and anything else silently loses the guest's bounds
     // configuration across every exit.
-    shadow.write(field::guest_ia32_bndcfgs,
-                 vmcs.read(field::guest_ia32_bndcfgs));
+    //
+    // Which is also why its slot needs no gate: SDM 30.3.1 saves it on
+    // any processor offering either BNDCFGS control, and this read is
+    // taken on every reflection, so the record is always the value
+    // vmcs02 holds.
+    auto bndcfgs_02 = vmcs.read(field::guest_ia32_bndcfgs);
+
+    shadow.write(field::guest_ia32_bndcfgs, bndcfgs_02);
+
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][10] = bndcfgs_02;
+        this->hot_state_slot_valid[cpu] |= 1ull << 10;
+    }
 }
 
 void hypervisor::host_write(std::size_t cpu,

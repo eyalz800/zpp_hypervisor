@@ -71508,3 +71508,198 @@ Checking which is which cost one calculation. Not checking would have
 wasted a rig cycle and weakened a test that exists to catch exactly this
 change - the comment says so, and says the test caught it in one build
 last time.
+
+## Six of the seven ungated writes after the VMPTRLD are now elided
+
+`ed0197b` measured writes at 24% of a 186,210-cycle `vmresume` exit and
+named the class to attack: "seven of the ten-odd performed per exit going
+through no elision family". This is that class, resolved. **Six of the
+seven went into `hot_state_saved`; the seventh is declined, with a
+recorded reason.**
+
+### The seven, verified rather than inherited
+
+Read out of `build_vmcs02` between its VMPTRLD and its `return`, and each
+checked against all three elision families:
+
+| write | family before | family now |
+|---|---|---|
+| `guest_cr0` | none | `hot_state_saved` slot 5 |
+| `guest_cr4` | none | `hot_state_saved` slot 6 |
+| `guest_dr7` | none | `hot_state_saved` slot 7 (gated) |
+| `guest_ia32_pat` | none | `hot_state_saved` slot 8 (gated) |
+| `guest_ia32_efer` | none | `hot_state_saved` slot 9 (gated) |
+| `guest_ia32_bndcfgs` | none | `hot_state_saved` slot 10 |
+| `vm_entry_interruption_information_field` | none | **still none** |
+
+The list is exactly the seven the previous analysis named. Two writes
+beside the seventh - `vm_entry_exception_error_code` and
+`vm_entry_instruction_length` - are already conditional on the valid bit
+and are not in the class.
+
+### Why `hot_state_saved` and not `control_cache`, which is the whole question
+
+SDM 30.3.1 (`.references/sdm.txt:204496-204512`) settles it. **Every VM
+exit saves CR0, CR3 and CR4 into the guest-state area under no control at
+all**; DR7 under "save debug controls"; IA32_PAT and IA32_EFER under their
+own exit controls; IA32_BNDCFGS on any processor offering either BNDCFGS
+control. So all six are fields *the processor rewrites*, which is the
+precise reason `vm_entry_controls` is excluded from `control_fields`
+(IA32_VMX_MISC bit 5, SDM 30.2) and the precise reason `l1_host_written`
+needs `host_field_elidable`'s measurement before it may elide anything.
+
+`control_cache` records what zpp wrote and is **never** read back.
+`hot_state_saved` is refreshed by a VMREAD of vmcs02 in `save_l2_state` on
+every reflection. That read-back is the entire difference, and it is why
+these six could join one family and not the other.
+
+**CR0 and CR4 are also the `control_cache` hazard's own shape, and that
+was checked hardest.** `exit_dispatch.cpp` writes vmcs02's guest CR0
+(`mov cr0`, `numeric_error` forced in), guest CR4 (VMXE in, SMXE out) and
+guest DR7 (`mov dr`) **directly, with vmcs02 current**, on an L2 exit zpp
+answers itself. Under `control_cache` that would sink the elision exactly
+as the two direct `vmcs.ept_pointer()` call sites did. It does not sink
+this one, and the argument is structural:
+
+- `build_vmcs02` has **exactly one caller**, `on_guest_vmlaunch`
+  (`nested_vmx.cpp:2484`), reached only when the level above executes
+  VMLAUNCH or VMRESUME.
+- The level above only runs after `reflect_l2_exit`, whose first act is
+  `save_l2_state`.
+- An L2 exit zpp answers itself returns `handled` or `deferred` and
+  resumes the second-level guest directly. It never reaches
+  `build_vmcs02`.
+
+So every direct write is followed by a read-back before it can matter.
+`tests/nested_exit` asserts both halves of that - the repair *and* the
+bound, the latter written as something breakable so a second caller for
+`build_vmcs02` fails a test rather than a boot.
+
+### The gate on three of the six, which is a real disagreement and not caution
+
+`save_l2_state` reads DR7, IA32_PAT and IA32_EFER back only where
+**vmcs12's** exit controls ask for the save. The processor writes vmcs02's
+copies under **vmcs02's**, and `build_vmcs02` composes those from vmcs01,
+never from vmcs12 - the same composition `87b091d` relied on for the
+linear-address gate. Two different control words, free to disagree in
+either direction, and this harness already reports the disagreement as a
+standing defect ("vmcs12 sets 'save IA32_PAT' and vmcs02 does not").
+
+`hot_state_slot_valid` is a per-slot bitmask with one rule: **record only
+what was read back this time.** A slot not read is a slot whose record may
+describe a value hardware replaced, so its bit is cleared and the write is
+performed. Sound whichever way the two control words disagree, and it
+costs only the elision. `build_vmcs02` sets a slot's bit again when it
+performs the write, so a failed entry that is retried still elides - SDM
+29.8 (`.references/sdm.txt:203333-203335`) lists "The guest-state area is
+not modified" among what an entry failure does not do.
+
+CR0, CR4 and IA32_BNDCFGS need no bit: their read-back has no gate either.
+
+### What was NOT elided, and why - the recorded negative
+
+**`vm_entry_interruption_information_field`.** It fails both tests the six
+passed, and the failure is not marginal in either.
+
+- **The processor moves it.** SDM 27.8.3 (`sdm.txt:200260-200261` and
+  `:200271`): "The valid bit in this field is cleared on every VM exit",
+  twice over - and SDM 29.8 (`:203333`) lists "The valid bit in the
+  injected-event identification field is not cleared" among the steps a
+  VM-entry failure skips. Predicting what vmcs02 holds therefore means
+  modelling hardware *and* branching on whether the entry succeeded: the
+  `vm_entry_controls` mistake with an extra case.
+- **Others write it.** With vmcs02 current, on an L2 exit zpp answers
+  itself, the field is written by `hypervisor.cpp`'s three injection
+  helpers, `exit_dispatch.cpp`'s NMI injection, and
+  `record_l2_entry_event`'s VINA drop and restage. None goes through any
+  elision family. That is `control_cache`'s hazard verbatim.
+
+The obvious fix - read it back in `save_l2_state` the way CR0 is - is a
+**net loss** and the arithmetic is why it stays declined: it buys a
+2,131-cycle VMWRITE on the entries where the value repeats and costs a
+2,876-cycle VMREAD on **every** reflection, at roughly two exits per
+second-level entry. Do not re-propose it without a reason that is not
+arithmetic.
+
+A narrower version was considered and rejected too: "elide only when the
+last write was zero and this write is zero", which needs no hardware model
+because clearing bit 31 of zero is zero. It dies on the second bullet
+alone - an injection helper writing vmcs02 between two builds leaves the
+field holding a vector with its valid bit cleared, and the record would
+still read zero.
+
+### Test, with all seven gates negative-controlled separately
+
+74 new checks in `tests/nested_exit`, **two witnesses per case**: the value
+in vmcs02, and a new **per-encoding write counter** in the VMX shim
+(`g_vmwrite_field_count`, the write-side twin of the read counter
+`87b091d` added). Neither alone is enough - an elided write leaves vmcs02
+holding the value the write would have put there, so a value-only test
+passes whether or not the gate exists.
+
+    all six gated                    1,323 checks, 1 pre-existing failure
+    guest_cr0 reverted               +3 failures
+    guest_cr4 reverted               +2 failures
+    guest_dr7 reverted               +2 failures
+    guest_ia32_pat reverted          +1 failure
+    guest_ia32_efer reverted         +1 failure
+    guest_ia32_bndcfgs reverted      +2 failures
+    hot_state_slot_valid reverted    +3 failures
+
+Every revert names distinct checks. The `hot_state_slot_valid` control is
+the one worth reading: with the mask gone, DR7, IA32_PAT and IA32_EFER are
+elided against records that were never taken, while CR0, CR4 and BNDCFGS
+carry on correctly - which is exactly the split the mask exists for.
+
+Host suite: 92% passed, 2 failed - `tests/nested_exit` and
+`tests/watched_page`, the two pre-existing failures, and no others.
+`tests/nested_exit` is 1,323 checks with the same single failure it had at
+1,249 ("'load IA32_EFER on exit' puts vmcs12's host IA32_EFER into the
+register").
+
+One case failed on the first run and is recorded because it is the shape
+of mistake this test exists to catch: CR4's changed-value pair differed
+only in VMXE, which `build_vmcs02` forces in - so the two composed to the
+same value and the "a changed value is written" case was asserting that a
+no-op write happens. The comparison in `put_hot(6, ...)` is against the
+**composed** value for the same reason.
+
+### Falsifiable prediction, against boot 194
+
+Baseline: `vmcs_writes_taken / exits` = **10.54**, `exits/s` 5,319 against
+`l2-entries/s` 2,653, so **2.005 exits per `build_vmcs02` call**, and a
+write is 2,131 cycles.
+
+Three of the six elide unconditionally (CR0, CR4, BNDCFGS - no gate on
+their read-back); the other three elide only if Hyper-V's vmcs12 sets the
+matching save control, which has never been read out. So the prediction is
+a band with both ends named:
+
+| | 3 fields elide | 6 fields elide |
+|---|---|---|
+| writes/build removed | 3.00 | 6.00 |
+| writes/exit removed | 1.50 | 2.99 |
+| `vmcs_writes_taken/exits` | 10.54 -> **9.04** | 10.54 -> **7.55** |
+| cycles/exit saved | 3,189 | 6,377 |
+| share of a 186,210-cycle exit | **1.7%** | **3.4%** |
+
+Two secondary predictions that discriminate between the ends without a
+second boot, both from `phase_calls`/the write split already printed:
+
+- stamp slot 5 ("host state once, then every control"): **9.71 -> 7.71**
+  writes a call, ~30,678 -> ~26,400 cycles. Both CR writes are in it, and
+  both elide unconditionally, so this end of the band is not a guess.
+- stamp slot 6 ("every guest-state field"): **6.18 -> 5.18** if only
+  BNDCFGS elides, **6.18 -> 2.18** if all four do. Which number appears
+  reads Hyper-V's exit controls off the machine for free.
+
+`hot_state_writes_skipped` per `build_vmcs02` call should rise by the same
+3 to 6, and `hot_state_writes_done` must **not** fall to zero - the changed
+cases still write, and a zero there would mean the elision had stopped
+noticing changes.
+
+Larger than everything gained so far combined either way: `5d0af52` put the
+exit-information gates at 1.7% of the exit, and the low end of this band
+matches that on its own.
+
+**Not deployed** - no rig access from this branch.

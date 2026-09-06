@@ -6999,6 +6999,332 @@ static void test_the_control_cache_owns_the_ept_pointer()
     }
 }
 
+// ------------- 18b. the six saved guest-state fields build_vmcs02 elides
+/**
+ * `guest_cr0`, `guest_cr4`, `guest_dr7`, `guest_ia32_pat`,
+ * `guest_ia32_efer` and `guest_ia32_bndcfgs` are written by
+ * `build_vmcs02` after its VMPTRLD and elided against `hot_state_saved`.
+ *
+ * **Why they are in that family and not in `control_cache`.** SDM 30.3.1
+ * (`.references/sdm.txt:204496-204512`) has every VM exit save CR0 and
+ * CR4 into the guest-state area unconditionally, DR7 under "save debug
+ * controls", IA32_PAT and IA32_EFER under their own exit controls, and
+ * IA32_BNDCFGS on any processor offering either BNDCFGS control. A cache
+ * of what this VMM last *wrote* therefore describes a field the
+ * processor has since moved, which is exactly why `vm_entry_controls` is
+ * excluded from `control_fields`. `hot_state_saved` is immune because
+ * `save_l2_state` re-reads every slot out of vmcs02 on every reflection.
+ *
+ * Two witnesses per case, and neither is sufficient alone:
+ *
+ * - the value in vmcs02, which catches an elision that skipped a write
+ *   that was owed;
+ * - the shim's per-encoding write counter, which is the only thing that
+ *   can see an elision at all. The elided write would have stored the
+ *   value vmcs02 already holds, so a value-only test passes whether or
+ *   not the gate exists - the same reason `87b091d` had to add the read
+ *   counter for the exit-information gates.
+ */
+static void test_the_hot_state_family_owns_the_six_saved_fields()
+{
+    std::println("\n-- the hot-state family owns the six saved fields --");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    zpp::arch::x86_64::context registers{};
+
+    // The three exit controls whose absence stops `save_l2_state`
+    // reading a field back, and therefore stops its slot being
+    // recorded. Set in the default `asked` below so the ordinary cases
+    // exercise the elision, and cleared in the gate case at the end.
+    constexpr std::uint64_t save_three = exit_save_debug_controls |
+                                         exit_save_ia32_pat |
+                                         exit_save_ia32_efer;
+
+    constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+    constexpr std::uint64_t cr4_smxe = 1ull << 14;
+
+    auto asked_with = [&](std::uint64_t extra_exit) {
+        asked_controls asked;
+        asked.exit_controls =
+            exit_default1 | exit_host_address_space_size | extra_exit;
+        return asked;
+    };
+
+    auto writes = [](field which) {
+        return vmx::g_vmwrite_field_count[static_cast<std::uint64_t>(
+            which)];
+    };
+
+    auto fresh = [&] {
+        reset(registers);
+        hv().vmcs02_physical[cpu] = 0x2000;
+        hv().vmcs02_launched[cpu] = false;
+        hv().guest_state_deferred[cpu] = false;
+        hv().forget_vmcs02_contents(cpu);
+        hv().set_guest_current_vmcs(cpu, 0xa000);
+    };
+
+    // vmcs01 has to be current before each build, exactly as it is on
+    // the real path: `build_vmcs02` reads this VMM's own controls out of
+    // whatever is current and then does its own VMPTRLD.
+    auto enter = [&](const asked_controls & asked) {
+        auto own = std::uint64_t{0x1000};
+        static_cast<void>(vmx::vmptrld(&own));
+        return compose_entered(asked).has_value();
+    };
+
+    // The six, with the value vmcs12 asks for and the value vmcs02 must
+    // end up holding. They differ for CR4 alone, where `build_vmcs02`
+    // forces VMXE in and SMXE out.
+    struct probe
+    {
+        field which;
+        const char * name;
+        std::uint64_t first;
+        std::uint64_t second;
+        std::uint64_t (*composed)(std::uint64_t);
+    };
+
+    auto identity = [](std::uint64_t value) { return value; };
+    auto cr4_composed = [](std::uint64_t value) {
+        return (value | cr4_vmxe) & ~cr4_smxe;
+    };
+
+    const probe probes[] = {
+        {field::guest_cr0, "guest CR0", 0x80050033, 0x80050031, identity},
+        // CR4's pair must differ somewhere other than VMXE and SMXE:
+        // `build_vmcs02` forces one in and the other out, so a pair
+        // differing only there composes to the same value and the
+        // "changed" case would be asserting that a no-op write happens.
+        // It was written that way first, and the case failed.
+        {field::guest_cr4, "guest CR4", 0x000406f8, 0x000606f8,
+         cr4_composed},
+        {field::guest_dr7, "guest DR7", 0x400, 0xffff0ff0, identity},
+        {field::guest_ia32_pat, "guest IA32_PAT", 0x0007040600070406ull,
+         0x0007010600070106ull, identity},
+        {field::guest_ia32_efer, "guest IA32_EFER", 0xd01, 0x501,
+         identity},
+        {field::guest_ia32_bndcfgs, "guest IA32_BNDCFGS", 0, 0x3,
+         identity},
+    };
+
+    for (const auto & p : probes) {
+        auto asked = asked_with(save_three);
+
+        // ------------------------------------- the field is written
+        //
+        // First, because everything below is about a write being
+        // skipped and a fixture where it never happened would make the
+        // rest pass for the wrong reason.
+        fresh();
+        hv().guest_vmcs12[cpu].write(p.which, p.first);
+
+        auto before = writes(p.which);
+        check(enter(asked), text("%s: the first build succeeds", p.name));
+        check(before < writes(p.which),
+              text("%s: the first entry to a vmcs02 that has never run "
+                   "writes the field - nothing was ever saved out of it",
+                   p.name));
+        check(p.composed(p.first) == hv().vmcs.read(p.which),
+              text("%s: and vmcs02 carries what vmcs12 asked for",
+                   p.name));
+
+        // The exit. vmcs02 is current on return from `build_vmcs02`,
+        // which is the ordering the real path has.
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+
+        // --------------------------------- unchanged: the write goes
+        //
+        // The value vmcs12 now holds is the one `save_l2_state` composed
+        // out of vmcs02, so the write would be a no-op and is skipped.
+        before = writes(p.which);
+        auto expected = p.composed(hv().guest_vmcs12[cpu].read(p.which));
+
+        check(enter(asked), text("%s: the second build succeeds", p.name));
+        check(before == writes(p.which),
+              text("%s: an unchanged field is not written a second time "
+                   "- the processor saved that value into vmcs02 on the "
+                   "way out, so the VMWRITE would restate it",
+                   p.name));
+        check(expected == hv().vmcs.read(p.which),
+              text("%s: and vmcs02 still holds it, which is the only "
+                   "reason skipping is sound",
+                   p.name));
+
+        // ------------------------------------- changed: the write goes
+        //
+        // The comparison is on the value, so this needs no dirty bit.
+        hv().save_l2_state(cpu);
+        hv().guest_vmcs12[cpu].write(p.which, p.second);
+
+        before = writes(p.which);
+        check(enter(asked), text("%s: the third build succeeds", p.name));
+        check(before < writes(p.which),
+              text("%s: a value the level above changed is written",
+                   p.name));
+        check(p.composed(p.second) == hv().vmcs.read(p.which),
+              text("%s: and vmcs02 carries the new value", p.name));
+    }
+
+    // ------------------- what makes this family safe and the other not
+    //
+    // `exit_dispatch.cpp` writes vmcs02's guest CR0, guest CR4 and guest
+    // DR7 directly, with vmcs02 current, on an L2 exit this VMM answers
+    // itself. Under `control_cache` that would be the "somebody else
+    // moved the field" hazard the `ept_pointer` case above demonstrates.
+    // Here it is not, because the only route from such an exit back to
+    // `build_vmcs02` is through `reflect_l2_exit`, whose first act is
+    // `save_l2_state` - and that re-reads the field out of vmcs02.
+    {
+        constexpr std::uint64_t theirs = 0x80050031;
+        constexpr std::uint64_t elsewhere = 0x80050033;
+
+        static_assert(theirs != elsewhere);
+
+        auto asked = asked_with(save_three);
+
+        fresh();
+        hv().guest_vmcs12[cpu].write(field::guest_cr0, theirs);
+
+        check(enter(asked), "the CR0 hazard case builds");
+
+        hv().vmcs02_launched[cpu] = true;
+
+        // The exit handler's own write, which goes through no elision
+        // family at all.
+        hv().vmcs.guest_cr0(elsewhere);
+
+        // The reflection, which is what the level above needs before it
+        // can issue the VMRESUME that reaches `build_vmcs02`.
+        hv().save_l2_state(cpu);
+
+        check(enter(asked), "and builds again after the reflection");
+        check(elsewhere == hv().vmcs.read(field::guest_cr0),
+              "a direct write to vmcs02's guest CR0 is picked up by the "
+              "read-back in save_l2_state, so the next build agrees with "
+              "vmcs02 rather than eliding against a stale record - this "
+              "is the property control_cache does not have and is why "
+              "these six are in hot_state_saved instead");
+    }
+
+    // ------------------ the bound on that, stated as something breakable
+    //
+    // Without the reflection the record is stale, and the build elides
+    // against it. This is unreachable on the real path - `build_vmcs02`
+    // has exactly one caller, `on_guest_vmlaunch`, which requires the
+    // level above to be executing, which requires a reflection - and it
+    // is asserted here so that a future change giving `build_vmcs02` a
+    // second caller fails a test rather than a boot.
+    {
+        constexpr std::uint64_t theirs = 0x80050031;
+        constexpr std::uint64_t elsewhere = 0x80050033;
+
+        auto asked = asked_with(save_three);
+
+        fresh();
+        hv().guest_vmcs12[cpu].write(field::guest_cr0, theirs);
+
+        check(enter(asked), "the unreflected case builds");
+
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+        check(enter(asked), "and builds a second time");
+
+        hv().vmcs.guest_cr0(elsewhere);
+
+        check(enter(asked), "and a third time with no reflection");
+        check(elsewhere == hv().vmcs.read(field::guest_cr0),
+              "a write to vmcs02 with no intervening save_l2_state is "
+              "elided against a stale record - the reflection is what "
+              "bounds this, so build_vmcs02 must keep its single caller");
+    }
+
+    // ------------------------------------- the conditional three, gated
+    //
+    // `save_l2_state` reads DR7, IA32_PAT and IA32_EFER back only where
+    // **vmcs12's** exit controls ask for the save, while the processor
+    // writes vmcs02's copies under **vmcs02's** - two different control
+    // words. A slot that was not read is therefore a slot whose record
+    // may describe a value hardware replaced, and `hot_state_slot_valid`
+    // refuses it.
+    //
+    // This is the negative control on that mask: with the three bits
+    // clear in vmcs12 the three writes come back, while CR0, CR4 and
+    // BNDCFGS - whose read-back has no gate - keep eliding.
+    {
+        auto asked = asked_with(0);
+
+        fresh();
+        hv().guest_vmcs12[cpu].write(field::guest_cr0, 0x80050033);
+        hv().guest_vmcs12[cpu].write(field::guest_dr7, 0x400);
+
+        check(enter(asked), "the ungated case builds");
+
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+
+        auto dr7 = writes(field::guest_dr7);
+        auto pat = writes(field::guest_ia32_pat);
+        auto efer = writes(field::guest_ia32_efer);
+        auto cr0 = writes(field::guest_cr0);
+        auto cr4 = writes(field::guest_cr4);
+        auto bndcfgs = writes(field::guest_ia32_bndcfgs);
+
+        check(enter(asked), "and builds again");
+
+        check(dr7 < writes(field::guest_dr7),
+              "with 'save debug controls' clear in vmcs12 nothing read "
+              "vmcs02's DR7 back, so the write is owed");
+        check(pat < writes(field::guest_ia32_pat),
+              "and IA32_PAT's, for the same reason");
+        check(efer < writes(field::guest_ia32_efer),
+              "and IA32_EFER's");
+        check(cr0 == writes(field::guest_cr0),
+              "while CR0 still elides - SDM 30.3.1 saves it on every VM "
+              "exit under no control at all, so save_l2_state reads it "
+              "back unconditionally and the record is always current");
+        check(cr4 == writes(field::guest_cr4), "and CR4 still elides");
+        check(bndcfgs == writes(field::guest_ia32_bndcfgs),
+              "and IA32_BNDCFGS, whose read-back has no gate either");
+    }
+
+    // --------------------------------- the entry failure, and the retry
+    //
+    // SDM 29.8 (`.references/sdm.txt:203333-203335`): a VM-entry failure
+    // does not modify the guest-state area. So a build that is repeated
+    // with no entry in between - which is what a failed entry retried
+    // looks like - must still find vmcs02 holding what the previous
+    // build put there, including for a slot the previous build *wrote*
+    // rather than elided.
+    {
+        auto asked = asked_with(0);
+
+        fresh();
+        hv().guest_vmcs12[cpu].write(field::guest_dr7, 0x400);
+
+        check(enter(asked), "the retry case builds");
+
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+
+        // With the gate clear this build writes DR7 and records it.
+        check(enter(asked), "and builds again, writing DR7");
+
+        auto dr7 = writes(field::guest_dr7);
+
+        check(enter(asked), "and a third time with no entry in between");
+        check(dr7 == writes(field::guest_dr7),
+              "a build repeated with no entry elides the write the "
+              "previous build performed - build_vmcs02 sets the slot's "
+              "own bit when it writes, which is what makes a retried "
+              "entry cost one VMWRITE rather than two");
+        check(0x400 == hv().vmcs.read(field::guest_dr7),
+              "and vmcs02 still holds it");
+    }
+}
+
 // ------------- 19. the control registers a VM entry will not accept
 /**
  * The two halves of "a guest can stop a physical core with one control
@@ -7840,6 +8166,7 @@ int main()
 
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();
+    test_the_hot_state_family_owns_the_six_saved_fields();
     test_shadow_copies_name_the_current_vmcs();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);
