@@ -72893,3 +72893,43 @@ failures.
 
 **Not yet deployed**: boot 201 is mid-flight. The next deploy carries it,
 and the module base will move again - re-read it.
+
+## The address-space census works, and its first reading is System-only
+
+Boot 202, zpp resident, census deployed (`userip=1`), 3-process phase:
+
+    cpu 0 user-mode address spaces (176 user-mode samples)
+      cr3 0x00000000001ae000  masked 0x0000001ae000   176   100.0%
+      1 of 24 slots used, rows sum to 176 of 176 samples
+      unattributed: 0 of 176 (0.0%) ... 'not recorded' and 'recorded as
+        zero' are different readings here.
+    cpu 0 user-mode (address space, address) pairs (12 distinct of 512)
+    cpu 1 user-mode address spaces (0 user-mode samples)
+      no user-mode samples at all. That is either a guest that never left
+      kernel mode or a build with userip=0 - check the manifest.
+
+**`0x1ae000` is the `System` process**, whose `DirectoryTableBase` reads
+`0x1ae002` - the PCID masked off exactly as designed. So the join works:
+one cr3 in the census, one process in the list, and they match.
+
+Three things the instrument does that the ones it replaces could not:
+
+- **it names the address space**, where the module walk provably could not
+  (`108d445`: system DLLs share a base across processes)
+- **it reports "no samples" as a diagnosis** rather than as a zero, and
+  names both causes - a guest in kernel mode, or `userip=0`
+- **it separates "not recorded" from "recorded as zero"** on the
+  unattributed count, in the printed text, so the distinction cannot be
+  lost by a later reader
+
+### What the first reading says
+
+At the 3-process phase **all user-mode execution is in the `System`
+address space** - 176 of 176 samples, 12 distinct addresses. That is
+expected with no `smss.exe` yet, and it means the win32k syscalls found on
+boot 200 (`f649eda`) necessarily come **later**, once GUI processes exist.
+
+So the instrument is pointed at the right question and simply has not
+reached it yet. The catcher is armed on this boot; when it reaches the
+wall, the pair table will say which address space is making those calls -
+which is the thing three separate instruments could not answer.
