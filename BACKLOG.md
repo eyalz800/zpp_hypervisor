@@ -70273,3 +70273,84 @@ Hyper-V interface underneath.
 Recorded as the next experiment, explicitly labelled as a measurement
 crutch, with its result to be reported as "obtained under a launcher
 nothing else in this tree uses".
+
+## RETRACTED: "81% of the handler is VMCS read latency". Reads cost 60 cycles
+
+`6c1dab1` priced a VMREAD at ~4,600 cycles and concluded 81.1% of the
+handler was read latency. **The hypervisor prices reads and writes itself,
+in the binary, on every boot, and nothing had ever read the result.**
+
+`hypervisor::vmread_benchmark_cycles` and its four siblings, read off live
+boot 192 (1,000 accesses each):
+
+    read  shadowed     57.3 cyc/access    unshadowed   60.4    ratio 1.05x
+    write shadowed  2,038.2 cyc/access    unshadowed 2,043.2   ratio 1.00x
+
+**Reads are ~60 cycles. Writes are ~2,040.** The 4,600 figure was too high
+by **76x**, and it was circular: `BACKLOG.md:10692` derives it by dividing
+an exit's whole cost by its access count, so using it to prove accesses
+dominate the exit re-derives its own assumption. That entry was already
+flagged as an open contradiction and said not to build on.
+
+Recomputed at the measured price, boot 192 cpu 1, 399,548 handler cycles
+per round trip:
+
+    reads    62.9/RT x   60.4 =   3,795 cyc    0.9%
+    writes   21.1/RT x 2043.2 =  43,070 cyc   10.8%
+    VMCS traffic total          46,866 cyc   11.7%
+    EVERYTHING ELSE            352,682 cyc   88.3%
+
+**VMCS traffic is ~12% of the handler, not 81%.** And what cost there is
+sits on the **write** side, which `6c1dab1` also got backwards.
+
+### The second error, and it is mine
+
+`6c1dab1` read `control_writes_done` + `hot_state_writes_done` = 0.79
+per round trip and concluded "98.9% of the write side is elided". Those
+counters cover **only the families that have elision**. `vmcs_writes_taken`
+- the counter that sees every write - reads **10.54 per exit**, 21.1 per
+round trip. Seven writes in `build: after vmptrld` (`guest_cr0`,
+`guest_cr4`, `guest_dr7`, `pat`, `efer`, `bndcfgs`, entry-interruption) go
+through no elision family at all, so the 98.9% denominator **excluded them
+by construction**.
+
+Same shape as the `+0x543` test and the cache-hit-rate reading: a
+denominator that cannot contain the thing being counted.
+
+### What the benchmark's own comment says, now answered
+
+It sets out the question and both branches: *"If the shadowed ones come out
+at tens of cycles and the others at thousands, then the nested path's cost
+is not VMCS traffic at all - it is the traffic that leaves the shadow list
+... If all five agree, shadowing is not in play and every access has to be
+removed rather than redirected."*
+
+**All five agree** - ratios 1.05x and 1.00x. So shadowing is not in play,
+and there is no hot path to redirect onto shadowed fields. But since
+traffic is only 11.7%, removing accesses is not the lever either.
+
+### Where this leaves the goal
+
+**88.3% of the handler is something other than VMCS access**, and nothing
+in this investigation has looked at it. Every cost avenue pursued this
+session - redundant reads, the cache, enlightened VMCS, eager EPT - was
+aimed at the 11.7%.
+
+`a1ac974` closed enlightened VMCS on mechanism and that closure stands,
+but its *importance* collapses: eVMCS makes VMCS access cheap, and VMCS
+access is not what is expensive here.
+
+**The next question is what the other 88% is**, and the phase tree already
+names the candidates - `on_guest_vmlaunch` self 52,389 cyc/RT and `build:
+after vmptrld` 52,416 - neither of which is dominated by VMCS traffic at
+these prices. That is a different investigation and it starts from a
+measured number rather than an assumed one.
+
+### Caveat, recorded rather than buried
+
+The benchmark runs **once at startup** (`vmread_benchmark_done`), so it
+prices accesses in whatever context startup had, not necessarily steady
+state under a nested guest. That is a real limitation and it is the first
+thing to check before building on these figures - but it is still a direct
+measurement of the instruction, where 4,600 was a quotient of two
+unrelated quantities.
