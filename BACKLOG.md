@@ -73995,3 +73995,67 @@ guest with VBS running, regardless of speed.**
 The frozen readings from boots 203 and 207 are withdrawn as evidence
 (`e8cfdd5`) - both were taken across a window in which the guest stopped.
 **So there is one live wall reading, and it says the SCM runs.**
+
+## AT THE WALL: services.exe 40.5% and WerFault.exe 30.7% of user-mode execution
+
+Boot 208, the first **differenced** census at the wall (`eb5db81`'s
+census pair, joined against `DirectoryTableBase`). 41,664 new user-mode
+samples in the window:
+
+    services.exe    **40.5%**
+    WerFault.exe    **30.7%**
+    lsass.exe        12.7%
+    wininit.exe       3.4%
+    csrss.exe         2.2% + 1.1%
+    fontdrvhost x2   **absent from the top rows**
+
+**`services.exe` and `WerFault.exe` together are 71.2% of user-mode
+execution at the wall.**
+
+### This inverts the cumulative reading, exactly as feared
+
+The cumulative census at the wall (`7240012`) said `lsass.exe` 21.2%,
+`csrss` 11.8%, **`fontdrvhost` x2 12.2%**, `services.exe` 9.1%,
+`WerFault.exe` 8.0% - and I built on it. The differenced census says
+`services` 40.5% and `WerFault` 30.7%, with **fontdrvhost doing
+essentially nothing.**
+
+**`2c40f5e`'s framing is retracted**: fontdrvhost's 12.2% was accumulated
+*earlier in the boot*, and at the wall it is not a significant consumer.
+The win32k syscall observation stands as a fact about that process's
+history; it is not what the guest is doing when it stops.
+
+`95e3e3e` predicted exactly this - that a cumulative census "describes the
+boot, not the state" - and this is the measurement that proves it rather
+than argues it. **Every process ranking taken from a cumulative census at
+the wall this session was wrong.**
+
+### What the wall actually looks like, from two agreeing instruments
+
+    services.exe   40.5% of user-mode samples, and +3,462 context
+                   switches in 60 s = **57.7/s**, with a FOURTH thread
+                   appearing mid-measurement
+    WerFault.exe   30.7% of user-mode samples
+
+The `ContextSwitches` delta and the census delta are independent
+instruments and they agree: **the SCM is running hard.** That is now n=2
+live readings (boot 200 at 39.8/s, boot 208 at 57.7/s), so `d23d54e`'s
+conclusion - not starved, blocked on something specific - survives the
+retraction of its "SETTLED" framing and stands on two boots.
+
+**`WerFault.exe` at 30.7% is the new fact.** It is present on all seven
+walls, it is what Windows starts to report a crash, and it is burning a
+third of user-mode execution while the machine makes no progress. A crash
+reporter consuming the machine it is reporting on is a coherent stall in a
+way that "the SCM is slow" never was.
+
+### The catcher worked, including the part that says it did not
+
+The same run printed **`*** THE GUEST STOPPED DURING THE MEASUREMENT ***`**
+- and the readings are still valid, because the counters *moved*: 3,320 ->
+6,782 switches and 96,949 -> 138,613 samples, with `elapsed cycles`
+advancing 401 billion. A stop at the end of a window does not invalidate
+growth observed within it; a stop at the *start* does, which is what
+`e8cfdd5` caught on boot 207. **The instrument now distinguishes those two
+cases, and this run is the first where that distinction was needed and
+made.**
