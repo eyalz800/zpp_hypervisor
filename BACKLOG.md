@@ -73514,3 +73514,52 @@ the old tree compiles cleanly with `guest_gdtr_base` on that list, and
 after moving the list to `nested_vmx.h` the same edit is a compile error.
 Three guards added, 7 new checks, and two `priced_at` static_asserts so
 the arithmetic above cannot rot silently.
+
+## The two wall states look identical cumulatively - and that says nothing
+
+Boot 203 (services.exe FROZEN) against boot 200 (services.exe at 39.8
+switches/s), both at the 14-process wall, both censuses reader-proven:
+
+    boot 200   120,948 samples, 15 of 24 slots
+      21.2 11.8 11.5 10.2 10.2 9.1 8.0 6.3 5.9 3.7 1.7 0.1 0.1 0.1 0.0
+    boot 203   125,504 samples, 15 of 24 slots
+      20.4 11.7 10.8 10.7 10.0 9.7 7.4 6.7 5.9 4.6 1.7 0.2 0.1 0.1 0.0
+
+Same count of address spaces, near-identical shares, and **the same two
+`...001` cr3s at 6.7% and 5.9%** - the two `fontdrvhost.exe` instances
+under their KVA-shadow user-half cr3s, exactly as on boot 200.
+
+**This does not distinguish the two states, and cannot.** The census is
+**cumulative over the whole boot**; the `services.exe` readings that
+differ were **60-second differenced samples at the wall**. Two boots that
+took the same route to the same place will have the same cumulative
+profile whether or not their end states differ.
+
+**That is the same error as `a59a51c` and `1ec74e3`** - comparing a
+cumulative quantity across boots and reading the difference, or here the
+*similarity*, as though it described the moment. Recorded rather than
+quietly dropped because I nearly wrote it up as "the two states are
+identical", which the data does not support in either direction.
+
+### What would actually compare them
+
+A **differenced** census at the wall on each boot - two dumps sixty
+seconds apart, as `ZPP_CENSUS_ALL=1` differencing already does for the
+kernel-side census. Boot 200 stopped before that was possible; boot 203
+is stopped now. **So neither exists, and the comparison needs two future
+boots that both reach the wall alive.**
+
+The catcher already takes the `services.exe` reading at that moment. The
+cheap change is to have it take a **census delta** in the same window -
+it is two more dumps and no new instrument, and it would turn every
+wall-reaching boot into a usable comparison instead of one that has to be
+caught twice.
+
+### What the cumulative profile does support
+
+Weakly: the boots are **similar overall** - same processes, same
+proportions, same fontdrvhost pair carrying the system-call load. It is
+evidence that nothing structural differs between a boot whose SCM runs and
+one whose SCM freezes, which makes a *timing* or *ordering* difference
+more likely than a configuration one. That is worth one sentence and not
+more.
