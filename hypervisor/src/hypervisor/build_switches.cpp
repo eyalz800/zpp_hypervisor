@@ -14,6 +14,45 @@ namespace
 #endif
 constexpr bool sample_l1_enabled = (0 != ZPP_SAMPLE_L1);
 
+// The same treatment for the three live switches that had **no field at
+// all** until the 2026-09-06 switch audit. Each is spelled from its
+// macro here for the reason `sample_l1_enabled` above is: the
+// `constexpr bool` the code branches on is local to the translation
+// unit that owns the site, so there is no constant to reach for.
+//
+// `slow_exit_cycles` is the one that matters. It is a busy-wait in
+// `exit_dispatch.cpp` executed on **every VM exit**, it is a `CACHE
+// STRING` so a stale cache carries it silently, and the manifest could
+// not say whether it was set - which is character for character the
+// `ZPP_PUBLISH_REFERENCE_TSC` failure CLAUDE.md records, on the one
+// switch that adds cycles to the quantity a cost investigation is
+// measuring. An audit of per-exit cost that cannot rule it out is not
+// an audit.
+#ifndef ZPP_REQUEUE_INTERRUPTED_EVENTS
+#define ZPP_REQUEUE_INTERRUPTED_EVENTS 0
+#endif
+constexpr bool requeue_interrupted_events =
+    (0 != ZPP_REQUEUE_INTERRUPTED_EVENTS);
+
+#ifndef ZPP_VIRTUALIZE_APIC
+#define ZPP_VIRTUALIZE_APIC 0
+#endif
+constexpr bool virtualize_apic_enabled = (0 != ZPP_VIRTUALIZE_APIC);
+
+#ifndef ZPP_SLOW_EXITS
+#define ZPP_SLOW_EXITS 0
+#endif
+constexpr unsigned long long slow_exit_cycles = ZPP_SLOW_EXITS;
+
+// Eight digits, and the bound asserted rather than assumed - the
+// `lazy=` field records what four digits cost when 10,000 printed
+// `0000`, character for character what *off* prints. Eight covers
+// 99,999,999 cycles, about 50 ms on the 2 GHz part this runs on, which
+// is far past any value that leaves a guest running at all.
+static_assert(slow_exit_cycles < 100000000ull,
+              "ZPP_SLOW_EXITS gets eight digits in the build manifest, "
+              "so a larger value would print as a different legal one");
+
 constexpr char digit(bool value)
 {
     return value ? '1' : '0';
@@ -426,6 +465,43 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // than guessing.
         ' ', 'p', 'r', 'o', 'b', 'e', '=',
         digit(nested_vmx::probe_aps),
+        // === Three switches that had no field for months =========
+        //
+        // All three are live, all three branch on a `constexpr` the
+        // compiler saw, and none of them was here - so `strings` on the
+        // deployed binary could not answer what they were built as.
+        //
+        // `requeue=` puts back an event whose delivery a VM exit
+        // interrupted. It defaulted off for a long time and is on now;
+        // its own comment in `resume.cpp` says "did this come from the
+        // re-queue then costs one boot instead of an argument", which
+        // is only true if a boot can be told apart from another, which
+        // is what this field is for.
+        //
+        // `vapic=` takes every external interrupt in the host and
+        // injects it, the way KVM does, instead of letting the guest's
+        // own controller deliver natively. That is a different machine,
+        // not a tuning knob.
+        //
+        // `slow=` is the busy-wait in `exit_dispatch.cpp`, in
+        // time-stamp counter cycles, burned on **every VM exit**. It is
+        // the only switch in the tree that adds time to an exit
+        // directly, and it is a `CACHE STRING`, so it is exactly the
+        // shape of thing a stale cache carries into a cost measurement
+        // without anybody noticing. Zero is off.
+        ' ', 'r', 'e', 'q', 'u', 'e', 'u', 'e', '=',
+        digit(requeue_interrupted_events),
+        ' ', 'v', 'a', 'p', 'i', 'c', '=',
+        digit(virtualize_apic_enabled),
+        ' ', 's', 'l', 'o', 'w', '=',
+        digit(static_cast<unsigned>(slow_exit_cycles / 10000000)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 1000000)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 100000)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 10000)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 1000)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 100)),
+        digit(static_cast<unsigned>(slow_exit_cycles / 10)),
+        digit(static_cast<unsigned>(slow_exit_cycles)),
         // === The diagnostic channel ==============================
         //
         // **This whole class was invisible here, and it is the one

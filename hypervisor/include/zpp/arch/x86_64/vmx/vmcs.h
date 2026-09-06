@@ -263,6 +263,39 @@ inline void vmcs_note_read_caller(std::uint64_t caller)
  * So GS is read only from `read`/`write`, and `setup_vmcs` points the
  * real GS base at this processor's row before it issues its first VMCS
  * access. Ordering there is load bearing.
+ *
+ * **The default here is OFF and OFF has never booted. Read that as
+ * "untested arm", not as "the safe one".** `BACKLOG.md`'s
+ * "`ZPP_VMCS_CACHE=OFF` does not boot at all" records the only run of
+ * it, 2026-08-25: `vcache=0` verified in the deployed manifest, and
+ * serial stops after `ZPP_TRACE start up memory at 0x9c000` with **no
+ * `chainloading` line and no exit taken on any processor** - the
+ * hypervisor does not finish its own startup, long before a guest. The
+ * entry says outright that whatever makes OFF fail is "a second,
+ * separate bug in a configuration nobody has exercised".
+ *
+ * So the shipped `vcache=1` is load bearing until that is disproved,
+ * and `7905347` reached the same conclusion from the other direction
+ * after finding `ZPP_VMCS_CACHE:BOOL=ON` sitting in `build/debug` where
+ * nothing in presets or scripts had put it.
+ *
+ * Two things the next person should not have to re-derive:
+ *
+ * - **Nothing in the current code makes OFF structurally impossible.**
+ *   With `nested_vmx::evmcs_to_kvm` off, every `if constexpr
+ *   (vmcs_cache_enabled)` here is a pure removal: `vmcs_cache_forget`,
+ *   `vmcs_cache_select`, `vmcs_cache_revalidate` and
+ *   `vmcs_cache_borrow` all become no-ops and no state survives. With
+ *   it *on*, OFF is genuinely broken rather than merely untested -
+ *   `vmcs_cache_current_enlightened` is gated on this, so an
+ *   enlightened access would go to whichever real VMCS is current.
+ * - **The defect the 2026-08-25 run was testing for is fixed.**
+ *   `vmcs_cache_suspended` and `vmcs_cache_epoch` are `std::atomic`
+ *   now, so the reason to reach for OFF as a bisect arm is gone.
+ *
+ * Re-testing OFF costs seconds rather than a boot, because the failure
+ * signature is at hypervisor startup and shows on serial before Windows
+ * is reached at all.
  * @{
  */
 #ifndef ZPP_VMCS_CACHE

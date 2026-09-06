@@ -69786,3 +69786,218 @@ established, and the bad worker-count read sat beside it.
 That distinction matters for anything else those notes discouraged:
 **dwords on this guest are trustworthy when the address is right**, and
 the anchor is now cheap to re-run.
+
+
+## Switch audit for per-exit cost: 14 of 71 fields are stale cache, and 3 switches had no field at all
+
+**2026-09-06.** Every field of `zpp switches:` read against
+`CMakeLists.txt`'s option defaults, and every ON switch read against the
+site it gates. The premise is `b9a1ed0`'s: the guest is ~100x slow, `vmm
+65.07%` of the busy processor's wall clock, ~30 VMCS reads an exit at
+~9,600 exits/s, and the levers that were open are closed - enlightened
+VMCS both directions (`a1ac974`), redundant VMREAD removal (`1ec74e3`),
+and widening the cache (structural ceiling).
+
+### The deployed manifest is fourteen deliberate-looking non-defaults, and none of them is set by anything on the deploy path
+
+`build/debug/CMakeCache.txt` reproduces the deployed manifest exactly,
+field for field. Nothing in `CMakePresets.json`, `scripts/`, `.github/`
+or the `boot-windows-rig` skill sets any of them - the skill's recipe is
+`cmake --preset debug -DZPP_DIAG=ON -DZPP_SEARCH_ALL_DEVICES=ON` and
+nothing else. So all fourteen are inherited cache entries, the same
+class as `ZPP_VERIFY_HYPERVISOR`, `ZPP_PUBLISH_REFERENCE_TSC` and
+`vcache=1` in `7905347`.
+
+Built from a clean worktree at `9e137c3` with the plain `debug` preset,
+the tree's own defaults print:
+
+    reftsc=0 eagerept=0 efer0=0 lmswitch=1 censv=1 vtltrc=0 vtlcap=0
+    vcache=0 drop=1 novina=0 nosdma=0 hand=0 lsipi=0 nvtd=0 anest=0
+    apentry=0 diag=1
+
+against the deployed
+
+    reftsc=1 eagerept=1 efer0=1 lmswitch=0 censv=0 vtltrc=1 vtlcap=1
+    vcache=1 drop=0 novina=1 nosdma=1 hand=1 lsipi=1 nvtd=1 anest=1
+    apentry=1 diag=0
+
+`censv=0` and `diag=0` are improvements over the default and `drop=0` is
+a regression against `CMakeLists.txt`'s own "ON by default since
+2026-09-02: it is what takes Windows to the login screen". None of that
+is visible without diffing the manifest against the defaults, which
+nothing did until now.
+
+### `eagerept=1` is the losing arm of its own A/B
+
+The switch's declaration carries the measurement in a table: faults per
+round trip 16.31 -> 12.92, clean round trip **3.45 ms -> 4.07 ms
+(+18%)**, `on_l2_ept_fault` 377.9 -> 735.1 us/RT, `map_window` repoints
+282.7 -> 580.1/RT, and it ends "**Built, booted, and it is a net loss.
+Leave it off.**" It has been on ever since.
+
+`install_shadow_neighbours` runs on every successfully installed shadow
+leaf (`nested_entry.cpp:10636`), and EPT violations are 61.1% of exits.
+Per call it walks seven neighbours through `walk_ept`, each level a
+`read_guest_physical` through the mapping window.
+
+Turning it off is **not guest-visible**: it runs *after* the faulting
+leaf is installed and remembered, and every leaf it would have installed
+is installed by the fault that wants it, which is the base path already.
+
+### `vtlcap=1` is the deep trust-level capture, and its own comment calls it the last candidate for 137.6 VMCS reads a vmcall
+
+Counted off the code rather than estimated. Per capture:
+64 stack words, **1,024 code bytes read one byte at a time**, 32 shared
+quadwords, 32 spin quadwords, `image_base_of`/`image_name_of`/
+`module_name_of` walks, a `shadow_ept_lookup` and a full `walk_ept` of
+the guest hypervisor's own tables - each read preceded by
+`translate_guest_linear`, a four-level guest page walk whose every level
+is a `read_guest_physical`. That is ~1,150 linear translations and
+~4,600 window repoints a capture, on one switch in 64 of each kind after
+the first 4,096.
+
+Half of what it collects has no reader: `vtl_stack`, `vtl_code` and
+`vtl_assist` are printed by `rig-dump-state.py`; `vtl_shared`,
+`vtl_spin`, `vtl_page_*` and `vtl_follow_at` get **zero hits** across all
+of `scripts/`. Same trade as `census_closed` and the same verdict.
+
+### `vtltrc=` is not observational, and turning it off silently disables three guest-visible switches
+
+The finding of the audit, and it is not in the name. `capture_vtl_switch`
+returns immediately when `trace_vtl` is off, and it is the **only** writer
+of `vtl_latest` - whose `[cpu][1][vtl_eptp_slot]` is the anchor
+`entering_vtl1_space()` compares vmcs12's EPTP against
+(`nested_entry.cpp:9127`). `mark_vtl_half` is the only writer of
+`vtl_half_mark_kind`, and it is called from inside the same
+`if (nested_vmx::trace_vtl && vmcall)` block, which spans
+`nested_entry.cpp:11348-12933`. `in_vtl1` is set there too.
+
+So `vtltrc=0` makes `suppress_vina`, `force_no_secure_dma`, the VINA
+vector drop, `hold_clock_in_vtl1` and `hold_self_ipi_in_vtl1` **inert
+while the manifest still prints them on**. That is the
+`deliver_on_drop`/`tpr_shadow_offered` failure again - two variables in
+one experiment with nothing in the artifact to catch it - and it is
+refused the same way, by a `static_assert` beside `trace_vtl`.
+
+Run both ways against the real compile command for
+`build_switches.cpp`, with only the two switches moved:
+
+    vina=0 trace=0 (control)              compiled clean
+    vina=1 trace=1 (rig config)           compiled clean
+    vina=1 trace=0 (must be refused)      static assertion failed
+    vina=0 trace=1 (allowed)              compiled clean
+
+The consequence for the cost question: **`vtltrc=1` cannot be turned off
+as a saving.** Freeing it needs the two latches hoisted out from behind
+the trace, which is work and not a flag.
+
+### Three live switches had no manifest field, and one of them burns cycles in every exit
+
+`ZPP_SLOW_EXITS`, `ZPP_REQUEUE_INTERRUPTED_EVENTS` and
+`ZPP_VIRTUALIZE_APIC` are all compiled in, all branch on a `constexpr`,
+and none was in `zpp switches:`.
+
+`ZPP_SLOW_EXITS` is the one that matters here: it is a `rdtsc` busy-wait
+in `exit_dispatch.cpp:222` executed on **every VM exit**, it is a `CACHE
+STRING` so a stale cache carries it exactly as `ZPP_VERIFY_HYPERVISOR`
+was carried, and no artifact on the path to the rig could say whether it
+was set. An audit of per-exit cost that cannot rule it out is not an
+audit. It reads 0 in `build/debug`, so nothing measured is affected -
+but that was not checkable before this commit and now is:
+
+    zpp switches: ... probe=0 requeue=1 vapic=0 slow=00000000 diag=1 ...
+
+Eight digits with a `static_assert` on the bound, because `lazy=`
+already recorded what four digits cost when 10,000 printed `0000`.
+
+### Also corrected, both comments that disagreed with the value that runs
+
+- **`defer_guest_state`.** The header said "Off, after three boots" and
+  "a fourth condition exists and is not characterised", while
+  `CMakeLists.txt` defaults the option **ON** and its help text names the
+  fourth condition (`flush_guest_vmcs12` copying the whole vmcs12 back on
+  every VMPTRLD) with the measurement, 1.136x. Every build in the tree has
+  `defer=1`. Prose corrected; the header `#define` stays 0 because the
+  CMake forward always wins and only `tests/` reaches the header default.
+- **`vmcs_cache_enabled`.** The default is OFF and OFF has never booted
+  (5490). That is an untested arm, not a safe one, and the comment now
+  says so.
+
+### No time manipulation is active, checked at the sites
+
+`stretch=01` -> `if constexpr (1 != ZPP_STRETCH_GUEST_TIMER)` compiles
+the whole block out. `floor=0000000` -> `if constexpr (0 !=
+nested_vmx::tick_floor_units)` likewise. `dilate=01` -> `dilate_time =
+(1 < time_dilation)` is false, so `apply_time_dilation` returns at its
+first line, `use_tsc_offsetting` is not even requested into vmcs01's
+primary controls (`hypervisor.cpp:6631`), and the only other writer of
+`tsc_offset` is `build_vmcs02`'s KVM-shaped composition of vmcs01's
+(zero) with vmcs12's. Every `lazy*` field is zero.
+
+The one time-adjacent switch that **is** on is `reftsc=1`, and it should
+not be read as "nothing touches time": it publishes the reference TSC
+page the guest reads for `KeQueryPerformanceCounter`. It is truthful by
+construction - the scale is computed from the interface's own 10 MHz
+definition, or fitted to the level above's own answers where CPUID.15H
+reads zero - and it is off by default for a *safety* reason rather than a
+fidelity one, which `CMakeLists.txt` states: the target frame is resolved
+by walking the guest hypervisor's own EPT and then written by a separate
+call with nothing pinning the mapping in between, which is
+time-of-check-to-time-of-use on an address somebody else may now own.
+
+### The answer to "is there a switch that cuts the 65% without changing what the guest is told"
+
+**Two, and both are "stop doing something the tree already decided not to
+do". There is no switch that makes the remaining work cheaper.**
+
+| rank | change | expected saving | risk | why eligible |
+|---|---|---|---|---|
+| 1 | `ZPP_EAGER_EPT_NEIGHBOURS=OFF` | reverses a measured +18% round trip; `on_l2_ept_fault` 735.1 -> ~377.9 us/RT | ~none - strictly less work, restores the tree default, its own A/B is the evidence | installs only mappings the guest already permits, after the faulting leaf is in; the lazy path installs the same leaf on the fault that wants it |
+| 2 | `ZPP_VTL_CAPTURE=OFF` | its own comment's 137.6 VMCS reads a vmcall, ~9,500 reads a capture | ~none to the guest; loses `vtl_stack`/`vtl_code`/`vtl_assist` from the dump | pure reads of guest memory into our own members |
+| 3 | `ZPP_TRACE_AP_ENTRY=OFF` | negligible per exit; frees log-ring slots | none | observational, fires per AP start |
+
+Not eligible, and why, so none is re-proposed:
+
+- **`vtltrc=0`** - silently disables `novina`, `nosdma` and the VINA
+  vector drop. See above.
+- **`nosdma=0`** - re-enables `SkhalPciEnabled`, so guest-visible. It
+  does cost two full guest-linear walks plus two `l2_physical_to_l1`
+  walks per VTL1 entry. Worth **reading** rather than changing:
+  `secure_dma_forced` says whether it still writes anything now that
+  `nvtd=1` claims to make secure DMA succeed, and if it is flat the two
+  switches are doing the same job twice.
+- **`apicoff`, `keepapic`, `windowtpr`, `drop`, `stall`, `invall`,
+  `extint`, `hand`, `lsipi`, `hvbit`, `anest`** - all change what the
+  guest is told or what it is given.
+- **`vcache=0`** - has never booted; see 5490 and below.
+- **`evmk`, `evmix`** - closed on mechanism by `a1ac974`.
+
+Both eligible changes are reversions to the tree default, so neither is a
+new idea and neither needs a design. That is the honest shape of the
+answer: **the switch surface has no unexploited saving in it.** What is
+left after them is the nesting tax itself - ~30 VMCS reads an exit of
+which 76.8% miss the cache (`1ec74e3`), each a real VMREAD that exits to
+KVM - and that is not addressable by a flag.
+
+### `vcache=1`: keep it, and stop calling the default the safe arm
+
+5490 is credible **as recorded** and its mechanism is unexplained. What
+it names is checkable and unambiguous: serial stops after `ZPP_TRACE
+start up memory at 0x9c000`, no `chainloading` line, no exit on any
+processor - a hypervisor that does not finish its own startup, nowhere
+near a guest.
+
+What has changed since 2026-08-25 argues both ways and neither settles
+it. Nothing in the current code makes OFF structurally impossible: with
+`evmcs_to_kvm` off every `if constexpr (vmcs_cache_enabled)` in `vmcs.h`
+is a pure removal and no state survives. And the defect the run was
+testing for - `vmcs_cache_suspended` incremented non-atomically - is
+fixed, so the reason to reach for OFF as a bisect arm is gone.
+
+Recommendation: **leave `vcache=1` and document it as load bearing**,
+which the comment now does. The tree default of OFF should be flipped to
+ON only after one confirming run, because flipping a default on a single
+eight-day-old observation is how this tree got the fourteen cache entries
+in the first place. That run is cheap - the failure shows on serial
+before Windows is reached, so it costs seconds rather than an hour - and
+it is the one experiment here that is worth doing before the next boot.

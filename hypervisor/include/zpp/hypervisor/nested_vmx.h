@@ -681,6 +681,31 @@ inline constexpr bool intercept_self_ipi =
  *
  * That is the same INVEPT behaviour that closed the shadow-refresh lever,
  * arriving from the other side.
+ *
+ * ### "Leave it off" and it has been on ever since
+ *
+ * Found by the 2026-09-06 switch audit.
+ * `build/debug/CMakeCache.txt` carries
+ * `ZPP_EAGER_EPT_NEIGHBOURS:BOOL=ON`, debug is what is deployed, and
+ * the manifest has been printing `eagerept=1` on every deploy against
+ * a `CMakeLists.txt` default of OFF and against the table above -
+ * which is this switch's *own* A/B saying the round trip goes 3.45 ms
+ * -> 4.07 ms.
+ *
+ * Nothing here is retracted; the measurement stands and it says the
+ * shipped configuration is the losing arm. Turning it off is a strict
+ * reduction of work - `install_shadow_neighbours` is called after the
+ * faulting leaf is already installed and remembered, so removing it
+ * changes no mapping the faulting access needed - and it is not
+ * guest-visible: the lazy path installs the same leaf on the fault
+ * that wants it, which is what the base path already does.
+ *
+ * The prediction, so the next boot is a test and not a hope:
+ * `shadow_ept_neighbours_filled` stops, `on_l2_ept_fault` returns
+ * towards 377.9 us a round trip from 735.1, `map_window` repoints
+ * towards 282.7 from 580.1, and faults a round trip rise from 12.92
+ * towards 16.31. If the round trip does *not* fall, the +18% was not
+ * this and the attribution above is wrong.
  */
 inline constexpr bool eager_ept_neighbours =
 #if defined(ZPP_EAGER_EPT_NEIGHBOURS) && ZPP_EAGER_EPT_NEIGHBOURS
@@ -1455,6 +1480,34 @@ inline constexpr bool watch_vp_assist_page = (0 != ZPP_WATCH_VP_ASSIST);
  * If gating this does **not** move a vmcall's accesses, the capture is
  * not the residue and the mechanism behind those reads is still unfound.
  * That is the outcome this switch exists to make possible.
+ *
+ * ### It has been ON on the rig, and the experiment above was never run
+ *
+ * Found by the 2026-09-06 switch audit. `build/debug/CMakeCache.txt`
+ * carries `ZPP_VTL_CAPTURE:BOOL=ON` and debug is what is deployed, so
+ * the manifest has been printing `vtlcap=1` on every deploy - the same
+ * shape as `vcache=1` in `7905347` and as `ZPP_PUBLISH_REFERENCE_TSC`
+ * before it. Nothing in presets or scripts sets it.
+ *
+ * What that costs, counted off the code rather than estimated. Per
+ * capture: 64 stack words, **1,024 code bytes read one byte at a time**,
+ * 32 shared quadwords, 32 spin quadwords, `image_base_of` /
+ * `image_name_of` / `module_name_of` walks, a `shadow_ept_lookup` and a
+ * full `walk_ept` of the guest hypervisor's own tables. Every one of
+ * those reads is preceded by `translate_guest_linear`, which is a
+ * four-level guest page walk whose every level is a `read_guest_physical`
+ * through the mapping window - so roughly **1,150 linear translations and
+ * ~4,600 window repoints per capture**, which is the same currency
+ * `eager_ept_neighbours` was measured in (`map_window` repoints 282.7 ->
+ * 580.1 a round trip). It fires on one switch in 64 of each kind after
+ * the first 4,096.
+ *
+ * And half of what it collects has no reader. `vtl_stack`, `vtl_code`
+ * and `vtl_assist` are printed by `rig-dump-state.py`; `vtl_shared`,
+ * `vtl_spin`, `vtl_page_*` and `vtl_follow_at` appear **nowhere in
+ * `scripts/`** - grep says zero hits - so that part is paid for on every
+ * capture and never looked at, which is the `census_closed` trade
+ * exactly.
  */
 #ifndef ZPP_VTL_CAPTURE
 #define ZPP_VTL_CAPTURE 0
@@ -1568,6 +1621,30 @@ inline constexpr bool framebuffer_recorded = (0 != ZPP_FRAMEBUFFER);
  * One hypothesis per boot against that installation, with nothing to
  * reason from, is spending the user's hardware on guesses - and this
  * has already spent three.
+ *
+ * ### Everything above this line is superseded, and was for months
+ *
+ * Found by the 2026-09-06 switch audit, which is late: the option
+ * defaults **ON** - `CMakeLists.txt`'s `option(ZPP_DEFER_GUEST_STATE
+ * ... ON)` - and every build in the tree therefore has `defer=1`,
+ * while the `#define` below still reads 0 and the paragraphs above
+ * still read "Off, after three boots" and "a fourth condition exists
+ * and is not characterised".
+ *
+ * The fourth condition **was** characterised, and the option's own help
+ * text carries it: "Measured on the rig at 1.136x: `save_l2_state`
+ * 198,309 -> 52,792 cycles/call, wall clock per exit 462,843 ->
+ * 407,257. Four ordering conditions are found, fixed, and covered by
+ * `tests/nested_exit`'s sequence cases; the fourth was
+ * `flush_guest_vmcs12` copying the whole vmcs12 back on every VMPTRLD."
+ *
+ * The `#define` is kept at 0 rather than raised, because the CMake
+ * forward always wins and a header default that disagrees is only
+ * reachable by a build that bypasses CMake - which is `tests/`. What is
+ * corrected is the prose, for the reason `shadow_vmcs_enabled`'s own
+ * comment gives one screen above: "the value is the thing that runs; a
+ * comment that disagrees with it is worse than no comment, because it is
+ * read as the configuration."
  */
 #ifndef ZPP_DEFER_GUEST_STATE
 #define ZPP_DEFER_GUEST_STATE 0
@@ -3646,7 +3723,60 @@ static_assert(!(deliver_on_drop && !tpr_shadow_offered),
  */
 inline constexpr bool count_dropped_requests = (0 != ZPP_COUNT_DROPS);
 
+/**
+ * Record Hyper-V virtual trust level switches.
+ *
+ * **The name says observational and it is not, and that is the whole
+ * of what this comment is for.** Found by the 2026-09-06 switch audit,
+ * by reading the sites rather than the name.
+ *
+ * What is behind it, all of it inside one `if (nested_vmx::trace_vtl &&
+ * (basic_reason::vmcall == reason.basic()))` block spanning
+ * `nested_entry.cpp:11348-12933`:
+ *
+ * - `capture_vtl_switch`, which is the **only** writer of
+ *   `vtl_latest` - and `vtl_latest[cpu][1][vtl_eptp_slot]` is the
+ *   anchor `entering_vtl1_space()` compares vmcs12's EPTP against
+ *   (`nested_entry.cpp:9127`).
+ * - `mark_vtl_half`, which is the **only** writer of
+ *   `vtl_half_mark_kind` - the latch every VTL1-only block tests.
+ * - `in_vtl1`, which `hold_clock_in_vtl1` and `hold_self_ipi_in_vtl1`
+ *   are keyed on.
+ *
+ * So with this off, `suppress_vina`, `force_no_secure_dma`, the VINA
+ * vector drop, `hold_clock_in_vtl1` and `hold_self_ipi_in_vtl1` are all
+ * **silently inert** while the manifest still prints them as on. That is
+ * the `deliver_on_drop` / `tpr_shadow_offered` failure again - two
+ * variables in one experiment with nothing in the artifact to catch it -
+ * so it is refused the same way, by the static assertion below rather
+ * than by a note somebody has to read.
+ *
+ * What it costs while on, which is the other half of why it is not free:
+ * four VMCS reads per trust-level switch for the cheap register census
+ * (`guest_rsp`, `guest_rip`, `guest_cr3`, `guest_rflags`), plus the
+ * block above on every `vmcall` exit. It is per switch and not per exit,
+ * so it is small beside `capture_vtl_deeply` - but it is not zero and it
+ * is not optional.
+ *
+ * Off by default. Turning it off in a build that wants any of the five
+ * switches above needs those latches hoisted out from behind it first,
+ * which is real work and not a flag.
+ */
 inline constexpr bool trace_vtl = (0 != ZPP_TRACE_VTL);
+
+// The coupling above, refused at compile time. `deliver_on_drop` sets
+// the precedent and its comment gives the argument: the manifest is
+// read after a boot and this is answerable before one, both constants
+// are `constexpr`, so the combination can simply not build.
+static_assert(trace_vtl || !(suppress_vina || force_no_secure_dma ||
+                             hold_clock_in_vtl1 ||
+                             hold_self_ipi_in_vtl1),
+              "ZPP_SUPPRESS_VINA, ZPP_FORCE_NO_SECURE_DMA, "
+              "ZPP_HOLD_CLOCK_IN_VTL1 and ZPP_HOLD_SELF_IPI_IN_VTL1 all "
+              "test latches only ZPP_TRACE_VTL's own capture writes "
+              "(vtl_latest, vtl_half_mark_kind, in_vtl1), so they are "
+              "inert without it while the manifest still says they are "
+              "on - turn ZPP_TRACE_VTL on with them, or them off");
 
 /**
  * Whether a guest INVEPT discards the shadow on **every** processor.
