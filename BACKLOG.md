@@ -69571,3 +69571,45 @@ session was based on.**
 The guest was **healthy and slow**, and a 600-second watchdog on device
 power-transition completion reached its deadline first. That is now
 supported from three independent directions rather than argued.
+
+## A boot timeline to judge future boots against
+
+Boot 189 is the first 2-vCPU boot in this session held long enough to
+produce one. Elapsed times from `/proc/<qemu>/stat` field 22 against
+`/proc/uptime`, process counts from `scripts/guest-processes.py`:
+
+    13.9 min   (boot 190)   3 processes
+    26.9 min                3 processes   System, Secure System, Registry
+    42.6 min                9 processes   + smss, csrss x2, wininit, winlogon
+    51.9 min               14 processes   + services, lsass, LsaIso,
+                                            fontdrvhost x2, WerFault
+    51.9 min               STOP 0x9F, paused (shutdown)
+
+**Use this, not VTL counters, to decide whether a boot is behind.** A boot
+at 3 processes at 40 minutes is behind; a boot at 3 processes at 14
+minutes is on schedule, and boot 190 is the latter.
+
+Two things this makes quantitative that were guesswork before:
+
+- **The 60-minute floor is not conservative, it is barely adequate.** Boot
+  189 reached its furthest point at 51.9 min and was still climbing. Every
+  boot killed at 20-40 minutes in this session was killed during the
+  3-process phase, which on this timeline is *normal for that age*.
+- **The deadline is real and close.** The power IRPs were issued ~4 min in;
+  the 600 s budget expires ~14 min in. The guest reached 14 processes at
+  51.9 min. **It missed the budget by roughly 38 minutes**, so this is not
+  a near miss that a small speed-up rescues - a boot has to reach settled
+  user mode about **four times faster** than boot 189 did.
+
+That last number is the useful one, and it is discouraging in a way worth
+recording plainly: shaving 10-20% off per-exit cost cannot close a 4x gap.
+Either something makes the guest dramatically faster, or the 600 s budget
+has to not apply - and modifying the rig's Windows to extend it is out of
+bounds.
+
+**What is NOT ruled out**: that the four 2,881.5 s IRPs are not the ones
+that mattered. Only entry [6] was observed armed, at 278.9 s. If arming is
+per-IRP and the four oldest were never armed, then the deadline that
+actually killed the boot belongs to an IRP issued much later, and the gap
+is smaller than 4x. **That is the open question, and it decides whether
+speed is a viable lever at all.**
