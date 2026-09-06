@@ -69731,3 +69731,58 @@ The pool is **two threads at base priority 13** (`PopCreatePowerThread`
 → `KeSetActualBasePriorityThread(thread, 13)`), growing to at most 15.
 Two PASSIVE-level threads is exactly the shape that starves first on a
 ~100x-slow machine.
+
+## `guest-power-workers.py`: the pool is IDLE, and 32-bit reads are fine after all
+
+New reader for **`PopIrpThreadList`** - the list Microsoft's own
+`TRIAGE_9F_POWER` block names and that nothing in this tree read. Live
+boot 190, zpp resident, 29.3 min, 3 processes:
+
+    32-bit anchor  PopIrpWorkerSemaphore.Limit = 0x7fffffff   PASS
+                   header Type = 5 (SemaphoreObject)          PASS
+
+    SignalState                   0     nothing queued
+    WaitListHead        0xffffb30c...   a worker is IDLE and waiting
+    PopIrpWorkerCount             2     the two boot workers
+    PopIrpWorkerInFlight          0
+    PopIrpWorkerPending           0
+    PopPendingSetPowerDeviceIrps  0
+    PopInrushIrp                  0     slot free
+    PopCurrentIrpSequenceID       0
+
+    PopIrpThreadList - reader proven, head->Flink->Blink returns to head
+      [1] boot worker, Irp <null>, idle
+      [2] boot worker, Irp <null>, idle
+    0 of 2 are inside a driver
+
+By the script's own rule, published before the data: **some entry idle ->
+the pool is NOT the bottleneck.** At this stage it is not merely
+un-blocked, it is completely unused.
+
+### `PopCurrentIrpSequenceID = 0` is the strongest line here
+
+That counter is `lock xadd`-incremented by `PopAllocateIrp` on **every
+power IRP ever allocated**. Zero at 29.3 minutes means **not one power IRP
+has been issued on this boot**, which independently confirms the empty
+`PopIrpList` at 15.3 min from a second, unrelated field.
+
+So the power subsystem does not start early. Boot 189 had six IRPs at
+~52 min; boot 190 has had none at 29 min. **`0x9F` is therefore not a risk
+during the long 3-process phase at all** - it only becomes reachable once
+the boot is far enough along to power devices, which reinforces
+`85ac318`: a boot that bugchecks `0x9F` got *further* than one that sits
+quietly.
+
+### And a recorded suspicion is retired
+
+`guest-power-irps.py`'s header records `PopIrpWorkerCount` reading
+**296,159,351** and concludes that 32-bit reads on this guest were
+unproven. **They are fine.** The same field reads **2** here, and the
+semaphore anchor passes on two independent constants. The earlier garbage
+was a **wrong RVA**, not a broken read path - the script's own note says
+`PopWatchdogSleepTimeout` is in section 27 whose base was never
+established, and the bad worker-count read sat beside it.
+
+That distinction matters for anything else those notes discouraged:
+**dwords on this guest are trustworthy when the address is right**, and
+the anchor is now cheap to re-run.
