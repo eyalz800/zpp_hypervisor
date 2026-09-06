@@ -70001,3 +70001,78 @@ eight-day-old observation is how this tree got the fourteen cache entries
 in the first place. That run is cheap - the failure shows on serial
 before Windows is reached, so it costs seconds rather than an hour - and
 it is the one experiment here that is worth doing before the next boot.
+
+## eagerept=1 was a MEASURED +18% regression running on the rig, and 13 more stale entries
+
+The switch audit found the deployed manifest is **fourteen stale CMake
+cache entries**. Nothing in `CMakePresets.json`, `scripts/`, `.github/` or
+the rig skill sets any of them - the skill's recipe is
+`cmake --preset debug -DZPP_DIAG=ON -DZPP_SEARCH_ALL_DEVICES=ON` and
+nothing more. A clean worktree at `9e137c3` with the plain preset prints
+defaults that differ in fourteen fields. **This is the
+`ZPP_VERIFY_HYPERVISOR` class again, at fourteen times the scale.**
+
+### The one that matters: `eagerept`
+
+`ZPP_EAGER_EPT_NEIGHBOURS` was **ON**, and its own A/B in this tree reads
+**round trip 3.45 -> 4.07 ms, +18%**, with the verdict *"Leave it off"*.
+It has been ON for every measurement this session, on a path that takes
+**61.1% of exits**. So a measured regression was deployed and every
+per-exit number quoted this session included it.
+
+Turned OFF, with `vtlcap` and `apentry`:
+
+    eagerept=1 -> 0    reverses a measured +18% on the round trip
+    vtlcap=1   -> 0    its own comment: "the last candidate standing for
+                       137.6 VMCS reads a vmcall", ~9,500 reads a capture,
+                       and vtl_shared / vtl_spin / vtl_page_* / vtl_follow_at
+                       get ZERO hits across all of scripts/
+    apentry=1  -> 0    ~12 log lines per AP event, consuming ring slots
+
+All three are **guest-invisible**: `install_shadow_neighbours` runs after
+the faulting leaf is installed and only adds mappings the guest's own
+tables already permit; the deep capture only reads guest memory into our
+members. Deployed, hashes matched from a fresh mount, manifest verified on
+disk.
+
+### `vtltrc` must stay ON, and that is a trap worth naming
+
+`vtltrc=1` is **not observational**. `capture_vtl_switch` returns
+immediately when it is off and is the **only** writer of `vtl_latest`,
+whose `[cpu][1][vtl_eptp_slot]` is the anchor `entering_vtl1_space()`
+compares vmcs12's EPTP against. The `if (trace_vtl && vmcall)` block spans
+`nested_entry.cpp:11348-12933`, so turning it off makes `suppress_vina`,
+`force_no_secure_dma` and the clock/self-IPI holds **inert while the
+manifest still prints them ON**. A `static_assert` now refuses
+`novina=1 vtltrc=0`, verified to build in the three legal combinations and
+refuse the fourth.
+
+### Three live switches had NO manifest field
+
+`ZPP_SLOW_EXITS`, `ZPP_REQUEUE_INTERRUPTED_EVENTS`, `ZPP_VIRTUALIZE_APIC`.
+**`ZPP_SLOW_EXITS` is an `rdtsc` busy-wait on every VM exit** - a switch
+that directly adds time to the quantity this whole investigation is
+measuring, and it was not checkable from any artifact on the path to the
+rig. It reads **`slow=00000000`** now, so nothing measured was affected;
+but that could not be established before, only assumed.
+
+That is the fourth instance of the manifest rule earning its keep, and the
+first where the missing field was one that would have invalidated
+measurements rather than explaining a boot failure.
+
+### The honest negative on the original question
+
+**No switch makes the remaining work cheaper.** Both eligible changes are
+reversions to tree defaults - neither is a new idea. What is left is the
+nesting tax itself: ~30 VMCS reads an exit, most of them distinct fields
+needed once, each a real VMREAD exiting to KVM. No flag reaches that.
+
+### Hazard recorded, not acted on
+
+`efer0=1 lmswitch=0` is the exact combination `build_switches.cpp`'s own
+comment calls fatal - `lmswitch` is "the only thing that then keeps
+IA-32e-mode-guest and EFER.LMA agreeing with CR0.PG", and without it an AP
+reaching long mode is refused entry with `0x80000021`. **It is deployed,
+and it demonstrably reaches the login screen.** No `static_assert` added,
+because refusing a configuration that works is worse than the warning.
+Flagged for the next person rather than silently left.
