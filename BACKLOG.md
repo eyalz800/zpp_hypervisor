@@ -69664,3 +69664,70 @@ minutes - can die that way.
 That means `0x9F` is a marker of **progress**, not of failure severity: a
 boot that bugchecks `0x9F` got further than one that quietly sits at 3
 processes.
+
+## The four "stalled" IRPs were never armed - `now - 0` printed as an age
+
+Static analysis of the power path settles what `85ac318` suspected, and
+the mechanism is exact:
+
+- **`PopAllocateIrp` (RVA `0x38b218`) memsets the whole 0x138-byte
+  `_POP_IRP_DATA` to zero** and is the only producer.
+- **`WatchdogStart` (+0x30) is written in exactly one instruction in the
+  image**: `PopEnableIrpWatchdog+0x127` (`0x30aa43`), immediately after
+  `WatchdogState = 1`.
+- So an IRP whose watchdog was never armed carries `WatchdogStart == 0`
+  for its entire life, and the reader printed `now_unbiased - 0` as its
+  age.
+
+**Four entries agreeing to the last 100 ns are not four events. They are
+one subtraction from zero.** The tell was in the output and I quoted the
+number instead of doubting it - and then built a "4x faster" requirement
+on it (`021d7a3`, withdrawn in `85ac318`).
+
+### Why those four are healthy, by design
+
+`IRP_MN_WAIT_WAKE` (minor 0) is **never armed**:
+`PopRequestPowerIrp+0xe6` branches minor 0 straight to
+`IofCallDriverSpecifyReturn`, bypassing `PopQueueQuerySetIrp` and
+therefore the watchdog entirely; and `PoDeviceAcquireIrp` (`0x3c7908`)
+only writes `CurrentDevice` for minors 2 and 3. So a WAIT_WAKE IRP sits on
+`PopIrpList` with `CurrentDevice` NULL and `WatchdogStart` 0 **for the
+machine's whole uptime**, completing only when its device signals wake.
+Four of them - NIC, USB roots, HID, audio bus - is an ordinary population.
+
+**`CurrentDevice` NULL does not mean "never dispatched"** either. It is
+written by `PoDeviceAcquireIrp` and cleared by `PoDeviceReleaseIrp+0xc1`,
+so it means "not inside a driver *right now*".
+
+### And no armed IRP can survive its deadline
+
+`PopIrpWatchdogBugcheck` (`0x5ca648`) checks **neither state nor age** -
+once the DPC runs it bugchecks unconditionally. `PopEnableIrpWatchdog`
+arms once, only out of `Disabled`. So the "four IRPs at 480% of budget"
+anomaly `bd904d9` recorded as unexplained **has no code path at all**:
+they were never armed. Both timeout globals read `0x258` = 600 on disk and
+nothing in `.text` writes them - they are registry-only
+(`Session Manager\Power\WatchdogSleepTimeout`), hence **out of bounds**
+under the no-modification constraint.
+
+### The printer no longer invents the number
+
+`guest-power-irps.py` now prints `WatchdogStart 0 - the watchdog was NEVER
+ARMED, so this entry HAS NO AGE and no deadline`, and prints the raw
+`WatchdogStart` beside any real age. An instrument that cannot distinguish
+"issued 2,881 s ago" from "never armed" is the exact failure class this
+tree catalogues, and it had it.
+
+### What is now the decisive unread instrument
+
+**`PopIrpThreadList` (RVA `0xf08790`)** - `_POP_IRP_WORKER_ENTRY` nodes on
+each power worker's own stack: `Link@0, Thread@0x10, Irp@0x18,
+Device@0x20`. A node with non-zero `Irp` means **that worker is inside a
+driver right now**, and `+0x20` names it. **Nothing in `scripts/` reads
+it**, and Microsoft's own `TRIAGE_9F_POWER` block contains exactly
+`PopIrpList`, `PopIrpThreadList`, `ExWorkerQueue` and `IoWorkerQueue`.
+
+The pool is **two threads at base priority 13** (`PopCreatePowerThread`
+→ `KeSetActualBasePriorityThread(thread, 13)`), growing to at most 15.
+Two PASSIVE-level threads is exactly the shape that starves first on a
+~100x-slow machine.

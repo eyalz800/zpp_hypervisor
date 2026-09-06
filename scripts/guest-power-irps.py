@@ -318,11 +318,41 @@ while cur and cur != head and n < 64:
     print(f'      CurrentDevice {curdev:#x}  {drivername(curdev)}'
           if curdev else '      CurrentDevice <null>')
     print(f'        ^ the driver actually HOLDING the IRP.')
+    # **`WatchdogStart == 0` is NOT an age of `now`. It means the watchdog
+    # was never armed, and printing `now - 0` as an age invents a number.**
+    #
+    # `PopAllocateIrp` memsets the whole 0x138-byte `_POP_IRP_DATA` to
+    # zero, and `WatchdogStart` (+0x30) is written in exactly one place -
+    # `PopEnableIrpWatchdog+0x127`, immediately after `WatchdogState = 1`.
+    # So an IRP that was never armed carries zero for its entire life.
+    #
+    # An `IRP_MN_WAIT_WAKE` (MinorFunction 0) is never armed **by
+    # design**: `PopRequestPowerIrp+0xe6` sends minor 0 straight to
+    # `IofCallDriverSpecifyReturn` without going through
+    # `PopQueueQuerySetIrp`, so it never reaches the watchdog, and
+    # `PoDeviceAcquireIrp` only writes `CurrentDevice` for minors 2 and 3.
+    # Such an IRP sits on `PopIrpList` with `CurrentDevice` NULL and
+    # `WatchdogStart` 0 **for the machine's whole uptime, healthily**,
+    # completing only when the device signals wake.
+    #
+    # This printer previously showed four such entries as "age 2,881.5 s,
+    # 480.3% to bugcheck", which read as four IRPs stalled for 48 minutes
+    # and was quoted as exactly that. It was `now - 0`. The tell was there
+    # and was missed: four entries agreeing to the last 100 ns are not
+    # four events, they are one subtraction from zero.
     if start is not None and now_unbiased is not None:
-        age = now_unbiased - start
-        print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
-              f'of {BUGCHECK_AT / 1e7:.0f} s '
-              f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
+        if not start:
+            print(f'      WatchdogStart 0 - the watchdog was NEVER ARMED, '
+                  f'so this entry HAS NO AGE and no deadline.')
+            print(f'        (an IRP_MN_WAIT_WAKE is never armed by design '
+                  f'and lives here for the whole uptime - check '
+                  f'MinorFunction above before reading anything into it)')
+        else:
+            age = now_unbiased - start
+            print(f'      WatchdogStart {start:,}')
+            print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
+                  f'of {BUGCHECK_AT / 1e7:.0f} s '
+                  f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
     cur = rq(cur)
 
 print(f'\n{n} power IRP(s) in flight.')
