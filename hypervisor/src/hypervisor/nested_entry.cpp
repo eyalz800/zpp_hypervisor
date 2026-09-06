@@ -1209,6 +1209,12 @@ void hypervisor::write_vmcs02_control(std::size_t cpu,
         // recorded it as done, and no later build ever tried again.
         auto failures = arch::x86_64::vmx::vmcs_write_failures;
 
+        // Read before the write, since the write sets it. See
+        // `control_writes_uncached`: "there was no record" and "the
+        // record disagreed" are the two reasons this line is reached
+        // and they need opposite work.
+        auto uncached = !this->control_cache_valid[cpu][i];
+
         this->vmcs.write(control, value);
 
         if (failures != arch::x86_64::vmx::vmcs_write_failures) {
@@ -1218,12 +1224,30 @@ void hypervisor::write_vmcs02_control(std::size_t cpu,
         this->control_cache[cpu][i] = value;
         this->control_cache_valid[cpu][i] = true;
         this->control_writes_done[cpu] += 1;
+
+        if (uncached) {
+            this->control_writes_uncached[cpu] += 1;
+        }
         return;
     }
 
     // Not on the list, so not argued for. Written straight through
     // rather than added to the cache by accident.
     this->vmcs.write(control, value);
+}
+
+void hypervisor::forget_vmcs02_control(std::size_t cpu, field control)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    for (std::size_t i{}; i < std::size(control_fields); ++i) {
+        if (control_fields[i] == control) {
+            this->control_cache_valid[cpu][i] = false;
+            return;
+        }
+    }
 }
 
 std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
@@ -3091,6 +3115,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
             return;
         }
 
+        // Which of the two reasons this write is happening. See
+        // `hot_state_writes_uncached`: a value that moved is the guest,
+        // and nothing here can help it; a record that was not there is
+        // a precondition failing, and that is reachable.
+        if ((cpu < max_cpus) && !(reuse_hot_state && recorded)) {
+            this->hot_state_writes_uncached[cpu] += 1;
+        }
+
         write(value);
 
         // Kept in step so a second build without an intervening entry -
@@ -3187,6 +3219,14 @@ std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
                     vmcs.write(guest_field, value);
                     this->guest_state_cache[cpu][index] = value;
                     this->guest_state_writes_done[cpu] += 1;
+
+                    // The write that had nothing to compare against, as
+                    // opposed to a comparison that failed. See
+                    // `guest_state_writes_unlicensed`: 44 of these land
+                    // together on one call, so the two populations are
+                    // very different shapes and one counter over both
+                    // reports neither.
+                    this->guest_state_writes_unlicensed[cpu] += 1;
                 } else if (0 != (dirty & (1ull << index))) {
                     auto value = shadow.read(guest_field);
                     vmcs.write(guest_field, value);

@@ -417,6 +417,41 @@ void hypervisor::apply_time_dilation(std::size_t cpu, std::uint64_t now)
                              ? (this->dilation_offset[cpu] +
                                 this->tsc_offset_from_guest[cpu])
                              : this->dilation_offset[cpu]);
+
+        // **And tell `control_cache` its record is dead.**
+        //
+        // `field::tsc_offset` is on `control_fields`, and that list's
+        // note demands two properties of every member: the processor
+        // never saves over it, and *nothing writes it but*
+        // `build_vmcs02` and `on_l2_exit`'s threshold disarm, both
+        // through `write_vmcs02_control`. The line above is a third
+        // writer, with vmcs02 current whenever `running_l2` is set, so
+        // without this the cache describes a field somebody else moved
+        // - the same defect that keeps the pin-based and primary
+        // controls and the two CR read shadows off that list. A later
+        // build finding vmcs12's offset unchanged would then skip its
+        // write and leave vmcs02 carrying the dilation offset of an
+        // *earlier* exit, which is a time-stamp counter that jumps
+        // where `the_dilated_counter_never_runs_backwards` proves it
+        // never does.
+        //
+        // Latent rather than live today: the whole block is behind
+        // `if constexpr (dilate_time)` and `ZPP_TIME_DILATION` defaults
+        // to 1. Fixed rather than left, because the one configuration
+        // that reaches it is the one whose last outing was written up
+        // as bugcheck `0x1CA` - and a stale offset would have been a
+        // second reason for that reading to mean nothing.
+        //
+        // Invalidated rather than routed through `write_vmcs02_control`
+        // deliberately. Routing needs "vmcs02 is current" to be exactly
+        // `running_l2[cpu]`, and this call site is the last instruction
+        // before an entry that has not happened yet - `running_l2` is
+        // set *for* it. Invalidation is sound whichever VMCS is
+        // current, and it costs nothing here: with dilation on the
+        // offset moves on every exit, so the elision it gives up would
+        // have failed its value comparison anyway.
+        forget_vmcs02_control(cpu,
+                              arch::x86_64::vmx::vmcs::field::tsc_offset);
     }
 }
 

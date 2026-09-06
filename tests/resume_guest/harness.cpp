@@ -120,6 +120,22 @@ struct observations
     std::uint64_t record_exit_rip{};
     std::uint64_t controller_polls{};
     std::uint64_t shadow_ept_checks{};
+
+    /**
+     * Which control fields `apply_time_dilation` told the cache to
+     * forget, and how many times.
+     *
+     * Stubbed and counted for the same reason `discard_stale_shadow_ept`
+     * is: the real definition lives in `nested_entry.cpp`, which this
+     * harness does not compile, and `tests/nested_exit` drives it
+     * against a real `control_cache` there. The half that belongs here
+     * is only that the call happens, with the right field - which is the
+     * half a link-time stub can see and the other harness cannot.
+     * @{
+     */
+    std::uint64_t control_forgets{};
+    std::uint64_t control_forgotten_field{};
+    /** @} */
 };
 
 static observations g_observed;
@@ -168,6 +184,24 @@ void hypervisor::discard_stale_shadow_ept(std::size_t)
  * and a fixture that set them would only make the expected values here
  * harder to read for no question answered.
  */
+/**
+ * The control-field cache, which is `nested_entry.cpp`'s.
+ *
+ * `apply_time_dilation` writes vmcs02's `tsc_offset` directly, and that
+ * field is on `control_fields` - so `build_vmcs02`'s elision would
+ * otherwise compare against a record of what *it* last wrote while
+ * hardware carried something else. Counted here rather than
+ * reimplemented: what this harness can prove is that the invalidation is
+ * reached and names the right field.
+ */
+void hypervisor::forget_vmcs02_control(
+    std::size_t, arch::x86_64::vmx::vmcs::field control)
+{
+    g_observed.control_forgets += 1;
+    g_observed.control_forgotten_field =
+        static_cast<std::uint64_t>(control);
+}
+
 std::uint64_t & hypervisor::cached_vmx_msr(std::size_t)
 {
     static std::uint64_t permissive = 0xffffffff00000000ull;
@@ -1971,6 +2005,89 @@ void the_offset_composes_for_the_level_being_entered()
                 "and a second-level guest's carries both levels'");
 }
 
+/**
+ * Writing the offset drops `control_cache`'s record of the field.
+ *
+ * `field::tsc_offset` is on `control_fields`, and that list demands two
+ * properties of every member: the processor never saves over it, and
+ * nothing writes it but `build_vmcs02` and `on_l2_exit`'s threshold
+ * disarm, both through `write_vmcs02_control`. `apply_time_dilation` is
+ * a third writer, and with vmcs02 current it moves the very field the
+ * cache claims to describe - the defect that keeps the pin-based and
+ * primary controls and the two CR read shadows *off* that list.
+ *
+ * Left alone, a later `build_vmcs02` finding vmcs12's offset unchanged
+ * would skip its write and enter the second-level guest carrying the
+ * dilation offset of an earlier exit. That is the guest's time-stamp
+ * counter jumping, in the one build where
+ * `the_dilated_counter_never_runs_backwards` is the property being
+ * defended.
+ *
+ * The invalidation is unconditional - both levels - and the case asserts
+ * that rather than only the vmcs02 half. Routing through
+ * `write_vmcs02_control` instead would need "vmcs02 is current" to be
+ * exactly `running_l2`, and this is the last instruction before an entry
+ * that has not happened yet, so `running_l2` describes the entry rather
+ * than the present. Invalidation is sound either way and costs nothing:
+ * with dilation on the offset moves every exit, so the elision given up
+ * would have failed its value comparison anyway.
+ *
+ * The stub above is what makes this observable - the real definition is
+ * `nested_entry.cpp`'s, which this harness does not compile.
+ * `tests/nested_exit` drives that half against a real cache.
+ */
+void the_dilated_offset_invalidates_the_control_cache()
+{
+    using field = zpp::arch::x86_64::vmx::vmcs::field;
+
+    auto built = make();
+
+    // vmcs01's half. Invalidating vmcs02's slot here is one lost
+    // elision and never a wrong value, which is the whole argument for
+    // doing it unconditionally.
+    g_observed.control_forgets = 0;
+    g_observed.control_forgotten_field = 0;
+
+    built.state->dilation_mark[cpu] = 1000;
+    built.state->running_l2[cpu] = false;
+    built.state->apply_time_dilation(cpu, 1800);
+
+    check_equal(1,
+                g_observed.control_forgets,
+                "writing the guest hypervisor's own offset still drops "
+                "the cached record");
+    check_equal(static_cast<std::uint64_t>(field::tsc_offset),
+                g_observed.control_forgotten_field,
+                "and names tsc_offset, not some neighbour");
+
+    // vmcs02's half, which is the one that would otherwise be wrong.
+    built.state->dilation_mark[cpu] = 1800;
+    built.state->running_l2[cpu] = true;
+    built.state->apply_time_dilation(cpu, 2600);
+
+    check_equal(2,
+                g_observed.control_forgets,
+                "and so does writing a second-level guest's composed "
+                "offset, which is the case build_vmcs02 would elide "
+                "against a stale record");
+    check_equal(static_cast<std::uint64_t>(field::tsc_offset),
+                g_observed.control_forgotten_field,
+                "still naming tsc_offset");
+
+    // The negative control the pair needs: a call that charges nothing
+    // still writes the field, so it still has to invalidate. Reaching
+    // the same instant twice is the path `one_exit_is_charged_once`
+    // covers, and the offset it leaves is the same - which is exactly
+    // when a "only invalidate when the value moved" version would be
+    // wrong for the *next* call rather than this one.
+    built.state->apply_time_dilation(cpu, 2600);
+
+    check_equal(3,
+                g_observed.control_forgets,
+                "a call that charges nothing still wrote the field, so "
+                "it still drops the record");
+}
+
 } // namespace
 
 int main()
@@ -2013,6 +2130,7 @@ int main()
     the_dilated_counter_never_runs_backwards();
     one_exit_is_charged_once();
     the_offset_composes_for_the_level_being_entered();
+    the_dilated_offset_invalidates_the_control_cache();
 
     if (!g_findings.empty()) {
         std::println("\nfindings:");

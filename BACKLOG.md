@@ -71948,3 +71948,221 @@ built and needs a **live** guest at 14 processes - boot 195 stopped, so it
 could not be taken again. That is the measurement to prioritise on the
 next boot that gets there, and boot 195 says it will get there in about
 twenty minutes.
+## Nothing escapes the guest-state elision. The 10.10 is a cumulative denominator
+
+The question was "`build_vmcs02`'s 'every guest-state field' slot performs
+10.10 writes a call while `guest_state_writes_skipped` runs 46.02 per round
+trip - something escapes the elision, find it". The answer is that **nothing
+escapes**: every VMWRITE in that slot goes through one of the three families,
+and the 10.10 is the instrument, not the code.
+
+### Every write in the slot, enumerated
+
+The slot is `stamp(5)` to `stamp(6)`, `nested_entry.cpp:3176-3422`. It holds
+**57 field encodings**, reached by three write sites and eleven calls:
+
+| what | where | count | family |
+|---|---|---|---|
+| `guest_state_fields` loop, `!may_defer` branch | `nested_entry.cpp:3219` | 44 deferrable | `guest_state_cache`, **refused** - written unconditionally |
+| same loop, dirty branch | `:3232` | 0-44 | `guest_state_dirty` - the level above's own value, owed |
+| same loop, cached branch | `:3250` | 2 non-deferrable | `guest_state_cache` + `guest_state_fresh` |
+| `put_hot(4)` activity state | `:3275` | 1 | `hot_state_saved` slot 4 |
+| `put_hot(0/1/2)` RIP, RSP, RFLAGS | `:3281/3284/3287` | 3 | `hot_state_saved` slots 0-2 |
+| `put_hot(7/8/9)` DR7, IA32_PAT, IA32_EFER | `:3298/3301/3306` | 3 | `hot_state_saved`, gated by `hot_state_slot_valid` |
+| `put_hot(10)` IA32_BNDCFGS | `:3325` | 1 | `hot_state_saved` slot 10, ungated |
+| `put_hot(3)` interruptibility | `:3330` | 1 | `hot_state_saved` slot 3 |
+| `write_vmcs02_control` TSC offset | `:3404` | 1 | `control_cache` |
+| `write_vmcs02_control` TSC multiplier | `:3415` | 0 or 1 | `control_cache`, only where the control is set |
+
+The 46 in the loop, since the question asked what segment state actually
+costs: **8 selectors** (ES CS SS DS FS GS LDTR TR), **8 access-rights**, **10
+limits** and **10 bases** - the same eight plus GDTR and IDTR, which have a
+base and a limit and no selector or access-rights - is **36**. Then
+`guest_cr3`, `guest_pending_debug_exceptions`, the three SYSENTER fields,
+`guest_ia32_debugctl` and the four PDPTEs. 36 + 10 = 46.
+
+**44 of the 46 are deferrable** - all but `guest_cs_access_rights` and
+`guest_ss_access_rights`, which are on `shadow_read_write_fields` and would be
+handed over stale with no exit to repair on.
+
+### Which of them can live in which family, and why
+
+**All 46 are SDM 30.3 fields the processor rewrites on every VM exit**, so a
+`control_cache`-style record of what zpp wrote would be unsound for every one
+of them - the `vm_entry_controls` hazard verbatim, and the same argument
+`7678f44` made for CR0/CR4/DR7/PAT/EFER/BNDCFGS. `guest_state_cache` is **not**
+that kind of record: `save_l2_state:4699` fills it from a VMREAD of vmcs02, the
+same read-back that makes `hot_state_saved` immune.
+
+For the 44 deferrable ones that read-back does not happen, and the design does
+not pretend otherwise. It does something strictly better than eliding: it
+**skips the write entirely** and leaves vmcs02 holding what the processor
+saved. And where the licence lapses it refuses the cache outright rather than
+comparing against it - `nested_entry.cpp:3213`, "Unconditionally, not merely
+un-elided: `guest_state_cache` is stale for exactly these indices".
+
+So there is no field in this slot sitting outside a family, and none that could
+be moved to a stronger one.
+
+### The `control_cache` hazard's equivalent, and it is real
+
+The task asked to check for the local version of "four control fields are
+excluded from `control_cache` because `resume.cpp` and `local_apic.cpp` write
+them too". There is one, and it had not been found.
+
+`apply_time_dilation` (`resume.cpp:415`) writes `field::tsc_offset` **directly**
+with `this->vmcs.write`, and `field::tsc_offset` is on `control_fields`. A grep
+over every member of that list finds this is the **only** direct hardware write
+to any of them outside `write_vmcs02_control` - `nested_evmcs.cpp`'s `put`
+writes the vmcs12 shadow in memory, and `hypervisor.cpp:6390`'s I/O bitmaps are
+vmcs01 initialisation.
+
+The comment beside the write says it plainly: "Whichever VMCS the next
+instruction enters", and `resume.cpp:1614`'s own comment says `running_l2` is
+already set for the entry about to happen. So with `running_l2` set it moves
+vmcs02's copy of a field the cache claims to describe, and a later
+`build_vmcs02` finding vmcs12's offset unchanged would skip its write and enter
+the second-level guest carrying the dilation offset of an **earlier** exit -
+the guest's time-stamp counter jumping, in the one build where
+`the_dilated_counter_never_runs_backwards` is the property being defended.
+
+**Latent, not live**: the whole block is behind `if constexpr (dilate_time)`
+and the manifest reads `dilate=01`. Fixed anyway, because the one configuration
+that reaches it is `ZPP_TIME_DILATION`, whose last outing is written up in
+CLAUDE.md as bugcheck `0x1CA` - and a stale offset would have been a second
+reason for that reading to mean nothing.
+
+Fixed by invalidation (`forget_vmcs02_control`) rather than by routing through
+`write_vmcs02_control`, and the choice is recorded: routing needs "vmcs02 is
+current" to be exactly `running_l2[cpu]`, and that flag describes the entry
+about to happen rather than the present. Invalidation is sound whichever VMCS
+is current and costs nothing here - with dilation on the offset moves every
+exit, so the elision given up would have failed its value comparison anyway.
+
+### "Escapes the elision" against "elides but the value moved" - the counters could not tell them apart, and now can
+
+This is the part worth keeping. Each family performs a write for two reasons
+that need **opposite** work:
+
+- the value really changed - the guest, and no gate can help it;
+- there was no record to compare against - a precondition failing, which is
+  reachable.
+
+`..._writes_done` merged both and `..._writes_skipped` counts only the
+successes, so neither could separate them, and a slot reading ten writes a call
+is consistent with either. Three counters now split it, each a subset of its
+`done`:
+
+    guest_state_writes_unlicensed   the !may_defer branch: 44 at a time
+    hot_state_writes_uncached       !reuse_hot_state, or the slot bit clear
+    control_writes_uncached         control_cache_valid clear
+
+`done - uncached` is what genuinely moved. `unlicensed / 44` is how many builds
+lost the deferral's licence.
+
+And a fourth counter that already existed and **had no reader anywhere in this
+tree**: `guest_state_dirty_writes`, the fields the level above wrote since the
+last entry. It is not in `done` and not in `skipped`, so a guest-state write
+budget formed from those two was missing a population outright. Both printers
+and `--delta` carry all four now.
+
+### Why 10.10 cannot be the settled state, by arithmetic that needs no boot
+
+Three independent checks, any one sufficient:
+
+**1. It disagrees with `writes/exit` in the impossible direction.** `3a1213f`
+measured 6.51 writes an exit at 2.005 exits per `build_vmcs02` call - **13.05
+VMWRITEs a call for the whole handler**. The split table's own rows sum to
+20.49 a call for `build_vmcs02` alone, and `build_vmcs02`'s writes are a subset
+of the handler's. 20.49 > 13.05 is not a surprising reading, it is an
+impossible one, so the two are from different windows.
+
+**2. It went up across a change that can only take writes away.** The slot read
+6.18 before `7678f44` and 10.10 after, and `7678f44` added four gates inside it
+and removed nothing. `a59a51c` recorded exactly this and could not explain it.
+
+**3. The code's ceiling.** With 46.02 skips per round trip the loop is eliding
+essentially every field on every call, so it contributes ~0 writes. That leaves
+the 9 `put_hot` calls and 2 controls - **11 sites**. 10.10 of 11 means the
+hot-state gate is firing almost never, which contradicts `3a1213f`'s confirmed
+38% fall in writes an exit. Both cannot be true of one window.
+
+**The cause is named now: `vmcs02_split_*` was boot-cumulative and was
+explicitly on `DELTA_REFUSED_MEMBERS`.** Every gate inside `build_vmcs02` has a
+precondition that is false until a vmcs02 has run and been saved from -
+`vmcs02_launched`, `hot_state_valid`, `guest_state_deferred` - so a cumulative
+mean is weighted by exactly the calls that *cannot* elide, and boot 195's split
+was read at five minutes old. Boot 194's 6.18 was a mean over a long boot. This
+is the same family as the clock-gap histogram: **the member `--delta` refused
+by name is the member whose figures were all boot-cumulative.** It rides
+`--delta-phases` now and prints its own subset check against the handler's
+writes an exit.
+
+### The falsifiable prediction
+
+- **`vmcs_writes_taken / exits`: 6.51, unchanged.** Nothing here removes a
+  write on a default build (`dilate=01`), so any movement is the guest.
+- **Slot 6, differenced over a settled window: 1 to 4 writes a call**, against
+  10.10 cumulative. Derived from the code: the loop ~0, `put_hot(0)` RIP ~1
+  because the level above advances it on most reflections, RSP and RFLAGS below
+  that, and the other eight sites elide. A differenced reading near 10 falsifies
+  it, and `hot_state_writes_uncached` says immediately which way - ~9 a call
+  means the gate is not firing, ~0 means the writes are values the guest moved.
+- **Cycles saved per `vmresume` exit: 0.** This is a correctness fix, an
+  instrument fix and a measurement retraction, not a performance change, and
+  claiming otherwise would be another number borrowing its neighbour's
+  measurement.
+
+### What was NOT touched, with the reason so it is not re-proposed
+
+- **RIP, RSP, RFLAGS (`put_hot` 0/1/2).** They are already in the strongest
+  family available - `save_l2_state` refreshes all three by VMREAD on every
+  reflection - and what remains is the level above genuinely moving them. There
+  is no gate left to add. **If the differenced slot reads 1 to 4 with
+  `hot_state_writes_uncached` flat, this is the answer and the write avenue is
+  closed.**
+- **The 44-field deferral.** It already skips the write entirely rather than
+  eliding it, which is strictly better. Nothing to improve.
+- **Refreshing `guest_state_cache` from `materialise_l2_guest_state`** - the one
+  real elision opportunity found, and declined with numbers. `materialise`
+  (`nested_entry.cpp:9269`) reads all 44 clean deferrable fields out of vmcs02
+  and has their values in hand, then clears `guest_state_deferred` at `:9251`,
+  so the **next** `build_vmcs02` takes the `!may_defer` branch and writes all 44
+  unconditionally. Recording those reads into `guest_state_cache` behind a
+  per-index validity mask would let that build elide them. Declined because
+  `guest_state_writes_done` at 0.79 per round trip bounds the entire
+  `!may_defer` population at 0.018 calls a round trip - 0.79 writes, about 1,684
+  cycles, **0.9% of a 186,210-cycle exit at the absolute best** - against a new
+  validity mask and a proof that nothing enters L2 between the materialisation
+  and the build. `guest_state_writes_unlicensed` is the counter that says
+  whether it is worth revisiting; do not revisit it without reading that first.
+- **`vm_entry_interruption_information_field`.** `7678f44` declined it with a
+  net-loss calculation - 2,876 for the read-back against 2,131 for the write, at
+  two exits per second-level entry - and five other writers with vmcs02 current.
+  Unchanged, and re-stated here so it is not re-proposed a third time.
+- **`guest_cs_selector`.** Already one of the 46 and already deferred, so there
+  is no write to remove. The earlier re-examination stands.
+
+### Tests
+
+`tests/nested_exit` 1,323 -> 1,347 checks, `tests/resume_guest` 133 -> 138,
+same single pre-existing failure in each. Suite: 92%, the two pre-existing
+failures and no others. Two witnesses where a value alone would pass either
+way, and every gate negative-controlled **in both directions**:
+
+    control_writes_uncached        forced false                 +3 failures
+                                   forced true                  +1 failure
+    hot_state_writes_uncached      forced false                 +1 failure
+                                   forced true                  +1 failure
+    guest_state_writes_unlicensed  removed                      +1 failure
+                                   also counting dirty writes   +1 failure
+    forget_vmcs02_control          made a no-op                 +1 failure
+                                   no bounds check              +1 failure
+    apply_time_dilation's call     removed         +5 failures (resume_guest)
+
+The pair on `guest_state_writes_unlicensed` is the one to read: removing it
+fails the unlicensed case, and making it *also* count the dirty writes fails a
+different case - so the counter is pinned to one population from both sides.
+The first attempt at that second control **passed**, because the case did not
+exercise a dirty write at all; the case was extended rather than the control
+weakened.

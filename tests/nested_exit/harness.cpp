@@ -7325,6 +7325,256 @@ static void test_the_hot_state_family_owns_the_six_saved_fields()
     }
 }
 
+// ------------- 18c. "no record" against "the value moved"
+/**
+ * The three elision families each perform writes for two reasons that
+ * need opposite work, and no counter could tell them apart.
+ *
+ * `guest_state_writes_done`, `hot_state_writes_done` and
+ * `control_writes_done` each merge:
+ *
+ *   - **the value really changed** - the guest moved RIP, the level
+ *     above rewrote a segment - which no gate can help and which is the
+ *     answer that closes the write avenue; and
+ *   - **there was no record to compare against** - the deferral's
+ *     licence lapsed, `hot_state_valid` was clear, a control slot was
+ *     never written - which is a precondition failing and is reachable.
+ *
+ * `..._skipped` cannot separate them either: it counts the successes.
+ * So `build_vmcs02`'s "every guest-state field" slot reading ten writes
+ * a call is consistent with *both* readings, and the tree has held both
+ * in the same week - `a59a51c` recorded 10.10 against `7678f44`'s
+ * prediction of at most 5.18 and could not reconcile them.
+ *
+ * The three `..._uncached` / `..._unlicensed` counters are that split.
+ * Each case below drives one family through both reasons and asserts the
+ * new counter moves for one and not the other; the "value changed" half
+ * is the negative control, and it is the half that would pass anyway if
+ * the counter were simply a duplicate of `done`.
+ *
+ * The arithmetic they license, which is the point of having them:
+ *
+ *     done - uncached          writes no gate can remove
+ *     unlicensed / 44          calls that lost the deferral's licence
+ */
+static void test_the_counters_separate_no_record_from_a_changed_value()
+{
+    std::println("\n-- no record against a changed value --");
+
+    namespace vmx = zpp::arch::x86_64::vmx;
+
+    zpp::arch::x86_64::context registers{};
+
+    auto fresh = [&] {
+        reset(registers);
+        hv().vmcs02_physical[cpu] = 0x2000;
+        hv().vmcs02_launched[cpu] = false;
+        hv().guest_state_deferred[cpu] = false;
+        hv().forget_vmcs02_contents(cpu);
+        hv().set_guest_current_vmcs(cpu, 0xa000);
+    };
+
+    auto enter = [&](const asked_controls & asked) {
+        auto own = std::uint64_t{0x1000};
+        static_cast<void>(vmx::vmptrld(&own));
+        return compose_entered(asked).has_value();
+    };
+
+    asked_controls asked;
+
+    // ------------------------------------------- the control family
+    //
+    // And with it the mechanism `apply_time_dilation` now uses.
+    // `forget_vmcs02_control` is the only way a writer outside
+    // `write_vmcs02_control` can keep the cache honest, and
+    // `tests/resume_guest` can only see that the call happens - the real
+    // definition is in this translation unit, so the effect is checkable
+    // here and nowhere else.
+    {
+        fresh();
+
+        auto uncached = hv().control_writes_uncached[cpu];
+        auto done = hv().control_writes_done[cpu];
+
+        hv().write_vmcs02_control(cpu, field::exception_bitmap, 0x4000);
+
+        check((uncached + 1) == hv().control_writes_uncached[cpu],
+              "the first write to a control slot had no record to "
+              "compare against, and says so");
+        check((done + 1) == hv().control_writes_done[cpu],
+              "and counts as done, since uncached is a subset");
+
+        // --------- the negative control: a record that disagreed
+        hv().write_vmcs02_control(cpu, field::exception_bitmap, 0x8000);
+
+        check((uncached + 1) == hv().control_writes_uncached[cpu],
+              "a write against a record that disagreed is NOT uncached "
+              "- this is the half that no gate can remove, and a "
+              "counter that moved here would be a duplicate of done");
+        check((done + 2) == hv().control_writes_done[cpu],
+              "though it is still a write");
+
+        // --------------------------- and the same value is skipped
+        auto skipped = hv().control_writes_skipped[cpu];
+
+        hv().write_vmcs02_control(cpu, field::exception_bitmap, 0x8000);
+
+        check((skipped + 1) == hv().control_writes_skipped[cpu],
+              "the unchanged value elides, which is the fixture's own "
+              "proof that the cache is armed");
+
+        // ------------- THE REPAIR: forget_vmcs02_control drops it
+        hv().forget_vmcs02_control(cpu, field::exception_bitmap);
+
+        auto again = hv().control_writes_uncached[cpu];
+
+        hv().write_vmcs02_control(cpu, field::exception_bitmap, 0x8000);
+
+        check((again + 1) == hv().control_writes_uncached[cpu],
+              "after forget_vmcs02_control the identical value is "
+              "written again, with no record - which is what keeps a "
+              "third-party writer of a control_fields member from "
+              "leaving the cache describing a field it moved");
+        check(0x8000 == hv().vmcs.read(field::exception_bitmap),
+              "and vmcs02 carries it");
+
+        // A field that is not on `control_fields` has no slot, so
+        // forgetting it must be a no-op rather than a stray write into
+        // slot zero - which is what a loop missing its bounds check
+        // would do.
+        // Armed first, or the check compares false against false and
+        // cannot fail - a stray clear needs something to clear.
+        hv().control_cache_valid[cpu][0] = true;
+
+        hv().forget_vmcs02_control(
+            cpu, field::vm_entry_interruption_information_field);
+
+        check(hv().control_cache_valid[cpu][0],
+              "forgetting a field that is not on control_fields moves "
+              "no slot - the entry-interruption field is deliberately "
+              "absent from the list and must not alias slot zero");
+    }
+
+    // --------------------------------------------- the hot-state family
+    //
+    // vmcs12 asks for all three conditional saves, so that every slot is
+    // recorded by the reflection below. Without them `save_l2_state`
+    // does not read DR7, IA32_PAT or IA32_EFER back,
+    // `hot_state_slot_valid` refuses those three slots, and their writes
+    // are *correctly* uncached - which is the property
+    // `test_the_hot_state_family_owns_the_six_saved_fields` already
+    // covers and would make the negative control below assert the
+    // opposite of what it means.
+    {
+        asked_controls asked_hot;
+        asked_hot.exit_controls = exit_default1 |
+                                  exit_host_address_space_size |
+                                  exit_save_debug_controls |
+                                  exit_save_ia32_pat | exit_save_ia32_efer;
+
+        fresh();
+        hv().guest_vmcs12[cpu].write(field::guest_rip, 0x1000);
+
+        auto uncached = hv().hot_state_writes_uncached[cpu];
+
+        check(enter(asked_hot), "the first build succeeds");
+
+        check(uncached < hv().hot_state_writes_uncached[cpu],
+              "a vmcs02 that never ran has no hot-state record, so "
+              "every put_hot write is uncached");
+
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+
+        // --------- the negative control: the record exists and moved
+        hv().guest_vmcs12[cpu].write(field::guest_rip, 0x2000);
+
+        auto after_save = hv().hot_state_writes_uncached[cpu];
+        auto done = hv().hot_state_writes_done[cpu];
+
+        check(enter(asked_hot), "and so does a build after a reflection");
+
+        check(after_save == hv().hot_state_writes_uncached[cpu],
+              "with a record in hand nothing is uncached - the writes "
+              "that remain are values the level above moved, which is "
+              "the reading that closes the write avenue rather than "
+              "opening one");
+        check(done < hv().hot_state_writes_done[cpu],
+              "and RIP moved, so a write did happen");
+        check(0x2000 == hv().vmcs.read(field::guest_rip),
+              "carrying what vmcs12 asked for");
+    }
+
+    // ------------------------------------------ the guest-state family
+    //
+    // The 44 deferrable fields are written unconditionally whenever
+    // `may_defer_guest_state` is false, with no comparison at all -
+    // `guest_state_cache` is stale for exactly those indices, because
+    // `save_l2_state` does not read them back. That is 44 VMWRITEs
+    // landing on one call, and it is the only shape in this function
+    // that can put ten writes into one slot without any value having
+    // changed.
+    {
+        fresh();
+
+        auto unlicensed = hv().guest_state_writes_unlicensed[cpu];
+
+        check(enter(asked), "the unlicensed build succeeds");
+
+        auto first = hv().guest_state_writes_unlicensed[cpu];
+
+        check(unlicensed < first,
+              "a build with no licence to defer writes the deferrable "
+              "fields with nothing to compare against, and says so");
+        check(hv().guest_state_writes_unlicensed[cpu] <=
+                  hv().guest_state_writes_done[cpu],
+              "and unlicensed is a subset of done, never larger");
+
+        // --------- the negative control: the licence is in hand
+        hv().vmcs02_launched[cpu] = true;
+        hv().save_l2_state(cpu);
+
+        check(hv().may_defer_guest_state(cpu),
+              "the reflection licenses the deferral, which is the "
+              "precondition the case below turns on");
+
+        check(enter(asked), "and the licensed build succeeds");
+
+        check(first == hv().guest_state_writes_unlicensed[cpu],
+              "a licensed build writes nothing unlicensed - so a slot "
+              "reading ten writes a call with this counter flat is the "
+              "guest moving values, and with it climbing is the licence "
+              "lapsing. Those need opposite work and done alone reports "
+              "neither");
+
+        // --------- and the third population, which is neither
+        //
+        // A field the level above wrote since the last entry is owed its
+        // value, so a licensed build writes it. That write belongs to
+        // `guest_state_dirty_writes` - a counter this tree has never
+        // read out of a running guest - and must not land here, or
+        // "the licence lapsed" and "the guest hypervisor moved a field"
+        // become one number again.
+        hv().save_l2_state(cpu);
+        hv().guest_vmcs12[cpu].write(field::guest_cr3, 0x123000);
+        hv().mark_l2_guest_state_dirty(
+            cpu, static_cast<std::uint64_t>(field::guest_cr3));
+
+        auto dirty = hv().guest_state_dirty_writes[cpu];
+        auto second = hv().guest_state_writes_unlicensed[cpu];
+
+        check(enter(asked), "the build with a dirty field succeeds");
+
+        check(dirty < hv().guest_state_dirty_writes[cpu],
+              "a field the level above wrote is written back");
+        check(second == hv().guest_state_writes_unlicensed[cpu],
+              "and is not counted unlicensed - it had a record's worth "
+              "of licence, it simply was not this VMM's value to keep");
+        check(0x123000 == hv().vmcs.read(field::guest_cr3),
+              "and vmcs02 carries what the level above asked for");
+    }
+}
+
 // ------------- 19. the control registers a VM entry will not accept
 /**
  * The two halves of "a guest can stop a physical core with one control
@@ -8167,6 +8417,7 @@ int main()
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();
     test_the_hot_state_family_owns_the_six_saved_fields();
+    test_the_counters_separate_no_record_from_a_changed_value();
     test_shadow_copies_name_the_current_vmcs();
 
     std::println("\n{} checks, {} failures", g_checks, g_failures);

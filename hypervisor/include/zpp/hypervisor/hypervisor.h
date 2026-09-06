@@ -13267,6 +13267,30 @@ private:
      */
     std::uint64_t guest_state_writes_skipped[max_cpus]{};
     std::uint64_t guest_state_writes_done[max_cpus]{};
+
+    /**
+     * The subset of `guest_state_writes_done` taken because there was
+     * **nothing to compare against**, rather than because the value
+     * changed.
+     *
+     * The two need opposite work and the counters could not tell them
+     * apart. `guest_state_writes_done` counts the deferrable fields
+     * written on the `!may_defer_guest_state` branch - all 44 of them,
+     * unconditionally, because `guest_state_cache` is stale for exactly
+     * those indices - *and* the two non-deferrable fields written after
+     * a cache comparison that failed. A high total therefore reads
+     * identically whether the guest's segment state is churning or the
+     * deferral's licence keeps lapsing, and the first is unfixable while
+     * the second is a bug.
+     *
+     * This counts only the first. `done - unlicensed` is what genuinely
+     * changed. The pair also bounds the cost: one unlicensed build is 44
+     * VMWRITEs, so `unlicensed / 44` is how many calls lost the licence.
+     *
+     * Same question, three families, three counters:
+     * `hot_state_writes_uncached` and `control_writes_uncached` below.
+     */
+    std::uint64_t guest_state_writes_unlicensed[max_cpus]{};
     /** @} */
 
     /**
@@ -13311,6 +13335,31 @@ private:
     bool control_cache_valid[max_cpus][control_cache_capacity]{};
     std::uint64_t control_writes_skipped[max_cpus]{};
     std::uint64_t control_writes_done[max_cpus]{};
+
+    /**
+     * The subset of `control_writes_done` taken with the slot's
+     * `control_cache_valid` clear - no record to compare against - as
+     * opposed to a record that disagreed.
+     *
+     * See `guest_state_writes_unlicensed` for why the split matters. For
+     * this family it also names its own repair: a slot that is
+     * permanently invalid is a slot something else keeps invalidating,
+     * and the list of things allowed to do that is short.
+     */
+    std::uint64_t control_writes_uncached[max_cpus]{};
+
+    /**
+     * Drop one control field's cached value, so the next
+     * `write_vmcs02_control` performs its VMWRITE.
+     *
+     * For a writer that has to move vmcs02's copy of a `control_fields`
+     * member outside `build_vmcs02` and cannot route through the cache -
+     * see `apply_time_dilation`, which writes whichever VMCS the next
+     * entry uses and therefore cannot know it is vmcs02's cache it would
+     * be updating.
+     */
+    void forget_vmcs02_control(std::size_t cpu,
+                               arch::x86_64::vmx::vmcs::field control);
 
     /**
      * Write one of vmcs02's control fields, skipping the VMWRITE when
@@ -14329,6 +14378,24 @@ private:
     bool hot_state_valid[max_cpus]{};
     std::uint64_t hot_state_writes_skipped[max_cpus]{};
     std::uint64_t hot_state_writes_done[max_cpus]{};
+
+    /**
+     * The subset of `hot_state_writes_done` taken because
+     * `reuse_hot_state` was false or the slot's `hot_state_slot_valid`
+     * bit was clear - no record - as opposed to a record that
+     * disagreed.
+     *
+     * This is the counter that settles what the eleven writes after
+     * `build_vmcs02`'s VMPTRLD *are*. RIP, RSP and RFLAGS genuinely move
+     * on most reflections and no gate can help them; the other eight are
+     * expected to elide, and if they are not, the reason is one of the
+     * two preconditions failing rather than the guest. `done` alone
+     * cannot distinguish those, and `skipped` cannot either - it counts
+     * the successes.
+     *
+     * See `guest_state_writes_unlicensed` for the same split next door.
+     */
+    std::uint64_t hot_state_writes_uncached[max_cpus]{};
 
     /**
      * How much wall clock each level actually executes for, split by

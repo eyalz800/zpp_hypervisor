@@ -5670,10 +5670,27 @@ DELTA_PER_CPU_COUNTERS = [
     ("evmcs_writes", "enlightened VMCS writes"),
     ("hot_state_writes_skipped", "hot-state writes skipped"),
     ("hot_state_writes_done", "hot-state writes done"),
+    # The split `done` could not make. A write happens for two reasons -
+    # the value moved, or there was no record to compare against - and
+    # they need opposite work: the first is the guest and closes the
+    # avenue, the second is a precondition failing and is reachable.
+    # `done - uncached` is the first. Read as a rate: the cumulative
+    # figure averages a boot's cold start into its settled state, which
+    # is how one slot came to read 10.10 writes a call against a
+    # prediction of at most 5.18.
+    ("hot_state_writes_uncached", "hot-state writes with no record"),
     ("guest_state_writes_skipped", "guest-state writes skipped"),
     ("guest_state_writes_done", "guest-state writes done"),
+    # 44 VMWRITEs land together whenever the deferral's licence lapses,
+    # so divide by 44 for the number of builds that lost it.
+    ("guest_state_writes_unlicensed", "guest-state writes unlicensed"),
+    # The third population, and it had no reader at all - not in `done`,
+    # not in `skipped`, so a write budget formed from those two was
+    # missing it entirely.
+    ("guest_state_dirty_writes", "guest-state writes owed to L1"),
     ("control_writes_skipped", "control writes skipped"),
     ("control_writes_done", "control writes done"),
+    ("control_writes_uncached", "control writes with no record"),
     ("hyperv_vp_assist_writes", "VP assist page writes"),
     ("l2_vmfunc_calls", "VMFUNC calls"),
     ("l2_vmfunc_refused", "VMFUNC refusals"),
@@ -6051,13 +6068,20 @@ DELTA_REFUSALS = [
      "counts, vtl_service_calls, hypercall_code_counts, "
      "l2_injected_vector, l2_entry_vector, l2_synthetic_msr_writes, "
      "l2_msr_write_counts, bucket_phase_cycles, bucket_phase_reads, "
-     "bucket_phase_writes, bucket_calls, vmcs02_split_cycles",
+     "bucket_phase_writes, bucket_calls",
      "differenceable in principle and deliberately left out: every "
      "member added widens the read window, and the read window is this "
-     "measurement's own error bar. The five phase members at the end "
+     "measurement's own error bar. The four phase members at the end "
      "are the sub-splits of phases the tree above already covers, so "
      "the cheap reading is taken first and these are what to add when "
-     "it points at their parent"),
+     "it points at their parent. **vmcs02_split_* used to be on this "
+     "list and no longer is**: it pointed at its parent, its 'every "
+     "guest-state field' slot was quoted at 10.10 writes a call "
+     "against a prediction of at most 5.18, and the disagreement was "
+     "the cumulative denominator - a boot five minutes old is mostly "
+     "the calls that cannot elide, because every gate in build_vmcs02 "
+     "has a precondition that is false until a vmcs02 has run. It "
+     "rides --delta-phases now"),
     ("synthetic_msr_writes - a SIX-INDEX SLICE, not the census",
      "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0x93 SINT3, 0xb0 STIMER0_CONFIG, "
      "0xb1 STIMER0_COUNT, per processor",
@@ -6610,6 +6634,95 @@ def delta_handler_reason_lines(before, after, slots, seconds,
     return lines
 
 
+def delta_vmcs02_split_lines(before, after, calls):
+    """`dump_vmcs02_split`, over the measured window instead of the boot.
+
+    **The cumulative table is the instrument that produced this
+    session's one unreconciled number.**  `a59a51c` read its
+    "every guest-state field" slot at 10.10 writes a call against
+    `7678f44`'s prediction of at most 5.18, on a boot five minutes old,
+    and recorded "I cannot reconcile them from data taken this way".
+    It could not: every elision inside `build_vmcs02` has a
+    precondition that is false until a vmcs02 has run and been saved
+    from - `vmcs02_launched`, `hot_state_valid`,
+    `guest_state_deferred` - so a boot-cumulative mean is weighted by
+    exactly the calls that cannot elide, and a young boot is mostly
+    those.  The same table also cannot be checked against `writes/exit`,
+    which *is* differenced, so the two were being compared across
+    different windows.
+
+    Differenced, the slot says what the settled guest costs, and the
+    arithmetic closes: `build_vmcs02`'s writes a call divided by exits
+    a call must not exceed the handler's writes an exit, since the one
+    is a subset of the other.
+
+    `calls` is the windowed `phase_calls[cpu][2]` summed over every
+    processor - `vmcs02_split_*` is a single array all processors add
+    into, so one processor's denominator reads high by the processor
+    count.
+    """
+    if calls is None:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: NOT PRINTED. "
+                "`phase_calls[..][2]` was",
+                "  not read or went backwards, so there is no "
+                "denominator. Unknown, not zero."]
+    if not calls:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: build_vmcs02 was "
+                "not called at all.",
+                "  Not an empty table - a guest hypervisor that "
+                "launched nothing in this window."]
+
+    slots = len(VMCS02_SPLIT)
+    rows, bad, unread = {}, [], []
+    for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                 "vmcs02_split_writes"):
+        got, impossible, missing = delta_rows(
+            before, after, [((name, i), "") for i in range(slots)])
+        rows[name] = {key[1]: d for key, _l, _a, _b, d in got}
+        bad += [(name, key[1]) for key, _l, _a, _b, _d in impossible]
+        unread += [(name, key[1]) for key, _l in missing]
+
+    if unread or bad:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: NOT PRINTED. A "
+                "slot was absent from a",
+                "  sample or went backwards, so the split is unknown "
+                "rather than empty."]
+
+    cycles = rows["vmcs02_split_cycles"]
+    reads = rows["vmcs02_split_reads"]
+    writes = rows["vmcs02_split_writes"]
+    total = sum(cycles.values()) or 1
+
+    lines = ["",
+             f"build_vmcs02, split IN THIS WINDOW "
+             f"({sum(cycles.values()) // calls:,} cycles a call over "
+             f"{calls:,} calls)",
+             f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
+             f"{'rd/call':>8} {'wr/call':>8} {'cyc/access':>11}"]
+
+    for i, spent in sorted(cycles.items(), key=lambda kv: -kv[1]):
+        access = reads[i] + writes[i]
+        each = (f"{spent / access:>11,.0f}"
+                if access and (access / calls) >= 0.01
+                else f"{'-':>11}")
+        lines.append(f"  {VMCS02_SPLIT[i]:<40} {spent // calls:>9,} "
+                     f"{100.0 * spent / total:>5.1f}% "
+                     f"{reads[i] / calls:>8.2f} {writes[i] / calls:>8.2f}"
+                     f" {each}")
+
+    lines.append(f"  --- {sum(writes.values()) / calls:.2f} writes and "
+                 f"{sum(reads.values()) / calls:.2f} reads a call. "
+                 f"Both are a SUBSET of the")
+    lines.append("      handler's writes and reads an exit above - if "
+                 "either exceeds it, the")
+    lines.append("      two figures are from different windows and "
+                 "neither may be quoted.")
+    return lines
+
+
 def delta_phase_lines(before, after, cpu, slots, seconds, round_trips,
                       handler_delta, boot_round_trips, boot_handler):
     """`dump_phase_tree`, over the measured window instead of the boot.
@@ -7113,6 +7226,24 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
             for cpu in range(cpus):
                 monitor.queue(instance + off[name]
                               + cpu * phase_slots * 8, phase_slots)
+        # `build_vmcs02`'s own split, which is a sub-split of phase 2
+        # and rides the same flag.  Twenty-five quadwords, four more
+        # commands on a sample of about two hundred.
+        #
+        # **This table was boot-cumulative and named in
+        # DELTA_REFUSED_MEMBERS as "left out deliberately", and that is
+        # how one of its slots came to be quoted at 10.10 writes a call
+        # against a prediction of at most 5.18.**  A cumulative mean
+        # over a five-minute-old boot is mostly its cold start: every
+        # elision in that function has a precondition that is false
+        # until a vmcs02 has run and been saved from.  Differenced, the
+        # slot says what the settled guest costs.
+        for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                     "vmcs02_split_writes"):
+            if name in off:
+                monitor.queue(instance + off[name], len(VMCS02_SPLIT))
+        if "vmcs02_split_calls" in off:
+            monitor.queue(instance + off["vmcs02_split_calls"], 1)
     # Optional, and read per processor rather than as one run: the row
     # length comes from the ELF, never a literal 64, for the reason
     # `gdb_lengths` exists.
@@ -7176,6 +7307,11 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
                 for slot in range(phase_slots):
                     readings[(name, (cpu, slot))] = read(
                         name, cpu * phase_slots + slot)
+        for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                     "vmcs02_split_writes"):
+            for slot in range(len(VMCS02_SPLIT)):
+                readings[(name, slot)] = read(name, slot)
+        readings[("vmcs02_split_calls", None)] = read("vmcs02_split_calls")
     for cpu in range(cpus):
         for reason in range(reason_capacity):
             readings[("exit_reason_counts", (cpu, reason))] = read(
@@ -7694,6 +7830,24 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
                     after.get(("l2_entries", cpu)) or 0,
                     after.get(("handler_cycles", cpu)) or 0):
                 print(line)
+
+        # `build_vmcs02`'s own bracket, summed over every processor,
+        # because `vmcs02_split_*` has no `[max_cpus]` - it is one
+        # array all processors add into, and dividing it by one
+        # processor's call count reads about 2x high on a two-processor
+        # guest.  That was a live defect in the cumulative printer and
+        # is the same arithmetic here.
+        calls = 0
+        for cpu in range(cpus):
+            rows, bad, unread = delta_rows(
+                before, after, [(("phase_calls", (cpu, 2)), "")])
+            if bad or unread:
+                calls = None
+                break
+            calls += rows[0][4]
+
+        for line in delta_vmcs02_split_lines(before, after, calls):
+            print(line)
     else:
         print("")
         print("the phase tree: NOT SAMPLED in this window. Pass "
@@ -7831,6 +7985,7 @@ def main():
                "msr_write_uncounted", "msr_write_uncounted_code",
                "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
+               "hot_state_writes_uncached",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
@@ -7932,7 +8087,9 @@ def main():
                "l2_injected_vector", "l2_external_vector",
                "phase_cycles", "phase_calls",
                "guest_state_writes_skipped", "guest_state_writes_done",
+               "guest_state_writes_unlicensed", "guest_state_dirty_writes",
                "control_writes_skipped", "control_writes_done",
+               "control_writes_uncached",
                # The refusal itself. `scripts/zpp.gdb` has printed these
                # for a dozen sessions and this reader never did, so the
                # monitor path - the one that works on a wedged guest -
@@ -8252,6 +8409,7 @@ def main():
                "cpuid_hypervisor_leaves_asked",
                "evmcs_reads", "evmcs_writes", "evmcs_recommended",
                "hot_state_writes_skipped", "hot_state_writes_done",
+               "hot_state_writes_uncached",
                "l2_run_cycles", "l1_run_cycles", "handler_cycles",
                "handler_first_tsc", "handler_last_tsc",
                "shadow_ept_evictions", "shadow_ept_resets",
@@ -8329,7 +8487,9 @@ def main():
                "vmcs_shadow_loads",
                "vmcs_shadow_stores",
                "guest_state_writes_skipped", "guest_state_writes_done",
+               "guest_state_writes_unlicensed", "guest_state_dirty_writes",
                "control_writes_skipped", "control_writes_done",
+               "control_writes_uncached",
                # The refusal itself. `scripts/zpp.gdb` has printed these
                # for a dozen sessions and this reader never did, so the
                # monitor path - the one that works on a wedged guest -
@@ -11657,10 +11817,20 @@ def main():
         print(f"{cpu:3d}  {100.0*l2/span:6.2f}  {100.0*l1/span:7.2f}  "
               f"{100.0*vmm/span:5.2f}")
 
-    print("\ncpu  hot-state skipped/done")
+    # `uncached` splits `done` into its two populations, which need
+    # opposite work and were one number until now: a write taken because
+    # the *value* moved - the guest, unfixable - against one taken
+    # because there was no record to compare against, which is a
+    # precondition failing and is reachable. `changed` is the
+    # subtraction, printed rather than left to be done by hand from two
+    # columns, because that is the number that says whether the write
+    # avenue is closed.
+    print("\ncpu  hot-state skipped/done  uncached  changed")
     for cpu in range(args.cpus):
+        done = read('hot_state_writes_done', cpu) or 0
+        uncached = read('hot_state_writes_uncached', cpu) or 0
         print(f"{cpu:3d}  {read('hot_state_writes_skipped', cpu):-12d}/"
-              f"{read('hot_state_writes_done', cpu):-10d}")
+              f"{done:-10d}  {uncached:8d}  {done - uncached:7d}")
 
     print("\ncpu  shadow-loads  shadow-stores")
     for cpu in range(args.cpus):
@@ -11705,12 +11875,27 @@ def main():
         except SystemExit as failure:
             print(f"\n[{section.__name__} skipped: {failure}]")
 
-    print("\ncpu  guest-state skipped/done   control skipped/done")
+    # `unlicensed` is the subset of the guest-state `done` column taken
+    # on the `!may_defer_guest_state` branch - 44 VMWRITEs landing
+    # together on one call, with no comparison made at all, because
+    # `guest_state_cache` is stale for exactly those indices. Divide it
+    # by 44 for the number of builds that lost the deferral's licence.
+    #
+    # `dirty` is the third population and had **no reader anywhere in
+    # this tree**: a field the level above wrote since the last entry,
+    # written back because its value is owed. It is not in `done` at
+    # all, so a guest-state write budget formed from `done` alone was
+    # missing it.
+    print("\ncpu  guest-state skipped/done   unlicensed  dirty"
+          "   control skipped/done  uncached")
     for cpu in range(args.cpus):
         print(f"{cpu:3d}  {read('guest_state_writes_skipped', cpu):11d}/"
               f"{read('guest_state_writes_done', cpu):-11d}  "
+              f"{read('guest_state_writes_unlicensed', cpu):10d}  "
+              f"{read('guest_state_dirty_writes', cpu):5d}  "
               f"{read('control_writes_skipped', cpu):11d}/"
-              f"{read('control_writes_done', cpu):-11d}")
+              f"{read('control_writes_done', cpu):-11d}  "
+              f"{read('control_writes_uncached', cpu):8d}")
 
     print("\nvmcs fields the guest hypervisor uses")
     dump_field_use(args, instance, off)
