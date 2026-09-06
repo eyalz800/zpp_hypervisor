@@ -57,6 +57,23 @@ while :; do
     # and waiting for exactly 14 would miss one of them.
     if [ "$N" -ge 13 ] 2>/dev/null; then
         echo "=== WALL REACHED - taking the live measurement NOW ==="
+        # **Take the CENSUS on both sides of the same window.**
+        #
+        # The address-space census is cumulative over the whole boot, so
+        # a single dump at the wall describes the journey and not the
+        # destination - two boots that took the same route look
+        # identical whether or not their end states differ. That is what
+        # made boot 200 (SCM running at 39.8 switches/s) and boot 203
+        # (SCM frozen) indistinguishable by census when they are plainly
+        # different, and it is the same error recorded for the cache hit
+        # rate and the phase tree.
+        #
+        # Differencing needs two dumps, and the wall is reached and lost
+        # in minutes, so they have to be taken here or not at all.
+        pkill -x nc 2>/dev/null || true
+        ZPP_CENSUS_ALL=1 timeout 500 python3 "$HERE/rig-dump-state.py" \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 \
+            > /tmp/wall-census-a.txt 2>&1 || true
         pkill -x nc 2>/dev/null || true
         timeout 500 python3 "$HERE/guest-threads.py" "$BASE" "$CR3" services \
             2>&1 | tee /tmp/svc-a.txt
@@ -64,6 +81,13 @@ while :; do
         pkill -x nc 2>/dev/null || true
         timeout 500 python3 "$HERE/guest-threads.py" "$BASE" "$CR3" services \
             2>&1 | tee /tmp/svc-b.txt
+        pkill -x nc 2>/dev/null || true
+        ZPP_CENSUS_ALL=1 timeout 500 python3 "$HERE/rig-dump-state.py" \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 \
+            > /tmp/wall-census-b.txt 2>&1 || true
+        echo "census pair written: /tmp/wall-census-{a,b}.txt"
+        echo "  difference them - a single cumulative dump at the wall"
+        echo "  describes the boot, not the state."
         echo "=== DIFFERENCED ==="
         python3 - <<'PY'
 import re
