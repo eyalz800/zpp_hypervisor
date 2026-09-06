@@ -71127,3 +71127,68 @@ which is itself a check, since a broken read would jitter. **A frozen
 counter that stays frozen across two reads is evidence; a frozen counter
 read once is not**, and this is the first reading in the investigation
 where that distinction was available.
+
+## THE READ PRICE, MEASURED: a real VMREAD is 2,876 cycles
+
+Boot 194, the first with `afec3fc`'s fixed benchmark. zpp resident, module
+base moved to `0x66e70000` as expected. Read off the live singleton, 1,000
+accesses each:
+
+    exit_reason CACHED       58,683  =    58.7 cyc/access
+    rip         CACHED       54,695  =    54.7
+    gdtr_base   CACHED       58,981  =    59.0
+    write rsp             2,088,010  = 2,088.0
+    write gdtr_limit      2,174,074  = 2,174.1
+    **rip         RAW      2,868,798  = 2,868.8**
+    **gdtr_base   RAW      2,882,837  = 2,882.8**
+
+**A real VMREAD costs ~2,876 cycles. A cache hit costs ~57. The cache is
+worth 51x on a hit.** Every figure this session has argued from was wrong:
+60 (the cache), 991 (a controlled removal), 4,600 (a circular quotient),
+3,100 (stale hardcoded text).
+
+**And the benchmark's own question is now answered properly.** Its comment
+says: *"If all five agree, shadowing is not in play and every access has
+to be removed rather than redirected."* Raw reads are 2,868.8 and 2,882.8
+- **ratio 1.005x** - and writes 2,088 and 2,174. They agree. So KVM is not
+shadowing these fields for us, there is no hot path to redirect onto
+shadowed fields, and **accesses have to be removed.**
+
+The earlier "ratio 1.05x, shadowing not in play" reached the right
+conclusion from 999 samples that never executed the instruction. It is now
+true for the right reason.
+
+### The share of a vmresume exit, at last
+
+186,210 cycles, 33.1 reads, 20.6 writes:
+
+    hit rate 23.2%   reads 73,542 + writes 43,900 = 117,441   63.1%
+    hit rate 35.2%   reads 62,345 + writes 43,900 = 106,244   57.1%
+    hit rate 50.0%   reads 48,535 + writes 43,900 =  92,435   49.6%
+    every read a miss                              139,089   74.7%
+
+**VMCS traffic is 50-63% of a vmresume exit at the hit rates actually
+measured** (23.2-52% across boots). Not 24%, not 81%, not 1%.
+
+### This reverses a conclusion I recorded twice
+
+`6c1dab1` and `9c97e8e` both said the cache cannot help because most
+fields are read once per exit. **At 51x per hit, the cache is the single
+most valuable thing in the handler**, and its hit rate - which drifts
+between 23% and 52% within one boot - is worth 14 percentage points of the
+exit between those extremes.
+
+So the ranked list changes completely:
+
+1. **raise the cache hit rate** - each point is worth ~330 cycles an exit,
+   and the rate is already observed to vary by 29 points, so something
+   makes it swing and that something is reachable
+2. **remove reads that miss** - 2,876 cycles each; the class-(b) inventory
+   (fields read unconditionally but consumed only for some exit reasons)
+   is worth revisiting now that a miss has a real price
+3. **remove writes** - 2,131 each, and 20.6 an exit; the elision families
+   already skip 70 per round trip, but `vmcs_writes_taken` shows 10.54 an
+   exit still performed
+
+**Nothing should be ranked by any other price.** The five members are on
+every boot; read them rather than quoting this entry.
