@@ -71467,3 +71467,44 @@ gate that stopped *writing* instead of writing zero also fails.
 
 Integrated, built, host suite showing only the two pre-existing failures.
 **Not deployed** - boot 194 is mid-flight.
+
+## The guest_cs_selector decision SURVIVES the price correction - I mis-flagged it
+
+`5d0af52` flagged `resume.cpp`'s ungated `guest_cs_selector` read as "48x
+more attractive than when it was rejected", on the assumption that its
+recorded cost had been computed at the 60-cycle artefact. **Checked, and
+it was not.**
+
+The comment records the read as **0.8% of wall**. Working backwards from
+the measured handler share (65.07% of wall) and 348,046 handler cycles a
+round trip:
+
+    0.8% of wall  ->  1.23% of the handler
+                  ->  4,284 cycles/RT over 2.0 reads
+                  ->  implied read price **2,142 cycles**
+    measured read price                    **2,876 cycles**
+    ratio 1.34x
+
+**The recorded figure was computed at roughly the right price all along.**
+It is 34% low against today's measurement, not 48x low. So the trade it
+records - *"a saving that small is not worth weakening a test for"* -
+holds at the corrected price too, and the decision to leave the read
+ungated stands on its own reasoning.
+
+**Withdrawn**: the suggestion in `5d0af52` that this needs re-deciding.
+It was correctly decided, and re-opening it would have cost a build and a
+test regression to arrive back where the comment already is.
+
+### The general point, which is the reason to record this at all
+
+When a price is found to be wrong, the instinct is to re-open everything
+decided under it. **That is only valid for decisions that actually used
+it.** This one carried its own measurement - "0.8% of wall at 95 million
+resumes a run" - which was independent of the broken benchmark, and it
+survived. The three gates in `87b091d` were worth taking because their
+class had *never* been priced; this one had been.
+
+Checking which is which cost one calculation. Not checking would have
+wasted a rig cycle and weakened a test that exists to catch exactly this
+change - the comment says so, and says the test caught it in one build
+last time.
