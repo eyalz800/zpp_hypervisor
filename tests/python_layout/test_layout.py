@@ -2449,19 +2449,56 @@ class FakeRig:
         for i, a in enumerate(argv):
             if a != "-ex":
                 continue
-            answer = self._answer(argv[i + 1])
+            expression = argv[i + 1]
+            # `echo` is not an expression and produces no `$N`. It is
+            # what `gdb_symbols` and the caller-census symbolizer put
+            # between requests so that an absent symbol - which prints
+            # nothing at all on stdout - can be told from the next
+            # symbol's answer. A fixture that answered it as an
+            # expression would put a `$N` where the reader expects a
+            # marker and every symbol would resolve to its neighbour's
+            # address, which is the exact failure the marker exists to
+            # prevent.
+            if expression.startswith("echo "):
+                out.append(expression[len("echo "):].replace("\\n", ""))
+                continue
+            answer = self._answer(expression)
             if answer is None:
+                continue
+            if isinstance(answer, tuple):
+                out.append(answer[1])
                 continue
             n += 1
             out.append("${} = {}".format(n, answer))
         return FakeResult("\n".join(out) + "\n")
+
+    # Symbols the reader resolves by NAME rather than as an offset into
+    # the singleton - the `constinit` globals in `vmx/vmcs.h` and the
+    # `extern "C"` launch-failure words in `vmx/asm.h`. They must get
+    # DISTINCT addresses here: answering every one of them with the
+    # singleton's address makes a dozen different counters read the same
+    # word, which reads as perfect agreement and would hide a reader
+    # that computed the wrong address for all of them.
+    NAMESPACE_SYMBOL = re.compile(
+        r"^(zpp::arch::x86_64::vmx::|zpp_launch_)")
 
     def _answer(self, expression):
         """One expression's answer, or None when gdb would refuse it."""
         member = re.search(r"->([A-Za-z0-9_]+)$", expression)
         if expression.startswith("print/x (long)&") and member:
             return "0x{:x}".format(self.offset_for(member.group(1)))
+        # `info symbol <link-time address>`, which the caller census
+        # uses to turn a stored return address into a function name.
+        # Answered as a raw line, because gdb prints it as one rather
+        # than as a `$N` value.
+        symbol = re.match(r"info symbol 0x([0-9a-f]+)$", expression)
+        if symbol:
+            return ("raw", "fake_caller_0x{} + 16 in section .text"
+                           .format(symbol.group(1)))
         if expression.startswith("print/x &'"):
+            name = expression.split("'")[1]
+            if self.NAMESPACE_SYMBOL.match(name):
+                return "0x{:x}".format(self.offset_for(name))
             return "0x{:x}".format(self.singleton)
         for pattern, value in self.EXPRESSIONS:
             if re.search(pattern, expression):
@@ -3233,6 +3270,367 @@ class TheDeltaReadWindowIsMeasuredWhenItGrows(unittest.TestCase):
                            "--delta", "20", "--delta-phases"],
                    clock=self.CLOCK)
         self.assertLess(delta.connections, full.connections // 2)
+
+
+VMCS_HEADER = os.path.join(ROOT, "hypervisor", "include", "zpp", "arch",
+                           "x86_64", "vmx", "vmcs.h")
+
+
+def vmcs_constinit_scalars(source):
+    """Every namespace-scope `inline constinit` SCALAR in vmcs.h.
+
+    Scalars only: the arrays beside them are census tables with their
+    own readers and their own shapes, and a list that conflated the two
+    would demand a scalar reader for a 512-entry table.  The bracket
+    group is what separates them, and it is captured rather than
+    guessed.
+    """
+    pattern = re.compile(
+        r"inline\s+constinit\s+[\w:]+(?:<[^>]*>)?\s+(\w+)"
+        r"((?:\s*\[[^\]]*\])*)\s*\{", re.S)
+    return [m.group(1) for m in pattern.finditer(source)
+            if not m.group(2).strip()]
+
+
+class CountersOutsideTheSingletonAreAllRead(unittest.TestCase):
+    """Every `constinit` counter in vmcs.h has a reader, or is refused.
+
+    **The bug this exists for is a reader that cannot report its own
+    absence.**  `rig-dump-state.py` resolves every number it prints as an
+    offset into the singleton, and these are namespace-scope globals -
+    so there was no zero, no blank column and nothing at all to notice.
+    Four of them had been incrementing since the first boot of the
+    project with nothing ever printing one (`8fce1c9`), and the reading
+    that finally came out of two of them was taken by hand with
+    `llvm-nm` and the monitor.
+
+    Prose does not run.  This walks the header and fails when a counter
+    is added there without being added to one of the reader's two lists,
+    which is the only thing that stops the same gap reopening silently.
+    """
+
+    def setUp(self):
+        self.module = load_dump_state()
+        self.header = read(VMCS_HEADER)
+
+    def test_the_scan_finds_something(self):
+        """The negative control. A regex that matched nothing would make
+        every assertion below vacuously true."""
+        scalars = vmcs_constinit_scalars(self.header)
+        self.assertGreaterEqual(
+            len(scalars), 10,
+            "the constinit scan found {} scalars in vmcs.h, which means "
+            "the pattern has stopped matching the header - every check "
+            "below it is then vacuous".format(len(scalars)))
+        self.assertIn("vmcs_reads_taken", scalars)
+        self.assertIn("vmcs_cache_hits", scalars)
+
+    def test_every_constinit_scalar_has_a_reader(self):
+        covered = {s.rsplit("::", 1)[-1] for s, _ in
+                   (self.module.VMCS_GLOBAL_COUNTERS
+                    + self.module.VMCS_GLOBAL_STATE)}
+        for name in vmcs_constinit_scalars(self.header):
+            self.assertIn(
+                name, covered,
+                "{} is a namespace-scope constinit counter in vmcs.h and "
+                "no list in rig-dump-state.py names it, so nothing will "
+                "ever print it. Add it to VMCS_GLOBAL_COUNTERS if it is "
+                "monotonic, or to VMCS_GLOBAL_STATE if it is a gauge or "
+                "an identity.".format(name))
+
+    def test_nothing_is_read_that_the_header_does_not_declare(self):
+        """The other direction, and it is not symmetric noise.
+
+        A name the reader asks for and the header no longer declares
+        resolves to nothing, and the printer would report it as ABSENT -
+        which reads as "this build compiled it out" rather than "this
+        list is stale".  Those are different findings.
+        """
+        declared = set(vmcs_constinit_scalars(self.header))
+        for symbol, _label in (self.module.VMCS_GLOBAL_COUNTERS
+                               + self.module.VMCS_GLOBAL_STATE):
+            if not symbol.startswith(self.module.VMX_NS):
+                continue
+            name = symbol.rsplit("::", 1)[-1]
+            self.assertIn(
+                name, declared,
+                "rig-dump-state.py asks for {} and vmcs.h no longer "
+                "declares it; the printer would call it ABSENT, which "
+                "reads as a build switch rather than a stale "
+                "list".format(name))
+
+    def test_the_gauge_is_not_in_the_differenced_list(self):
+        """`vmcs_cache_suspended` is a borrow DEPTH, not a count.
+
+        Differencing it reports a legitimate decrease as IMPOSSIBLE,
+        which is a guard crying wolf - and this file records at length
+        what a guard that fires falsely costs the next time it fires
+        truthfully.
+        """
+        differenced = {s.rsplit("::", 1)[-1] for s, _ in
+                       self.module.VMCS_GLOBAL_COUNTERS}
+        self.assertNotIn("vmcs_cache_suspended", differenced)
+        self.assertNotIn("vmcs_read_failed_field", differenced)
+        self.assertNotIn("vmcs_write_failed_field", differenced)
+
+
+class AnAbsentSymbolDoesNotShiftItsNeighbours(unittest.TestCase):
+    """`gdb_symbols` must never attribute one symbol's address to another.
+
+    A failed `print` emits no `$N` on stdout at all, so matching answers
+    to requests by POSITION silently shifts every symbol after the first
+    absent one onto its neighbour's address.  Every counter after it
+    then reads a plausible number belonging to something else, which is
+    the exact shape of wrong this whole test file exists for - and the
+    only reason `gdb_symbols` emits a marker per request.
+    """
+
+    def resolve(self, present):
+        import types
+        module = load_dump_state()
+
+        def fake_run(argv, **kwargs):
+            out, n = [], 0
+            for i, a in enumerate(argv):
+                if a != "-ex":
+                    continue
+                expression = argv[i + 1]
+                if expression.startswith("echo "):
+                    out.append(expression[5:].replace("\\n", ""))
+                    continue
+                name = expression.split("'")[1]
+                if name not in present:
+                    continue
+                n += 1
+                out.append("${} = 0x{:x}".format(n, present[name]))
+            return FakeResult("\n".join(out) + "\n")
+
+        module.subprocess = types.SimpleNamespace(run=fake_run)
+        return module.gdb_symbols("/dev/null", ["a", "b", "c", "d"])
+
+    def test_all_present(self):
+        """The premise, without which the case below proves nothing."""
+        got = self.resolve({"a": 0x10, "b": 0x20, "c": 0x30, "d": 0x40})
+        self.assertEqual({"a": 0x10, "b": 0x20, "c": 0x30, "d": 0x40}, got)
+
+    def test_a_hole_in_the_middle_leaves_the_rest_where_they_are(self):
+        got = self.resolve({"a": 0x10, "c": 0x30, "d": 0x40})
+        self.assertEqual(
+            {"a": 0x10, "b": None, "c": 0x30, "d": 0x40}, got,
+            "an absent symbol shifted the answers after it, so every "
+            "counter past the first missing one would read another "
+            "counter's value")
+
+    def test_a_hole_at_the_front_does_not_shift_either(self):
+        got = self.resolve({"b": 0x20, "c": 0x30, "d": 0x40})
+        self.assertEqual({"a": None, "b": 0x20, "c": 0x30, "d": 0x40}, got)
+
+    def test_nothing_present_is_not_an_exception(self):
+        """Absent is a finding to report, not a reason to die.
+
+        `gdb_symbol` - singular - `sys.exit`s, which is right for the
+        singleton and wrong for a counter: a binary that predates a name
+        must cost that section and not the dump.
+        """
+        self.assertEqual(
+            {"a": None, "b": None, "c": None, "d": None},
+            self.resolve({}))
+
+
+class TheVmcsHitRateIsCumulativeUntilItIsDifferenced(unittest.TestCase):
+    """The measured trap, with both numbers from the same boot.
+
+    `8fce1c9` on wedged boot 188: hits 121,448,302 -> 126,604,843 and
+    misses 108,412,273 -> 117,488,833 over 45 s.  Cumulative that pair
+    reads **52.8%** and differenced it reads **36.2%** - the cache
+    overstated by half again, because a boot has phases with completely
+    different VMCS access patterns and a total averages them.
+
+    So the arithmetic is checked against both, and the cumulative
+    printer is required to say which one it is producing.  A printer
+    that emitted only the total would be the failure this whole file is
+    about, and there would be nothing in the output to notice it by.
+    """
+
+    A_HITS, B_HITS = 121448302, 126604843
+    A_MISSES, B_MISSES = 108412273, 117488833
+
+    def setUp(self):
+        self.module = load_dump_state()
+        self.module.BUILD_MANIFEST = (
+            "zpp switches: nested=1 censv=0 vcache=1 uevmcs=1")
+
+    def rate(self, text):
+        match = re.search(r"cache hit rate\s+.*=\s*([0-9.]+)%", text)
+        self.assertIsNotNone(match, "no hit rate in:\n" + text)
+        return float(match.group(1))
+
+    def test_cumulative_reads_52_8_percent(self):
+        # Sample A's totals, which is the pair `8fce1c9` quotes. Either
+        # sample is "cumulative" and the two do not agree - B reads
+        # 51.9% - which is itself the argument: a cumulative ratio drifts
+        # with whatever the boot has been doing and has no window to be
+        # a rate over.
+        text = "\n".join(self.module.vmcs_global_ratio_lines(
+            {"vmcs_cache_hits": self.A_HITS,
+             "vmcs_cache_misses": self.A_MISSES},
+            None, "CUMULATIVE - see the warning"))
+        self.assertAlmostEqual(52.8, self.rate(text), places=1)
+        self.assertIn("CUMULATIVE", text)
+
+    def test_differenced_reads_36_2_percent(self):
+        text = "\n".join(self.module.vmcs_global_ratio_lines(
+            {"vmcs_cache_hits": self.B_HITS - self.A_HITS,
+             "vmcs_cache_misses": self.B_MISSES - self.A_MISSES},
+            None, "DIFFERENCED over 45.0 s", 45.0))
+        self.assertAlmostEqual(36.2, self.rate(text), places=1)
+        self.assertIn("DIFFERENCED", text)
+
+    def test_the_two_disagree_by_enough_to_matter(self):
+        """The point of the pair, stated as a check rather than prose."""
+        cumulative = self.rate("\n".join(
+            self.module.vmcs_global_ratio_lines(
+                {"vmcs_cache_hits": self.B_HITS,
+                 "vmcs_cache_misses": self.B_MISSES},
+                None, "CUMULATIVE")))
+        windowed = self.rate("\n".join(
+            self.module.vmcs_global_ratio_lines(
+                {"vmcs_cache_hits": self.B_HITS - self.A_HITS,
+                 "vmcs_cache_misses": self.B_MISSES - self.A_MISSES},
+                None, "DIFFERENCED", 45.0)))
+        self.assertGreater(cumulative - windowed, 10.0)
+
+    def test_the_hit_rate_never_prints_without_vcache(self):
+        """A hit rate is meaningless without knowing whether the cache
+        is compiled in at all - the tree default is OFF and the debug
+        build has been carrying ON (7905347)."""
+        values = {"vmcs_cache_hits": 1, "vmcs_cache_misses": 3}
+        for manifest, expected in (
+                ("zpp switches: vcache=1", "vcache=1"),
+                ("zpp switches: vcache=0", "vcache=0"),
+                (None, "vcache=?")):
+            self.module.BUILD_MANIFEST = manifest
+            text = "\n".join(self.module.vmcs_global_ratio_lines(
+                values, None, "CUMULATIVE"))
+            self.assertIn(expected, text)
+
+    def test_a_compiled_out_cache_does_not_report_a_zero_hit_rate(self):
+        """`vcache=0` with hits and misses both zero is a fact about the
+        build. Printing `0.0%` there would be a measurement of the
+        guest, which it is not."""
+        self.module.BUILD_MANIFEST = "zpp switches: vcache=0"
+        text = "\n".join(self.module.vmcs_global_ratio_lines(
+            {"vmcs_cache_hits": 0, "vmcs_cache_misses": 0,
+             "vmcs_reads_taken": 500000}, 10000, "CUMULATIVE"))
+        self.assertIn("UNDEFINED", text)
+        self.assertNotIn("= 0.0%", text)
+        self.assertIn("COMPILED OUT", text)
+
+    def test_the_unaccounted_gap_is_shown_with_its_arithmetic(self):
+        """296,407 reads/s against 246,023 hits+misses/s is a real 17%,
+        and the printer must show the subtraction rather than assert the
+        percentage."""
+        self.module.BUILD_MANIFEST = (
+            "zpp switches: vcache=1 uevmcs=1")
+        text = "\n".join(self.module.vmcs_global_ratio_lines(
+            {"vmcs_reads_taken": 296407, "vmcs_cache_hits": 56831,
+             "vmcs_cache_misses": 189192, "vmcs_cache_unarmed": 0},
+            9752, "DIFFERENCED", 1.0))
+        self.assertIn("296,407 - 246,023 = 50,384", text)
+        self.assertIn("17.0%", text)
+        # Named as attributable-but-not-apportioned rather than as
+        # "unexplained": the routes are known and only their split is
+        # not measured.
+        self.assertIn("SUSPENDED", text)
+        self.assertIn("UNARMED", text)
+
+
+class TheVmcsGlobalsTellUnreadFromZero(unittest.TestCase):
+    """Zero, unread and absent are three answers and must print as three.
+
+    Every one of them looks like "the counter is fine" if it prints as a
+    zero, and this file's recurring finding is that an instrument which
+    cannot report its own failure reports health for ever.
+    """
+
+    def setUp(self):
+        self.module = load_dump_state()
+        self.module.BUILD_MANIFEST = "zpp switches: censv=0 vcache=1"
+
+    def rows(self, before, after, missing=()):
+        keyed_before = {("global:" + n, None): v
+                        for n, v in before.items()}
+        keyed_after = {("global:" + n, None): v for n, v in after.items()}
+        return "\n".join(self.module.delta_vmcs_global_lines(
+            keyed_before, keyed_after, list(missing), 1000, 10.0))
+
+    def test_a_counter_read_twice_at_zero_says_it_is_a_real_zero(self):
+        text = self.rows({"vmcs_read_failures": 0},
+                         {"vmcs_read_failures": 0})
+        self.assertIn("READ TWICE", text)
+        self.assertIn("vmcs_read_failures", text)
+
+    def test_a_counter_the_monitor_never_answered_says_NOT_READ(self):
+        text = self.rows({"vmcs_read_failures": None},
+                         {"vmcs_read_failures": None})
+        self.assertIn("NOT READ", text)
+        self.assertIn("NOT zero", text)
+        self.assertNotIn("READ TWICE", text)
+
+    def test_an_absent_symbol_is_named_and_blamed_on_the_switch(self):
+        text = self.rows({}, {}, missing=["vmcs_read_overflow"])
+        self.assertIn("vmcs_read_overflow", text)
+        self.assertIn("ABSENT", text)
+        self.assertIn("censv=0", text)
+
+    def test_a_counter_going_backwards_is_refused_not_printed(self):
+        """It goes to the IMPOSSIBLE block, and NOT into a rate.
+
+        `delta_impossible_lines` prints `-60` deliberately - naming the
+        impossible number is the whole point of that block. What must
+        not happen is the same value appearing as a `+delta` row or
+        being divided by the exit count into a plausible negative rate.
+        """
+        text = self.rows({"vmcs_reads_taken": 100},
+                         {"vmcs_reads_taken": 40})
+        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("100 -> 40  (-60)", text)
+        self.assertNotIn("+             -60", text)
+        self.assertIn("VMCS reads per exit    NOT COMPUTED", text)
+
+
+class TheVmcsGlobalsAreReadInBothModes(unittest.TestCase):
+    """End to end, against the fake rig, in the default dump and in
+    `--delta` - because a section wired into one and not the other is
+    how `--delta` came to refuse `clock_gap_buckets` by name for the
+    whole of its life."""
+
+    CLOCK = [1000.0, 1000.4, 1020.0, 1020.4]
+
+    def test_the_default_dump_carries_the_section(self):
+        text = run_reader(FakeRig(), ["--elf", "/dev/null", "--cpus", "2"])
+        self.assertIn("NOT singleton members", text)
+        self.assertIn("vmcs_reads_taken", text)
+        self.assertIn("VMCS reads per exit", text)
+        self.assertIn("CUMULATIVE", text)
+
+    def test_the_delta_report_carries_it_too_and_says_DIFFERENCED(self):
+        text = run_reader(FakeRig(),
+                          ["--elf", "/dev/null", "--cpus", "2",
+                           "--delta", "20"], clock=self.CLOCK)
+        self.assertIn("NOT singleton members, DIFFERENCED", text)
+        self.assertIn("vmcs_cache_hits", text)
+        self.assertIn("derived (DIFFERENCED", text)
+
+    def test_the_caller_census_is_present_or_says_why_not(self):
+        """It has never had a reader of any kind, and it is absent from
+        a `censv=0` binary - so the one thing that must never happen is
+        the section printing nothing at all."""
+        text = run_reader(FakeRig(), ["--elf", "/dev/null", "--cpus", "2"])
+        self.assertTrue(
+            "vmcs reads by CALLER" in text
+            or "vmcs read callers: NOT PRESENT" in text,
+            "the caller census neither reported nor explained itself")
 
 
 if __name__ == "__main__":

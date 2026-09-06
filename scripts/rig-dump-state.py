@@ -212,6 +212,38 @@ def manifest_field(name):
     return None
 
 
+def read_build_manifest(args, base):
+    """Read `zpp_build_switches` off the running module.
+
+    Returns `(address, raw_bytes)` and sets `BUILD_MANIFEST` when the
+    bytes really are the manifest.  **One read path with two callers**,
+    which is the point: the cumulative dump reads it as its base proof
+    and prints a long diagnosis of what came back, and `--delta` returns
+    long before ever reaching that block - so before this existed,
+    `manifest_field` answered None for the whole of delta mode and every
+    switch-dependent caveat printed as "unknown".  That is the wrong
+    answer in the mode this file most wants trusted.
+
+    The diagnosis stays at the cumulative caller, which is why this
+    returns the raw bytes rather than a verdict: distinguishing an
+    all-`0xff` failed read from a wrong base needs the bytes, and that
+    guard has already cried wolf once.
+    """
+    manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
+    mon = Monitor(args.rig, args.port)
+    # The whole string, not the first two words. The prefix is all the
+    # base check needs; the rest says what was compiled in, and more than
+    # one switch below changes what the numbers above *mean*.
+    mon.queue(manifest_va, 32)
+    got = mon.run()
+    raw = b"".join(got.get(manifest_va + 8 * i, 0).to_bytes(8, "little")
+                   for i in range(32))
+    if raw.startswith(b"zpp switches:"):
+        global BUILD_MANIFEST
+        BUILD_MANIFEST = raw.split(b"\0")[0].decode("ascii", "replace")
+    return manifest_va, raw
+
+
 def census_caveat(what):
     """One line saying whether `census=` explains an empty instrument.
 
@@ -361,6 +393,54 @@ def gdb_symbol(elf, symbol):
     if not m:
         sys.exit(f"could not find {symbol} in {elf}")
     return int(m.group(1), 16)
+
+
+def gdb_symbols(elf, symbols):
+    """Link-time addresses for many symbols, in one gdb run, non-fatally.
+
+    Returns `{symbol: address or None}` - **None for absent, never a
+    `sys.exit`**, which is the whole difference from `gdb_symbol` above.
+    That one is right for the singleton and the manifest: if those are
+    missing the dump is worthless and dying is the honest answer. It is
+    wrong for a counter, because a counter can be absent for two ordinary
+    reasons that must not take the dump down - the deployed binary
+    predates it, or a build switch compiled it out and `--gc-sections`
+    removed the storage.  Both are *findings*, and the caller can only
+    report them if it is still running.
+
+    One invocation for the lot: gdb spends its time opening the ELF, so
+    fifteen separate runs cost fifteen times as much as one.  The marker
+    is needed because a failed `print` emits no `$N` at all, so the
+    values cannot be matched to the requests by position - the third
+    symbol's address would be read as the fourth's, which is exactly the
+    class of plausible-and-wrong this file exists to refuse.  gdb's
+    "No symbol ..." goes to stderr and is deliberately not captured;
+    absence is signalled by finding no address between two markers.
+
+    The name is passed to gdb in its **demangled** spelling, quoted -
+    `&'zpp::arch::x86_64::vmx::vmcs_reads_taken'`.  That is what gdb's
+    own parser wants, and it means the caller never has to spell an
+    Itanium-ABI mangling like `_ZN3zpp4arch6x86_643vmx16vmcs_reads_takenE`
+    that would silently rot the first time a namespace is renamed.
+    """
+    marker = "@@zpp@@"
+    args = []
+    for symbol in symbols:
+        args += ["-ex", f"echo {marker}\\n",
+                 "-ex", f"print/x &'{symbol}'"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+
+    # `split` on the marker gives one chunk per request, in order, with
+    # the text before the first marker discarded.  A chunk carrying an
+    # address is a hit; an empty chunk is an absent symbol.
+    chunks = out.split(marker)[1:]
+    found = {}
+    for i, symbol in enumerate(symbols):
+        chunk = chunks[i] if i < len(chunks) else ""
+        m = re.search(r"=\s*(0x[0-9a-f]+)", chunk)
+        found[symbol] = int(m.group(1), 16) if m else None
+    return found
 
 
 class Monitor:
@@ -618,6 +698,516 @@ def dump_field_use(args, instance, off, capacity=128):
     overflow = words.get(instance + off["vmcs_field_use_overflow"], 0)
     if overflow:
         print(f"  table full, {overflow} uses not recorded")
+
+
+# ---------------------------------------------------------------------
+# Counters that are NOT members of the singleton.
+#
+# **Why this block exists at all.**  Every other number this reader
+# prints is resolved as an offset into
+# `zpp::hypervisor::hypervisor::instance()::instance` - `gdb_offsets`
+# asks the ELF where a member sits, and `instance + off[name]` is read
+# over the monitor.  That mechanism can only ever see members.  The
+# counters below are namespace-scope `constinit` globals in
+# `hypervisor/include/zpp/arch/x86_64/vmx/vmcs.h`, so they have no
+# offset into anything and this reader had **no reference to any of
+# them**.  They had been incrementing since the first boot of the
+# project and nothing had ever printed one.
+#
+# That is a distinct failure from the ones this file catalogues
+# elsewhere.  The usual one is an instrument that cannot report its own
+# *failure*; this is an instrument that cannot report its own
+# *existence* - there is no zero, no blank column, nothing at all to
+# notice.  `8fce1c9` got the first reading out of two of them by hand,
+# with `llvm-nm` on the deployed ELF and the QEMU monitor, and `843690a`
+# then lost a before/after comparison because the other two were "three
+# lines away and I did not take them".
+#
+# **Addressing is simpler here, not harder.**  A global's runtime
+# address is `module base + its link-time symbol value`, full stop -
+# no member offset, no per-processor stride.  These are all `[1]`
+# scalars, shared across processors and deliberately non-atomic: the
+# header argues at length that a counter occasionally short by a racing
+# increment answers "about how many per exit" exactly as well as an
+# exact one, and that a `lock` prefix on the hot path to measure the hot
+# path is a real cost added for nothing.  So there is no per-cpu column
+# to print and none is missing.
+#
+# **Everything here is monotonic and therefore belongs in `--delta`.**
+# Cumulative, the hit rate reads 52.8% where the same two counters
+# differenced over 45 s read 36.2% - it averages phases with completely
+# different access patterns.  A cumulative-only presentation of these
+# would overstate the cache by half again, which is the exact failure
+# this whole file is written against.  The one non-monotonic value in
+# vmcs.h, `vmcs_cache_suspended`, is a *depth* and is in the state list
+# below rather than this one for that reason.
+VMX_NS = "zpp::arch::x86_64::vmx::"
+
+VMCS_GLOBAL_COUNTERS = [
+    (VMX_NS + "vmcs_reads_taken",
+     "VMCS field reads this VMM executed"),
+    (VMX_NS + "vmcs_writes_taken",
+     "VMCS field writes this VMM executed"),
+    (VMX_NS + "vmcs_cache_hits",
+     "reads answered from the per-processor cache"),
+    (VMX_NS + "vmcs_cache_misses",
+     "reads that went to the processor (a real VMREAD)"),
+    (VMX_NS + "vmcs_cache_unarmed",
+     "cache lookups with no armed GS row (see the note below)"),
+    (VMX_NS + "vmcs_cache_revalidations",
+     "rows revalidated after a borrow"),
+    # Monotonic: the only writer is `fetch_add(1)` in
+    # `vmcs_cache_forget`.  It starts at 1, not 0, so a cumulative
+    # reading is one high and a *difference* is exact - another reason
+    # to prefer the windowed number.
+    (VMX_NS + "vmcs_cache_epoch",
+     "cache windows ended (epoch bumps)"),
+    # "A non-zero count here is never normal" - the header says so in
+    # terms.  These used to be `__builtin_trap()`.
+    (VMX_NS + "vmcs_read_failures",
+     "VMREADs the layer below REFUSED (MUST be 0)"),
+    (VMX_NS + "vmcs_write_failures",
+     "VMWRITEs the layer below REFUSED (MUST be 0)"),
+    # The census tables' own honesty counters.  Absent from a `censv=0`
+    # binary along with the tables they guard, which the printer says.
+    (VMX_NS + "vmcs_read_overflow",
+     "census read-table slot collisions (MUST be 0)"),
+    (VMX_NS + "vmcs_write_overflow",
+     "census write-table slot collisions (MUST be 0)"),
+    (VMX_NS + "vmcs_read_caller_overflow",
+     "census caller-table overflows (48 slots, linear probe)"),
+]
+
+# Read and printed, never differenced.  Three different kinds of thing,
+# and none of them is a count of events:
+#
+#  - a *field encoding*, which is an identity;
+#  - a *depth*, which goes up and down and whose difference is
+#    meaningless (`delta_rows` would report a legitimate decrease as
+#    IMPOSSIBLE, which would be a false alarm - the second entry in
+#    DELTA_REFUSALS);
+#  - launch-path failure state, which is written once and then stands.
+VMCS_GLOBAL_STATE = [
+    (VMX_NS + "vmcs_read_failed_field",
+     "first field encoding a VMREAD was refused for"),
+    (VMX_NS + "vmcs_write_failed_field",
+     "first field encoding a VMWRITE was refused for"),
+    (VMX_NS + "vmcs_cache_suspended",
+     "borrow depth AT THIS INSTANT (0 at rest; a gauge, not a count)"),
+    # Not in vmcs.h but in the same class exactly: `extern "C"` globals
+    # in `vmx/asm.h`, written by the naked `vmlaunch`/`vmresume` stubs
+    # and readable nowhere else.  Non-zero means a VM entry failed on
+    # the launch path, which no member of the singleton records.
+    ("zpp_launch_failed",
+     "a VM entry failed on the launch path (MUST be 0)"),
+    ("zpp_launch_instruction_error",
+     "...and the VM-instruction error it reported (SDM 31.4)"),
+]
+
+
+def vmcs_globals_resolve(elf, base):
+    """Runtime addresses for the globals above, and the absentees.
+
+    Returns `(addresses, missing)`.  `addresses` maps the **short** name
+    to `base + symbol`; `missing` is the list of short names the ELF has
+    no symbol for, which the printers name out loud rather than leaving
+    as a silent gap.
+    """
+    wanted = [s for s, _ in VMCS_GLOBAL_COUNTERS + VMCS_GLOBAL_STATE]
+    found = gdb_symbols(elf, wanted)
+    addresses, missing = {}, []
+    for symbol in wanted:
+        short = symbol.rsplit("::", 1)[-1]
+        if found[symbol] is None:
+            missing.append(short)
+        else:
+            addresses[short] = base + found[symbol]
+    return addresses, missing
+
+
+def vmcs_globals_missing_lines(missing):
+    """Name every absent symbol, and say what would explain it.
+
+    A symbol that is not in the ELF is not a counter reading zero, and
+    the two must not print the same.  Two ordinary causes, both of which
+    the manifest can distinguish from a real problem.
+    """
+    if not missing:
+        return []
+    lines = ["  symbols ABSENT from this ELF (NOT zero - unmeasurable "
+             "in this build):"]
+    for name in missing:
+        lines.append(f"    {name}")
+    censv = manifest_field("censv")
+    census_names = [n for n in missing
+                    if "overflow" in n or "caller" in n or "_field" in n]
+    if census_names and censv == "0":
+        lines.append("  censv=0 in the build manifest, so the VMCS "
+                     "census tables are compiled out and")
+        lines.append("  `--gc-sections` removed their storage - which is "
+                     "why the overflow and caller")
+        lines.append("  counters have no symbol. Build with "
+                     "-DZPP_VMCS_CENSUS=1 to ask.")
+    elif censv is None:
+        lines.append("  (the build manifest was not read, so whether a "
+                     "switch compiled these out is")
+        lines.append("  unknown - which is not the same as knowing the "
+                     "binary predates them)")
+    else:
+        lines.append("  the deployed binary predates these names. Check "
+                     "--elf points at the binary")
+        lines.append("  that is running: `.rig-deployed-hypervisor.elf`, "
+                     "not out/.")
+    return lines
+
+
+def vmcs_global_value_lines(values, missing, unread, what):
+    """The raw counters, with unread and zero told apart.
+
+    `values` maps short name to an integer or None.  None means the
+    monitor never answered for that address - which is **not** zero, and
+    the single habit this file records as most expensive.  All-ones is
+    the monitor's own failed-read signature (the manifest guard learned
+    that the hard way), so it is called out rather than printed as
+    18 quintillion.
+    """
+    lines = ["", f"vmcs counters that are NOT singleton members "
+                 f"({what})"]
+    for symbol, label in VMCS_GLOBAL_COUNTERS + VMCS_GLOBAL_STATE:
+        short = symbol.rsplit("::", 1)[-1]
+        if short in missing:
+            continue
+        value = values.get(short)
+        if value is None:
+            lines.append(f"  {short:<28} NOT READ - the monitor did not "
+                         f"answer. Not zero.")
+        elif value == 0xffffffffffffffff:
+            lines.append(f"  {short:<28} 0xffff...ffff - this is a FAILED "
+                         f"READ, not a value")
+        else:
+            lines.append(f"  {short:<28} {value:>18,}  {label}")
+    if unread:
+        lines.append(f"  ({len(unread)} address(es) went unanswered after "
+                     f"retries; see above)")
+    lines += vmcs_globals_missing_lines(missing)
+    return lines
+
+
+def vmcs_global_ratio_lines(values, exits, what, seconds=None):
+    """The three ratios these counters exist for, arithmetic shown.
+
+    `values` carries **deltas** in `--delta` mode and totals in the
+    cumulative dump; `what` says which, because the two must never be
+    read as the same quantity.  `exits` is the matching `exit_total`
+    figure summed over the processors sampled, or None.
+
+    Every line prints its own numerator and denominator.  A percentage
+    with its population hidden is the second entry in this file's list of
+    thirty misreadings, and 52.8% versus 36.2% for this very pair is the
+    worked example.
+    """
+    def value(name):
+        got = values.get(name)
+        return got if isinstance(got, int) else None
+
+    reads = value("vmcs_reads_taken")
+    writes = value("vmcs_writes_taken")
+    hits = value("vmcs_cache_hits")
+    misses = value("vmcs_cache_misses")
+    unarmed = value("vmcs_cache_unarmed")
+    epochs = value("vmcs_cache_epoch")
+
+    lines = ["", f"  derived ({what}):"]
+
+    # **The manifest field first, because the hit rate is meaningless
+    # without it.**  `vcache=0` and a 0% hit rate is a compiled-out
+    # cache; `vcache=1` and a 0% hit rate is a cache that never hits.
+    # Those are opposite findings and the counters alone cannot tell
+    # them apart.  The tree default is OFF and the debug build has been
+    # carrying ON - see 7905347, which is the commit that had to point
+    # this out after the fact.
+    vcache = manifest_field("vcache")
+    if vcache == "1":
+        lines.append("    vcache=1: the per-processor field cache IS "
+                     "compiled in, so hits/misses")
+        lines.append("      are populated and the rate below is a "
+                     "measurement.")
+    elif vcache == "0":
+        lines.append("    *** vcache=0: the field cache is COMPILED OUT. "
+                     "`hits` and `misses` cannot")
+        lines.append("      be anything but zero, EVERY read is a real "
+                     "VMREAD, and a hit rate of")
+        lines.append("      0% here is a fact about this build and says "
+                     "nothing about the guest. ***")
+    else:
+        lines.append("    vcache=? - the build manifest was not read, so "
+                     "whether the field cache is")
+        lines.append("      compiled in is UNKNOWN. A hit rate below "
+                     "cannot be interpreted until it is.")
+
+    # **Three different reasons this cannot be computed, and they print
+    # differently.**  A denominator that was never read, a denominator
+    # that really is zero (no exit was taken in this window - a reading,
+    # not an absence) and a numerator that was never read are three
+    # facts, and collapsing them into one "NOT COMPUTED" is the habit
+    # this file is written against.
+    def per_exit(what, value):
+        if value is None:
+            return f"    {what:<22} NOT COMPUTED: the counter was not read"
+        if exits is None:
+            return (f"    {what:<22} NOT COMPUTED: exit_total was not "
+                    f"read - unknown, not zero")
+        if 0 == exits:
+            return (f"    {what:<22} NOT COMPUTED: exit_total moved by 0, "
+                    f"so there is no denominator")
+        return (f"    {what:<22} {value:,} / {exits:,} "
+                f"= {value / exits:.2f}")
+
+    lines.append(per_exit("VMCS reads per exit", reads))
+    lines.append(per_exit("VMCS writes per exit", writes))
+    if 0 == exits:
+        lines.append("      An exit count of zero over a measured window "
+                     "is a reading about the")
+        lines.append("      guest - the processor took no exit - and is "
+                     "not a failed read.")
+
+    if hits is not None and misses is not None and (hits + misses):
+        total = hits + misses
+        lines.append(f"    cache hit rate         {hits:,} / ({hits:,} + "
+                     f"{misses:,}) = {100.0 * hits / total:.1f}%")
+        lines.append(f"      -> {100.0 * misses / total:.1f}% of "
+                     f"accounted reads were REAL VMREADs ({misses:,})")
+        if seconds:
+            lines.append(f"      -> {misses / seconds:,.0f} real VMREADs "
+                         f"per second over {seconds:.1f} s")
+    elif hits is not None and misses is not None:
+        lines.append("    cache hit rate         UNDEFINED: hits + misses "
+                     "= 0 (see vcache= above)")
+    else:
+        lines.append("    cache hit rate         NOT COMPUTED: hits or "
+                     "misses was not read")
+
+    # ------------------------------------------------------------------
+    # The gap, and what is known about it.
+    #
+    # Measured on boot 189: 296,407 reads/s against 246,023 hits+misses/s
+    # - a real 17% of reads that are neither.  It is not a lost count and
+    # not a torn read; it is four routes out of `vmcs::read` that return
+    # before the hit/miss accounting.  Reading the function settles it
+    # (vmcs.h, `std::uint64_t read(field) const`):
+    #
+    #  1. `vmcs_reads_taken` is incremented on the FIRST line, so it
+    #     counts every call unconditionally. Everything below is a
+    #     subset of it by construction.
+    #  2. An ENLIGHTENED row: `vmcs_cache_current_enlightened()` returns
+    #     non-zero and the function `return evmcs_load(...)` - a plain
+    #     load out of the page shared with the layer below, ahead of the
+    #     cache, counted by neither. `uevmcs=` in the manifest says
+    #     whether this route exists in this build at all.
+    #  3. The cache SUSPENDED: inside a `vmcs_cache_borrow` (the two
+    #     shadow-VMCS copies) `row` is forced to `vmcs_cache_processors`,
+    #     so the whole cache block is skipped and control falls through
+    #     to the bare `vmread` at the bottom. That IS a real VMREAD and
+    #     **there is no counter for it** - which is why the gap can be
+    #     attributed but not decomposed exactly.
+    #  4. The cache UNARMED: `vmcs_cache_row_index()` found no
+    #     `vmcs_cache_token_magic` in the GS row and returned
+    #     `vmcs_cache_processors`. Same fall-through, also a real
+    #     VMREAD. `vmcs_cache_unarmed` counts these - but it is an upper
+    #     bound rather than a measurement, because an unarmed READ bumps
+    #     it TWICE (once inside `vmcs_cache_current_enlightened()`, once
+    #     from the direct call in `read`) and an unarmed WRITE and every
+    #     `vmcs_cache_revalidate()` bump it as well.
+    #  5. `vcache=0` removes the whole `if constexpr` block, so the gap
+    #     is 100% of reads and that is not an anomaly.
+    #
+    # So: the gap is REAL and its mechanism is known; its split between
+    # routes 2, 3 and 4 is NOT measured, and closing that would take one
+    # more counter on the fall-through path. Stated rather than glossed,
+    # because "17% unexplained" and "17% explained but not apportioned"
+    # are different claims and only the second one is true.
+    # ------------------------------------------------------------------
+    if reads is not None and hits is not None and misses is not None:
+        accounted = hits + misses
+        gap = reads - accounted
+        share = (100.0 * gap / reads) if reads else 0.0
+        lines.append(f"    reads NOT accounted    {reads:,} - {accounted:,}"
+                     f" = {gap:,}  ({share:.1f}% of reads)")
+        if gap < 0:
+            lines.append("      *** NEGATIVE: hits+misses exceeds the "
+                         "read count, which is impossible. ***")
+            lines.append("      Suspect a torn sample or an --elf that is "
+                         "not the running binary.")
+        elif gap and vcache == "0":
+            # Not an anomaly and not worth apportioning: with the cache
+            # compiled out the whole `if constexpr` block is gone, so
+            # every read misses the accounting by construction and the
+            # gap is 100% of reads by definition.
+            lines.append("      EXPECTED: vcache=0 removes the accounting "
+                         "entirely, so this gap is")
+            lines.append("      every read there is and carries no "
+                         "information.")
+        elif gap:
+            lines.append("      Reads that return before the hit/miss "
+                         "accounting, all three routes known:")
+            lines.append("      enlightened-VMCS loads (uevmcs="
+                         f"{manifest_field('uevmcs')}), reads taken while "
+                         "the cache was")
+            lines.append("      SUSPENDED by a shadow-VMCS borrow, and "
+                         "reads with the GS row UNARMED.")
+            if unarmed is not None:
+                lines.append(f"      vmcs_cache_unarmed = {unarmed:,}, but "
+                             f"it is an UPPER BOUND on the last of")
+                lines.append("      those: an unarmed read bumps it twice "
+                             "and writes bump it too. The")
+                lines.append("      suspended route has NO counter, so the "
+                             "split is not measured.")
+
+    if epochs is not None and exits:
+        lines.append(per_exit("cache windows per exit", epochs))
+        lines.append("      Every one ends a window and throws rows away; "
+                     "only one of them is the")
+        lines.append("      exit itself. See `vmcs_cache_suspended` in "
+                     "vmcs.h.")
+
+    return lines
+
+
+def dump_vmcs_globals(args, elf, base, exits):
+    """The non-singleton VMCS counters, cumulatively.
+
+    **Cumulative, and it says so on every line.**  Kept because the
+    default dump is often the only thing taken from a wedged guest and a
+    total is better than nothing, but `--delta` is where these belong -
+    the printer points at it rather than leaving the reader to remember.
+    """
+    try:
+        addresses, missing = vmcs_globals_resolve(elf, base)
+    except Exception as failure:
+        print(f"\n[vmcs non-singleton counters: {failure}]")
+        return
+
+    monitor = Monitor(args.rig, args.port)
+    for address in addresses.values():
+        monitor.queue(address, 1)
+    words = monitor.run()
+    values = {name: words.get(address)
+              for name, address in addresses.items()}
+
+    for line in vmcs_global_value_lines(values, missing, monitor.unanswered,
+                                        "CUMULATIVE since boot"):
+        print(line)
+    for line in vmcs_global_ratio_lines(values, exits,
+                                        "CUMULATIVE - see the warning"):
+        print(line)
+    print("  *** These are boot-cumulative and average every phase the "
+          "guest has been through. ***")
+    print("  The same hits/misses pair reads 52.8% cumulative and 36.2% "
+          "differenced over 45 s")
+    print("  on one boot (8fce1c9). Use `--delta N` before quoting any "
+          "rate or percentage.")
+
+
+def dump_vmcs_caller_use(args, elf, base):
+    """Which *code* reads the VMCS, by return address.
+
+    The one instrument in `vmcs.h` that has never had a reader of any
+    kind.  Its own declaration describes the recipe this implements -
+    "return addresses rather than field encodings, resolved offline
+    against the ELF with `info symbol`; the module base moves per run, so
+    what is stored is the raw address and the reader subtracts".
+
+    Why it is worth the read: the field table beside it says `guest_rip`
+    is read 4.6 times an exit and cannot say by whom, so it cannot
+    distinguish one caller in a loop from six callers asking once - and
+    those want opposite fixes.  48 slots and a linear probe, so this is
+    97 words, about the same as one exit-ring row.
+
+    Absent from a `censv=0` binary, which is the shipping default; the
+    caller is expected to say so rather than print nothing.
+    """
+    names = [VMX_NS + n for n in ("vmcs_read_caller",
+                                  "vmcs_read_caller_hits")]
+    found = gdb_symbols(elf, names)
+    if any(found[n] is None for n in names):
+        print("\nvmcs read callers: NOT PRESENT in this ELF "
+              f"(censv={manifest_field('censv')}).")
+        print("  The caller census is compiled out, so this is "
+              "unmeasurable in this build -")
+        print("  not zero. Build with -DZPP_VMCS_CENSUS=1 to ask.")
+        return
+
+    slots = 48
+    callers = base + found[names[0]]
+    hits = base + found[names[1]]
+    monitor = Monitor(args.rig, args.port)
+    monitor.queue(callers, slots)
+    monitor.queue(hits, slots)
+    words = monitor.run()
+
+    rows = []
+    for i in range(slots):
+        count = words.get(hits + 8 * i)
+        caller = words.get(callers + 8 * i)
+        if count and caller:
+            rows.append((count, caller))
+    if not rows:
+        print("\nvmcs read callers: the table is present and EMPTY. With "
+              "censv=1 that means no")
+        print("  read has been taken through `vmcs::read` since boot, "
+              "which for a running guest")
+        print("  would itself be the finding.")
+        return
+
+    # **Sorted BEFORE the symbols are asked for**, so that `chunks[i]`
+    # and `rows[i]` stay the same row.  Sorting afterwards and indexing
+    # the answers by the new order attributes every count to somebody
+    # else's function name - plausible output, entirely wrong, and
+    # exactly the class of mistake the rest of this file is about.
+    rows.sort(reverse=True)
+
+    # `info symbol` wants the LINK-TIME address, so the base comes back
+    # off before asking. Batched, one gdb run, same marker trick as
+    # `gdb_symbols` - and an address that resolves to nothing prints as
+    # a bare offset rather than being dropped.
+    #
+    # **An address BELOW the module base is not asked about at all.**
+    # `caller - base` would be negative, `f"0x{n:x}"` formats that as
+    # `0x-...`, and gdb answers a malformed address with an error that
+    # lands in the chunk and prints as though it were a function name.
+    # A caller outside the module is also a finding in its own right -
+    # nothing but this VMM's own code calls `vmcs::read` - so it is
+    # named as such rather than silently mis-symbolized.
+    marker = "@@zpp@@"
+    inside = [i for i, (_c, caller) in enumerate(rows) if caller >= base]
+    gdb_args = []
+    for i in inside:
+        gdb_args += ["-ex", f"echo {marker}\\n",
+                     "-ex", f"info symbol 0x{rows[i][1] - base:x}"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf]
+                         + gdb_args, capture_output=True,
+                         text=True).stdout
+    chunks = out.split(marker)[1:]
+    named = {}
+    for position, i in enumerate(inside):
+        chunk = chunks[position].strip() if position < len(chunks) else ""
+        name = chunk.split(" in section")[0].strip() if chunk else ""
+        if name and not name.startswith("No symbol"):
+            named[i] = name
+
+    total = sum(count for count, _ in rows) or 1
+    print(f"\nvmcs reads by CALLER ({total:,} recorded, {len(rows)} "
+          f"distinct sites)")
+    print("  every row, however cold - a top-N cut on a census hides "
+          "exactly what it exists to find")
+    for rank, (count, caller) in enumerate(rows):
+        name = named.get(rank)
+        if name is None:
+            name = (f"(unresolved) +0x{caller - base:x}" if caller >= base
+                    else f"*** 0x{caller:x} is BELOW the module base "
+                         f"0x{base:x} - not our code ***")
+        print(f"  {rank + 1:2d}. {count:>12,}  "
+              f"{100.0 * count / total:5.1f}%  {name}")
 
 
 def dump_own_field_use(args, elf, base):
@@ -6440,7 +7030,7 @@ def serial_module_base(rig):
 def delta_sample(args, instance, off, cpus, reason_capacity,
                  disposition_capacity, synthetic_capacity=None,
                  gap_capacity=None, reason_slots=None,
-                 phase_slots=None):
+                 phase_slots=None, vmcs_globals=None):
     """One complete delta sample: open, read, close.
 
     **The monitor takes exactly one connection.**  `Monitor` opens and
@@ -6520,6 +7110,16 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
                                   + (cpu * synthetic_capacity + slot) * 8,
                                   1)
 
+    # The counters that are NOT singleton members, at `module base +
+    # symbol` rather than `instance + offset`.  Queued into the SAME
+    # batch as everything above, deliberately: a second connection would
+    # be a second instant, and these have to be differenced against the
+    # exit count sampled beside them or the reads-per-exit ratio is two
+    # windows divided by each other.  One word each, so a dozen names
+    # cost two more monitor commands on a sample of about two hundred.
+    for address in (vmcs_globals or {}).values():
+        monitor.queue(address, 1)
+
     started = time.monotonic()
     words = monitor.run()
     ended = time.monotonic()
@@ -6572,6 +7172,21 @@ def delta_sample(args, instance, off, cpus, reason_capacity,
                 for slot in DELTA_SYNTHETIC_STATE_SLOTS:
                     readings[("state", name, cpu, slot)] = read(
                         name, cpu * synthetic_capacity + slot)
+
+    # `("global:<name>", None)` rather than `(name, None)`, so that a
+    # global can never collide with a singleton member of the same name -
+    # today none does, and a member added later would silently overwrite
+    # a reading rather than fail.  `delta_key_name` renders a None index
+    # as the bare name, so the prefix is what appears in any complaint
+    # and it says which addressing mode produced the number.
+    #
+    # `words.get` with no default: a missing address stays **None** and
+    # `delta_rows` reports it as unread.  Defaulting it to 0 here would
+    # turn a monitor that did not answer into a counter that did not
+    # move, which is the single habit this file records as most
+    # expensive.
+    for name, address in (vmcs_globals or {}).items():
+        readings[("global:" + name, None)] = words.get(address)
 
     clock = max((read(DELTA_CLOCK, cpu) or 0) for cpu in range(cpus))
     first = tuple(read(DELTA_FINGERPRINT, cpu) for cpu in range(cpus))
@@ -6765,15 +7380,140 @@ def delta_synic_lines(after, cpus):
     return lines
 
 
+def delta_vmcs_global_lines(before, after, missing, exits, seconds):
+    """The non-singleton VMCS counters, differenced over the window.
+
+    **This is where these counters belong**, and the reason is one
+    number: the same `vmcs_cache_hits`/`vmcs_cache_misses` pair reads
+    52.8% cumulative and 36.2% differenced over 45 s on one boot
+    (`8fce1c9`).  A boot has phases with completely different VMCS
+    access patterns and a cumulative ratio averages them, so a
+    cumulative-only presentation would have overstated the cache by half
+    again - the failure this whole file is written against.
+
+    Every difference goes through `delta_rows`, so a counter that went
+    backwards is reported as IMPOSSIBLE rather than printed, and one
+    that was never read stays unread rather than becoming a zero.  The
+    ratios then run on the deltas, through the same printer the
+    cumulative dump uses, so the two cannot drift apart.
+    """
+    entries = [(("global:" + s.rsplit("::", 1)[-1], None), label)
+               for s, label in VMCS_GLOBAL_COUNTERS
+               if s.rsplit("::", 1)[-1] not in missing]
+    rows, impossible, unread = delta_rows(before, after, entries)
+
+    lines = ["", "vmcs counters that are NOT singleton members, "
+                 "DIFFERENCED over this window"]
+    lines.append("  (namespace-scope constinit globals in vmcs.h - see "
+                 "VMCS_GLOBAL_COUNTERS for why")
+    lines.append("   nothing in this reader could see them until now)")
+
+    if not entries:
+        lines.append("  NOTHING SAMPLED: not one of these symbols is in "
+                     "the ELF.")
+        lines += vmcs_globals_missing_lines(missing)
+        return lines
+
+    values, still = {}, []
+    for key, label, a, b, delta in rows:
+        name = key[0].split(":", 1)[1]
+        values[name] = delta
+        rate = f"{delta / seconds:>14,.1f}/s" if seconds else " " * 17
+        lines.append(f"  {name:<28} +{delta:>16,} {rate}  {label}")
+        if 0 == delta:
+            still.append(name)
+
+    for key, label in unread:
+        name = key[0].split(":", 1)[1]
+        lines.append(f"  {name:<28} NOT READ in one or both samples - "
+                     f"unknown, NOT zero")
+
+    # **"Did not move" and "did not read" must not print the same**, and
+    # here the two samples settle it without any extra work: a row that
+    # is in `rows` at all was answered twice, so a delta of zero is a
+    # measurement.  A row the monitor never answered is in `unread`
+    # above and says so.  Collected into one line rather than repeated
+    # under every row, because on a healthy guest most of these are the
+    # MUST-be-0 refusal counters and a dozen identical notes would bury
+    # the counters that did move.
+    if still:
+        lines.append(f"  the {len(still)} counter(s) at +0 above were "
+                     f"READ TWICE and did not move, so those are")
+        lines.append("  genuine zeroes rather than failed reads:")
+        row = "   "
+        for name in still:
+            if len(row) + len(name) + 2 > 74:
+                lines.append(row)
+                row = "   "
+            row += " " + name + ","
+        lines.append(row.rstrip(","))
+
+    lines += delta_impossible_lines(impossible)
+
+    # State, printed from sample B as a VALUE and never differenced -
+    # `VMCS_GLOBAL_STATE` says which three kinds these are and why
+    # subtracting any of them produces a distance rather than a rate.
+    # Printed here rather than left out of delta mode entirely, because a
+    # non-zero `zpp_launch_failed` or `vmcs_*_failed_field` invalidates
+    # every rate above it and this is the only mode some runs use.
+    state = []
+    for symbol, label in VMCS_GLOBAL_STATE:
+        short = symbol.rsplit("::", 1)[-1]
+        if short in missing:
+            continue
+        value = after.get(("global:" + short, None))
+        if value is None:
+            state.append(f"  {short:<28} NOT READ - unknown, NOT zero")
+        else:
+            state.append(f"  {short:<28} {value:>18,}  {label}")
+    if state:
+        lines.append("")
+        lines.append("  state, from sample B (NOT differenced - see "
+                     "VMCS_GLOBAL_STATE):")
+        lines += state
+
+    lines += vmcs_globals_missing_lines(missing)
+    lines += vmcs_global_ratio_lines(
+        values, exits, f"DIFFERENCED over {seconds:.1f} s", seconds)
+    return lines
+
+
 def delta_main(args, base, instance, off, cpus, reason_capacity,
                disposition_capacity, synthetic_capacity=None,
                gap_capacity=None, reason_slots=None, phase_slots=None):
     """Two samples, a measured span between them, and rates from it."""
+    # **Before the samples, not after**, and it costs one monitor round
+    # trip: `manifest_field` answers None until this has run, and delta
+    # mode returns long before the cumulative dump's own manifest read.
+    # Without it every switch-dependent caveat in this report - `vcache=`
+    # beside the hit rate above all - printed "unknown" in the one mode
+    # this file asks people to trust.  Failure here is not fatal: the
+    # caveats then say the manifest was not read, which is the honest
+    # third answer and is not the same as a switch reading zero.
+    try:
+        read_build_manifest(args, base)
+        if BUILD_MANIFEST:
+            print(f"  {BUILD_MANIFEST}")
+    except Exception as failure:
+        print(f"  build manifest not read: {failure} - every `switch=` "
+              f"caveat below will say so")
+
+    # Resolved once, from the ELF, and reused for both samples: the
+    # module base does not move under a running guest, and re-resolving
+    # between samples would put a gdb invocation inside the measured
+    # span.
+    try:
+        vmcs_globals, vmcs_missing = vmcs_globals_resolve(args.elf, base)
+    except Exception as failure:
+        vmcs_globals, vmcs_missing = {}, []
+        print(f"  vmcs non-singleton counters not resolved: {failure}")
+
     print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
           f"B ...")
     before, first_a, clock_a, a0, a1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity, reason_slots, phase_slots)
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots,
+        vmcs_globals)
 
     # The socket is closed before this sleep and reopened after it: no
     # connection is held across the wait.
@@ -6781,7 +7521,8 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
 
     after, first_b, clock_b, b0, b1 = delta_sample(
         args, instance, off, cpus, reason_capacity, disposition_capacity,
-        synthetic_capacity, gap_capacity, reason_slots, phase_slots)
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots,
+        vmcs_globals)
     base_b = serial_module_base(args.rig)
 
     # Midpoint to midpoint, because each sample takes a measurable time
@@ -6870,6 +7611,21 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
         if bad or unread:
             return None
         return sum(d for _k, _l, _a, _b, d in rows)
+
+    # Straight after `summed`, because the reads-per-exit ratio needs
+    # `exit_total` differenced over the SAME window and summed over the
+    # SAME processors - and through `delta_rows`, so a denominator that
+    # went backwards comes back as None and the printer says "NOT
+    # COMPUTED" instead of dividing by it.  `843690a` lost a whole
+    # before/after because the numerator was taken and the denominator
+    # was not; here they cannot be separated.
+    try:
+        for line in delta_vmcs_global_lines(
+                before, after, vmcs_missing, summed("exit_total"),
+                span[1] or args.delta):
+            print(line)
+    except Exception as failure:
+        print(f"\n[vmcs non-singleton counters not reported: {failure}]")
 
     if reason_slots:
         for line in delta_handler_reason_lines(
@@ -10724,15 +11480,7 @@ def main():
     # The build manifest is a fixed string at a fixed offset from the
     # base, so reading it back is a direct test of the base itself.
     try:
-        manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
-        mon = Monitor(args.rig, args.port)
-        # The whole string, not the first two words. The prefix is all the
-        # base check needs; the rest says what was compiled in, and one
-        # switch below changes what the numbers above *mean*.
-        mon.queue(manifest_va, 32)
-        got = mon.run()
-        raw = b"".join(got.get(manifest_va + 8 * i, 0).to_bytes(8, "little")
-                       for i in range(32))
+        manifest_va, raw = read_build_manifest(args, base)
         if raw.startswith(b"zpp switches:"):
             print("base proven: zpp_build_switches reads back at the base")
             manifest = raw.split(b"\0")[0].decode("ascii", "replace")
@@ -10961,6 +11709,34 @@ def main():
         dump_own_field_use(args, args.elf, base)
     except SystemExit as failure:
         print(f"\n[dump_own_field_use skipped: {failure}]")
+
+    # Beside the field tables, because they answer three halves of one
+    # question - which fields, which callers, and how many in total - and
+    # all three are addressed as `module base + symbol` rather than
+    # through the singleton.  See VMCS_GLOBAL_COUNTERS for why the third
+    # of them had never been printed by anything.
+    #
+    # `exit_total` summed over the processors read, because
+    # `vmcs_reads_taken` is one shared counter across all of them and
+    # dividing a machine-wide numerator by one processor's exits is the
+    # mislabelling this mode exists to end.
+    #
+    # `Exception` and not just `SystemExit`, unlike the sections above:
+    # these two shell out to gdb for symbols rather than for offsets, and
+    # a gdb that is absent raises `FileNotFoundError` instead of exiting.
+    # Losing two sections is right; losing the rest of the dump to them
+    # is not.
+    try:
+        exits = sum((read('exit_total', cpu) or 0)
+                    for cpu in range(args.cpus))
+        dump_vmcs_globals(args, args.elf, base, exits)
+    except Exception as failure:
+        print(f"\n[dump_vmcs_globals skipped: {failure}]")
+
+    try:
+        dump_vmcs_caller_use(args, args.elf, base)
+    except Exception as failure:
+        print(f"\n[dump_vmcs_caller_use skipped: {failure}]")
 
     # Before the per-handler breakdowns, because it answers a different
     # and prior question: those say what this VMM spent its time on, and
