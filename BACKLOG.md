@@ -70354,3 +70354,63 @@ state under a nested guest. That is a real limitation and it is the first
 thing to check before building on these figures - but it is still a direct
 measurement of the instruction, where 4,600 was a quotient of two
 unrelated quantities.
+
+## The by-reason table was in the dump all along, and vmcall costs 6.7x
+
+While chasing the cost model I never read the section that answers it
+directly. Boot 192, both processors, **183,222 cycles per exit overall**:
+
+    reason          exits      cyc/exit   share   rd/exit  wr/exit
+    vmresume    5,169,328     186,210    38.6%      33.1     20.6
+    wrmsr       2,121,693     190,320    16.2%      41.3     13.0
+    int-window  1,659,341     185,751    12.3%      37.7     11.8
+    vmcall        245,387   1,236,167    12.2%     464.7     27.9
+    ept-violation 2,856,305    75,582     8.6%      20.0      1.9
+    tpr-below     537,667     182,895     3.9%      37.1     11.1
+    ext-int       328,136     195,081     2.6%      43.5     11.8
+    vmptrld       174,436     351,632     2.5%      82.6     14.5
+    hlt           270,278     195,248     2.1%      58.7     20.2
+
+**`vmcall` costs 1,236,167 cycles - 6.7x the average - on 245,387 exits,
+and takes 464.7 reads.** At the measured 60 cycles a read those 464.7
+reads are 27,882 cycles, **2.3% of what a vmcall costs.** So even the one
+exit reason that is access-heavy is not access-*bound*.
+
+`ept-violation` is the cheapest at 75,582 and the most numerous at
+2,856,305 - consistent with `eagerept=0` and with the shadow EPT cache
+answering most of them.
+
+### The stale constant that made the cost model wrong
+
+`rig-dump-state.py` printed *"launch-time price list says ~3,100 a read,
+~2,200 a write"* as **hardcoded text beside a computed number**. The write
+half is right; the read half is stale by ~50x and predates
+`shadowvmcs=1`, whose own note records shadowing taking VMREAD and VMWRITE
+"from 65.7% of every exit to six and 411". **Shadowing made reads cheap
+and the printed constant never followed.**
+
+That constant was load-bearing. A model built on it - and on a separate
+~4,600 derived by dividing an exit's whole cost by its access count -
+produced `6c1dab1`'s "81% of the handler is read latency". At the measured
+price it is **under 1%**.
+
+The printer now names the five members and says to read them instead of
+assuming a price. **A number printed beside a measurement gets read as
+part of it**, which is the same family as `vmcs.h:143` quoting a retracted
+1,606 cycles - already recorded as the third instance of a number
+outliving its retraction. This is the fourth.
+
+### Where the cost actually is, stated as an open question
+
+At ~183,000 cycles an exit, with reads at 60 and writes at 2,040:
+
+    33.1 reads  x    60 =    1,986 cyc    1.1%
+    20.6 writes x 2,040 =   42,024 cyc   22.9%
+    ---------------------------------------------
+    VMCS traffic            44,010 cyc   24.0%
+    everything else        139,212 cyc   76.0%
+
+**Three quarters of a `vmresume` exit is not VMCS traffic at all.** What it
+is has not been measured, and every cost avenue this session pursued was
+aimed at the quarter. That is the next question, and it now starts from
+measured prices rather than a hardcoded constant.

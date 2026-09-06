@@ -3734,8 +3734,38 @@ def dump_vmcs02_split(args, elf, instance):
           f"reached the end")
     print(f"  --- {all_access / whole_calls:.1f} VMCS accesses a call; over "
           f"the slots that take them, {hot_cycles / max(hot_access, 1):,.0f} "
-          f"cycles each (launch-time price list says ~3,100 a read, ~2,200 "
-          f"a write)")
+          f"cycles each")
+    # **The launch-time price was HARDCODED here as "~3,100 a read,
+    # ~2,200 a write" and the read half is stale by two orders of
+    # magnitude.** The hypervisor measures it on every boot - 1,000
+    # accesses each of `exit_reason`, `guest_rip` (shadowed),
+    # `guest_gdtr_base` (unshadowed), and writes of `guest_rsp` and
+    # `guest_gdtr_limit` - into `vmread_benchmark_cycles` and its four
+    # siblings, and read live off a running guest they give:
+    #
+    #     read  shadowed    57.3 cyc   unshadowed    60.4   ratio 1.05x
+    #     write shadowed 2,038.2 cyc   unshadowed 2,043.2   ratio 1.00x
+    #
+    # The write half of the hardcoded pair was right; the read half was
+    # not, and it predates `shadowvmcs=1` - whose own note records
+    # shadowing taking VMREAD and VMWRITE "from 65.7% of every exit to
+    # six and 411". Shadowing made reads cheap and the printed constant
+    # never followed.
+    #
+    # That constant was load-bearing: a cost model built on ~3,100 (and
+    # on a separate ~4,600 derived by dividing an exit's whole cost by
+    # its access count) concluded 81% of the handler was read latency.
+    # At the measured price it is under 1%. **A number printed beside a
+    # measurement gets read as part of it** - this is the same family as
+    # `vmcs.h:143` quoting a retracted 1,606 cycles, which BACKLOG.md
+    # records as the third instance of a number outliving its
+    # retraction.
+    print(f"  --- launch-time price list, MEASURED per 1000 accesses, is "
+          f"in vmread_benchmark_cycles / vmread_shadowed_cycles / "
+          f"vmread_unshadowed_cycles / vmwrite_shadowed_cycles / "
+          f"vmwrite_unshadowed_cycles. Read them rather than assuming a "
+          f"price; the read half of the constant that used to be printed "
+          f"here was stale by ~50x.")
     print(f"  --- {100.0 * hot_cycles / max(total, 1):.1f}% of the phase is "
           f"slots that touch the VMCS, {100.0 * cold_cycles / max(total, 1):.1f}%"
           f" is software that touches nothing")
