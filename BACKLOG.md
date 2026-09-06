@@ -70198,3 +70198,78 @@ VMCS would have, and is unavailable (`a1ac974`).
 cycles, in the phase that matters.** Every previous cost reading was taken
 in a wedged or transient state and could not be attributed to the boot's
 critical path.
+
+## 81% of the handler is VMCS READ latency. The write side is already solved
+
+Same window as `51d64d2`, boot 191, 3-process phase, cpu 0, 4,060 round
+trips per second:
+
+    writes ELIDED per round trip        writes PERFORMED per round trip
+      guest_state   46.02                 control    0.42
+      control       19.59                 hot_state  0.37
+      hot_state      4.63                 -------------------
+      -------------                       total      0.79
+      total         70.24
+
+**70 writes elided against 0.79 performed - 98.9% of the write side never
+touches the processor.** `control_writes_skipped` alone runs 97.9%, and
+`hot_state` 92.5%. The elision machinery this tree already has is doing
+its job almost perfectly.
+
+So the four expensive phases in `51d64d2` are **not** expensive because
+they write. Against reads:
+
+    reads per round trip   61.4      (30.68/exit x 2.00 exits)
+    writes performed        0.79
+    at ~4,600 cycles per real VMREAD:
+      61.4 x 4,600 = 282,256 cycles
+      handler total = 348,046 cycles
+      -> 81.1% of the handler is VMCS READ latency
+
+**That is the whole problem in one number.** `build: after vmptrld` is
+expensive because building vmcs02 must *read* vmcs12; `save_l2_state` is
+expensive because it must *read* vmcs02. Both are reads that miss the
+cache (76.9% miss, `1ec74e3`) and each miss is an exit to KVM.
+
+### What this closes and what it leaves
+
+**Closed by measurement, not argument:**
+
+- **the write side** - 98.9% already elided, nothing left to win
+- **instrumentation** - 3.5% of the handler total (`51d64d2`)
+- **the EPT path** - idle in this phase
+- **removing redundant reads** - done, and the redundant ones were the
+  cache hits (`1ec74e3`); the 61.4 reads/RT that remain are distinct
+  fields
+
+**What is left is a single lever with a single blocker.** 61 distinct VMCS
+field reads per round trip, each ~4,600 cycles because it exits to the
+layer below. The architectural answer is **enlightened VMCS** - the fields
+live in a shared page and a read is a memory load. `a1ac974` closed it:
+KVM advertises max hypervisor leaf `0x40000001` and `KVMKVMKVM`, leaf
+`0x40000004` does not exist, so `underlying_offers_evmcs` is false and
+nothing zpp does creates it.
+
+**So the guest's boot speed is bounded by something outside zpp**, and
+that is now a measured statement rather than a suspicion: 81% of the
+handler is a cost that only the layer below can remove.
+
+### The one thing that would test it without lying to the guest
+
+`boot-zpp.sh` passes no `hv-` flag; `boot.sh` passes `hv-passthrough`.
+Adding `hv-evmcs` to the launcher would very likely make leaf
+`0x40000004` appear and `underlying_offers_evmcs` become true.
+
+**That is not a fix** - CLAUDE.md is explicit that anything only working
+while something else implements it is not a fix, and the goal is to need
+nothing underneath. **But it is a legitimate diagnostic**, and it is now
+the single most informative experiment available: it would say whether
+81% of the handler disappearing changes the boot outcome at all. If it
+does not, the whole cost avenue is closed for good and the remaining
+failure is elsewhere. If it does, the 81% is confirmed as the binding
+constraint and the question becomes how to get the same effect without a
+Hyper-V interface underneath.
+
+Recorded as the next experiment, explicitly labelled as a measurement
+crutch, with its result to be reported as "obtained under a launcher
+nothing else in this tree uses".
