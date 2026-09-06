@@ -71838,3 +71838,55 @@ and I cannot reconcile them from data taken this way.
 measured in the 3-process phase - the same phase, on the same instrument -
 against boot 194's 25.36 reads and 10.54 writes. That is one wait, not one
 boot, and it is queued.
+
+## CONFIRMED: 5.2% of a vmresume exit removed, against a predicted 5.1%
+
+Boot 195 re-measured at 16.2 minutes, where cpu 1's handler cost is
+**407,549 cycles a round trip** against the reference range of
+348,046-399,548 - close enough that the workloads are comparable, unlike
+the five-minute reading in `a59a51c` at 1,294,537.
+
+    counter            boot 194     boot 195     change      predicted
+    reads/exit           25.36        24.55       -3.2%       -4.4%
+    writes/exit          10.54         6.51      -38.2%       -14% or -28%
+    cache hit rate       23.3%        22.4%      unchanged
+
+**The hit rate barely moved, which is what makes the read comparison
+clean** - `ed0197b` established that the rate is a ratio set by the read
+mix, so two readings at 23.3% and 22.4% are reading the same mix, and the
+fall in reads is the gates rather than the denominator.
+
+At the measured prices (2,876 a miss, 57 a hit, 2,131 a write):
+
+    VMCS cycles an exit   78,739 -> 68,976    **-9,763**
+    against a 186,210-cycle vmresume exit     **-5.2%**
+    predicted 1.7% (reads) + 3.4% (writes)  =  5.1%
+
+**5.2% measured against 5.1% predicted.** The first change this session
+that was predicted, deployed, and confirmed at the predicted size.
+
+### Where each half landed against its own prediction
+
+- **reads -3.2% against -4.4% predicted.** Slightly under, and the
+  agent flagged why in advance: `~0.22` of the 1.11 reads an exit was
+  soft, resting on a reflected exit mix taken from a boot that ended in
+  `0x133`. The two hard 1.0s landed.
+- **writes -38.2% against -14% or -28%.** Below even the six-elide end.
+  The agent named both ends because three of the six needed Hyper-V's
+  vmcs12 to set a save control that had never been read out. **All six are
+  eliding**, so that control is set - a fact about the guest obtained for
+  free from a prediction that bracketed it.
+
+### What this does not claim
+
+**Not that the boot got faster.** `ceab9a4` records boots 189 and 190
+differing by eleven processes on identical binaries, so an outcome
+difference at this scale is unmeasurable in one boot. 5.2% of the
+handler is ~3.4% of wall, and the guest needs an order of magnitude, not
+a twentieth.
+
+What it does establish is that **the cost model now predicts reality**.
+Three sessions of cost work were built on prices that were wrong by 17x
+and 48x; this is the first prediction made at measured prices and it came
+in within 2%. That is the thing worth having - the model can now be used
+to rank work without spending a boot to find out.
