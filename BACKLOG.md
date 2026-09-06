@@ -70548,3 +70548,67 @@ before the stop, or something pins the value. **Do not build on the 300 s
 figure until it is explained.** The bugcheck's own P4 (`0xffffcf898f23d4a0`)
 is not entry [3]'s IRP either, so the entry that reached the deadline is
 not among the six the list still holds.
+
+## The wall at 14 processes: services.exe is preempted, and no svchost ever starts
+
+Boot 192, stopped in `paused (shutdown)` with memory intact, anchor proven
+on every read (`PsActiveProcessHead` first entry is `System`):
+
+    winlogon.exe   3 threads   UserRequest, WrQueue x2
+    lsass.exe     13 threads   WrLpcReceive, UserRequest x3, WrQueue x8,
+                               WrAlertByThreadId
+    services.exe   3 threads   **WrQuantumEnd**, WrQueue x2
+
+**`WrQuantumEnd` is not a block. It is a thread that was preempted at
+quantum end and is waiting to be scheduled again** - runnable, not
+waiting on anything.
+
+And the process list has **`services.exe` but not one `svchost.exe`.**
+After 45 minutes the service control manager has started **zero**
+services. That is what "14 processes" has meant on all three boots.
+
+### This reconnects the cost work to the failure
+
+The picture across every instrument now agrees:
+
+- the guest spends its entries in the clock and quantum-end path - five
+  addresses, `KiQuantumEnd+0x538` among them (`4fc1d2a`, `9c29788`)
+- `services.exe` is **runnable and preempted**, not blocked
+- nothing else is stuck: winlogon waits on a user-mode object, lsass is
+  idle in ordinary waits
+- no service ever starts, so the boot cannot advance past 14 processes
+- eventually a device power IRP misses its 600 s budget and `0x9F` fires,
+  naming whichever driver held one
+
+**So the wall is not a deadlock and not a lost event. It is
+`services.exe` failing to accumulate enough processor time to start
+services**, on a machine where the clock path consumes the processor.
+
+That is consistent with boot 192 being 32% faster and dying identically:
+32% is not enough to change the outcome, and `e63e586`'s reading that the
+failure is "functional, not a race" needs qualifying - **it is a race, but
+against a margin far larger than 32%.**
+
+### The recipe's barrier-2 invariant is absent on both boots
+
+`multicore-login-screen-reached-recipe` records barrier 2 as 13-14
+processes whose invariant is **one `lsass.exe` thread stuck in
+`WrVirtualMemory`**, verified as the same thread object seven minutes
+apart. **Boots 189 and 192 both have 14 processes and neither has a single
+`WrVirtualMemory` thread** - 14 and 13 threads respectively, every wait
+reason ordinary.
+
+Two independent boots is enough to say the invariant does not hold for
+this failure. Either these are not barrier 2, or the invariant was
+specific to the boot it was recorded from. **Process count alone does not
+identify barrier 2**, which `63196e3` already flagged from boot 189 and
+this confirms.
+
+### Caveat on the single sample
+
+One `WrQuantumEnd` reading is a snapshot, and a thread caught just after
+preemption looks identical to one starved for minutes. What makes it more
+than a snapshot is the **zero svchost processes after 45 minutes** - that
+is a cumulative fact, not an instant. Sampling `services.exe`'s
+`ContextSwitches` (`_KTHREAD+0x154`) twice would settle it outright, and
+that field is already documented in this tree.
