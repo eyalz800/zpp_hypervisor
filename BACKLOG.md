@@ -72821,3 +72821,75 @@ outcomes and all three are informative:
   unreconciled,
 - `user_rip_unattributed` is most of `user_rip_samples` - the instrument
   failed, and it says so instead of printing an empty table.
+
+## The census can name the address space now - userip=1
+
+`a622eef` said attribution needed the census to record cr3 beside the RIP
+and called it "one word per row". `6d2b344` built it, and the design is
+better than that:
+
+**A separate user-mode-only `(cr3, rip)` census**, not a widening of the
+existing arrays. Two tables over one stream:
+
+- a 512-row per-CPU hashed pair table keyed on `(cr3, rip)`
+- a 24-slot linear **non-evicting** dictionary of cr3 values
+
+**The dictionary is the control.** A process with a large share there and
+no row in the pair table is the pair table reporting its own saturation -
+which a hashed table with decay eviction cannot say about itself. That is
+the "an instrument that cannot report its own failure" rule applied at
+design time rather than discovered afterwards.
+
+### The cost, measured on the artifact
+
+    singleton  62,545,920 -> 62,951,424   +405,504  (+0.65%)
+
+Rejected with numbers rather than by argument: one extra word on
+`interrupted_rip` + `quiet_rip` is **1,048,576 bytes**, 2.6x more, and it
+attributes kernel addresses that gain nothing - every process shares them.
+
+**`userip=0` leaves the singleton exactly the same size**, because the
+arrays are members either way. So the switch saves cycles, not bytes, and
+that is why it defaults ON.
+
+### The cr3 is a VMREAD, and it is priced rather than hidden
+
+Both "free" sources were read and refused:
+
+- `l2_exit_cr3` sits behind `census_exits` (off by default) and reads on
+  **every** exit
+- `guest_state_cache[cpu][guest_cr3]` is `build_vmcs02`'s bookkeeping and
+  **a guest `mov cr3` does not exit**, so it would attribute every sample
+  to whatever the level above last wrote into vmcs12 - the same class of
+  error the site already refuses `hot_state_saved[cpu][0]` for
+
+So it takes one `guest_cr3` read, **gated on the address before the VMCS
+is touched**, and that gating is verified on the shipped ELF:
+`llvm-objdump` shows `is_user_address` called first with the false branch
+jumping past the `guest_cr3` call, and the `userip=0` build has no such
+call at all. Checking the artifact rather than the source is what
+CLAUDE.md asks for and it was done.
+
+### Reporting failure, and the mask
+
+`note_user_rip` returns false and writes nothing when the cr3 masks to
+zero, counted by `user_rip_unattributed`; **no row can carry cr3 0**, so
+"not recorded" is distinguishable from "recorded as zero".
+`user_cr3_overflow` does the same for the dictionary.
+
+Rows store cr3 masked to `0x000ffffffffff000`; the dictionary keeps it
+**unmasked** so the `...002` PCID survives. The reader prints raw, masked
+and the mask constant, and states that an unmasked compare "matches
+nothing and reads as *no process executes*" - which is exactly the failure
+`a622eef` would have hit.
+
+### Test
+
+53 checks, and **both negative controls run**: widening the mask to `~0`
+fails 7 checks; dropping cr3 from the hash key - the module-walk failure
+mode this whole change exists to escape - fails 3 and collapses two
+address spaces into one row. Suite 24/26 with only the two pre-existing
+failures.
+
+**Not yet deployed**: boot 201 is mid-flight. The next deploy carries it,
+and the module base will move again - re-read it.
