@@ -74302,3 +74302,26 @@ fires at 600 s cannot fire at 300 s. Either the effective timeout here is
 printing, or the age's "now" is not the clock the watchdog uses. The
 value 3,000,051,652 (100ns) is 300.0052 s - suspiciously close to a round
 300 - which favours the first. Not settled; do not quote the 600.
+
+## dbgeng replicated on boot 209 - but note which claim replicated
+
+    WerFault.exe   0x7ff74ec60000 + 0xa1000
+    wer.dll        0x7ff9518e0000 + 0xf2000
+    faultrep.dll   0x7ff951540000 + 0x84000
+    dbgeng.dll     0x7ff9507a0000 + 0x71c000     <- same size as boot 208
+
+Proof passed (first module is `WerFault.exe`), 40 modules walked, and the
+`dbgeng.dll` image size matches boot 208's `0x71c000` exactly.
+
+**The two boots support different strengths of claim, and conflating them
+would overstate the result.** Boot 208 showed dbgeng *executing* -
+`dbgeng.dll + 0x41e54d` was WerFault's hottest **differenced** address in
+a measured window. Boot 209 shows dbgeng only *loaded*, from the module
+list. Loaded is much weaker: `dbgeng.dll` is a static import of
+`faultrep.dll`, so its presence is guaranteed by WerFault starting at all
+and is not evidence about what ran.
+
+So what replicated is "WerFault, on the multicore boot, is the
+kernel-reporting flavour with the debug engine mapped" - twice. What was
+measured *once* is that it was running that engine. The second is the
+load-bearing claim and it still rests on boot 208 alone.
