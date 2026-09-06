@@ -74367,3 +74367,52 @@ reader and a poller disagree about the same guest, run the reader by
 hand before believing the poller.** Twenty-four minutes of "n=2" was one
 command away from being read correctly, and the command was one I had
 already written.
+
+## Boot 210 failed EARLIER than the wall, and its exit profile is different
+
+Boot 210 ran 53 minutes without ever starting `smss.exe`: `n=3`
+(`System`, `Secure System`, `Registry`) from the first sample to the
+last, ~64 samples. That is **not** the 14-process wall this
+investigation has been chasing - it is a stop before session manager
+launches at all, and it is the first time this session a boot has failed
+that early.
+
+It was not idle. KVM's own counters, read from the host and needing no
+monitor connection: `nested_run/s` **9,909** then **9,763** in two
+windows 20 minutes apart, and `guest_mode` 1 on both vCPUs on the first
+read. So both processors were executing the nested guest at roughly
+twice the 5,334/s settled rate this tree has recorded.
+
+**Exit profile, and the caveat comes first: this is CUMULATIVE over the
+whole 3,184 s, not differenced.** `CLAUDE.md` is emphatic that a
+cumulative figure averages a boot's phases, and this file has already
+recorded four numbers that were fiction for exactly that reason. It is
+recorded here as a *shape to compare against*, not as a rate.
+
+    vmresume       13,239,764   48.4%
+    int-window      5,516,191   20.2%      <- the striking one
+    wrmsr           3,773,424   13.8%
+    tpr-below       2,435,281    8.9%
+    ext-int         1,380,619    5.0%
+    ept-violation     780,265    2.9%
+    vmcall            104,083    0.4%
+
+**Interrupt-window exiting at 20.2% is 5.5 million requests for a window
+that then did not take the interrupt.** An interrupt-window exit means
+"tell me when the guest can accept an interrupt"; taking five and a half
+million of them, with `tpr-below` another 8.9% behind it, is the shape of
+an interrupt that is repeatedly pending and repeatedly not delivered.
+
+**What this does NOT establish**, and the gap is the reason no conclusion
+is drawn: there is no control. No differenced profile from a boot that
+*did* reach the wall exists at the same phase, so "20.2% is high" is
+compared against nothing. Two profiles from different phases of different
+boots are not comparable, which is the mistake `boot.sh` versus
+`boot-zpp.sh` already cost this project once.
+
+So the next boot takes an exit-reason profile at the *same elapsed time*,
+and both get differenced. That is one command and it converts this from
+a suggestive number into a comparison.
+
+Also noted: `vmcall` is only 104,083 - the VTL call count - which is low
+for 53 minutes, and no `vtl_fresh` line appeared in the dump at all.
