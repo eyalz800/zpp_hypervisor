@@ -75299,3 +75299,25 @@ session added.
 
 Tally: nine boots, **two healthy** (212, 218), six stalled A, one stalled
 B. 2/9 against the recipe's 7/20.
+
+## Running tally after ten boots
+
+    healthy    212 (polled), 218 (unpolled)          2
+    stalled A  211, 213, 215, 216, 217, 219, 220     7
+    stalled B  214                                   1
+
+Stalled A's band, widened by boots 219 and 220 from the six-sample
+figure: cpu0 **8,709-8,804/s** (1.1%, was 0.36%), cpu1 1,185-1,196/s,
+`vmcall` **124-152** per ~62 s window. Still a narrow attractor; the
+0.36% was optimistic on six samples, as such figures usually are.
+
+**Two healthy boots in ten**, against the recipe's 7 in 20. Not
+inconsistent - ten boots cannot separate 20% from 35% - and the triage
+now costs ~13 minutes rather than 30-60, so the cost per sample is a
+third of what it was when this session started.
+
+What a healthy boot is now worth, and why the cycling continues rather
+than switching to analysis: both remaining questions need one.
+`a4db23e`'s `IntcOED` finding rests on a single IRP read and wants a
+second; and the goal itself - the login screen - has only ever been
+reached from the healthy state.
