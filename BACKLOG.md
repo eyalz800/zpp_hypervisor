@@ -69410,3 +69410,70 @@ enlightened-VMCS closure (KVM advertises max leaf `0x40000001`), and the
 instrument fixes all stand - none depended on the guest being wedged.
 
 **Holding this boot. `LogonUI.exe` is the next thing to look for.**
+
+## Boot 189 reached VBS-running user mode, then died to a 600-second watchdog
+
+**The furthest a 2-vCPU boot has gone in this session.** zpp resident (2
+`allocate_rwx`), `ZPP_CPUS=2`, elapsed 51.9 min:
+
+    26.9 min    3 processes   System, Secure System, Registry
+    42.6 min    9 processes   + smss, csrss x2, wininit, winlogon
+    51.9 min   14 processes   + services.exe, lsass.exe, LsaIso.exe,
+                                fontdrvhost.exe x2, WerFault.exe
+               VM status: paused (shutdown)
+
+**`LsaIso.exe` is present.** Per the login-screen recipe, `LsaIso.exe`
+beside `Secure System` exists **only under Credential Guard** - so VBS was
+genuinely running, nested, on zpp, in user mode. That is the configuration
+the goal asks for; only `LogonUI.exe` was missing.
+
+### It did not wedge. It was killed by a timer
+
+`KiBugCheckData` on the stopped guest (memory intact, because
+`-no-reboot -no-shutdown` is unconditional):
+
+    STOP 0x9F  DRIVER_POWER_STATE_FAILURE
+    param1 0x3   a device object has been blocking an IRP for too long
+    DEVICE_OBJECT 0xffffa308a9067930  blocked IRP 0xffffa308a9a1a8a0
+    DRIVER_OBJECT 0xffffa308a8d1a2c0  ->  \Driver\IntcAudioBus
+
+**0x9F param 3 is a flat 600-second watchdog**, and the reader prints its
+own caveat: it names *who held an IRP when the timer expired*, which is not
+what caused the stall. A machine that is merely slow for 600 s produces
+this bugcheck naming whichever driver happened to hold one.
+
+`WerFault.exe` parented by `wininit` is beside it in the process list,
+consistent with a critical-process failure report rather than a clean
+shutdown.
+
+### This reframes the whole investigation
+
+The evidence now fits **a race against a 600-second timer**, not a
+deadlock:
+
+- the guest **does** stall - the VTL counters freeze for tens of minutes,
+  reproducibly, in a tight coordinate band
+- but it **keeps progressing through the stall**, 3 -> 9 -> 14 processes,
+  with those counters at +0 the whole time
+- if the stall outlasts a power IRP's 600 s budget, `0x9F` fires and the
+  boot dies **whatever it was about to do next**
+
+So the "wedge" is most likely a **severe slowdown**, and the failure is
+the watchdog reaching its deadline first. `\Driver\IntcAudioBus` is the
+bystander the timer happened to catch - which is exactly what
+`f899fe2` concluded about `VBoxSup.sys` from the other direction, and the
+second time this investigation has named a driver that was only holding
+something when the music stopped.
+
+**INFERRED and flagged:** that the watchdog fired *because* of the
+slowdown rather than because of a genuine IntcAudioBus fault. What would
+settle it: whether the blocked IRP's own age exceeds 600 s
+(`scripts/guest-power-irps.py` ages every power IRP and the guest is
+stopped with memory intact, so this is readable now), and whether a boot
+that reaches user mode faster survives.
+
+**This is a better target than anything in the convoy analysis**, because
+it is quantitative and has a deadline: the guest needs to reach a settled
+user mode inside 600 s of the power IRP being issued. Every microsecond
+removed from the stall is now measurable against a known budget rather
+than against an unknown one.
