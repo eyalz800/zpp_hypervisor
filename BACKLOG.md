@@ -73793,3 +73793,81 @@ outcomes, all informative:
   `5c9aba1`'s last open item goes with it.
 - the control fails - nothing above is a finding, and
   `shadowing_ineffective` / `vmcs_shadowing_stranded` are where to look.
+
+## The CS/SS shadow bet is now measurable - and a divergence window was found first
+
+`5c9aba1` queued moving `guest_cs_ar_bytes`/`guest_ss_ar_bytes` from the
+read-write shadow list to read-only, worth **3,791 cyc/RT each** - the
+un-elidable `copy_shadow_to_vmcs12` read-back - and said it needed a
+counter rather than an argument. `993d200` builds the counter and found
+two things on the way that matter more than the saving.
+
+### 1. The existing census structurally CANNOT answer it
+
+`record_vmcs_field_use` is called from **inside `on_guest_vmwrite`**. A
+writable-shadowed field's VMWRITE **does not exit**, so `0x4816` and
+`0x4818` can *never* appear in `vmcs_field_write_count` while they are
+shadowed writable. **Their absence from `dump_field_use` is the bitmap
+working, not hvix64 abstaining** - and reading it the other way would have
+been a clean, confident, entirely wrong result.
+
+That is the same shape as `108d445` (module attribution cannot name a
+process) and it is worth stating as a class: **an instrument placed on the
+exit path cannot see what the change removes from the exit path.**
+
+### 2. A real divergence window, which zpp does not close and KVM does
+
+A **read-only**-shadowed field's VMWRITE exits into `on_guest_vmwrite`,
+which stores into `guest_vmcs12`. The value is not lost. **But the
+hardware shadow region still holds the old value until the next
+`copy_vmcs12_to_shadow`, and an L1 VMREAD in between is answered stale
+with no exit to repair on** - the level above would see its own store not
+take effect.
+
+**KVM repairs this inline**: `.references/kvm/nested.c:5704`, inside
+`handle_vmwrite`, does `vmcs_load(shadow) / __vmcs_writel / vmcs_clear /
+vmcs_load(back)` for `is_shadow_field_ro`. Those are the same three region
+instructions phase slots 41/43/44 and 46/48/49 bracket here, so **such a
+VMWRITE costs an exit *plus* a republish** - which the pricing in
+`5c9aba1` did not include because the question had not arisen.
+
+Also `nested.c:5695` masks AR bytes with `0x1f0ff` and its comment names
+this exact configuration - "intercepted for VMWRITE but not VMREAD in L1".
+**zpp does not mask.** Recorded; not acted on, since the fields were not
+moved.
+
+### 3. The decision rule, fixed before the reading exists
+
+    saving   3,791 cyc/RT per field (slot 47, the un-elidable read-back)
+    cost     one vmwrite exit at the vmread row's 106,488 cyc
+
+    break-even  **0.0356 writes/RT** = one per 28.1 round trips
+    above 0.0356          -> loss under any pricing, do not move
+    below 0.0178          -> win even if a vmwrite exit costs 2x a vmread
+    between               -> undecided; price the republish, do not pick
+    both fields together  -> 0.0712
+
+**And the counter is a lower bound**: a write of the value already present
+is invisible to a `value != cache` compare, so **zero is necessary and not
+sufficient - it flatters the change.** Stated in advance so the reading
+cannot be fitted afterwards.
+
+A prior worth having: the shadowing-OFF census quoted in
+`nested_shadow_vmcs.cpp` records the segment-base and access-right block
+at **seven writes apiece out of 2,176,011** - five orders of magnitude
+under break-even. Strong, and still one line of prose from an older boot
+in a different configuration, which is why the counter exists.
+
+### The instrument
+
+`ZPP_CENSUS_SHADOW_WRITES`, **default OFF**, manifest `shadowwr=0`,
+verified on the artifact - `copy_shadow_to_vmcs12` is `0x39e` bytes off
+and `0x50d` on, so the code is **gone rather than predicated**. Off by
+default because the compare sits *inside* the interval slot 47 brackets,
+and slot 47 is the 34,118 cycles the whole break-even rests on.
+
+Four ways of reporting its own failure, including a **positive control**:
+all nine writable fields are censused, so `guest_rip` and the
+interruptibility field must move - if they do not, the reader prints
+`*** CONTROL FAILED ***` and refuses the rows. Singleton +8,192 bytes,
+**so the module base moves when this is deployed.**
