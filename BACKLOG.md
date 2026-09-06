@@ -74234,3 +74234,71 @@ where WerFault falls relative to the arming, and WerFault does not exist
 yet. What it does establish is the **baseline**: six consecutive samples,
 spanning n=2 to n=9 and eighteen minutes, with no watchdog armed. Any
 arming seen from here is dateable against that.
+
+## RETRACTED: "the watchdog is NOT armed" was my own truncated instrument
+
+`161b490` reported six consecutive samples with the power watchdog
+unarmed, and then `WerFault` appearing at n=13 with it still unarmed -
+read as refuting the prediction in `7f7139a`. **All of that is void, and
+the fault is in the poller I wrote two commits earlier.**
+
+`rig-watch-order2.sh` piped `guest-power-irps.py` through
+
+    grep -E "NEVER ARMED|WatchdogStart [1-9]|age " | tr '\n' '|' | cut -c1-200
+
+and **`cut -c1-200` reached only the first two entries.** The post-mortem
+full list on that same boot:
+
+    [0]..[4]  MinorFunction 0  IRP_MN_WAIT_WAKE   WatchdogState 0
+    [5]       MinorFunction 2  IRP_MN_SET_POWER   WatchdogState 1 (ARMED)
+              Irp 0xffffd20363994010  CurrentDevice \Driver\USBHUB3
+              WatchdogStart 16,271,833,102   age 300.0 s
+
+The five entries the cut could reach are `IRP_MN_WAIT_WAKE`, and
+**`guest-power-irps.py` prints, on every one of them, that a wait-wake is
+never armed by design.** So the poller was not sampling a watchdog at
+all; it was re-reading a constant, and reporting it as a measurement six
+times.
+
+This is `CLAUDE.md`'s "a top-N cut hides exactly the thing a census
+exists to find", reproduced exactly, three weeks after that entry was
+written about the hot-address map. The cut was added for line-length
+tidiness. **The armed entry was item six of six.**
+
+Worse, it produced a *confident refutation*: the instrument agreed with a
+hypothesis by being blind to the only row that could disagree. That is
+the same shape as the RDX census in the table above, which "confirmed"
+a loop by censusing a sentinel.
+
+**What is actually true on boot 209**, from the post-mortem read:
+
+- The bugcheck is `0x9F` param1 `0x3`, `DEVICE_OBJECT 0xffffd20363943ca0`,
+  `IRP 0xffffd20363994010`, named driver `\Driver\USBHUB3`.
+- Those are **entry [5] exactly** - same IRP, same device. So this time
+  the accused is not an arbitrary bystander: the armed IRP is a real
+  `IRP_MN_SET_POWER` whose `CurrentDevice` is USBHUB3 itself, not null.
+- `\Driver\USBHUB3` is nonetheless the **fourth** driver this
+  investigation has named, after `VBoxSup.sys`, `IntcAudioBus` and
+  `fontdrvhost`. It is not being recorded as a culprit.
+
+### The ordering question is still open, and now has a bound
+
+Arming time is recoverable from the age. The guest was `running` at
+21:51:21 and `paused (shutdown)` by 21:52, so it stopped at ~21:51:30;
+minus the 300.0 s age puts the arming at **~21:46:30**. `WerFault` was
+**absent at 21:44:52 and present at 21:51:21**.
+
+So the arming falls *inside* the interval in which WerFault appeared.
+**The two cannot be ordered from this boot** - the poll gap is 6.5
+minutes and both events are inside it. Not "refuted", not "confirmed":
+unresolved, with a bound tight enough that a faster poll settles it.
+
+### An open discrepancy, recorded rather than explained
+
+The armed entry reads `age 300.0 s of 600 s (50.0% to bugcheck)` **at a
+machine that had already bugchecked on that very IRP.** A watchdog that
+fires at 600 s cannot fire at 300 s. Either the effective timeout here is
+300 s and the script's "of 600 s" is an assumption it should stop
+printing, or the age's "now" is not the clock the watchdog uses. The
+value 3,000,051,652 (100ns) is 300.0052 s - suspiciously close to a round
+300 - which favours the first. Not settled; do not quote the 600.
