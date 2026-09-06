@@ -74582,3 +74582,33 @@ session) is now replaced by a differenced one from this build.
 minutes, doing 435 VTL calls a second. Boot 211 would have been killed by
 this criterion at 13 minutes instead of 28, and boot 210 at 13 instead of
 53.
+
+## The VTL-rate criterion made a forward prediction and it held
+
+At 13 minutes boot 212 looked identical to boots 210 and 211 by every
+instrument that had been used all session: `n=3`, `System` +
+`Secure System` + `Registry`, no `smss.exe`, `VM status: running`, zero
+armed watchdogs. Boot 210 sat in that exact state for 53 minutes and
+boot 211 for 28.
+
+The differenced window called it healthy anyway, on `vmcall` alone:
+
+    boot 210   killed at 53 min, never reached smss.exe
+    boot 211     2.16 vmcall/s at 13 min  ->  killed at 28 min, never reached smss.exe
+    boot 212   435.49 vmcall/s at 13 min  ->  smss.exe at 15.5 min
+
+**`smss.exe` appeared at 23:49:46, about two and a half minutes after the
+measurement that predicted it.** The criterion was applied before the
+outcome was observable, and the outcome agreed.
+
+That is worth more than the individual numbers, because it is the first
+*prospective* test anything in this investigation has passed. Every other
+figure in this file was fitted to a boot that had already finished, and
+`CLAUDE.md` lists eight ways that goes wrong. A criterion that names the
+outcome in advance, on a state that looks identical to the failing one by
+every other reading, is a different kind of evidence.
+
+**One prediction is one prediction.** n = 1 in each arm, and the honest
+reading is "consistent with", not "established". What makes it worth
+acting on now is the cost asymmetry: applying it wrongly loses one boot,
+and not applying it lost 81 minutes across boots 210 and 211.
