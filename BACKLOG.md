@@ -73958,3 +73958,40 @@ commit earlier and which I did not apply to the catcher itself.
 `cmp`s the two census dumps - printing `*** BYTE-IDENTICAL ***` with the
 `elapsed cycles` argument when they match. A frozen reading is now only
 offered as evidence when the guest was alive at both ends of the window.
+
+## Every boot that reaches 14 processes dies to 0x9F. Seven for seven
+
+Tally across this session's 2-vCPU boots, zpp resident on every one:
+
+    reached 14 processes   189 192 195 200 202 203 207   = **7**
+    of those, STOP 0x9F    189 192 195 200 202 203 207   = **7**
+    reached LogonUI.exe                                  = **0**
+    stalled at 3 processes 190 191 193 194 196 197 198
+                           199 201 204 205 206           = 12
+
+**Seven walls, seven `0x9F DRIVER_POWER_STATE_FAILURE`, zero login
+screens.** The terminal state is not a coincidence of one boot or one
+configuration - it has survived the eagerept/vtlcap reversion, the read
+gates, the write elisions, and a 2.4x spread in how fast the wall was
+reached (21.9 to 51.9 minutes).
+
+That is the most reproducible fact in this investigation, and it is worth
+stating as a bound on every explanation offered so far: **whatever the
+wall is, it produces the same bugcheck every time, from a 14-process
+guest with VBS running, regardless of speed.**
+
+### What the seven have in common, from the readings that survive
+
+- **14 processes**, always the same set, always with `WerFault.exe`
+  present and **zero `svchost.exe`**
+- **`LsaIso.exe` running** - Credential Guard genuinely up
+- `0x9F` param1 `0x3`, naming a driver that
+  `guest-power-irps.py` shows is an arbitrary victim of a flat 600-second
+  watchdog (`bd904d9`)
+- one genuine live reading of `services.exe` at the wall, boot 200's, and
+  it shows the SCM **running at 39.8 context switches a second and
+  starting nothing** (`d23d54e`)
+
+The frozen readings from boots 203 and 207 are withdrawn as evidence
+(`e8cfdd5`) - both were taken across a window in which the guest stopped.
+**So there is one live wall reading, and it says the SCM runs.**
