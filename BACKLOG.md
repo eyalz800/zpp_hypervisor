@@ -72552,3 +72552,54 @@ finishing). What would settle it: walk the remaining processes and see how
 many map `win32u.dll` at that base, then attribute by elimination or by a
 per-process sampler. **Two drivers have already been named wrongly this
 session; this one waits for the walk.**
+
+## Module attribution cannot name the process - system DLLs share a base
+
+Continuing the walk from `f649eda`:
+
+    csrss.exe   22 modules, PROOF PASS
+      0x7ffe0eb132e5  -> win32u.dll + 0x32e5   (base 0x7ffe0eb10000)
+      0x7ffe11000665  -> **ntdll.dll + 0x160665**
+      0x7ffe111060c0  -> in NO module of this process
+
+    WerFault.exe 45 modules, PROOF PASS
+      0x7ffe0eb132e5  -> win32u.dll + 0x32e5   (base 0x7ffe0eb10000)
+
+**`win32u.dll` is at the identical base in both processes.** That is
+correct Windows behaviour - ASLR randomises a system DLL's base **once per
+boot**, not per process, so every process that maps it sees it at the same
+address.
+
+**So the module walk answers "what code" and can never answer "which
+process".** `f649eda` said WerFault having win32u loaded does not make it
+the caller; this shows the stronger statement - **no module walk can
+settle that**, because csrss maps the same bytes at the same address, and
+so will winlogon and fontdrvhost.
+
+That is a real limit on the instrument, found by using it rather than by
+reasoning about it, and it is worth recording because the obvious next
+step - "walk the remaining processes" - **cannot work.**
+
+### What the walk did establish
+
+- `0x7ffe0eb132e5` (6,303 samples) is **`win32u.dll + 0x32e5`**, a win32k
+  system-call stub, in a module mapped by every GUI process
+- `0x7ffe11000665` (6,347) is **`ntdll.dll + 0x160665`** - deep in ntdll,
+  not the `Nt*`/`Zw*` stub region near its start
+- `0x7ffe111060c0` (6,793, the single hottest user-mode address) is in
+  **no module of either process walked**, and sits **0xc0 bytes past
+  ntdll's mapped end** (`0x7ffe10ea0000 + 0x266000 = 0x7ffe11106000`).
+  Recorded unexplained rather than guessed at.
+
+### The route that CAN attribute, and it already exists
+
+The exit ring records **cr3 beside every `[l2-rip]`**, and `guest_cr3` is
+read per exit. A user-mode RIP tagged with the guest cr3 that produced it
+names the *address space*, and `_KPROCESS.DirectoryTableBase` - which
+`guest-user-module.py` now reads for every process - maps a cr3 back to a
+process name.
+
+**That is a join between two instruments this tree already has**, needing
+no new hypervisor code: take user-mode RIPs from the exit ring with their
+cr3, and look each cr3 up in the process list. It is the next read, and it
+is the only one that can say which process is making the win32k calls.
