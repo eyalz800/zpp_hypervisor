@@ -69353,3 +69353,60 @@ This is the same family as the `+0x543` test that the control refuted, two
 commits earlier: **a reading with no measured variance is not a
 measurement.** Twice in one session, and both times the check was cheap
 and available.
+
+## BOOT 189 WAS NEVER WEDGED - 3 processes to 9, including winlogon.exe
+
+**zpp resident (2 `allocate_rwx` markers), `VM status: running`,
+`ZPP_CPUS=2`, elapsed 42.6 minutes.**
+
+    26.9 min   System, Secure System, Registry                  3 processes
+    42.6 min   + smss.exe 536, csrss.exe 876, smss.exe 948,
+               wininit.exe 956, csrss.exe 964, winlogon.exe 1012  9 processes
+               walk complete to the list head, first entry System
+
+**`winlogon.exe` is running.** That is the stage immediately before
+`LogonUI.exe`, which is the goal.
+
+### The VTL counters read +0 through ALL of that
+
+This is the demonstration, and it is total. Across the same interval:
+
+    vtl_fresh_calls  cpu 0   +0 in every window
+    vtl_copy_calls   cpu 0   +0 in every window
+    vtl_fresh_calls  cpu 1   ~0.6-1.0/s   (the secure-kernel periodic tick)
+
+**The guest started the session manager, both client-server subsystems,
+`wininit` and `winlogon` while every counter I had been calling "the
+progress marker" sat at zero.** `1cc007d` recorded that the recipe says
+VTL count is not a progress measure; this is what that costs when
+ignored, measured on a live boot.
+
+### Every "wedged" call I made this session is now suspect
+
+Boots 185-189 were all declared wedged on VTL counters, at 20-40 minutes,
+inside the window the recipe explicitly reserves. Boot 189 - the one I
+happened to hold, only because the corrected policy landed while it was
+running - was **still progressing** the whole time.
+
+So:
+
+- **The five-boot "stall coordinate band"** (`e53b81c`, `8138e79`,
+  `1ec74e3`) is a band of where the VTL counters *stop*, which is a real
+  and reproducible event, but it is **not** where the guest stops. Those
+  boots may well have been progressing when killed.
+- **The convoy analysis** (`4fc1d2a` .. `f94789f`) was taken on guests
+  that were, by this evidence, plausibly still booting. The lock spin and
+  the census shapes are real observations; whether they describe a
+  *terminal* state or a *transient phase every boot passes through* is now
+  open, and the second is at least as consistent with what boot 189 just
+  did.
+- **`1ec74e3`'s outcome test** - "boot 189 wedges in the band like the
+  others" - is **withdrawn**. It did not wedge.
+
+### What this does not overturn
+
+The removal work's static count reduction, the `vcache=1` discovery, the
+enlightened-VMCS closure (KVM advertises max leaf `0x40000001`), and the
+instrument fixes all stand - none depended on the guest being wedged.
+
+**Holding this boot. `LogonUI.exe` is the next thing to look for.**
