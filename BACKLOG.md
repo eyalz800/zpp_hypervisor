@@ -72166,3 +72166,77 @@ different case - so the counter is pinned to one population from both sides.
 The first attempt at that second control **passed**, because the case did not
 exercise a dirty write at all; the case was extended rather than the control
 weakened.
+
+## Nothing escapes the guest-state elision - and a latent tsc_offset bug found on the way
+
+`6fac2df`. Three results, none of them the one the task was set for.
+
+### 1. The 10.10 writes a call was an artefact, and I could not reconcile it
+
+`a59a51c` recorded that `build_vmcs02`'s "every guest-state field" slot
+read **6.18 -> 10.10 writes a call** across a change that only *adds*
+gates, called it unreconcilable, and refused to build on it. **It was
+right to refuse.** `vmcs02_split_*` is boot-cumulative and is explicitly
+on `DELTA_REFUSED_MEMBERS`; every gate has a precondition that is false
+until a vmcs02 has run, so a young boot's cumulative mean is dominated by
+calls that *cannot* elide.
+
+Three checks settle it without a boot:
+
+- 6.51 writes/exit x 2.005 exits a call = **13.05 writes a call for the
+  whole handler**, while the split's rows sum to **20.49 for
+  `build_vmcs02` alone** - a subset exceeding its superset
+- the slot rose across a change that only adds gates
+- at 46.02 skips a round trip the loop contributes ~0, leaving 11 sites,
+  so 10.10 would mean the hot-state gate almost never fires - against a
+  **confirmed** 38% fall in writes per exit
+
+It now rides `--delta-phases` and prints its own subset check.
+
+### 2. All 57 writes in that slot are gated. There is no third path
+
+57 field encodings across three sites and eleven calls: 44 through the
+`guest_state_cache` loop (which correctly **refuses** the cache for the
+deferrable fields, since segment state per SDM 30.3 is rewritten by the
+processor and can only live in a read-back family), 9 through
+`hot_state_saved`, and 1-2 through `control_cache`. **The answer to
+"something escapes" is that preconditions fail, not that a write bypasses
+a family.**
+
+`guest_state_dirty_writes` **exists, is incremented, and had no reader
+anywhere in the tree** - it is in neither `done` nor `skipped`, so any
+write budget built from those two was missing a population. Three new
+subset counters now separate "escaped the family" from "the value really
+changed", which the old pair could not.
+
+### 3. A latent correctness bug, which is the real find
+
+**`apply_time_dilation` (`resume.cpp:415`) writes `field::tsc_offset`
+directly, and that field is on `control_fields`.** A grep over all 21
+members shows it is the only such writer outside `write_vmcs02_control`.
+With `running_l2` set it moves vmcs02's copy **under the cache**, so a
+later `build_vmcs02` would elide the write and enter L2 carrying an
+*earlier* exit's dilation offset.
+
+This is exactly the hazard CLAUDE.md records for the four excluded control
+fields - *"the cache would describe a field somebody else had moved"* -
+and it had not been found. Latent today because `dilate=01` compiles the
+path out, and fixed with a new `forget_vmcs02_control`: **invalidation,
+not routing**, because `running_l2` describes the entry about to happen
+rather than the present.
+
+### Prediction, and it is deliberately null
+
+    writes/exit          6.51, UNCHANGED - nothing here removes a write
+    cycles saved              **0**
+    slot 6 DIFFERENCED   1-4 writes/call, not 10.10
+
+**This is a correctness fix, an instrument fix and a retraction, not a
+performance change**, and it is recorded as such so nobody looks for a
+speed-up that was never claimed. If the differenced slot reads 1-4 with
+`hot_state_writes_uncached` flat, **the write avenue is closed.**
+
+Tests 1,323 -> 1,347 and 133 -> 138, every gate negative-controlled both
+directions. **Two controls passed on the first run** - the dirty-write and
+bounds-check cases - and in both the agent extended the case rather than
+weakening the control, which is the right way round and worth naming.
