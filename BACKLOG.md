@@ -68868,11 +68868,48 @@ Landed, with the counts they change:
 | `cr3_seen` `guest_cr3` | gated `closed=` | per exit |
 | control pin/primary read-backs | gated `closed=` | per L2 entry |
 
-Predicted, and falsifiable on the rig with `--delta`: at the default
-`census=0 closed=0`, `vmcs_reads_taken / exits` should fall by **4** -
-three per exit plus the ring's - and `vmcs_reads_taken / l2-entries` by
-a further **5** (three per reflection, two per entry). Anything short of
-that means a site is reached by a path this audit did not walk.
+Predicted, and falsifiable on the rig with `--delta`, at the default
+`census=0 closed=0`:
+
+- **4 fewer VMCS reads per exit** - the trampoline log, `last_resume_rip`
+  and the exit ring's RIP, plus `cr3_seen`'s `guest_cr3`. Every one of
+  the four ran on every exit `on_vm_exit` took.
+- **5 fewer per second-level entry** - three on the reflection
+  (`vm_entry_controls`, and the ring's activity state and CS selector)
+  and two on the entry (the pin and primary control read-backs).
+- At the measured 2.00 exits per second-level entry that is
+  **4 + 5/2 = 6.5 fewer reads per exit** in a nested steady state, and
+  the whole-exit figure is the one to difference. `vmcs_reads_taken`
+  counts every call to `vmcs::read`, cached or not - the increment is
+  the first line of the function - so a removed call site is exactly one
+  fewer count, with no cache interaction to reason about.
+
+Anything short of that means a site is reached by a path this audit did
+not walk.
+
+Verified on the artifact rather than by inspection, `llvm-objdump` over
+the shipped ELF, counting calls to the out-of-line accessor in each
+function. e53b81c against this branch, both `census=0 closed=0`:
+
+| function | accessor | before | after |
+|---|---|---|---|
+| `record_exit` | `guest_rip` | 1 | **0** |
+| `resume_guest` | `guest_rip` | 4 | 3 |
+| `on_vm_exit` | `guest_cr3` | 8 | 7 |
+| `on_vm_exit` | `guest_gdtr_base` | 8 | 7 |
+| `save_l2_state` | `vm_entry_controls` | 2 | 1 |
+| `reflect_l2_exit` | activity + CS | 2 | **0** |
+| `build_vmcs02` | pin + primary | 4 | 2 |
+| `on_vm_exit` | `guest_rip` | 16 | 19 |
+
+The last row is the one to read carefully, because it went **up**. That
+is the nine terminal `record_exit` calls now naming
+`vmcs.guest_rip()` themselves: five of them are in `on_vm_exit`, against
+the trampoline log and `l1_vmcall_rip` removed, which is 16 - 2 + 5 =
+19 exactly. All five are followed by `[[noreturn]] on_unhandled_exit`,
+so none is on a path a running machine takes. A static call-site count
+is not a dynamic one, and this row is why the prediction above is stated
+per exit rather than as a code-size claim.
 
 ### Negative 1: the hot-RIP census must keep reading the field
 
