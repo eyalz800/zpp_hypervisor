@@ -69307,3 +69307,49 @@ The five-boot coordinate band recorded in `e53b81c` and after stands as a
 measurement of where the phase-1 wedge sits; it is **not** the five-boot
 failure run it was written as, because at least some of those boots were
 killed before the recipe's own clock.
+
+## RETRACTED: "the removal took out cache hits". The hit rate is not stable in time
+
+`1ec74e3` concluded that 80.5% of the reads the removal eliminated were
+cache **hits**, from a single comparison: boot 188 wedged 36.2% against
+boot 189 wedged 23.2%. **The comparison does not hold.**
+
+The new reader printed 45.3% on wedged boot 189 - the *same boot* whose
+23.2% the conclusion rests on. Four consecutive 40 s windows on it, taken
+to see whether that was noise:
+
+    window 1   hits +6,206,845  misses +7,159,399   46.4%
+    window 2   hits +6,235,038  misses +6,896,323   47.5%
+    window 3   hits +7,590,067  misses +6,869,676   52.5%
+    window 4   hits +6,102,485  misses +7,239,726   45.7%
+    spread 45.7 .. 52.5, range 6.8 points
+
+**Within a window the rate is stable to a few points; across a boot it
+moved from 23.2% to ~47%** with no configuration change. Total cache-path
+traffic moved too - 244,000/s then, ~333,000/s now.
+
+So the 36.2% and 23.2% I differenced were **two boots at different
+times-since-wedge**, and the gap between them is smaller than the drift
+within one boot. `1ec74e3`'s mechanism - "removing redundant reads removes
+hits by construction" - is a plausible argument that I presented as a
+measurement, and the measurement does not support it.
+
+**Retracted**: the 80.5%/7% hits-vs-misses split, and with it the claim
+that the removal targeted "the half of the traffic that was already free".
+
+**Still standing**: the outcome test (boot 189 wedged at 26,257 fresh calls
+and 10,583 copies, inside the five-boot band), and the count reduction,
+which was verified **statically on the shipped ELF** and never depended on
+any runtime rate.
+
+**What I should have done, and it costs one extra sample:** before
+differencing a rate across two boots, sample it twice within one. A
+quantity that drifts by 24 points inside a single boot cannot carry a
+13-point difference between boots. The reader now prints these
+automatically, so the sample is free from here on - the whole reason the
+counters were worth wiring in.
+
+This is the same family as the `+0x543` test that the control refuted, two
+commits earlier: **a reading with no measured variance is not a
+measurement.** Twice in one session, and both times the check was cheap
+and available.
