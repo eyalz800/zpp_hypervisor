@@ -75045,3 +75045,47 @@ work.
 Tally over seven boots: **one healthy (212), five stalled A (211, 213,
 215, 216, 217), one stalled B (214)**. One in seven against the recipe's
 7 in 20 - low, but seven boots cannot distinguish 14% from 35%.
+
+## Control: is the POLLER causing the stall? Boot 218 runs with no watcher
+
+Six of the last seven boots stalled, and every one of them ran
+`rig-watch-order4.sh` at a 20-second cadence. That poller issues hundreds
+of `xp` reads per cycle through the QEMU monitor, and the walk takes
+minutes - so the guest is being read almost continuously from the moment
+the kernel base is logged.
+
+`CLAUDE.md` already carries the general form of this: **"a reset that
+appears while gdb is attached is the debugger's until proven
+otherwise"**, and beside it the measured case where sampling a breakpoint
+by hand held the machine for tens of seconds and tripped Hyper-V's
+synthetic watchdog. The monitor is not gdb, but it is the same kind of
+interference and it has never been controlled for here.
+
+**The evidence is genuinely mixed, which is why this needs a control
+rather than an argument:**
+
+- Boots 213, 215, 216, 217 ran the 20 s poller and all stalled.
+- Boot 212 *also* ran the 20 s poller and reached the wall - but it is
+  the boot whose watcher I killed and restarted four times for
+  measurements, so it had long unpolled gaps.
+- Boots 208 and 209 reached the wall under much slower pollers (90-120 s).
+
+So "aggressive polling prevents progress" is consistent with every boot
+except 212, and 212 is exactly the one with the gaps.
+
+**Boot 218 is the control: no watcher at all.** One `--delta 60` triage
+at ~13 minutes, and nothing else touching the monitor before it. A single
+variable against boots 213-217, which differ only in being polled
+throughout.
+
+Recorded before the result, so it cannot be fitted afterwards:
+
+- **stalled** -> the poller is exonerated, and six stalled boots are the
+  rig's own rate. Continue as before.
+- **healthy** -> one sample, not proof, but it makes the poller a live
+  suspect and the next step is obvious: run two more unpolled boots
+  before believing it.
+
+This costs nothing extra - the triage runs on every boot anyway. What it
+buys is the answer to a question that, if left unasked, would make every
+subsequent measurement suspect.
