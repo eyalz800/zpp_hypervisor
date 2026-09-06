@@ -30,6 +30,20 @@
 import re, socket, sys, time
 RIG, PORT = '192.168.1.199', 4446
 LINKS, NAME, TLIST, TENTRY, WREASON = 472, 824, 48, 760, 643
+# `_KTHREAD.ContextSwitches`, PDB offset 340 = 0x154, a 32-bit counter.
+#
+# **A WaitReason is a snapshot and cannot distinguish a thread just
+# preempted from one starved for minutes.** `WrQuantumEnd` in particular
+# means "preempted at quantum end, waiting to be scheduled" - runnable,
+# not blocked - and a single sample of it says nothing about whether the
+# thread is making progress. ContextSwitches differenced across two runs
+# of this script does: a thread that is being scheduled has a rising
+# count, a starved one does not.
+#
+# This exists because `services.exe` was found with a `WrQuantumEnd`
+# thread and zero `svchost.exe` children after 45 minutes, and the wait
+# reason alone could not tell those apart.
+CTXSW = 0x154
 # KWAIT_REASON, the ones that matter here
 R = {0:'Executive',1:'FreePage',2:'PageIn',3:'PoolAllocation',
      4:'DelayExecution',5:'Suspended',6:'UserRequest',7:'WrExecutive',
@@ -112,8 +126,15 @@ while cur and cur!=HEAD and cur not in seen:
         while th and th!=thead and th not in tseen and n<40:
             tseen.add(th); kt=th-TENTRY
             wr=rb(kt+WREASON)
-            print(f'  thread {kt:#x}  WaitReason {wr} = {R.get(wr,"?")}')
+            cs=rq(kt+(CTXSW & ~7))
+            cs=None if cs is None else (cs>>(32*((CTXSW>>2)&1)))&0xffffffff
+            print(f'  thread {kt:#x}  WaitReason {wr} = {R.get(wr,"?")}'
+                  f'  ContextSwitches {cs}')
             th=rq(th); n+=1
         print(f'{n} threads listed')
+        print('  ContextSwitches is only meaningful DIFFERENCED - run this '
+              'twice, seconds apart. A rising count is a thread being '
+              'scheduled; a frozen one beside WrQuantumEnd is a thread '
+              'that wants to run and is not getting to.')
         break
     cur=rq(cur)

@@ -71043,3 +71043,31 @@ be re-read after it (`allocate_rwx done at ...`).
 tree's best available figure remains 991 cycles from a controlled removal
 (`BACKLOG.md:30545`); the new members will either confirm it or replace
 it with a direct measurement.
+
+## guest-threads.py now prints ContextSwitches, because a WaitReason is a snapshot
+
+`5871b1e` found `services.exe` with a thread in `WrQuantumEnd` and zero
+`svchost.exe` children after 45 minutes, and recorded the caveat that one
+`WrQuantumEnd` reading cannot distinguish a thread **just preempted** from
+one **starved for minutes** - they look identical.
+
+`_KTHREAD.ContextSwitches` (PDB offset 340 = `0x154`) settles it, and the
+reader now prints it. Differenced across two runs seconds apart:
+
+    rising count                     the thread IS being scheduled
+    frozen beside WrQuantumEnd       it wants to run and is not getting to
+
+Validated on live boot 193: `System` threads read 892, 1, 1, 1, 1, 182 -
+small plausible integers, not the garbage a wrong offset or a bad dword
+path gives. The anchor (`PsActiveProcessHead` first entry is `System`)
+passes in the same run.
+
+**This is the measurement that would promote `5871b1e` from a snapshot to
+a fact**, and it needs a *live* guest at 14 processes - the stopped
+specimens cannot move, so it could not be taken on boots 189 or 192.
+Queued for the next boot that reaches that stage.
+
+The general form, which this file already carries in other words: **a
+state field says where a thread is, a counter says whether it is going
+anywhere.** Prefer the counter whenever the question is "is this
+progressing", and difference it.
