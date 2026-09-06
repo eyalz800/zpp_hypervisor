@@ -69243,3 +69243,67 @@ labelled as obtained under a launcher nothing else in this tree uses.
 measurement.** The remaining reads are misses because each is a distinct
 field needed once per exit; the cache cannot help and the only architectural
 alternative is unavailable.
+
+## Two method errors of mine this session, both named in the recipe I had
+
+Checked the deployed binary against the recipe that reached the login
+screen (boot 150). **All six switches match exactly**:
+
+    deployed  nested=1 reftsc=1 selfipi=0 windowtpr=0 drop=0 dropcnt=0
+    recipe    nested=1 reftsc=1 selfipi=0 windowtpr=0 drop=0 dropcnt=0
+
+So there is **no regression in the binary** - five consecutive wedges are
+not a broken configuration.
+
+And boot 189 is a genuine phase-1 wedge, confirmed by the instrument the
+recipe names rather than the one I had been using:
+
+    System / Secure System / Registry - 3 processes
+    walk ended: reached the list head - complete
+    cross-check: first entry is `System` - offsets are right
+
+### Error 1: I judged progress by VTL counts all session
+
+The recipe says it in a heading - **"VTL call count is NOT a progress
+measure - use the process list"** - and records that boot 163 had 40,627
+VTL calls with 3 processes and `smss.exe` never started. Every
+"progressing" and "wedged" call I made this session came from
+`vtl_fresh_calls` and `vtl_copy_calls`.
+
+It happened to agree here: 189 reads wedged both ways. But agreement on
+one boot is not validity, and the recipe already records six boots
+misfiled on VTL count alone.
+
+### Error 2: my kill policy was far too aggressive
+
+The recipe's expensive lesson is a heading too - **"Never call a
+multicore boot wedged before an hour"** - because **boot 150 took ~50
+minutes including a 40-minute stall at 37,659 VTL calls that cleared on
+its own**, and boots 142-147 were killed at five to twenty minutes and
+called wedged.
+
+**I killed boots 185-189 at roughly 20-40 minutes each.** By the recipe's
+own account that is inside the window where boot 150 was still stalled.
+Five wedges observed under a policy that would have discarded the one
+success is not evidence about the wedge rate; it is evidence about the
+policy.
+
+At a recorded 1-in-10 multicore rate, five consecutive failures is
+unremarkable anyway (~59% likely), so nothing here needed explaining -
+but I was explaining it.
+
+### Corrected policy, in force from now
+
+- **Judge progress with `scripts/guest-processes.py`**, not VTL counters.
+  3 processes = phase-1 wedge; 13-14 = barrier 2; `LogonUI.exe` = the
+  goal.
+- **Do not kill a 2-vCPU boot before 60 minutes**, and state the
+  observation window whenever calling one wedged.
+- VTL counters stay useful for *what the secure kernel is doing*, which
+  is what they measure, and for the stall-coordinate band - but not as a
+  verdict on the guest's progress.
+
+The five-boot coordinate band recorded in `e53b81c` and after stands as a
+measurement of where the phase-1 wedge sits; it is **not** the five-boot
+failure run it was written as, because at least some of those boots were
+killed before the recipe's own clock.
