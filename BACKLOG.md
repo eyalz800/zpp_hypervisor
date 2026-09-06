@@ -74745,3 +74745,73 @@ the cleanest demonstration yet that the name is whoever held an IRP when
 a flat timer expired. `guest-bugcheck.py` says so in its own output.
 **No driver named by a 0x9F on this rig should be investigated as a
 suspect** until something other than the bugcheck implicates it.
+
+## The wall, caught in the act: the guest spins in the Hyper-V HYPERCALL PAGE
+
+Boot 212's exit ring at death, cpu0, is a clean repeating cycle - not a
+sample, the actual last exits:
+
+    vmcall  rip=0xfffff828823a751f  detail=0x100000012   [l1-rip]
+    vmptrld rip=0xfffff8288221c921
+    invvpid rip=0xfffff828823a7425
+    vmwrite rip=0xfffff8288234078e
+    vmresume rip=0xfffff80069f2001c                      [l2-rip]
+    vmcall  rip=0xfffff828823a751f  detail=0x11          [l1-rip]
+    vmptrld ... invvpid ... vmwrite ...
+    vmresume rip=0xfffff80069f20035                      [l2-rip]
+    ... and repeat, verbatim
+
+The L2 resume address alternates between exactly **two** addresses 0x19
+apart, and the hypercall input value alternates between **0x11** and
+**0x100000012** (low 16 bits are the call code, so codes `0x11` and
+`0x12`; the high dword on the second is a rep count of 1).
+
+**`0xfffff80069f20000` is the Hyper-V hypercall page, and that is
+established from its BYTES, not from where it sits:**
+
+    +0x00   0f 01 c1          vmcall
+    +0x03   c3                ret
+    +0x04   8b c8             mov ecx, eax
+    +0x06   b8 11 00 00 00    mov eax, 0x11
+    +0x0b   0f 01 c1          vmcall
+    +0x0e   c3                ret
+
+`0f 01 c1` is `VMCALL`. The page is a table of `vmcall; ret` stubs, which
+is exactly what the guest maps when it writes
+`HV_X64_MSR_HYPERCALL`. It lies inside **neither** ntoskrnl
+(`0xfffff800da400000`) nor hvix (`0xfffff82882030000`) - it is its own
+page, which is why every module-based lookup this session came back
+empty for it.
+
+**It is also the hottest code in the guest.** From the same boot's
+census, the addresses on that one page:
+
+    0xfffff80069f2001c    80,421   9.1%   |   85,151   6.5%
+    0xfffff80069f20003    22,045   2.5%   |   13,284   1.0%
+    0xfffff80069f20000        41   0.0%   |
+
+`+0x03` is the `ret` after a `vmcall` and `+0x1c` is another stub's
+`vmcall`. **Between 7.5% and 11.6% of all sampled instruction pointers,
+on both processors, are inside a 64-byte hypercall stub page.**
+
+### What this pins down
+
+The wall is not a stall in the sense of a processor sitting idle, and it
+is not slowness. `7d76895` established it is a hard stop in *progress* -
+no process created for the last 300 s - while `07e82da` measured the
+machine still taking ~15,000 exits/s. This says what those exits are:
+**a two-code hypercall loop, issued from the hypercall page, serviced and
+re-entered, forever.**
+
+That reframes the target. The expensive question all session has been
+"what is costing us time per exit". The exits are not the problem -
+**the guest is asking for the same two things repeatedly and something
+about the answer does not let it stop asking.**
+
+**What is NOT established.** The two call codes are read off the wire as
+`0x11` and `0x12`; this tree has no TLFS copy in `.references/`, so they
+are **not** named here - naming them from memory is exactly what
+`CLAUDE.md` forbids, and a wrong name would send the next session after
+the wrong hypercall. Identifying those two codes against the TLFS is the
+single highest-value next step, and it is a documentation lookup rather
+than another boot.
