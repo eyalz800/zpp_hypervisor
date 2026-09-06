@@ -74679,3 +74679,69 @@ what launched WerFault, because it had not started counting.
 The next question, and it is a different one: **what launched WerFault at
 1,574.7 s?** A live kernel report is triggered by a specific event, and
 that event is now the earliest known thing on this timeline.
+
+## Boot 212's full creation timeline: the boot runs fast, then stops DEAD at 1,585 s
+
+Every process dated on one clock, plus the watchdog and the death:
+
+    smss.exe        1,043.8 s
+    csrss.exe       1,507.9 s
+    wininit.exe     1,534.8 s
+    csrss.exe       1,548.9 s
+    services.exe    1,565.2 s
+    WerFault.exe    1,574.7 s
+    LsaIso.exe      1,579.0 s
+    lsass.exe       1,579.3 s
+    winlogon.exe    1,583.3 s
+    watchdog armed  1,585.1 s
+    ------------------------------  nothing further is ever created
+    guest died      1,885.1 s
+
+**Two things fall out of this that no process-count poll could show.**
+
+**1. WerFault is mid-startup, not terminal.** It is created 9.5 s after
+`services.exe` and *before* `LsaIso.exe`, `lsass.exe` and
+`winlogon.exe` - all three of which start normally afterwards. So
+WerFault does not stop the boot: the boot carries on past it for another
+8.6 seconds and creates three more processes, including Credential
+Guard's isolated LSA. Any account in which WerFault is what blocks
+startup is wrong.
+
+**2. The wall is a HARD STOP, not a slowdown.** From `csrss.exe` at
+1,507.9 s to `winlogon.exe` at 1,583.3 s the guest creates six processes
+in **75 seconds** - brisk. Then, 1.8 seconds after `winlogon.exe`, the
+watchdog arms and **nothing is ever created again** for the remaining 300
+seconds of the guest's life. Not slower: stopped.
+
+That is a sharper localisation than this investigation has had. The
+question is no longer "why is the boot slow" but **"what happens at
+1,585 s, immediately after `winlogon.exe` is created?"**
+
+## The power watchdog fires at 300 s, not 600. Confirmed on two boots
+
+`a5c4969` recorded an unexplained discrepancy: boot 209's armed entry
+read `age 300.0 s of 600 s` on a machine that had already bugchecked on
+that IRP, and a 600 s watchdog cannot fire at 300 s. Boot 212 settles it
+independently:
+
+    boot 209   age at death   300.0052 s
+    boot 212   age at death   300.0002 s     (1,885.1 - 1,585.1)
+
+**Two boots, computed by different routes** - 209's from the reader's own
+post-mortem age, 212's from the difference of two timestamps I took
+myself - agreeing to five significant figures. The effective timeout is
+**300 s**. `guest-power-irps.py` prints "of 600 s" and that string is
+wrong; it should print 300 or print nothing.
+
+## Fifth driver name, and it is still arbitrary
+
+    boot 209   \Driver\USBHUB3
+    boot 212   \Driver\IntcAudioBus
+
+Same bugcheck, same param1 `0x3`, same 300 s, **different driver**. That
+is the fifth name this investigation has produced after `VBoxSup.sys`,
+`IntcAudioBus`, `fontdrvhost` and `USBHUB3`, and the two boots here are
+the cleanest demonstration yet that the name is whoever held an IRP when
+a flat timer expired. `guest-bugcheck.py` says so in its own output.
+**No driver named by a 0x9F on this rig should be investigated as a
+suspect** until something other than the bugcheck implicates it.
