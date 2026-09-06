@@ -88,6 +88,36 @@ while :; do
         echo "census pair written: /tmp/wall-census-{a,b}.txt"
         echo "  difference them - a single cumulative dump at the wall"
         echo "  describes the boot, not the state."
+        # **Was the guest still RUNNING for the whole window?**
+        #
+        # The status is checked at the top of the poll loop, which is
+        # before the wall is detected - not during the sixty seconds the
+        # two readings bracket. Boot 207 died inside that window and the
+        # differencing reported "0 of 3 threads scheduled, FROZEN" when
+        # the truth was "the guest had stopped". Both census dumps came
+        # back BYTE-IDENTICAL, `elapsed cycles` included, which is what
+        # exposed it - a TSC-derived value cannot repeat on a running
+        # machine.
+        #
+        # So the window needs its own status check, and a frozen reading
+        # is only evidence about the guest if the guest was alive at both
+        # ends of it.
+        pkill -x nc 2>/dev/null || true
+        AFTER=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 \
+                2>/dev/null | grep -ai "VM status" | tail -1 || true)
+        echo "VM status AFTER the window: $AFTER"
+        case "$AFTER" in
+            *paused*)
+                echo "*** THE GUEST STOPPED DURING THE MEASUREMENT ***"
+                echo "    Any frozen counter below is a stopped guest, not"
+                echo "    a stalled one. Do NOT read it as a wall state."
+                ;;
+        esac
+        if cmp -s /tmp/wall-census-a.txt /tmp/wall-census-b.txt; then
+            echo "*** THE TWO CENSUS DUMPS ARE BYTE-IDENTICAL ***"
+            echo "    Including elapsed cycles, which cannot repeat on a"
+            echo "    running machine. The guest executed nothing at all."
+        fi
         echo "=== DIFFERENCED ==="
         python3 - <<'PY'
 import re

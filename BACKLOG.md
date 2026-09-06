@@ -73905,3 +73905,56 @@ thread census shows `ntoskrnl+0x6fb520` - `Phase1Initialization` - as
 `state 2` (Running) with `wait 32` (`WrPreempted`) across all 997 samples
 at the 3-process phase, which is the same shape `58fffd1` measured by
 `ContextSwitches` and is consistent with it.
+
+## The census delta caught a stopped guest being read as a frozen one
+
+Boot 207 reached the wall, the catcher fired, and reported **"0 of 3
+services.exe threads scheduled in ~60 s - FROZEN"**. The census pair the
+catcher now takes says that reading is worthless:
+
+    md5 wall-census-a.txt  be6e03a88d2819719f2de368803412ab
+    md5 wall-census-b.txt  be6e03a88d2819719f2de368803412ab
+
+**Byte-identical.** Including `elapsed cycles 2,638,320,449,686` in both -
+a TSC-derived value that **cannot repeat on a running machine**. Both
+dumps carry `reader proven` twice, so the reads succeeded; the guest was
+simply not executing. `VM status` immediately afterwards: **`paused
+(shutdown)`**.
+
+**So the guest had already stopped when the window was taken.** The
+catcher checks status at the top of its poll loop - *before* the wall is
+detected - and not across the sixty seconds the two readings bracket.
+
+### This retracts "the wall has two states"
+
+`1dc7529` recorded boot 200 (SCM at 39.8 switches/s) against boot 203 (SCM
+frozen) as **two states of the wall**, and called the difference the most
+interesting open question. **Boot 203's frozen reading is now suspect on
+exactly these grounds**: its `VM status` also read `paused (shutdown)` when
+checked after the catcher output, and nothing in the data I kept can
+distinguish "the SCM was frozen" from "the guest had stopped".
+
+So the honest position is:
+
+    boot 200   RISING, guest demonstrably alive       genuine reading
+    boot 203   FROZEN, guest paused when next checked  INDETERMINATE
+    boot 207   FROZEN, guest provably not executing    STOPPED, not frozen
+
+**One genuine wall reading exists, not three, and "two states" rests on a
+reading that cannot be defended.** Withdrawn.
+
+### The instrument found its own predecessor's blind spot
+
+This is the census delta earning its place on the first boot it ran on -
+`eb5db81` added it to compare wall *states*, and instead it caught the
+comparison being invalid. **A `ContextSwitches` delta cannot report a
+stopped guest**: every counter it reads is frozen, which is precisely the
+signature it is looking for. It needed a second quantity that is frozen
+for only one of the two reasons, which is the pattern `81d582d` named one
+commit earlier and which I did not apply to the catcher itself.
+
+**Fixed**: the catcher now re-reads `VM status` *after* the window, prints
+`*** THE GUEST STOPPED DURING THE MEASUREMENT ***` when it changed, and
+`cmp`s the two census dumps - printing `*** BYTE-IDENTICAL ***` with the
+`elapsed cycles` argument when they match. A frozen reading is now only
+offered as evidence when the guest was alive at both ends of the window.
