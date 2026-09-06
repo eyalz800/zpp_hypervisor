@@ -72336,3 +72336,43 @@ Not fixed now: boot 198 is running with a matched pair, the catcher is
 armed on it, and changing the reader mid-flight would invalidate the
 comparison it exists to make. Recorded so the next person does not lose a
 boot to it.
+
+## The services.exe question does NOT need a live guest - the absolute count answers it
+
+`eb6a337` and `af2e631` both assume the `services.exe` measurement needs a
+**live** guest at 14 processes, because `ContextSwitches` is only
+meaningful differenced. That is true of the *rate* and false of the
+question.
+
+**The absolute count answers it on a stopped guest.** `services.exe` has a
+known lifetime - it appears between the 9-process and 14-process readings,
+so on boot 195 it had existed for at most ~20 minutes when the guest
+stopped. Against that:
+
+    ContextSwitches in the tens          it has barely run: STARVED
+    ContextSwitches in the thousands     it has been scheduled throughout,
+                                         and is blocked on something specific
+
+For scale, the `System` threads measured on boot 193 carried 2,699-4,909
+switches after ~44 minutes, and the busiest ran at 4-8/s. A `services.exe`
+that had been scheduled at all comparably would show hundreds to low
+thousands; one showing single or double digits has been on a processor
+almost never.
+
+**That is the same discrimination the differenced version gives**, and it
+works on every stopped specimen - boots 189, 192 and 195 all had
+`services.exe` and memory intact, and **none of them was asked.** Three
+opportunities lost to an assumption I did not check.
+
+The differenced reading is still better where available - it separates
+"running now" from "ran early and stopped" - so the catcher stays. But it
+is no longer the only route, and **a boot that reaches 14 processes and
+dies is now fully informative** rather than a missed window.
+
+### Applied from the next 14-process boot onward
+
+`guest-threads.py` already prints the count (`2fd08e8`). The rule is:
+**when a boot reaches 13+ processes, read `services.exe` threads
+immediately, whether the guest is running or stopped**, and record the
+absolute counts with the process's age. The catcher does this for a live
+guest; for a stopped one it is a single command and needs no window at all.
