@@ -72933,3 +72933,68 @@ So the instrument is pointed at the right question and simply has not
 reached it yet. The catcher is armed on this boot; when it reaches the
 wall, the pair table will say which address space is making those calls -
 which is the thing three separate instruments could not answer.
+
+## THE JOIN WORKS: user-mode execution at the wall, named by process
+
+Boot 202 at the 14-process wall, zpp resident, `userip=1`. **120,948
+user-mode samples across 15 address spaces**, joined against each
+process's `DirectoryTableBase`:
+
+    process          DirTableBase      masked        share
+    lsass.exe        0x3571f7002       0x3571f7000   **21.2%**
+    csrss.exe        0x1b5b43002       0x1b5b43000    11.8%
+    wininit.exe      0x1b56af002       0x1b56af000    11.5%
+    csrss.exe (2nd)    0x30ab002         0x30ab000    10.2%
+    winlogon.exe     0x1b5dd6002       0x1b5dd6000    10.2%
+    services.exe     0x342f40002       0x342f40000     9.1%
+    WerFault.exe     0x113fd0002       0x113fd0000     8.0%
+    smss.exe         0x341b0e002       0x341b0e000     3.7%
+    System             0x1ae002          0x1ae000      0.1%
+    ---------------------------------------------------------
+    **0x1b0eb9000  6.3%  <- the win32u syscall caller**
+    **0x1b87a9000  5.9%  <- the win32u syscall caller**
+    matched no live process
+
+**Nine of fifteen address spaces are named, covering 85.8% of samples.**
+The instrument does what three previous attempts could not.
+
+### The win32k callers are NOT any live process
+
+The two address spaces carrying the `win32u.dll + 0x32e5` syscall pair -
+`rip 0x7ffdde7d32e5`/`e7`, 5,414 and 4,273 samples - **match no
+`DirectoryTableBase` in the list.** And their cr3s end **`001`** where
+every named process ends **`002`**.
+
+That `001`/`002` split is the KVA-shadow (KPTI) PCID pair: `002` is the
+kernel-half cr3 that `_KPROCESS.DirectoryTableBase` records, `001` the
+user-half pointing at the shadow tables, which have a **different base**.
+So these two are user-half cr3s, and the kernel-half value the process
+list carries cannot be compared against them directly.
+
+**Two readings, and I cannot yet separate them:**
+
+1. they are the user halves of two of the named processes, and the
+   remaining 85.8% of samples carrying `002` cr3s means KVA shadow is off
+   for those and on for these two
+2. they are processes that **started, made win32k calls, and exited** -
+   leaving samples with no process entry to match
+
+Reading 2 would be the more interesting: something starting and exiting
+repeatedly while `services.exe` runs at 39.8 switches a second and starts
+no service is a coherent story, and `WerFault.exe` being present on every
+wall boot fits it.
+
+**Not choosing between them here.** What distinguishes them is whether any
+live process's *user-half* cr3 equals `0x1b0eb9001` - readable from
+`_EPROCESS`'s KVA-shadow fields, or by checking whether the shadow tables
+at that base map the same user addresses as a known process.
+
+### And the biggest single consumer is lsass.exe
+
+**21.2% of all user-mode execution at the wall is `lsass.exe`** - more
+than either `csrss`, more than `services.exe`. With `LsaIso.exe` running
+(Credential Guard), lsass talks to the isolated process across the VTL
+boundary, which is the most expensive call in this system.
+
+That is a new, concrete, named target and it was invisible to every
+instrument before this one.
