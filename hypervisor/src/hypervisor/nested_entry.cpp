@@ -5867,8 +5867,49 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // updates the reason and the qualification and leaves the others
         // alone, so writing them would fabricate an account of an
         // instruction that never ran.
+        // SDM 30.2.1 defines the guest-linear address for LMSW with a
+        // memory operand, INS/OUTS, EPT violations that set bit 7 of the
+        // qualification and SPP-related events, and closes the list with
+        // "For all other VM exits, the field is undefined."
+        // `linear_address_defined_for` carries the mapping onto basic
+        // exit reasons and the argument for the two clauses that do not
+        // reduce to a reason.
+        //
+        // **This is the one place the tree diverges from KVM, and
+        // deliberately.** `sync_vmcs02_to_vmcs12` reads the field
+        // unconditionally (`.references/kvm/nested.c:4570`), so KVM hands
+        // its guest hypervisor hardware's undefined value. Both are
+        // architecturally permitted - the field is undefined either way -
+        // so KVM's choice is evidence about cost, not about correctness,
+        // and it costs a real VMREAD on every reflection: measured at
+        // 2,876 cycles on the rig, against ~57 for a cache hit, and this
+        // read is a guaranteed miss because nothing reads the field
+        // twice in one exit.
+        //
+        // Zero rather than "leave vmcs12's field alone", which is what
+        // the `guest_physical_address` gate below does. The two are not
+        // the same situation: KVM never writes vmcs12's guest-physical
+        // address at all, so leaving it untouched *is* matching KVM,
+        // while this field is written on every ordinary exit today.
+        // Stopping the write would leave the previous reflection's
+        // address in place - a live-looking kernel address from an
+        // unrelated exit, which is the hardest shape of wrong value to
+        // attribute. Zero is the choice `honest_exit_length` already
+        // made three statements below, for the same reason, and it is a
+        // value the architecture itself writes here: SDM 30.2.5 clears
+        // the neighbouring instruction-information field on an exit in
+        // enclave mode.
+        //
+        // The guest hypervisor in front of us reads this field 129 times
+        // in a whole run (`nested_shadow_vmcs.cpp`, the shadow-list
+        // census), and it is in neither shadow list, so those reads exit
+        // and are answered out of vmcs12 - which is why the value
+        // written here is the value it sees.
         shadow.write(field::guest_linear_address,
-                     vmcs.read(field::guest_linear_address));
+                     linear_address_defined_for(
+                         static_cast<std::uint64_t>(reason.basic()))
+                         ? vmcs.read(field::guest_linear_address)
+                         : 0);
 
         // SDM 27.2.1: `guest_physical_address` receives an address only
         // for an EPT violation, an EPT misconfiguration or an
@@ -5913,20 +5954,53 @@ void hypervisor::reflect_l2_exit(std::size_t cpu,
         // reflections in one boot carrying a non-zero length for a
         // reason SDM 30.2.5 leaves undefined, and a guest hypervisor
         // advances a RIP by this number.
-        auto reported_length =
-            vmcs.read(field::vm_exit_instruction_length);
+        //
+        // The test now decides whether to *read*, where it used to read
+        // first and overwrite the result with zero. The value handed
+        // over is identical either way - that is what makes this the one
+        // gate here with no correctness content - and it drops a VMREAD
+        // on every reflection whose reason is in the `no` list, which the
+        // reflected mix puts at roughly a fifth of them. With
+        // `honest_exit_length` off the read stays unconditional, because
+        // then the field is copied through whatever the reason.
+        auto reported_length = std::uint64_t{};
 
         if constexpr (nested_vmx::honest_exit_length) {
-            if (exit_length_defined::no ==
+            if (exit_length_defined::no !=
                 exit_length_defined_for(
                     static_cast<std::uint64_t>(reason.basic()))) {
-                reported_length = 0;
+                reported_length =
+                    vmcs.read(field::vm_exit_instruction_length);
             }
+        } else {
+            reported_length = vmcs.read(field::vm_exit_instruction_length);
         }
 
         shadow.write(field::vm_exit_instruction_length, reported_length);
-        shadow.write(field::vm_exit_instruction_information,
-                     vmcs.read(field::vm_exit_instruction_information));
+
+        // SDM 30.2.5 names a closed instruction list for the
+        // instruction-information field and ends "For all other VM
+        // exits, the field is undefined, unless the VM exit occurred in
+        // enclave mode, in which case the field is cleared."
+        // `instruction_information_defined_for` carries that list.
+        //
+        // Same divergence from KVM as the guest-linear address above and
+        // for the same reason: `prepare_vmcs12` reads it unconditionally
+        // (`.references/kvm/nested.c:4628`), which is permitted but pays
+        // a guaranteed VMREAD miss on every reflection. Zero here is not
+        // merely a permitted undefined value, it is the value the
+        // processor itself writes for an exit in enclave mode, which is
+        // the only case the section defines outside its list.
+        //
+        // None of the reasons this VMM actually reflects in the settled
+        // state - `wrmsr`, `interrupt_window`, `vmcall` - is on the list,
+        // so the read goes away on essentially all of them.
+        shadow.write(
+            field::vm_exit_instruction_information,
+            instruction_information_defined_for(
+                static_cast<std::uint64_t>(reason.basic()))
+                ? vmcs.read(field::vm_exit_instruction_information)
+                : 0);
 
         // SDM 30.2.4, "Information for VM Exits During Event Delivery".
         // Copied from the hardware's own report rather than reconstructed,

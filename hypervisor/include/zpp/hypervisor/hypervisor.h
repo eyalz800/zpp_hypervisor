@@ -7571,6 +7571,111 @@ private:
         }
     }
 
+    /**
+     * Whether SDM 30.2.5 defines the VM-exit instruction-information
+     * field for a basic exit reason.
+     *
+     * Two answers rather than the three above, because this field has no
+     * conditional case: the section names a closed list of instructions
+     * and ends *"For all other VM exits, the field is undefined, unless
+     * the VM exit occurred in enclave mode, in which case the field is
+     * cleared."* (`.references/sdm.txt:204159-204175`). Nothing about
+     * event delivery enters into it, which is what makes the `no` answer
+     * here stronger than `exit_length_defined_for`'s.
+     *
+     * The list below is that instruction list mapped onto basic exit
+     * reasons: INS/OUTS is `io_instruction`, LIDT/LGDT/SIDT/SGDT is
+     * `gdtr_or_idtr`, LLDT/LTR/SLDT/STR is `ldtr_or_tr`, and the rest
+     * have reasons of their own.
+     *
+     * **Three instructions on the SDM's list have no enumerator here and
+     * that is not an omission**: LOADIWKEY, TPAUSE and UMWAIT. Their
+     * exits require secondary VM-execution controls that
+     * `nested_vmx::supported_secondary_controls` does not offer, so a
+     * guest hypervisor cannot ask for them - `build_vmcs02` refuses a
+     * vmcs12 whose secondary controls fall outside that set
+     * (`nested_entry.cpp`, the `within_capability` check) - and this
+     * VMM's own vmcs01 does not set them either. They therefore cannot
+     * appear as a reflected exit reason, and answering `false` for the
+     * numbers they would occupy costs nothing.
+     */
+    static constexpr bool
+    instruction_information_defined_for(std::uint64_t basic)
+    {
+        using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+
+        switch (static_cast<basic_reason>(basic)) {
+        case basic_reason::io_instruction: // INS, OUTS
+        case basic_reason::invept:
+        case basic_reason::invpcid:
+        case basic_reason::invvpid:
+        case basic_reason::gdtr_or_idtr: // LIDT, LGDT, SIDT, SGDT
+        case basic_reason::ldtr_or_tr:   // LLDT, LTR, SLDT, STR
+        case basic_reason::rdrand:
+        case basic_reason::rdseed:
+        case basic_reason::vmclear:
+        case basic_reason::vmptrld:
+        case basic_reason::vmptrst:
+        case basic_reason::vmread:
+        case basic_reason::vmwrite:
+        case basic_reason::vmxon:
+        case basic_reason::xrstors:
+        case basic_reason::xsaves:
+            return true;
+
+        default:
+            return false;
+        }
+    }
+
+    /**
+     * Whether SDM 30.2.1 defines the guest-linear address for a basic
+     * exit reason.
+     *
+     * The section's list, verbatim
+     * (`.references/sdm.txt:203824-203851`): LMSW with a memory operand,
+     * INS or OUTS with a usable segment, EPT violations that set bit 7 of
+     * the exit qualification, SPP-related events, and - only if the
+     * "prematurely busy shadow stack" VM-exit control is 1 - EPT
+     * misconfiguration, page-modification log-full and instruction
+     * timeout. It closes with *"For all other VM exits, the field is
+     * undefined."*
+     *
+     * Mapped onto basic exit reasons that is `control_register_access`
+     * (LMSW is a control-register access, Table 30-3 access type 3),
+     * `io_instruction`, `ept_violation` and `spp_related_event`.
+     * `ept_misconfiguration` is here for a different reason and it is not
+     * the shadow-stack clause: it is the one reason beside
+     * `ept_violation` for which this VMM already reads
+     * `guest_physical_address` five lines below, so keeping the two
+     * fields on the same pair of reasons means an EPT-fault reflection is
+     * described whole or not at all.
+     *
+     * **The shadow-stack clause cannot bite here.** Its three extra
+     * reasons need that VM-exit control set in *vmcs02*, and
+     * `build_vmcs02` composes vmcs02's exit controls from vmcs01's own
+     * (`exit02 = exit01`, plus the acknowledge-interrupt bit) rather than
+     * from vmcs12, so the only way that control could be 1 is if this VMM
+     * set it, and nothing in this tree names it. Page-modification
+     * log-full additionally needs PML, which is not offered.
+     */
+    static constexpr bool linear_address_defined_for(std::uint64_t basic)
+    {
+        using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+
+        switch (static_cast<basic_reason>(basic)) {
+        case basic_reason::control_register_access: // LMSW, memory operand
+        case basic_reason::io_instruction:          // INS, OUTS
+        case basic_reason::ept_violation:
+        case basic_reason::ept_misconfiguration:
+        case basic_reason::spp_related_event:
+            return true;
+
+        default:
+            return false;
+        }
+    }
+
     struct reflect_info_record
     {
         /** Set last, so a reader that finds it set finds the rest

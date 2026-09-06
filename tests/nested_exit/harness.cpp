@@ -7523,6 +7523,275 @@ static void test_cr8_encoding_four()
     hv().nested_tpr_threshold[cpu] = 0;
 }
 
+// ---- 21. the exit-information fields the SDM leaves undefined
+/**
+ * What `reflect_l2_exit` puts in vmcs12's exit-information block, and
+ * which VMCS fields it reads to get there.
+ *
+ * Three fields are read on every reflection and consumed only for
+ * particular exit reasons - the guest-linear address (SDM 30.2.1), the
+ * instruction-information field (SDM 30.2.5) and the instruction length
+ * (SDM 30.2.5, through `exit_length_defined_for`, which already zeroed
+ * the value it had just read). A real VMREAD is measured at 2,876 cycles
+ * on the rig against ~57 for a cache hit, and each of these is a
+ * guaranteed miss, so removing one is worth about half a percent of the
+ * handler.
+ *
+ * **Two assertions per case, and that is the point.** The value in
+ * vmcs12 says the guest hypervisor is told the right thing; the shim's
+ * per-encoding read count says the VMREAD is gone. Neither alone would
+ * catch the mistake this is guarding: the instruction-length gate hands
+ * over exactly the same value as before, so a value-only test passes
+ * whether the read was removed or not, and a count-only test passes if
+ * the field is skipped on a reason that defines it.
+ *
+ * The undefined answer is **zero**, not vmcs12's previous contents. The
+ * positive cases are run *after* a reflection that wrote a sentinel, so
+ * a gate that merely stopped writing would leave the sentinel there and
+ * these would still read it - which is the failure mode "leave vmcs12
+ * alone" has and is why the negative cases below assert on a specific
+ * value rather than on inequality.
+ */
+static void test_the_exit_information_fields_the_sdm_leaves_undefined()
+{
+    std::println("\n-- the exit-information block writes only what SDM "
+                 "30.2.1 and 30.2.5 define --");
+
+    zpp::arch::x86_64::context registers{};
+
+    constexpr std::uint64_t linear_sentinel = 0xffff'8000'1234'5000ull;
+    constexpr std::uint64_t information_sentinel = 0x0007'0c05ull;
+    constexpr std::uint64_t length_sentinel = 3;
+
+    // One reflection, with the three hardware fields carrying values a
+    // real exit could have produced. Returns what vmcs12 ended up
+    // holding and how many times each encoding was fetched out of the
+    // region during the call.
+    struct reflection
+    {
+        std::uint64_t linear;
+        std::uint64_t information;
+        std::uint64_t length;
+        std::uint64_t linear_reads;
+        std::uint64_t information_reads;
+        std::uint64_t length_reads;
+    };
+
+    auto reflect = [&](unsigned reason) {
+        asked_controls asked;
+        auto built = compose(asked, registers);
+        check(built.has_value(),
+              "the exit-information fixture composes vmcs02");
+
+        hv().running_l2[cpu] = true;
+        hv().vmcs.write(field::guest_linear_address, linear_sentinel);
+        hv().vmcs.write(field::vm_exit_instruction_information,
+                        information_sentinel);
+        hv().vmcs.write(field::vm_exit_instruction_length,
+                        length_sentinel);
+
+        // vmcs12 pre-loaded with the same sentinels, so "wrote zero" and
+        // "left the field alone" are different observations. Without
+        // this every negative case would pass against a gate that simply
+        // stopped writing, and vmcs12's field would go on carrying an
+        // address from an unrelated exit - which is the value the
+        // architecture permits and a debugger cannot attribute.
+        auto & shadow = hv().guest_vmcs12[cpu];
+        shadow.write(fields::guest_linear_address, linear_sentinel);
+        shadow.write(fields::vm_exit_instruction_information,
+                     information_sentinel);
+        shadow.write(fields::vm_exit_instruction_length, length_sentinel);
+
+        auto & counts = zpp::arch::x86_64::vmx::g_vmread_field_count;
+        auto linear_before = counts[static_cast<std::uint64_t>(
+            field::guest_linear_address)];
+        auto information_before = counts[static_cast<std::uint64_t>(
+            field::vm_exit_instruction_information)];
+        auto length_before = counts[static_cast<std::uint64_t>(
+            field::vm_exit_instruction_length)];
+
+        hv().reflect_l2_exit(
+            cpu, zpp::arch::x86_64::vmx::exit_reason(reason), 0);
+
+        return reflection{
+            .linear = shadow.read(fields::guest_linear_address),
+            .information =
+                shadow.read(fields::vm_exit_instruction_information),
+            .length = shadow.read(fields::vm_exit_instruction_length),
+            .linear_reads = counts[static_cast<std::uint64_t>(
+                                field::guest_linear_address)] -
+                            linear_before,
+            .information_reads =
+                counts[static_cast<std::uint64_t>(
+                    field::vm_exit_instruction_information)] -
+                information_before,
+            .length_reads = counts[static_cast<std::uint64_t>(
+                                field::vm_exit_instruction_length)] -
+                            length_before,
+        };
+    };
+
+    {
+        // `wrmsr` is the largest reflected reason on the rig, ~63% of
+        // second-level exits. SDM 30.2.1's list does not name it and
+        // 30.2.5's instruction list does not either; the instruction
+        // *length* list does, so that one still has to be read.
+        auto seen = reflect(static_cast<unsigned>(basic_reason::wrmsr));
+
+        check(0 == seen.linear,
+              "a reflected wrmsr hands over a zero guest-linear address "
+              "- SDM 30.2.1 defines the field for LMSW with a memory "
+              "operand, INS/OUTS, EPT violations and SPP events, and "
+              "closes with 'For all other VM exits, the field is "
+              "undefined'");
+        check(0 == seen.linear_reads,
+              "and does not read it out of the VMCS at all, which is "
+              "the 2,876 cycles this gate exists for");
+
+        check(0 == seen.information,
+              "and a zero instruction-information field - SDM 30.2.5's "
+              "instruction list does not include WRMSR, and zero is the "
+              "value the processor itself writes there for an exit in "
+              "enclave mode");
+        check(0 == seen.information_reads,
+              "without reading that field either");
+
+        check(length_sentinel == seen.length,
+              "but the instruction length is carried through unchanged: "
+              "SDM 30.2.5's first list names WRMSR, and a guest "
+              "hypervisor adds this number to a RIP");
+        check(1 == seen.length_reads,
+              "which means it is still read exactly once");
+    }
+
+    {
+        // The reason `exit_length_defined_for` already answers `no` for,
+        // and the second largest reflected reason at ~19%. Nothing
+        // observable changes here - the field was zeroed after being
+        // read before this change and is zero without being read now -
+        // so the read count is the only witness.
+        auto seen =
+            reflect(static_cast<unsigned>(basic_reason::interrupt_window));
+
+        check(0 == seen.length,
+              "an interrupt-window exit reports a zero instruction "
+              "length, as `honest_exit_length` already required");
+        check(0 == seen.length_reads,
+              "and no longer reads the field to throw the value away - "
+              "the value handed over is identical either way, so this "
+              "count is the whole of what the change did");
+        check((0 == seen.linear) && (0 == seen.information),
+              "with the other two fields zero beside it");
+        check((0 == seen.linear_reads) && (0 == seen.information_reads),
+              "and unread");
+    }
+
+    {
+        // Both fields defined at once. INS and OUTS are the only
+        // instructions on both SDM lists, so this is the case that would
+        // catch a gate written too tight - and it runs after the two
+        // above, whose sentinel is still in vmcs12, so a gate that
+        // stopped writing rather than writing zero would pass the checks
+        // above and fail nothing here.
+        auto seen =
+            reflect(static_cast<unsigned>(basic_reason::io_instruction));
+
+        check(linear_sentinel == seen.linear,
+              "an INS or OUTS reflection carries the guest-linear "
+              "address through - SDM 30.2.1 names it, and it is the "
+              "base of the relevant segment plus (E)DI or (E)SI");
+        check(1 == seen.linear_reads, "read exactly once");
+        check(information_sentinel == seen.information,
+              "and the instruction-information field with it - SDM "
+              "30.2.5 Table 30-8 gives its format for INS and OUTS");
+        check(1 == seen.information_reads, "read exactly once");
+        check(length_sentinel == seen.length,
+              "and the instruction length, which INS and OUTS are on the "
+              "first list for too");
+    }
+
+    {
+        // The EPT violation, which is what the guest hypervisor's 129
+        // reads of the linear address in a whole run are for. This VMM
+        // claims most of these in `l0_wants_l2_exit` and does not
+        // reflect them, but the ones it does reflect must be described
+        // whole: SDM 30.2.1 gives the linear address alongside the
+        // guest-physical address the gate below already reads.
+        auto seen =
+            reflect(static_cast<unsigned>(basic_reason::ept_violation));
+
+        check(linear_sentinel == seen.linear,
+              "a reflected EPT violation carries the guest-linear "
+              "address - the half of an EPT fault that says which "
+              "mapping the second-level guest was walking");
+        check(1 == seen.linear_reads, "read exactly once");
+        check(0 == seen.information,
+              "and a zero instruction-information field, which SDM "
+              "30.2.5's list does not define for an EPT violation");
+        check(0 == seen.information_reads, "unread");
+    }
+
+    {
+        // LMSW with a memory operand is a control-register access, SDM
+        // Table 30-3 access type 3 with operand type 1. The
+        // qualification is not consulted by the gate, so a MOV to CR
+        // reads the field too - deliberately, because narrowing the gate
+        // to the qualification would mean decoding it here to save one
+        // read on a reason that is a rounding error in the reflected
+        // mix.
+        auto seen = reflect(
+            static_cast<unsigned>(basic_reason::control_register_access));
+
+        check(linear_sentinel == seen.linear,
+              "a control-register access carries the guest-linear "
+              "address - SDM 30.2.1's first case is LMSW with a memory "
+              "operand, and a control-register access is the exit reason "
+              "it produces");
+        check(1 == seen.linear_reads, "read exactly once");
+    }
+
+    {
+        // The two descriptor-table reasons, which are the whole of the
+        // SDM's LIDT/LGDT/SIDT/SGDT and LLDT/LTR/SLDT/STR rows and the
+        // ones a list assembled from instruction names rather than exit
+        // reasons would drop.
+        auto gdtr =
+            reflect(static_cast<unsigned>(basic_reason::gdtr_or_idtr));
+        check(information_sentinel == gdtr.information,
+              "LIDT/LGDT/SIDT/SGDT carry the instruction-information "
+              "field - SDM 30.2.5 Table 30-10");
+        check(1 == gdtr.information_reads, "read exactly once");
+        check(0 == gdtr.linear,
+              "and no guest-linear address, which SDM 30.2.1 does not "
+              "define for them");
+
+        auto ldtr =
+            reflect(static_cast<unsigned>(basic_reason::ldtr_or_tr));
+        check(information_sentinel == ldtr.information,
+              "LLDT/LTR/SLDT/STR carry it too - Table 30-11");
+        check(1 == ldtr.information_reads, "read exactly once");
+    }
+
+    {
+        // A reason on neither list and not an instruction at all, to
+        // check the gates are keyed on the reason rather than on
+        // anything that happens to correlate with it in the cases above.
+        auto seen = reflect(static_cast<unsigned>(basic_reason::vmcall));
+
+        check((0 == seen.linear) && (0 == seen.information),
+              "a vmcall reflection carries neither the guest-linear "
+              "address nor the instruction information");
+        check((0 == seen.linear_reads) && (0 == seen.information_reads),
+              "and reads neither");
+        check(length_sentinel == seen.length,
+              "but does carry the instruction length - VMCALL is on SDM "
+              "30.2.5's first list, and the guest hypervisor advances "
+              "its guest's RIP past the hypercall by it");
+    }
+
+    hv().running_l2[cpu] = false;
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -7567,6 +7836,7 @@ int main()
     test_guest_thread_sample_stride();
     test_control_registers_a_vm_entry_refuses();
     test_cr8_encoding_four();
+    test_the_exit_information_fields_the_sdm_leaves_undefined();
 
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();

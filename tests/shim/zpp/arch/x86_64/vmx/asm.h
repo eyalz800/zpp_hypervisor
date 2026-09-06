@@ -38,11 +38,34 @@ inline std::uint64_t * g_vmcs_region(std::size_t index)
     return (0 == index) ? g_vmcs : g_vmcs_other[index - 1];
 }
 
+/**
+ * How many times each encoding has been fetched out of a region, ever.
+ *
+ * A field this VMM decides not to read is invisible in the *value* it
+ * hands over whenever the value it would have written is the same - the
+ * instruction-length gate is exactly that case, since `honest_exit_length`
+ * already zeroed the field it had just read. A test that only compares
+ * vmcs12 therefore cannot tell "the read was removed" from "the read was
+ * kept", which is the whole property those gates exist for.
+ *
+ * `vmcs_reads_taken` counts logical reads and would answer, but it counts
+ * every field together, so a case would have to assume nothing else on
+ * the path changed with the exit reason. This counts per encoding and
+ * assumes nothing.
+ *
+ * Note it is below the field cache: a read answered from the cache does
+ * not reach here. Nothing in the exit-information block reads a field
+ * twice, so the two agree there, and a case that ever needs them not to
+ * should say so.
+ */
+inline std::uint64_t g_vmread_field_count[0x8000]{};
+
 inline int vmread(std::uint64_t field, void * out)
 {
     if (!g_vmcs_valid || (field >= 0x8000)) {
         return 1;
     }
+    g_vmread_field_count[field] = g_vmread_field_count[field] + 1;
     *static_cast<std::uint64_t *>(out) = g_vmcs_loaded[field];
     return 0;
 }
