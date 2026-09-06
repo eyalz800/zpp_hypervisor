@@ -74325,3 +74325,45 @@ So what replicated is "WerFault, on the multicore boot, is the
 kernel-reporting flavour with the debug engine mapped" - twice. What was
 measured *once* is that it was running that engine. The second is the
 load-bearing claim and it still rests on boot 208 alone.
+
+## My poller was blind to `Secure System` - every n= in boots 209 and 210 is one low
+
+Boot 210 sat at "n=2, Registry System" for twenty-four minutes. The
+reader was not at fault - run by hand it gives:
+
+    System           pid 4
+    Secure System    pid 68     <- dropped by the poller
+    Registry         pid 112
+    3 processes; walk ended because: reached the list head - complete
+    cross-check: first entry is `System` - offsets are right
+
+The poller extracted names with
+
+    sed -n 's/^  \([A-Za-z0-9_.-]*\) *pid.*/\1/p'
+
+and **that character class has no space in it**, so `Secure System`
+matches "Secure", fails to find `pid` next, and is silently discarded.
+
+Two consequences, and the second is worse than the arithmetic:
+
+- **Every `n=` quoted for boots 209 and 210 is one too low.** Boot 209's
+  n=2/3/4/9/13 were really 3/4/5/10/14. The 14-process wall is the same
+  wall; the numbers just need reading as one higher.
+- **It was blind to exactly the wrong process.** `Secure System` is the
+  VTL1 process - its presence is the evidence that VBS came up at all,
+  which is half the goal being pursued. The one name the pattern could
+  not represent was the one worth watching.
+
+**This is the third instrument I have broken in this session**, after the
+`cut -c1-200` that hid the armed watchdog (`a5c4969`) and the empty exit
+ring quoted as a finding (`dd0f433`). All three share one shape: a
+*filter written for tidiness* silently narrowing the population, with
+nothing in the output marking that anything was dropped. The `cut` was
+for line length, the character class was for name safety, and neither
+had a reason behind it beyond looking neat.
+
+The rule that would have caught all three, and it is cheap: **when a
+reader and a poller disagree about the same guest, run the reader by
+hand before believing the poller.** Twenty-four minutes of "n=2" was one
+command away from being read correctly, and the command was one I had
+already written.
