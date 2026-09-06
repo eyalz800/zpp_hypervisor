@@ -71780,3 +71780,61 @@ save control, which has never been read out - so both ends are named:
 not a guess. Slot 6 goes 6.18 -> 5.18 or -> 2.18, which reads Hyper-V's
 exit controls off the machine for free. `hot_state_writes_done` must not
 reach zero.
+
+## Boot 195 has both changes deployed - and cannot yet test either
+
+Deployed the read gates (`87b091d`) and the write elisions (`7678f44`)
+together. zpp resident (2 markers), `VM status: running`, `ZPP_CPUS=2`.
+
+First readings, and **none of them is a valid test**:
+
+    reads per exit    25.36 -> 22.96     predicted 24.25
+    writes per exit   10.54 ->  5.61     predicted 9.04 or 7.55
+    cache hit rate    23.3% -> 30.5%
+
+Both "beat" their predictions, which is the first thing that should raise
+suspicion rather than satisfaction. **Boot 195 was five minutes old when
+these were taken; every figure they are compared against came from the
+3-process phase at 30-45 minutes.** The handler cost says so plainly:
+
+    boot 191, 3-process phase     348,046 handler cycles a round trip
+    boot 195, five minutes in   1,294,537 (cpu 0) / 567,193 (cpu 1)
+
+A round trip costing 3.7x more is not the same workload, so a
+reads-per-exit comparison across them measures the phase, not the change.
+**This is the same error as `1ec74e3` (cache rate across boots at
+different times-since-wedge) and `9c97e8e` (prices from a benchmark
+measuring something else), and it is the third time in this session the
+same shape has come up.**
+
+### The discriminator moved, and it is the one honest number here
+
+`build_vmcs02`'s "host state once, then every control" slot carries the
+two CR writes and was predicted to go **9.71 -> 7.71 writes a call**, with
+the agent noting "this end is not a guess". Measured: **8.16.**
+
+That is a real fall of 1.55 of a predicted 2.00, and the shortfall is
+expected rather than a miss - elision skips only when the value is
+*unchanged*, so ~78% of the two CR writes eliding is exactly what a
+value-compare gate does on a field that sometimes moves.
+
+**But the slot beside it went the wrong way**: "every guest-state field"
+reads 10.10 writes a call against 6.18 before. Per-call totals across the
+two slots are 15.89 -> 18.26, **up**, while writes per *exit* are down.
+Those are different denominators over different boots at different stages,
+and I cannot reconcile them from data taken this way.
+
+### What is actually established
+
+- both changes are deployed, hashes verified from a fresh mount
+- the guest boots with them and is running
+- the host suite passes with only the two pre-existing failures, and every
+  gate is negative-controlled individually (7 gates, +1 to +8 failures
+  each on revert)
+- the CR-write discriminator moved in the predicted direction by 78% of
+  the predicted amount
+
+**What is not established is any cycle saving.** The test needs boot 195
+measured in the 3-process phase - the same phase, on the same instrument -
+against boot 194's 25.36 reads and 10.54 writes. That is one wait, not one
+boot, and it is queued.
