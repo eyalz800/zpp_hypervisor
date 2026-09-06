@@ -74111,3 +74111,52 @@ table, and whether they land in a module doing file or memory-dump work.
 **That read needs no new boot** - boot 208 is stopped with memory intact
 and the pair table already holds `(cr3, rip)` rows for
 `0x1bbaab000`.
+
+## CONFIRMED: WerFault is running dbgeng.dll - it is generating a kernel dump
+
+`a7044c4` inferred from the `-k -c` command line that WerFault was
+collecting a kernel report, and flagged that the flag's meaning came from
+documentation rather than from the guest. **The module walk settles it.**
+
+WerFault's **differenced** hot addresses at the wall (3,593 new samples in
+the window), placed with the proof passing (40 modules, first is
+`WerFault.exe`):
+
+    0x7ffaa3b9e54d  +840  ->  **dbgeng.dll + 0x41e54d**
+    0x7ffaa37b5f9e  +212  ->  **dbgeng.dll + 0x35f9e**
+    0x7ffaa6834b30  +165  ->  KERNELBASE.dll + 0x194b30
+    0x7ffaa8ee0665  +159  ->  ntdll.dll + 0x160665
+
+**`dbgeng.dll` is the Windows Debug Engine** - the library that reads and
+writes crash dumps, and what WerFault loads to *generate* one. Its top two
+addresses are WerFault's first and third hottest.
+
+So the reading is no longer an inference from a flag: **Windows is running
+the debug engine at the wall**, and that process is 30.7% of user-mode
+execution while the machine makes no progress. The `-k -c` command line
+and the loaded module agree, and they are independent evidence.
+
+### services.exe, differenced, for contrast
+
+    0x7ffaa8ee0665  +3,223  ->  ntdll.dll + 0x160665
+    0x7ff7c1cb4180  +1,900  ->  services.exe's own image
+    0x7ff7c1cb5afb  +1,049  ->  services.exe
+    0x7ff7c1cb4708  +  995  ->  services.exe
+
+**`ntdll + 0x160665` is the single hottest address in BOTH processes** -
+3,223 in `services.exe` and 159 in `WerFault` - and it was also the #2
+user-mode address on boot 202 (`0x7ffde1720665`, same offset). A single
+ntdll offset dominating two unrelated processes across two boots is a
+**shared code path**, and at that depth in ntdll it is not a `Nt*` stub.
+Not identified; recorded with its offset so it can be.
+
+### One reproducible oddity, recorded not explained
+
+`0x7ffaa8fe60d1` lands in **no module**, and it is **0xd1 bytes past
+ntdll's mapped end** (`0x7ffaa8d80000 + 0x266000 = 0x7ffaa8fe6000`). The
+same shape appeared on boot 202 - `0x7ffde111060c0`, also just past
+ntdll's end, also the hottest unmatched address. **Twice, on different
+boots, at the same tiny offset past the same module.** That is not a
+coincidence and it is not a mapping error at this rate; it is most likely
+`SizeOfImage` under-reporting the last section, or a region mapped
+immediately after. Recorded so the next reader does not treat it as noise.
