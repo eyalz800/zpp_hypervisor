@@ -69180,3 +69180,66 @@ they delete three genuinely duplicated reads and one stale value
 (`last_resume_rip` was reading the pre-advance RIP and is now right), and
 the two negatives are recorded with their reasons. It is good hygiene that
 turned out not to be the lever.
+
+## The enlightened-VMCS lever is closed: KVM presents no Hyper-V interface at all
+
+`1ec74e3` left one way to remove VMCS **misses** rather than hits:
+enlightened VMCS, gated on the layer below advertising it. Read from the
+singleton on wedged boot 189:
+
+    underlying_max_leaf    0x40000001
+    underlying_signature   "KVMKVMKVM   "
+    underlying_interface   0x0100fe7b        (NOT "Hv#1" = 0x31237648)
+    underlying_recommend   0x00000000        bit 14 CLEAR
+
+**KVM advertises max hypervisor leaf `0x40000001` and its own
+`KVMKVMKVM` signature. Leaf `0x40000004` does not exist underneath us**,
+so `detect_underlying_hypervisor` returns early at its
+`underlying_max_leaf < 0x40000004` guard and never reads the
+recommendations at all.
+
+**The zero is the early return, not a reading**, and that distinction is
+the whole point of taking the four fields together. Quoting
+"recommendations = 0, therefore no enlightened VMCS" would have been
+**right by accident and wrong in mechanism**: KVM is not declining to
+recommend it, KVM is never asked. A later reader acting on "KVM says no"
+would go looking for a KVM setting that would make it say yes, and there
+is no such setting to find - the interface is absent, not negative.
+
+This is the same family as everything under "an instrument that cannot
+report its own failure": a field left at its initialiser by an early
+return is indistinguishable from a field genuinely read as zero, unless
+something beside it says which happened. Here `underlying_max_leaf` is
+that something, and it cost one extra read.
+
+### Two wrong fields on the way to the right one
+
+`rig-dump-state.py` prints a `rec` column that reads `evmcs_recommended`,
+which is **what zpp offers upward to hvix64** - not what KVM offers
+downward to zpp. It reads 0 on both processors, consistent with the
+manifest's `evmcs=0`, and it answers a different question entirely. I
+nearly closed this avenue on it. The downward fields
+(`underlying_*`) are **not printed by any instrument in this tree** and had
+to be read by DWARF offset out of the singleton.
+
+### What this closes, and the one thing it does not
+
+**Closed**: enlightened VMCS as a way to cut the 187,639 real VMREADs/s.
+The mechanism requires a Hyper-V interface underneath and there is none.
+Nothing in zpp can create one.
+
+**Not a fix even if it worked**: `boot-zpp.sh` passes no `hv-` flag, while
+`boot.sh` passes `hv-passthrough` - CLAUDE.md records that asymmetry and
+that it has already caused one wrong conclusion. Adding `hv-evmcs` to the
+launcher would very likely make leaf `0x40000004` appear and enlightened
+VMCS become available. **That is a measurement crutch, not a fix.**
+CLAUDE.md's rule is explicit: the goal is to need nothing under us at all,
+so anything that only works while something else implements it is not a
+fix. It would be legitimate only as a *diagnostic* - to measure what the
+wedge does when VMCS access is cheap - and any result would have to be
+labelled as obtained under a launcher nothing else in this tree uses.
+
+**So the per-tick cost avenue is now closed on mechanism, not on
+measurement.** The remaining reads are misses because each is a distinct
+field needed once per exit; the cache cannot help and the only architectural
+alternative is unavailable.
