@@ -13127,6 +13127,82 @@ private:
     bool shadow_cache_valid[max_cpus]{};
     std::uint64_t shadow_writes_skipped[max_cpus]{};
     std::uint64_t shadow_writes_done[max_cpus]{};
+
+    // Both copy loops index this cache by list position, read-only
+    // entries first, and `shadow_field_written` below relies on every
+    // writable entry having a slot rather than falling off the end. It
+    // is asserted rather than checked at runtime so the counter cannot
+    // acquire a branch on the hottest loop in the VMM.
+    static_assert(nested_vmx::shadow_read_only_priced_at +
+                          nested_vmx::shadow_read_write_priced_at <=
+                      shadow_cache_capacity,
+                  "the two shadow lists no longer fit in shadow_cache, "
+                  "so the copy loops would stop caching the tail and "
+                  "shadow_field_written would stop counting it");
+    /** @} */
+
+    /**
+     * **Which of the shadowed writable fields the guest hypervisor
+     * actually writes** - the one question a VM exit census structurally
+     * cannot answer, because a shadowed field's write does not exit.
+     *
+     * See `nested_vmx::census_shadow_writes` for why it exists and why
+     * it is off by default. The mechanism in one line:
+     * `copy_shadow_to_vmcs12` reads every writable entry back anyway,
+     * and `shadow_cache` holds what this VMM last published into the
+     * region, so a difference between the two is the level above having
+     * written it. One compare on a value already in a register.
+     *
+     * Indexed by position in `nested_vmx::shadow_read_write_fields`, and
+     * that order is pinned by `tests/nested_exit` because
+     * `rig-dump-state.py` turns a slot back into a field name from a
+     * list it cannot check.
+     *
+     * `shadow_field_seen` and `shadow_field_published` are **the second
+     * field**, and they are here rather than dropped because a count
+     * alone cannot say whether it is counting what its label claims. If
+     * the differences a slot records are this VMM's own bookkeeping
+     * rather than the guest hypervisor's stores, the pair reads as
+     * something that is obviously not an access-rights word - and "read
+     * the value, not the expression" is the rule that costs least when
+     * it is designed in. They hold the last differing pair only: what
+     * the region contained and what had been published into it.
+     *
+     * **Known bias, which must be quoted with any figure from these: a
+     * write of the value already present is invisible.** Every count
+     * here is a lower bound on the VMWRITEs that would exit if the field
+     * moved to the read-only list.
+     * @{
+     */
+    static constexpr std::size_t shadow_write_slots =
+        nested_vmx::shadow_read_write_priced_at;
+    std::uint64_t shadow_field_written[max_cpus][shadow_write_slots]{};
+    std::uint64_t shadow_field_seen[max_cpus][shadow_write_slots]{};
+    std::uint64_t shadow_field_published[max_cpus][shadow_write_slots]{};
+
+    /**
+     * The denominator and the refusal, so the rows above can be read
+     * honestly.
+     *
+     * `shadow_write_samples` counts collections in which the comparison
+     * was made at all - one per `copy_shadow_to_vmcs12` that reached the
+     * loop with a valid cache. It is the population every "writes per
+     * round trip" figure divides by, and **it is also the census
+     * reporting its own absence**: zero here against a large
+     * `vmcs_shadow_loads` means the compare never ran, which is what a
+     * `shadowwr=0` build looks like from the inside, with no manifest
+     * needed.
+     *
+     * `shadow_write_unsampled` counts collections skipped because
+     * `shadow_cache_valid` was false - the first round trip after the
+     * control is armed, and any after a stand-down. Those cannot be
+     * compared against anything, and counting them is what stops "not
+     * recorded" reading as "recorded as zero".
+     * @{
+     */
+    std::uint64_t shadow_write_samples[max_cpus]{};
+    std::uint64_t shadow_write_unsampled[max_cpus]{};
+    /** @} */
     /** @} */
 
     /**

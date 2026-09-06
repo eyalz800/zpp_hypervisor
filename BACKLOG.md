@@ -73563,3 +73563,233 @@ evidence that nothing structural differs between a boot whose SCM runs and
 one whose SCM freezes, which makes a *timing* or *ordering* difference
 more likely than a configuration one. That is worth one sentence and not
 more.
+
+## The CS/SS access-rights bet is now measurable, and the safety analysis moved the price
+
+`5c9aba1` closed "extend the shadow VMCS list" as a measured negative and
+queued exactly one survivor, in its own words:
+
+> KVM has `GUEST_CS/SS_AR_BYTES` **read-only** where we have them
+> read-write, worth 7,582 cyc/RT (1.6% of the VMM). It's a bet, and a
+> shadowed field's writes don't exit, so it needs a counter, not an
+> argument.
+
+The counter is built and is off by default. **The fields have not
+moved**, and moving them was never the point.
+
+### First: the existing census cannot answer this, and that is structural
+
+Checked before building anything, because this tree has repeatedly built
+what it already had. `record_vmcs_field_use` is called from **inside
+`on_guest_vmwrite`** (`nested_vmx.cpp`, immediately after the
+`encoding.read_only()` check), which is a VM exit handler. A field on
+`shadow_read_write_fields` has its bit cleared in
+`vmcs_shadow_write_bitmap` by `initialize_vmcs_shadowing` precisely so
+that the guest hypervisor's VMWRITE of it **does not exit**.
+
+So encodings `0x4816` and `0x4818` can never appear in
+`vmcs_field_write_count` while they are shadowed, and **their absence
+from `dump_field_use` is the bitmap working rather than hvix64
+abstaining**. Reading the field-use table and concluding "it never writes
+CS access rights" is a wrong answer that looks exactly like the right
+one. `dump_field_use`'s docstring does not say this; the printer beside
+it now does.
+
+One measurement already speaks to it, and it is prose in
+`nested_shadow_vmcs.cpp`: the census taken **with shadowing off**, where
+every write did exit, recorded "the whole of the segment-base and
+access-right block seven writes apiece" against 2,176,011 writes in that
+run. Seven is 3.2e-6 of it - five orders of magnitude under the
+break-even below. That is a strong prior and **not** a substitute for the
+reading: it is one line of prose about one older boot in a different
+configuration, and `5c9aba1` did not cite it.
+
+### What "read-only in the shadow bitmap" means in this tree
+
+Answered from the code, because the SDM's general description is not the
+question.
+
+- `initialize_vmcs_shadowing` sets both bitmaps to all ones, then clears
+  a bit per entry: the read-only list clears in the **read** bitmap only,
+  the read-write list clears in **both**. A clear bit is the permission.
+- A field on the read-only list therefore has its VMREAD served from the
+  hardware shadow region with no exit, and its **VMWRITE exits** -
+  `vmx_exit_reason::vmwrite`, 25 - into `on_guest_vmwrite`.
+- That handler is safe for these two. It does nothing per-encoding beyond
+  `mark_l2_guest_state_dirty` and `guest_vmcs12[cpu].write(...)`, and
+  `guest_cs_access_rights` is not deferrable
+  (`deferrable_field_is_shadowed` already excludes both shadow lists), so
+  `build_vmcs02` writes it every entry regardless. **The value is not
+  lost.**
+
+**But there is a real divergence window, and it is the finding.** After
+that exiting VMWRITE, `guest_vmcs12` holds the new value and the
+*hardware shadow region still holds the old one*. `copy_vmcs12_to_shadow`
+runs at the tail of `reflect_l2_exit`, from `set_vmcs_shadowing(cpu,
+true)`, from `flush_guest_vmcs12` and from `on_guest_vmlaunch_or_resume`
+- so between the write and the next of those, an L1 VMREAD of the same
+field is answered **from the stale region, with no exit to repair on**.
+L1 would see its own store not take effect.
+
+KVM has exactly this hazard and repairs it explicitly.
+`.references/kvm/nested.c:5704`, inside `handle_vmwrite`:
+
+```c
+		/*
+		 * L1 can read these fields without exiting, ensure the
+		 * shadow VMCS is up-to-date.
+		 */
+		if (enable_shadow_vmcs && is_shadow_field_ro(field)) {
+			preempt_disable();
+			vmcs_load(vmx->vmcs01.shadow_vmcs);
+			__vmcs_writel(field, value);
+			vmcs_clear(vmx->vmcs01.shadow_vmcs);
+			vmcs_load(vmx->loaded_vmcs->vmcs);
+			preempt_enable();
+		}
+```
+
+A VMPTRLD, a write, a VMCLEAR and a VMPTRLD back - **the same three
+region instructions this tree already brackets as the expensive part of
+each copy**, phase slots 41/43/44 on the way out and 46/48/49 on the way
+in. Their price is in every dump and should be read from the same dump
+rather than reconstructed by subtracting two figures measured in
+different runs. The consequence is what matters: **a VMWRITE exit to a
+read-only shadowed field is not a plain vmwrite exit**, it is that plus a
+republish, so the honest cost is above whatever the by-reason table says
+for the instruction alone.
+
+Two further requirements a mover has to satisfy, both from the same KVM
+function:
+
+- **The AR-byte mask.** `.references/kvm/nested.c:5695` does
+  `value &= 0x1f0ff` for `GUEST_ES_AR_BYTES .. GUEST_TR_AR_BYTES`, and
+  its comment names this exact configuration as the reason: *"if an
+  AR_BYTE field is intercepted for VMWRITE but not VMREAD (in L1), then
+  VMREAD from L1 will return a different value than VMREAD from L2"*.
+  Hardware strips the reserved bits when the region is written through
+  VMWRITE; `guest_vmcs12` is plain memory and strips nothing. zpp does
+  not mask.
+- Nothing else. Both fields are already excluded from
+  `guest_state_deferrable` by being on a shadow list, so unlike the
+  twelve fields `5c9aba1` priced, **no `save_l2_state` / `build_vmcs02`
+  change is needed**.
+
+### The decision rule, stated before the reading exists
+
+- **Saving**, per field moved: `3,791` cyc/RT. That is phase slot 47,
+  `copy in: field reads`, 34,118 cycles over nine writable entries - the
+  loop that **cannot be elided**, because there is no way to know whether
+  the level above wrote the region without reading it. The copy-out write
+  (slot 42, 875/entry) is *not* saved: a read-only entry is still
+  published.
+- **Cost**, per write: one vmwrite exit. `vmwrite` has no row of its own
+  in the by-reason table; `5c9aba1` used the `vmread` row's **106,488
+  cycles** (44,186 exits, reproducing at 102,104 and 112,426) and noted
+  `on_guest_vmwrite` is the lighter handler. It used that figure to
+  *overstate the benefit* of adding fields. Here the exit is on the
+  **cost** side, so 106,488 now overstates the cost - the conservative
+  direction, which is what a rule fixed in advance should be. It also
+  under-counts the republish above, and those two errors point opposite
+  ways.
+
+So, per field:
+
+    break-even = 3,791 / 106,488 = 0.0356 writes per round trip
+               = one write per 28.1 round trips
+               = 311,600 writes over the 8,758,448 round trips of boot 202
+
+- **Above 0.0356 writes/RT: do not move it.** A loss under any pricing of
+  a vmwrite exit at or above the vmread row.
+- **Below 0.0178 (one per 56.2 RT): moving it wins** even if a vmwrite
+  exit costs twice a vmread.
+- **Between the two: undecided**, and the honest next step is to price a
+  vmwrite exit and the republish rather than to pick.
+- Both fields together, if both move: 7,582 cyc/RT saved against
+  `(W_cs + W_ss) * 106,488`, so the combined threshold is 0.0712.
+
+**The counter is a lower bound and the rule has to be read with that.** A
+write of the value already present is invisible to it, so a reading of
+zero is necessary and not sufficient - it flatters the change. A reading
+*above* threshold is decisive; a reading of zero is a green light to
+price the republish, not to move the field.
+
+### What was built
+
+`ZPP_CENSUS_SHADOW_WRITES`, **default OFF**, manifest field `shadowwr=`.
+
+`copy_shadow_to_vmcs12` already reads every writable entry back, and
+`shadow_cache` already holds what this VMM last published into the
+region. Between the publish and the collect the level above is the only
+thing that touches the region - this VMM's own stores go to
+`guest_vmcs12` and reach the region through the next publish, which
+refreshes the cache in the same pass. So `value != shadow_cache[index]`
+**is** the guest hypervisor's store, and the whole instrument is one
+64-bit compare on a value already in a register. No new VMREAD, no new
+exit, nothing that changes what the guest sees.
+
+Off by default, which is the opposite of `userip=` and argued rather than
+copied: the compare sits **inside the interval phase slot 47 brackets**,
+and slot 47 is the 34,118 cycles the entire break-even above rests on. A
+census that moves its own denominator is "a number can borrow its
+neighbour's measurement" with the roles reversed. Cost boots and census
+boots are different builds, and `shadowwr=` is how a dump says which.
+
+It reports its own failure, four ways:
+
+- `shadow_write_samples` is the denominator **and the absence detector**:
+  zero here against a large `vmcs_shadow_loads` means the compare never
+  ran, which is what `shadowwr=0` looks like from the inside with no
+  manifest needed. The reader says so in those words.
+- `shadow_write_unsampled` counts collections where `shadow_cache_valid`
+  was false - the first round trip after arming, and any after a
+  stand-down. Not comparable is a different reading from zero.
+- **A positive control that can fail loudly.** All nine writable fields
+  are censused, not only the two under question, so `guest_rip` and
+  `guest_interruptibility_state` - 38.8% and 36.0% of L1's writes in the
+  shadowing-off census - sit in the same table. If *those* read zero the
+  instrument is broken or the region is frozen, and the reader prints
+  `*** CONTROL FAILED ***` and says not to read the rows as a finding.
+- `shadow_field_seen` / `shadow_field_published` keep the last differing
+  pair, so a row can be checked against what an access-rights word can
+  possibly be. "Read the value, not the expression."
+
+No top-N cut and no suppression of zero rows: the rows worth most here
+are the ones reading zero, which is the whole finding, and a census
+printed only where it is non-zero cannot show it.
+
+Measured on the built ELF: singleton `0x3c09000` -> `0x3c0b000`, **+8,192
+bytes** against 7,424 declared, so 768 went to padding. `.bss` moves with
+it and **the module base moves with it** - re-read `allocate_rwx done at
+...` for this build rather than carrying one over. `shadowwr=0` costs
+those bytes anyway - the members exist either way - and saves only the
+cycles. Verified on the artifact with `llvm-nm -S`:
+`copy_shadow_to_vmcs12` is `0x39e` bytes with the switch off and `0x50d`
+with it on, so the code really is gone rather than predicated at runtime.
+
+`tests/nested_exit` gains six checks, 1,354 -> 1,360, the one pre-existing
+failure unchanged. They pin the **order** of `shadow_read_write_fields`,
+because that order is a wire format between three things that cannot see
+each other - both copy loops index `shadow_cache` by it,
+`shadow_field_written` is indexed by it, and `rig-dump-state.py` turns a
+slot back into a field name from a hardcoded list nothing in python can
+check. Both negative controls were **run**: swapping the CS and SS
+entries fails 2 checks, and perturbing one encoding in the reader's list
+fails 1. `nested_vmx::shadow_read_write_slot` answers past-the-end for a
+field that is not on the list, and that is checked too, or "everything is
+at slot 0" would have passed the order loop.
+
+### The next read
+
+One boot to the usual wall with `-DZPP_CENSUS_SHADOW_WRITES=ON`, dump,
+and read `cpu N guest-hypervisor writes to SHADOWED fields`. Three
+outcomes, all informative:
+
+- `guest_rip` and interruptibility carry differences and `0x4816`/`0x4818`
+  read zero or near it - the seven-writes prior is confirmed on this
+  boot, and the remaining work is pricing the republish KVM does, not
+  arguing about whether hvix64 writes them.
+- `0x4816`/`0x4818` are above 0.0356/RT - **closed permanently**, and
+  `5c9aba1`'s last open item goes with it.
+- the control fails - nothing above is a finding, and
+  `shadowing_ineffective` / `vmcs_shadowing_stranded` are where to look.

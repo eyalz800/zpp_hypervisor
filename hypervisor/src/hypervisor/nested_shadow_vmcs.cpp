@@ -912,10 +912,66 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
         auto index = sizeof(shadow_read_only_fields) /
                      sizeof(shadow_read_only_fields[0]);
 
+        // **The only instrument that can see a shadowed field's writes,
+        // and it is free.** `record_vmcs_field_use` lives inside
+        // `on_guest_vmwrite`, so it can only ever count writes that
+        // exited - and a field on this list has its bit cleared in
+        // `vmcs_shadow_write_bitmap` precisely so its writes do not.
+        // Encodings 0x4816 and 0x4818 can therefore never appear in
+        // `vmcs_field_write_count` while they are shadowed, and their
+        // absence from a dump is the bitmap working rather than the
+        // guest hypervisor abstaining.
+        //
+        // What is compared instead: `shadow_cache` holds what this VMM
+        // last published into the region, and between that publish and
+        // this collection the level above is the only thing that touches
+        // it - this VMM's own stores go to `guest_vmcs12` and reach the
+        // region through the next publish, which refreshes the cache in
+        // the same pass. So value != cache is the guest hypervisor's
+        // store, on a read that was being taken anyway.
+        //
+        // See `nested_vmx::census_shadow_writes` for the bias (a write
+        // of the value already there is invisible, so every count is a
+        // lower bound) and for why this is off by default: it sits
+        // inside the interval phase slot 47 brackets, and slot 47 is the
+        // measurement the whole break-even rests on.
+        if constexpr (nested_vmx::census_shadow_writes) {
+            if (cpu < max_cpus) {
+                if (this->shadow_cache_valid[cpu]) {
+                    this->shadow_write_samples[cpu] =
+                        this->shadow_write_samples[cpu] + 1;
+                } else {
+                    this->shadow_write_unsampled[cpu] =
+                        this->shadow_write_unsampled[cpu] + 1;
+                }
+            }
+        }
+
         for (auto entry : shadow_read_write_fields) {
             auto value = this->vmcs.read(entry);
             auto encoding =
                 vmcs_field_encoding(static_cast<std::uint64_t>(entry));
+
+            // Before the cache slot is overwritten below with what was
+            // found, which is what makes this readable at all. The row
+            // index is derived from `index` rather than carried in a
+            // second counter, so the two cannot drift apart - the
+            // static_assert beside `shadow_cache_capacity` is what
+            // guarantees every writable entry has a cache slot to
+            // subtract from.
+            if constexpr (nested_vmx::census_shadow_writes) {
+                auto slot = index - (sizeof(shadow_read_only_fields) /
+                                     sizeof(shadow_read_only_fields[0]));
+
+                if ((cpu < max_cpus) && this->shadow_cache_valid[cpu] &&
+                    (value != this->shadow_cache[cpu][index])) {
+                    this->shadow_field_written[cpu][slot] =
+                        this->shadow_field_written[cpu][slot] + 1;
+                    this->shadow_field_seen[cpu][slot] = value;
+                    this->shadow_field_published[cpu][slot] =
+                        this->shadow_cache[cpu][index];
+                }
+            }
 
             // The region is the truth for a shadowed field only while
             // the control is genuinely in force; where it is advertised

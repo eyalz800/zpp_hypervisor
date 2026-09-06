@@ -1042,6 +1042,76 @@ inline constexpr bool census_closed = (0 != ZPP_CENSUS_CLOSED);
 inline constexpr bool census_user_rip = (0 != ZPP_CENSUS_USER_RIP);
 
 /**
+ * Count how often the guest hypervisor writes each entry of
+ * `shadow_read_write_fields`, **without making the write exit**.
+ *
+ * ## The question it exists to answer
+ *
+ * `5c9aba1` closed "extend the shadow list" as a measured negative and
+ * queued exactly one survivor: KVM has `GUEST_CS_AR_BYTES` and
+ * `GUEST_SS_AR_BYTES` as `SHADOW_FIELD_RO`
+ * (`.references/kvm/vmcs_shadow_fields.h:47` and `:48`) where this VMM
+ * has both in `shadow_read_write_fields`. Moving a field from the
+ * writable list to the read-only one removes it from the **one loop
+ * that can never be elided** - `copy_shadow_to_vmcs12` reads every
+ * writable entry back because there is no way to know whether the level
+ * above wrote the region without reading it - and that loop is phase
+ * slot 47, measured at 34,118 cycles a round trip over nine entries,
+ * **3,791 each**. Two fields is 7,582 cycles on every one of 8,758,448
+ * round trips, 1.6% of this VMM.
+ *
+ * **The existing per-field census cannot answer it, and that is
+ * structural rather than an oversight.** `record_vmcs_field_use` is
+ * called from inside `on_guest_vmwrite`, which is a VM exit handler. A
+ * field on the writable list has its bit cleared in
+ * `vmcs_shadow_write_bitmap`, so the guest hypervisor's VMWRITE of it
+ * **does not exit**, so nothing reaches the census and encodings
+ * `0x4816` and `0x4818` can never appear in `vmcs_field_write_count`
+ * while the field is shadowed. A dump showing them absent is the
+ * bitmap working, not the guest abstaining.
+ *
+ * ## What is counted instead, and why it is the only thing that can be
+ *
+ * `copy_shadow_to_vmcs12` already reads every writable field back, and
+ * `shadow_cache` already holds what this VMM last published into the
+ * region. **If the two differ, the only thing that can have written it
+ * is the level above** - between the publish and the collect nothing
+ * else touches the region, and this VMM's own writes go to
+ * `guest_vmcs12` and reach the region only through the next publish,
+ * which updates the cache in the same breath. So the whole instrument
+ * is one 64-bit compare against a value already in a register, on a
+ * read already taken. No new VMREAD, no new exit.
+ *
+ * **Its bias is one-directional and must be quoted with it: a write of
+ * the value already there is invisible.** The count is therefore a
+ * *lower bound* on the writes that would exit if the field moved, which
+ * is the direction that flatters the change - so a low reading is
+ * suggestive and a high one is decisive.
+ *
+ * ## Off by default, which is the opposite of `userip=`
+ *
+ * The compare sits **inside the loop phase slot 47 brackets**, and slot
+ * 47 is the measurement the entire break-even rests on. An instrument
+ * that perturbs its own denominator is this tree's "a number can borrow
+ * its neighbour's measurement" with the roles reversed, so the cost
+ * boots and the census boots are deliberately different builds. Turn it
+ * on for the boot that answers the question; read slot 47 from a boot
+ * with it off.
+ *
+ * Off, every `shadow_write_*` member reads zero - and zero is exactly
+ * what "the guest hypervisor never wrote this field" looks like. The
+ * manifest's `shadowwr=` field is what separates them, and
+ * `shadow_write_samples` reading zero against a large
+ * `vmcs_shadow_loads` says the same thing without the manifest.
+ */
+#ifndef ZPP_CENSUS_SHADOW_WRITES
+#define ZPP_CENSUS_SHADOW_WRITES 0
+#endif
+
+inline constexpr bool census_shadow_writes =
+    (0 != ZPP_CENSUS_SHADOW_WRITES);
+
+/**
  * Step the trust-level loop with the monitor trap flag. Off unless
  * asked for, and that is a correctness requirement rather than tidiness.
  *
@@ -3415,6 +3485,37 @@ static_assert(std::size(shadow_read_write_fields) ==
               "pay for itself - re-derive the break-even beside this "
               "list before updating this count");
 /** @} */
+
+/**
+ * Where a field sits in `shadow_read_write_fields`, or one past the end
+ * when it is not on the list.
+ *
+ * The writable list's *order* is load bearing in three places that
+ * cannot see each other: `copy_vmcs12_to_shadow` and
+ * `copy_shadow_to_vmcs12` index `shadow_cache` by it,
+ * `shadow_field_written` is indexed by it, and `rig-dump-state.py`
+ * turns a slot back into a field name from a hardcoded list. Nothing in
+ * python can check that last one, so this exists to let
+ * `tests/nested_exit` pin the order the reader assumes - reordering the
+ * list then fails the host suite instead of silently relabelling every
+ * row of a census.
+ *
+ * Past-the-end rather than an error for the same reason `note_user_rip`
+ * returns false: "not on the list" has to be a readable answer, not an
+ * index into something else.
+ */
+inline constexpr std::size_t
+shadow_read_write_slot(arch::x86_64::vmx::vmcs_fields::vmcs_field entry)
+{
+    for (std::size_t slot{}; slot < std::size(shadow_read_write_fields);
+         ++slot) {
+        if (shadow_read_write_fields[slot] == entry) {
+            return slot;
+        }
+    }
+
+    return std::size(shadow_read_write_fields);
+}
 
 /**
  * Watch the IUM context block for writes, and log who makes them.

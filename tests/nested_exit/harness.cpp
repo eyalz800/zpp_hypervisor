@@ -3041,6 +3041,101 @@ static void test_l0_precedence()
                   "the read-write shadow list is the length 'copy in: "
                   "field reads' 34,118 cycles a round trip is divided "
                   "by to price an entry at 3,791");
+
+            // **The writable list's ORDER is a wire format, and one of
+            // its three readers is python.**
+            //
+            // `shadow_field_written` - the census that answers whether
+            // hvix64 ever writes a shadowed field, which no VM exit
+            // census can, since a shadowed field's write does not exit
+            // - is indexed by position in this list.
+            // `rig-dump-state.py` turns a slot back into a field name
+            // from a hardcoded `SHADOW_RW_FIELDS`, and nothing in
+            // python can check it against the C++. So the sequence is
+            // pinned here: reordering the list fails this suite instead
+            // of silently relabelling every row of a census, which is
+            // the failure mode where the *wrong* answer is the
+            // plausible-looking one.
+            //
+            // Encodings rather than names, because the reader's list is
+            // encodings and a name that moved would not show up.
+            constexpr struct
+            {
+                field entry;
+                std::uint64_t encoding;
+            } reader_order[] = {
+                {field::guest_dr7, 0x681a},
+                {field::guest_rip, 0x681e},
+                {field::guest_rflags, 0x6820},
+                {field::guest_interruptibility_state, 0x4824},
+                {field::vm_entry_interruption_information_field, 0x4016},
+                {field::primary_processor_based_vm_execution_controls,
+                 0x4002},
+                {field::tpr_threshold, 0x401c},
+                {field::guest_cs_access_rights, 0x4816},
+                {field::guest_ss_access_rights, 0x4818},
+            };
+
+            check(std::size(reader_order) ==
+                      std::size(nv::shadow_read_write_fields),
+                  "rig-dump-state.py's SHADOW_RW_FIELDS has one row per "
+                  "writable shadow entry");
+
+            std::size_t order_agrees{};
+            std::size_t encodings_agree{};
+            for (std::size_t slot{}; slot < std::size(reader_order);
+                 ++slot) {
+                if (nv::shadow_read_write_slot(reader_order[slot].entry) ==
+                    slot) {
+                    ++order_agrees;
+                }
+                if (static_cast<std::uint64_t>(reader_order[slot].entry) ==
+                    reader_order[slot].encoding) {
+                    ++encodings_agree;
+                }
+            }
+
+            check(std::size(reader_order) == order_agrees,
+                  "every field sits at the slot rig-dump-state.py "
+                  "labels it with, so shadow_field_written's rows are "
+                  "named correctly");
+            check(std::size(reader_order) == encodings_agree,
+                  "and the encodings the reader prints are the "
+                  "encodings the fields have - the reader has no other "
+                  "source for them");
+
+            // The negative control a static_assert cannot have: the
+            // predicate must be able to answer "not on the list", or
+            // "every field is at slot 0" would pass the loop above for
+            // the first row and nothing would be pinned at all.
+            check(std::size(nv::shadow_read_write_fields) ==
+                      nv::shadow_read_write_slot(field::guest_cr3),
+                  "a field that is not on the writable list answers "
+                  "past-the-end rather than an index into it - "
+                  "guest_cr3 is the case that matters, since KVM "
+                  "shadows it and this VMM must not");
+            check(std::size(nv::shadow_read_write_fields) ==
+                      nv::shadow_read_write_slot(field::exit_reason),
+                  "and a field on the READ-ONLY list is not on this "
+                  "one either, so the slot predicate cannot be "
+                  "confused by the other list");
+
+            // The two fields the census was built to price. KVM has
+            // both as SHADOW_FIELD_RO
+            // (.references/kvm/vmcs_shadow_fields.h:47 and :48) where
+            // this VMM has them writable, which is worth 2 x 3,791
+            // cycles a round trip if hvix64 does not write them. **This
+            // check asserts where they are, not that they should
+            // move** - moving them needs the census reading below
+            // 0.0356 writes a round trip each.
+            check(7 == nv::shadow_read_write_slot(
+                           field::guest_cs_access_rights) &&
+                      8 == nv::shadow_read_write_slot(
+                               field::guest_ss_access_rights),
+                  "guest_cs_access_rights and guest_ss_access_rights "
+                  "are slots 7 and 8, which is where a dump's "
+                  "shadow_field_written rows for 0x4816 and 0x4818 are "
+                  "read from");
         }
 
         // **The case that reset the guest 218 times.** Deferral is

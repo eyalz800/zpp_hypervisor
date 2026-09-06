@@ -161,6 +161,22 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // not be compared for rate.
         ' ', 'u', 's', 'e', 'r', 'i', 'p', '=',
         digit(nested_vmx::census_user_rip),
+        // The shadowed-field write census, and the one switch here that
+        // is deliberately OFF by default rather than ON. It is one
+        // compare per writable shadow entry, taken **inside the interval
+        // phase slot 47 brackets** - and slot 47 is the 34,118 cycles
+        // that prices every shadow-list decision this project makes. A
+        // census that moves its own denominator is not a cheap census,
+        // so cost boots and census boots are different builds and this
+        // field is how a dump says which one it came from.
+        //
+        // Off, `shadow_field_written` and its two value rows read zero,
+        // and zero is exactly "the guest hypervisor never wrote this
+        // field" - which is the reading the census exists to establish.
+        // Those two must not be confusable, and this is what separates
+        // them.
+        ' ', 's', 'h', 'a', 'd', 'o', 'w', 'w', 'r', '=',
+        digit(nested_vmx::census_shadow_writes),
         // Off hands application processors to the guest unvirtualized,
         // so this is a correctness field and not a tuning one. It was
         // stale-OFF in `build/debug` for a session with nothing on the

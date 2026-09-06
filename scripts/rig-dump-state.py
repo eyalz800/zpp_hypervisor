@@ -5766,6 +5766,16 @@ DELTA_PER_CPU_COUNTERS = [
     # health for ever after user mode stops.
     ("user_rip_samples", "user-mode census samples"),
     ("user_rip_unattributed", "user-mode samples with no cr3"),
+    # The shadowed-write census's denominator and its refusal.  The
+    # per-field rows themselves are `[max_cpus][slots]` and this list
+    # only differences one word per processor, so they stay cumulative
+    # in the main dump - which is the right presentation for them: the
+    # quantity the decision rule needs is writes per round trip over the
+    # whole run, and both halves of that ratio start at the same instant.
+    # These two are here so a window can still say whether the census is
+    # live at all.
+    ("shadow_write_samples", "shadow collections compared"),
+    ("shadow_write_unsampled", "shadow collections not comparable"),
 ]
 
 # Monotonic counts that are single words, not per-processor rows.  Read
@@ -8179,6 +8189,14 @@ def main():
                "user_rip_samples", "user_rip_overflow",
                "user_rip_unattributed",
                "user_cr3_seen", "user_cr3_hits", "user_cr3_overflow",
+               # Which shadowed writable fields the level above writes.
+               # The `vmwrite` table above cannot answer this - a
+               # shadowed field's write does not exit, so it never
+               # reaches `record_vmcs_field_use` and its absence there
+               # is the bitmap working. See the printer.
+               "shadow_field_written", "shadow_field_seen",
+               "shadow_field_published",
+               "shadow_write_samples", "shadow_write_unsampled",
                "guest_interrupted_trace", "guest_interrupted_count",
                "guest_interrupted_rsp", "guest_interrupted_rip",
                # The interrupted thread's own registers and its own
@@ -9869,6 +9887,158 @@ def main():
                       "DirectoryTableBase in this guest ends ...002, so "
                       "an unmasked compare matches nothing and reads "
                       "as 'no process executes'.")
+
+    # Which shadowed writable fields the guest hypervisor actually
+    # writes - the one question `dump_field_use` above structurally
+    # cannot answer.
+    #
+    # **Why it needs its own instrument.** `record_vmcs_field_use` is
+    # called from inside `on_guest_vmwrite`, a VM exit handler. A field
+    # on `shadow_read_write_fields` has its bit cleared in
+    # `vmcs_shadow_write_bitmap` precisely so that the guest
+    # hypervisor's VMWRITE of it does NOT exit. So those encodings can
+    # never appear in the `vmwrite` table above while they are
+    # shadowed, and their absence there is the bitmap working rather
+    # than the guest abstaining. Reading the field-use table and
+    # concluding "hvix64 never writes CS access rights" is the mistake
+    # this block exists to make impossible.
+    #
+    # **What it measures instead.** `copy_shadow_to_vmcs12` reads every
+    # writable entry back anyway, and `shadow_cache` holds what this VMM
+    # last published into the region; a difference is the level above
+    # having written it. One compare, no new VMREAD, no new exit.
+    #
+    # **The bias, which must be quoted with any number here: a write of
+    # the value already present is invisible.** Every count is a LOWER
+    # BOUND on the VMWRITEs that would exit if the field moved to the
+    # read-only shadow list.
+    #
+    # The order of `SHADOW_RW_FIELDS` must match
+    # `nested_vmx::shadow_read_write_fields`. Nothing in python can
+    # check that, so `tests/nested_exit` pins it with
+    # `nested_vmx::shadow_read_write_slot` - a reorder fails the host
+    # suite instead of silently relabelling every row below.
+    SHADOW_RW_FIELDS = [
+        (0x681a, "guest_dr7"),
+        (0x681e, "guest_rip"),
+        (0x6820, "guest_rflags"),
+        (0x4824, "guest_interruptibility_state"),
+        (0x4016, "vm_entry_interruption_information_field"),
+        (0x4002, "primary_processor_based_vm_execution_controls"),
+        (0x401c, "tpr_threshold"),
+        (0x4816, "guest_cs_access_rights"),
+        (0x4818, "guest_ss_access_rights"),
+    ]
+
+    if "shadow_field_written" in off:
+        SWSLOTS = len(SHADOW_RW_FIELDS)
+        for _n in ("shadow_field_written", "shadow_field_seen",
+                   "shadow_field_published"):
+            for _c in range(args.cpus):
+                monitor.queue(instance + off[_n] + _c * SWSLOTS * 8,
+                              SWSLOTS)
+        for _n in ("shadow_write_samples", "shadow_write_unsampled"):
+            monitor.queue(instance + off[_n], args.cpus)
+        if "vmcs_shadow_loads" in off:
+            monitor.queue(instance + off["vmcs_shadow_loads"], args.cpus)
+        words.update(monitor.run())
+
+        for _c in range(args.cpus):
+            seen = words.get(
+                instance + off["shadow_write_samples"] + _c * 8, 0)
+            skipped = words.get(
+                instance + off["shadow_write_unsampled"] + _c * 8, 0)
+            loads = None
+            if "vmcs_shadow_loads" in off:
+                loads = words.get(
+                    instance + off["vmcs_shadow_loads"] + _c * 8, 0)
+
+            print(f"\ncpu {_c} guest-hypervisor writes to SHADOWED "
+                  f"fields ({seen:,} collections compared)")
+
+            # The census reporting its own absence, before any row is
+            # read. Zero comparisons against a live collection count is
+            # a shadowwr=0 build, and that reads identically to a guest
+            # hypervisor that never wrote a single shadowed field.
+            if not seen:
+                if loads:
+                    print(f"  NOT MEASURED: {loads:,} shadow collections "
+                          f"happened and none was compared, so this is a "
+                          f"build with the census off. Check `strings "
+                          f"<hypervisor> | grep 'zpp switches'` for "
+                          f"shadowwr= and rebuild with "
+                          f"-DZPP_CENSUS_SHADOW_WRITES=ON.")
+                else:
+                    print("  no shadow collections on this processor at "
+                          "all - vmcs_shadow_loads is zero too, so this "
+                          "says nothing about the census.")
+                continue
+
+            rows = []
+            for i, (enc, name) in enumerate(SHADOW_RW_FIELDS):
+                n = words.get(instance + off["shadow_field_written"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                v = words.get(instance + off["shadow_field_seen"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                p = words.get(instance + off["shadow_field_published"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                rows.append((n, enc, name, v, p))
+
+            # No top-N cut and no suppression of zero rows. The rows
+            # worth the most are the ones reading zero - that is the
+            # whole finding - and a census printed only where it is
+            # non-zero cannot show it.
+            for n, enc, name, v, p in rows:
+                share = n / seen
+                per = f"1 per {seen / n:>10,.1f} RT" if n else \
+                      "never observed  "
+                print(f"  0x{enc:04x} {name:<46} {n:>12,}  "
+                      f"{share:8.5f}/RT  {per}")
+                if n:
+                    print(f"         last differing pair: region "
+                          f"0x{v:016x} had been published "
+                          f"0x{p:016x}")
+
+            total = sum(n for n, _, _, _, _ in rows)
+            print(f"  {total:,} differences over {seen:,} comparisons, "
+                  f"{skipped:,} collections not comparable (the cache "
+                  f"was invalid - the first round trip after the "
+                  f"control is armed, and any after a stand-down)")
+
+            # The positive control, and it is not optional. guest_rip
+            # and the interruptibility state are what a guest
+            # hypervisor's exit handler writes on essentially every
+            # resume; if THOSE read zero the instrument is broken, or
+            # the region is frozen, and no other row means anything.
+            live = sum(n for n, enc, _, _, _ in rows
+                       if enc in (0x681e, 0x4824))
+            if not live:
+                print("  *** CONTROL FAILED: guest_rip and "
+                      "guest_interruptibility_state both read zero "
+                      "differences. Those are written on nearly every "
+                      "resume, so either the comparison is not seeing "
+                      "the region (check shadowing_ineffective and "
+                      "vmcs_shadowing_stranded) or this census is "
+                      "measuring nothing. Do not read the rows above "
+                      "as a finding. ***")
+            else:
+                print(f"  control: guest_rip + interruptibility carry "
+                      f"{live:,} differences, so the comparison does "
+                      f"see the level above's stores")
+
+            # The decision the census was built for, priced in advance
+            # so the reading cannot be fitted to it afterwards. See the
+            # BACKLOG entry and nested_vmx::census_shadow_writes.
+            print("  decision rule: moving one field to the read-only "
+                  "shadow list saves 3,791 cyc/RT (phase slot 47, the "
+                  "un-elidable read-back) and costs one vmwrite EXIT "
+                  "per write, priced at the vmread row's 106,488 "
+                  "cycles. Break-even is 0.0356 writes/RT, one per "
+                  "28.1 round trips. Above that it is a loss under any "
+                  "pricing; below 0.0178 (one per 56.2) it is a win "
+                  "even if a vmwrite exit costs twice a vmread. And "
+                  "these counts are a LOWER bound - a write of the "
+                  "value already there is invisible.")
 
     # The interface's own crash report. HV_X64_MSR_CRASH_P0..P4 are
     # 0x40000100-0x40000104 and the control is 0x40000105; the guest
