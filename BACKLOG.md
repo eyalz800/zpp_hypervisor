@@ -69110,3 +69110,73 @@ informative on its own.
 before-set while the specimen is in hand. A wedged guest is the expensive
 thing to obtain; the marginal cost of three more counter reads while it is
 sitting there is seconds, and the cost of missing one is a boot.
+
+## The removal took out CACHE HITS, not exits - and the wedge did not move
+
+**Outcome test, boot 189, the removal build.** zpp resident, VM running,
+healthy for ~20 minutes, then wedged at:
+
+    cpu 0 vtl_fresh 26,257   band over five boots: 26,192 / 26,257 /
+    cpu 0 vtl_copy  10,583                        26,570 / 26,944 / 27,100
+                                        copies:   10,583 / 10,602 /
+                                                  10,677 / 10,782 / 10,834
+
+**Fifth consecutive boot inside the band. The removal changed nothing.**
+
+### Why, measured rather than guessed
+
+Took the whole set this time, wedged state, 67 s window:
+
+                        boot 188 (pre)   boot 189 (post)    change
+    hits                  114,590/s         56,714/s      -57,876  -50.5%
+    misses                201,701/s        187,639/s      -14,062   -7.0%
+    hits + misses         316,291/s        244,353/s      -71,938  -22.7%
+    hit rate                 36.2%            23.2%
+    reads_taken                 --        295,771/s
+    writes_taken                --        125,897/s
+    exits                       --          9,625/s   -> 30.7 reads/exit
+
+**80.5% of the reads the removal eliminated were cache HITS.** Real
+VMREADs - the ones that exit to the layer below - fell only 7%.
+
+**And that is not bad luck, it is structural.** Six of the eight sites were
+classified "(a) redundant - the same value is already in hand". **A
+redundant read of a field already read this window is precisely what the
+VMCS cache answers from memory.** So the selection criterion that made the
+removals safe - *this value is already available* - is the same criterion
+that made them cheap. The optimization targeted the half of the traffic
+that was already free.
+
+The falling hit rate confirms it from the other side: 36.2% -> 23.2%. A
+change that removed misses would have *raised* the hit rate. It fell,
+because hits were what left.
+
+### What this settles
+
+`b216a27` predicted the removal would narrow the convoy if per-tick cost
+were causal, and named the falsifier: **`vmm%` falls materially and the
+wedge stays.** The real VMREAD traffic fell 7%, which is not "materially",
+so this run does **not** trigger that falsifier - it fails to test the
+hypothesis rather than refuting it.
+
+**Honest position: the cost hypothesis is still untested.** Testing it
+needs a change that removes *misses*, and the sites that generate misses
+are by definition the ones whose value is **not** already in hand - which
+are exactly the reads that cannot be removed by rewiring. Those need
+either the cache to cover more fields, or enlightened VMCS
+(`evmcs=0` today, and `underlying_offers_evmcs` is gated on the layer
+below advertising it).
+
+**The generalisable rule, and it is not obvious:** *removing redundant
+work is not the same as removing expensive work, and when a cache is
+present the two are close to disjoint.* Rank optimisation candidates by
+measured miss cost, never by redundancy. A redundancy audit finds what is
+cheap to remove; that is a different question from what is worth removing.
+
+### Kept anyway
+
+The eight removals stay on develop. They are correct, they cost nothing,
+they delete three genuinely duplicated reads and one stale value
+(`last_resume_rip` was reading the pre-advance RIP and is now right), and
+the two negatives are recorded with their reasons. It is good hygiene that
+turned out not to be the lever.
