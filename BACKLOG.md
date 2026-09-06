@@ -72297,3 +72297,42 @@ question becomes what holds the processor against a thread that wants it.
 
 **Those two answers point in opposite directions and one read separates
 them.** That is the highest-value measurement outstanding.
+
+## The reader can be NEWER than the deployed binary, and it fails hard
+
+Boot 197 produced no dump at all. `rig-dump-state.py --elf
+.rig-deployed-hypervisor.elf` returned a single line:
+
+    could not read all offsets from .rig-deployed-hypervisor.elf: got [...]
+
+`.rig-deployed-hypervisor.elf` is exactly what it should be - the binary
+actually running - and CLAUDE.md keeps it for that reason. **The skew was
+the other way round: the READER had moved ahead of the deployed binary.**
+`6fac2df` added `guest_state_writes_unlicensed`,
+`hot_state_writes_uncached` and `control_writes_uncached` and taught the
+reader to read them; the deployed binary was built before they existed.
+
+This is the mirror of the hazard the tree already records - *"the
+singleton's offsets move when a member is added, so a reader pointed at a
+rebuilt ELF against a deployed older binary reads plausible garbage"* -
+and the mirror is **worse in one way and better in another**. Better,
+because it fails loudly instead of printing zeroes. Worse, because it
+loses the **whole dump**, not the members it cannot find: fifteen minutes
+of boot 197 were unreadable for want of three counters that had nothing to
+do with the question being asked.
+
+**The operational rule, which cost a boot:** after any commit that adds a
+singleton member, **deploy before reading**, or point `--elf` at the ELF
+the running binary was built from. The `.rig-deployed-hypervisor.elf` copy
+protects against the reader being *behind*; nothing protects against it
+being *ahead*.
+
+**Worth fixing in the reader** - a member the ELF does not carry should be
+named and skipped, exactly as the non-singleton counters already are
+(`acfeb73` does this for `vmread_raw_*`). The bulk offset path does not,
+and it is the one that aborts.
+
+Not fixed now: boot 198 is running with a matched pair, the catcher is
+armed on it, and changing the reader mid-flight would invalidate the
+comparison it exists to make. Recorded so the next person does not lose a
+boot to it.
