@@ -71005,3 +71005,41 @@ give the real number - and every cost decision in this file depends on
 it. **Recorded as the next change, ahead of any optimisation**, because
 ranking work by a price that is wrong by 17x is how three of this
 session's conclusions came to be retracted.
+
+## The read benchmark now prices the instruction, not the cache
+
+Three retracted conclusions traced to one defect, so it is fixed rather
+than worked around. `price_read` calls `vmcs::read`, which answers from
+the field cache when `vcache=1` - `vmcs.h:1044-1046` returns
+`current.value[slot]` on a tag match without executing the instruction.
+Reading one field a thousand times is therefore **one VMREAD plus 999
+cache hits**, and the quotient is ~57 cycles whatever a VMREAD costs.
+
+Added `price_read_raw`, which calls `arch::x86_64::vmx::vmread` directly,
+and two members:
+
+    vmread_raw_shadowed_cycles      guest_rip     through the instruction
+    vmread_raw_unshadowed_cycles    guest_gdtr_base
+
+**Both prices are kept, and that is the point.** The cached number is a
+real measurement of a cache hit and is what the hot path pays on a hit;
+the raw number is what a miss costs. **Quoting either as "the read price"
+without saying which is exactly how this went wrong**, so the comment at
+the site says so and the log line labels the raw pair
+`RAW (instruction, cache bypassed)`.
+
+`price_write` was already sound - `vmcs::write` executes `vmwrite` on
+every call - which is why reads and writes came out 34x apart for what
+should be the same mechanism. The asymmetry was the symptom that should
+have prompted this check and was instead reported as a finding.
+
+Built, `-Werror` clean, member present in the ELF at `0x02d31dc0`, host
+suite showing only the two pre-existing failures. **Not deployed yet** -
+boot 193 is mid-flight and adding members moves the module base and the
+singleton offsets, so this goes out with the next deploy and the base must
+be re-read after it (`allocate_rwx done at ...`).
+
+**Nothing should be ranked by read cost until this has run once.** The
+tree's best available figure remains 991 cycles from a controlled removal
+(`BACKLOG.md:30545`); the new members will either confirm it or replace
+it with a direct measurement.

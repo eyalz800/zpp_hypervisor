@@ -13492,6 +13492,18 @@ private:
     std::uint64_t vmread_unshadowed_cycles{};
     std::uint64_t vmwrite_shadowed_cycles{};
     std::uint64_t vmwrite_unshadowed_cycles{};
+    /**
+     * The same two fields priced through the **instruction** rather
+     * than through `vmcs::read`, which answers from the field cache
+     * when `vcache=1` and therefore reports a cache hit however
+     * expensive a VMREAD is. See the comment at the benchmark.
+     *
+     * `vmread_shadowed_cycles` and `vmread_unshadowed_cycles` remain
+     * the CACHED price and are still worth having - the hot path pays
+     * that on a hit. These two are what a miss costs.
+     */
+    std::uint64_t vmread_raw_shadowed_cycles{};
+    std::uint64_t vmread_raw_unshadowed_cycles{};
     std::uint64_t vmread_benchmark_sink{};
     bool vmread_benchmark_done{};
 

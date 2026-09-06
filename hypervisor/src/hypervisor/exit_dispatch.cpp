@@ -176,6 +176,36 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             return arch::x86_64::rdtsc() - before;
         };
 
+        // **`price_read` above does NOT price a VMREAD while the field
+        // cache is on, and that cost three retracted conclusions.**
+        //
+        // `vmcs::read` answers from the cache - `vmcs.h` returns
+        // `current.value[slot]` on a tag match without executing the
+        // instruction - so reading ONE field a thousand times is one
+        // real VMREAD plus 999 cache hits, and the quotient is ~57
+        // cycles **whatever a VMREAD costs**. `price_write` has no such
+        // path (`vmcs::write` always executes `vmwrite`), which is why
+        // the two came out 34x apart for what should be the same
+        // mechanism - the asymmetry was a symptom and was read as a
+        // finding.
+        //
+        // This variant calls the instruction wrapper directly, so it
+        // prices the instruction. Both numbers are kept: the cached one
+        // is a genuine measurement of a cache hit and is what the hot
+        // path actually pays on a hit, and the raw one is what a miss
+        // costs. Quoting either as "the read price" without saying
+        // which is how this went wrong.
+        auto price_read_raw = [&](bench_field which) {
+            std::uint64_t value{};
+            auto before = arch::x86_64::rdtsc();
+            for (int i = 0; i < 1000; ++i) {
+                arch::x86_64::vmx::vmread(
+                    static_cast<std::uint64_t>(which), &value);
+            }
+            sink += value;
+            return arch::x86_64::rdtsc() - before;
+        };
+
         // The value is read first and written back unchanged, so this
         // prices the instruction without altering any state.
         auto price_write = [&](bench_field which) {
@@ -196,12 +226,20 @@ void hypervisor::on_vm_exit(std::uint64_t cpuid,
             price_write(bench_field::guest_rsp);
         this->vmwrite_unshadowed_cycles =
             price_write(bench_field::guest_gdtr_limit);
+        this->vmread_raw_shadowed_cycles =
+            price_read_raw(bench_field::guest_rip);
+        this->vmread_raw_unshadowed_cycles =
+            price_read_raw(bench_field::guest_gdtr_base);
         this->vmread_benchmark_sink = sink;
 
         log("vmcs price per 1000: exit_reason {} rip {} gdtr_base {}",
             this->vmread_benchmark_cycles,
             this->vmread_shadowed_cycles,
             this->vmread_unshadowed_cycles);
+        log("vmcs price per 1000 RAW (instruction, cache bypassed): "
+            "rip {} gdtr_base {}",
+            this->vmread_raw_shadowed_cycles,
+            this->vmread_raw_unshadowed_cycles);
         log("vmcs price per 1000: write rsp {} write gdtr_limit {}",
             this->vmwrite_shadowed_cycles,
             this->vmwrite_unshadowed_cycles);
