@@ -74416,3 +74416,36 @@ a suggestive number into a comparison.
 
 Also noted: `vmcall` is only 104,083 - the VTL call count - which is low
 for 53 minutes, and no `vtl_fresh` line appeared in the dump at all.
+
+## Boots 208-211 ran ONE binary. The spread is variance, not a regression
+
+`.rig-deployed-hypervisor.elf` is dated **2026-09-06 18:39**, sha256
+prefix `0c7219c2e2032532`, and **nothing was rebuilt or deployed after
+it** - every boot from 208 onward this session ran that exact image, with
+the manifest `nested=1 shadowvmcs=1 userip=1 novina=1 nosdma=1 ...`
+unchanged throughout.
+
+Outcomes from that one binary:
+
+    boot 208   reached the wall, WerFault running dbgeng
+    boot 209   reached the wall at ~37 min, 0x9F / USBHUB3
+    boot 210   53 minutes at n=3, never started smss.exe
+    boot 211   at n=3 past 19 min (in progress)
+
+**So the difference between "reaches the 14-process wall" and "never
+starts session manager" is not in the code.** It is run-to-run variance
+of one image, which is consistent with the recipe's own measured rate of
+7 successes in 20 boots.
+
+Worth writing down because the natural response to "two boots in a row
+failed earlier than the last one" is to bisect, and there is nothing to
+bisect - `git log` on `hypervisor/` shows the last functional changes
+(`87b091d`, `7678f44`) predate boot 208, which succeeded. **Check the
+deployed artifact's date before suspecting a change**; it costs one
+`stat` and it is the same discipline as reading the switch manifest
+before believing a run.
+
+The corollary is the useful one: **a single failing boot is not evidence
+about a change**, and neither is a single passing one. Anything claimed
+about a code change on this rig needs several boots per arm, because the
+noise is larger than most effects being chased.
