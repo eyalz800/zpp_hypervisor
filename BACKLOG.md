@@ -71192,3 +71192,62 @@ So the ranked list changes completely:
 
 **Nothing should be ranked by any other price.** The five members are on
 every boot; read them rather than quoting this entry.
+
+## The cache window ends once per exit, so "raise the hit rate" is not a knob
+
+`65334f3` ranked "raise the cache hit rate" first, on the strength of the
+51x per-hit value and a rate that swings 23-52%. **The counters say why it
+swings, and it is not tunable.**
+
+Boot 194, differenced over 32.03 s:
+
+    exits            302,947   9,458/s
+    epoch bumps      303,868   9,487/s    ratio to exits **1.003**
+    revalidations    292,313   9,126/s    ratio to exits 0.965
+    unarmed                0        0/s
+
+    reads/exit 25.36    hits/exit 5.90    misses/exit 19.46
+
+**The cache window ends once per exit** - 1.003 epoch bumps per exit. That
+is correct and necessary: after a VM exit the processor has changed the
+VMCS, so anything cached from before is stale. **So a hit is only ever a
+repeat read of the same field within a single exit**, and the ceiling is
+"how many fields does this handler read twice", which is 5.90 of 25.36.
+
+`vmcs_cache_unarmed` is a **genuine zero** (the reader distinguishes that
+from an unread member), so arming is not the limit either.
+
+**Withdrawn**: "each point of hit rate is worth ~330 cycles an exit and
+something reachable moves it". The rate is not a knob - it is a ratio
+determined by the read pattern, and the swing between 23% and 52% across
+boots is the read *mix* changing with what the guest is doing, not the
+cache performing better or worse.
+
+### What the measurement does leave
+
+19.46 real VMREADs an exit at 2,876 cycles is **55,967 cycles**, against a
+186,210-cycle `vmresume` exit - **30%** - plus 20.6 writes at 2,131 =
+43,900, **24%**. Together **54%**, which is inside the 50-63% band
+`65334f3` derived, so the conclusion survives its own correction.
+
+The lever that remains is the one the benchmark's comment named and this
+now confirms twice over: **accesses have to be removed, not redirected and
+not cached better.** Specifically:
+
+- the **19.46 misses an exit** are distinct fields read once. Removing any
+  of them saves 2,876 cycles each - the class-(b) inventory (read
+  unconditionally, consumed only for some exit reasons) is worth its
+  2.2 reads a round trip at this price, which is ~6,300 cycles, where at
+  the old 60-cycle figure it looked like 132.
+- the **20.6 writes an exit** are 24% of the exit on their own. The
+  elision families already skip 70 per round trip; `vmcs_writes_taken`
+  says 10.54 an exit still get through, and seven of those go through no
+  elision family at all.
+
+**Cross-cache reads are the one structural idea left**: a field zpp itself
+wrote, with nothing since to invalidate it, could be answered from memory
+across the epoch boundary rather than re-read. `control_cache` and
+`hot_state_saved` already hold exactly those values for the write side.
+Whether a read may trust them is a correctness question and not a tuning
+one - and it is the same question `record_l2_entry_event`'s "read it back
+out of vmcs02" principle answers *no* to for instruments.
