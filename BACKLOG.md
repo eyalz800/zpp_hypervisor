@@ -74612,3 +74612,70 @@ every other reading, is a different kind of evidence.
 reading is "consistent with", not "established". What makes it worth
 acting on now is the cost asymmetry: applying it wrongly loses one boot,
 and not applying it lost 81 minutes across boots 210 and 211.
+
+## SETTLED: WerFault comes FIRST. The power watchdog arms 10.4 s AFTER it
+
+The question `7f7139a` posed - is WerFault a cause of the wall or a
+consequence of the power timeout - is answered, on boot 212, with both
+events on **one clock**:
+
+    WerFault.exe created     1,574.7 s since boot
+    watchdog A armed         1,585.1 s      (+10.4 s after WerFault)
+    watchdog B armed         1,693.1 s     (+118.4 s after WerFault)
+
+**The prediction in `7f7139a` is refuted.** WerFault is *not* a
+consequence of a power-state watchdog timeout: it exists 10.4 seconds
+before the first watchdog arms at all.
+
+Note this is the *third* time this question has been answered and the
+first time the answer is worth keeping. `161b490` "refuted" it from a
+truncated instrument and was void (`a5c4969`). Boots 209 and 212 both
+failed to order the events by polling, because the poller's gap - 6.5
+minutes, then 2.2 - was wider than the 10.4-second interval being
+measured. **Polling was never going to work**, and three attempts at it
+were three attempts at the wrong method.
+
+### The method, which generalises past this question
+
+Both events already carry a timestamp, so neither needed to be caught
+live:
+
+    _EPROCESS.CreateTime          system time, 100ns since 1601 UTC
+    _POP_IRP_DATA.WatchdogStart   unbiased interrupt time, 100ns since boot
+
+Different clocks, different epochs - the exact trap this file records for
+the SynIC slot, whose `delivery_time - expiration_time` of 7.2078 s was
+read as a latency and was two anchors. The conversion is one subtraction:
+
+    boot_in_system_time = SystemTime_now - unbiased_interrupt_time_now
+
+`scripts/guest-when-created.py` does it, and **refuses to print a
+comparison that fails a sanity check** - a converted creation time must
+be >= 0 and <= now. This one passed. A wrong epoch produces a plausible
+number, which is precisely how the SynIC figure survived being quoted for
+twenty-five minutes.
+
+`_EPROCESS.CreateTime` is **504**, taken from the ntkrnlmp.pdb field list
+that also carries `UniqueProcessId` 464 and `ActiveProcessLinks` 472 -
+the offsets whose reader proof already passes. `llvm-pdbutil` reports a
+second `CreateTime` at 1216 in an unrelated structure, and picking by
+name alone would have taken it.
+
+### What this reframes, stated as a hypothesis and not a finding
+
+The causal story that fits the order is the reverse of the one assumed
+all session: **WerFault starts first, runs the debug engine (`26f23d8`),
+and the power IRPs then fail to complete underneath it** - their
+watchdogs arming 10.4 s and 118.4 s later, one of which eventually
+delivers the `0x9F`.
+
+That would make the kernel-report generation a **contributor to** the
+`0x9F` rather than a reaction to it. **The ordering is consistent with
+that and does not establish it** - something upstream could equally cause
+both, with WerFault merely reacting sooner. What the ordering *does*
+close off is the direction that was assumed: the power timeout cannot be
+what launched WerFault, because it had not started counting.
+
+The next question, and it is a different one: **what launched WerFault at
+1,574.7 s?** A live kernel report is triggered by a specific event, and
+that event is now the earliest known thing on this timeline.
