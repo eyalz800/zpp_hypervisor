@@ -73871,3 +73871,37 @@ all nine writable fields are censused, so `guest_rip` and the
 interruptibility field must move - if they do not, the reader prints
 `*** CONTROL FAILED ***` and refuses the rows. Singleton +8,192 bytes,
 **so the module base moves when this is deployed.**
+
+## The shadow-write census reports its own absence, verified on the rig
+
+Boot 206, deployed with `shadowwr=0`, reader proven. The section prints:
+
+    cpu 0 guest-hypervisor writes to SHADOWED fields (0 collections compared)
+      NOT MEASURED: 6,243,758 shadow collections happened and none was
+      compared, so this is a build with the census off. Check
+      `strings <hypervisor> | grep 'zpp switches'` for shadowwr= and
+      rebuild with -DZPP_CENSUS_SHADOW_WRITES=ON.
+
+**It distinguishes "not measured" from "measured zero" by checking a
+counter that is live either way** - 6,243,758 collections happened, and
+none was compared, so the zero is a build fact rather than a guest fact.
+It then names the manifest field to check and the flag to rebuild with.
+
+That is the thing five instruments in this session failed to do. A zero
+that reads as "no writes" would have been the strongest possible evidence
+for moving the CS/SS fields to read-only - and it would have been
+evidence about the build. `993d200` set the decision rule in advance and
+this is the guard that keeps a `shadowwr=0` run from ever satisfying it.
+
+Worth naming as the pattern, since it is now the third instrument built
+this way (`6d2b344`'s cr3 dictionary, `guest-power-workers.py`'s 32-bit
+anchor, and this): **a counter that can be zero for two reasons needs a
+second counter that can only be zero for one of them.** Here that is the
+collection count; there it was the semaphore limit and the dictionary
+share.
+
+Also visible on the same dump, unremarked elsewhere: the second-level
+thread census shows `ntoskrnl+0x6fb520` - `Phase1Initialization` - as
+`state 2` (Running) with `wait 32` (`WrPreempted`) across all 997 samples
+at the 3-process phase, which is the same shape `58fffd1` measured by
+`ContextSwitches` and is consistent with it.
