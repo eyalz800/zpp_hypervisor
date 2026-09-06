@@ -69531,3 +69531,43 @@ that path ran out.
 
 That is a much narrower target than "the guest is slow": something in
 device power IRP completion is not making progress from ~4 minutes in.
+
+## Boot 189 had 14 processes and NO stuck lsass thread - it was healthy, just slow
+
+The login-screen recipe records barrier 2 as "13-14 processes" whose
+invariant is **one `lsass.exe` thread stuck in `WrVirtualMemory`**, the
+same thread object seven minutes apart. It also says this check was missed
+on boot 150 and could not be redone.
+
+Boot 189 stopped in `paused (shutdown)` with memory intact, so the check
+was possible. `scripts/guest-threads.py`, anchor proven (first entry of
+`PsActiveProcessHead` is `System`):
+
+    lsass.exe, 14 threads
+      9 x WrQueue          normal worker idle
+      3 x UserRequest
+      1 x WrLpcReceive
+      1 x WrAlertByThreadId
+      ZERO in WrVirtualMemory
+
+**A 14-process boot with no stuck lsass thread.** So either boot 189 was
+not barrier 2 despite the process count, or the `WrVirtualMemory`
+invariant is not universal to it. On this evidence the process count alone
+does not identify barrier 2, and the recipe's classification by count
+should carry that caveat.
+
+Every wait reason present is an ordinary idle wait. **lsass was fine.**
+
+### Three instruments now agree boot 189 was not stuck
+
+    process list      3 -> 9 -> 14, still climbing when it died
+    lsass threads     no stuck thread, all ordinary waits
+    power IRPs        six aging together -> upstream, name arbitrary
+
+Against one instrument that said "wedged" throughout: the VTL counters, at
+`+0`. **The counter that was wrong is the one every "wedged" call this
+session was based on.**
+
+The guest was **healthy and slow**, and a 600-second watchdog on device
+power-transition completion reached its deadline first. That is now
+supported from three independent directions rather than argued.
