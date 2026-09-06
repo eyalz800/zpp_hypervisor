@@ -68762,3 +68762,42 @@ address**. CLAUDE.md already records "a public symbol names the nearest
 start below, not the function"; this adds the second half - *check for
 callers before reasoning from the name*. Two greps, and it caught a
 conclusion already committed.
+
+## The convoy in numbers, and the falsifiable prediction for the removal work
+
+Boot 187, wedged, cpu 0 (the lock holder's processor):
+
+    completed passes            1,327 / s      -> one pass every 753 us
+    cpu 0 wall share   l2-run    8.96%   Windows executing
+                       l1-run   25.97%   hvix64
+                       vmm      65.07%   zpp's exit handler
+
+**zpp takes 65% of the holder's wall clock.** The guest work inside one
+pass is on the order of a microsecond of instructions; the pass occupies
+753 us of wall. cpu 1 must land its `lock btsq` in whatever fraction of
+those 753 us the lock is free, and `+0x543..0x54f` absent across three
+boots says it never does.
+
+**The prediction, stated so it can be falsified:** if zpp's 65.07% VMM
+share on cpu 0 falls, each pass completes in proportionally less wall
+time, the lock-held fraction falls with it, and cpu 1's acquire window
+widens. Concretely, for the removal work in flight:
+
+- `vmcs_reads_taken / exits` must fall by the predicted integer - the
+  agent is asked for that number, and it is checkable with `--delta`
+- cpu 0's `vmm%` must fall from 65.07%
+- **the test that matters**: `KiQuantumEnd+0x543..0x54f` becoming
+  PRESENT on cpu 1. That single row going from absent to non-zero is
+  the spinner acquiring, and it is binary
+
+**What would falsify the whole framing**: `vmm%` falls materially and
+`+0x543` stays absent. Then the convoy is not cost-driven and the
+remaining explanation is that the holder re-acquires unconditionally on
+each tick regardless of how fast it runs - a fairness problem, not a
+throughput one, and nothing zpp can reach.
+
+**Recorded against a known counter-example**, so this is not re-derived
+optimism: `b711510` halved zpp's duty (0.771 -> 0.371) and Windows' share
+did not move. That measured throughput on a *different* boot shape and
+did not check `+0x543`. It is not evidence either way about the convoy,
+but it is the reason to state the falsifier up front rather than after.
