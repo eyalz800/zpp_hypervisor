@@ -75257,3 +75257,45 @@ carried.
 
 The read costs one command on any boot that dies, and it is now the first
 thing to run after `guest-bugcheck.py`.
+
+## The poller is exonerated: an UNPOLLED boot lands in stalled A exactly
+
+Boot 219, run with no watcher at all, triaged at 12 minutes:
+
+    boot 219 UNPOLLED   cpu0 8,783.12/s   cpu1 1,193.87/s   vmcall 127 (2.05/s)
+    stalled A band      cpu0 8,773-8,804  cpu1 1,185-1,196  vmcall 124-125
+    int-window 21.1%, wrmsr 14.1% - both inside the band
+
+**It is stalled A, indistinguishable from the five polled boots.** So the
+state is not produced by my instrumentation, and `0279ce5`'s hypothesis -
+that hundreds of `xp` reads per cycle were stalling the guest - is dead.
+
+The suggestive pattern that motivated it (six of seven polled boots
+stalled, and boot 218 healthy on the first unpolled run) survived exactly
+one more sample. Two unpolled boots now split 1 healthy / 1 stalled,
+against 1 / 6 polled - which with n=2 is no evidence at all for a
+difference, and the specific prediction "unpolled boots are healthy" is
+refuted by its second test.
+
+**Two things are worth keeping from the exercise, and neither is the
+result:**
+
+- The control was **registered before it ran**, with both outcomes and
+  their consequences written down. When the first result came back the
+  way it was hoped, the pre-registration is what stopped it being
+  declared a finding on one sample - and the second sample would then
+  have been a retraction instead of a confirmation.
+- **KVM's host-side counters are a genuinely non-perturbing instrument.**
+  Boots 218 and 219 were both tracked to their triage entirely through
+  `nested_run` and `guest_mode` over ssh, with zero QEMU monitor
+  contact. That capability was recorded in `CLAUDE.md` and had never been
+  used this way; it is the right default for watching a boot that must
+  not be disturbed.
+
+Stalled A now has **six samples** (211, 213, 215, 216, 217, 219), one of
+them unpolled, holding a 0.36% band on cpu0 across all six. The state is
+real, intrinsic to the guest, and not an artefact of anything this
+session added.
+
+Tally: nine boots, **two healthy** (212, 218), six stalled A, one stalled
+B. 2/9 against the recipe's 7/20.
