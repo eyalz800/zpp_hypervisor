@@ -70076,3 +70076,55 @@ reaching long mode is refused entry with `0x80000021`. **It is deployed,
 and it demonstrably reaches the login screen.** No `static_assert` added,
 because refusing a configuration that works is worse than the warning.
 Flagged for the next person rather than silently left.
+
+## Boot-to-boot variance exceeds any effect a single boot can measure
+
+Three 2-vCPU boots, zpp resident on all three, judged by
+`guest-processes.py`:
+
+    boot 189  eagerept=1   3 @ 26.9   9 @ 42.6   14 @ 51.9   then 0x9F
+    boot 190  eagerept=1   3 @ 13.9   3 @ 40.7    3 @ 62.8   still 3
+    boot 191  eagerept=0   3 @ 12.9   3 @ 37.5    3 @ 51.1   still 3
+
+**Boots 189 and 190 ran the SAME binary and the same switches, and
+differed by eleven processes at the same elapsed time.** So the
+boot-to-boot variance on this rig is larger than any effect a
+configuration change of this size could produce, and **a single boot
+cannot A/B a switch.**
+
+That is the honest reading of boot 191. It shows no improvement from
+`eagerept=0` - and it also could not have shown one. Recording it as
+"eagerept=0 did not help" would be exactly the error `1ec74e3` made with
+the cache hit rate: quoting a difference smaller than the noise as though
+it were a measurement.
+
+### What this costs, stated plainly
+
+The login-screen recipe records ~1 in 10-15 multicore boots succeeding.
+Each boot needs **60+ minutes** to be judged. So distinguishing a 20%
+speed-up by outcome needs on the order of **tens of boots per arm** -
+tens of hours. **Outcome-based A/B on this rig is not practical for
+changes of this magnitude.**
+
+The alternative is to measure the *mechanism* rather than the outcome:
+`eagerept`'s own A/B was a **round-trip latency** measurement, not a boot
+race, which is why it could resolve 18% at all. Any future cost change
+should be judged the same way - on a counter that moves per exit, in a
+named phase, differenced - and the boot outcome used only to confirm
+nothing broke.
+
+**`eagerept=0` stays**, on the strength of the tree's own recorded A/B
+(3.45 -> 4.07 ms, +18%, "Leave it off") and because it restores the
+default. Not on the strength of boot 191, which is evidence of nothing.
+
+### The instrument that would have made this measurable
+
+`shadow_ept_leaves_filled` read **1 in a 32-second window** on boot 191's
+3-process phase, and `shadow_ept_cache_hits` 4,150/s. So during the long
+3-process phase the EPT *install* path is idle and the cache is answering
+almost everything - **`eagerept` cannot matter in the phase where these
+boots spend most of their time.** Its 18% was measured on a round trip
+that installs leaves.
+
+That is worth more than the boot: it says where to look for the 3-process
+phase's cost, and it is not the EPT path.
