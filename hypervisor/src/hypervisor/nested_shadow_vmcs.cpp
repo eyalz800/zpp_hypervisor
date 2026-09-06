@@ -70,50 +70,18 @@ using field = arch::x86_64::vmx::vmcs::field;
 /**
  * The fields the guest hypervisor may read without an exit.
  *
- * The exit-information fields are here and not in the writable list
- * because they are read-only to a guest hypervisor: it reads them on
- * every exit it takes, and VMWRITE to one of them faults unless the
- * processor reports "VMWRITE to any supported field", which this VMM does
- * not report. So they need copying in one direction only, at the point
- * this VMM writes them - the reflection.
+ * **Moved to `nested_vmx.h`, beside the writable list**, so that
+ * `deferrable_field_is_shadowed` can see it. While it lived here it was
+ * invisible to that assert, and a guest-state field added to it would
+ * have been published stale out of a deferred vmcs12 with nothing
+ * complaining - the same hazard the writable list is already guarded
+ * against, and the direction of the copy does not soften it. Measured
+ * both ways: with the list in this file the tree compiled **cleanly**
+ * with `guest_gdtr_base` on it, and refuses it now. Nothing on it is
+ * guest state today, so that was a gap and not a bug; the guard is what
+ * stops it becoming one.
  */
-constexpr field shadow_read_only_fields[] = {
-    field::exit_reason,
-    field::vm_exit_instruction_length,
-    // **Added on the re-measurement the comment above asks for**, taken
-    // from the running guest rather than from KVM's list:
-    //
-    //     vmcs fields the guest hypervisor uses
-    //       --- vmread (627,719 total, 29 distinct) ---
-    //         0x4404 vm_exit_interruption_information  626,394  99.8%
-    //         0x6400 exit_qualification                    263   0.0%
-    //         0x6802 guest_cr3                             140   0.0%
-    //
-    // **99.8% of every VMREAD this guest hypervisor issues is this one
-    // field**, and each one was a VMX instruction trapping to the layer
-    // below at the ~1.76 us that comment prices them at. Nothing else in
-    // the census is above 0.05%, so this single entry is the whole of
-    // the remaining read traffic.
-    //
-    // Safe by the same argument the two above rest on, and the copy it
-    // needs already exists. It is read-only to a guest hypervisor - a
-    // VMWRITE to it faults, since this VMM does not report "VMWRITE to
-    // any supported field" - so it needs copying in one direction only,
-    // at the reflection, and `reflect_l2_exit` already does exactly
-    // that:
-    //
-    //     auto interruption_information =
-    //         vmcs.read(field::vm_exit_interruption_information);
-    //     shadow.write(field::vm_exit_interruption_information,
-    //                  interruption_information);
-    //
-    // It is not guest state, so it is not deferrable and cannot trip
-    // `deferrable_field_is_shadowed` - the hazard that assert exists for
-    // is a *deferred write* never being materialised because the read
-    // that would repair it no longer exits, and there is no deferred
-    // write here.
-    field::vm_exit_interruption_information,
-};
+using nested_vmx::shadow_read_only_fields;
 
 /**
  * The fields the guest hypervisor may both read and write without an

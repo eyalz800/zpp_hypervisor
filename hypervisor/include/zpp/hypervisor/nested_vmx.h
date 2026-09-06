@@ -1,7 +1,9 @@
 #pragma once
 #include "zpp/arch/x86_64/vmx/vmcs_fields.h"
 #include "zpp/arch/x86_64/vmx/vmx.h"
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 
 namespace zpp::hypervisor::nested_vmx
 {
@@ -3165,6 +3167,73 @@ constexpr std::uint64_t supported_entry_controls =
                    // which already worked that way.
 
 /**
+ * The fields the guest hypervisor may read without an exit, but not
+ * write.
+ *
+ * The exit-information fields belong here and not in the writable list
+ * because they are read-only to a guest hypervisor: it reads them on
+ * every exit it takes, and VMWRITE to one of them faults unless the
+ * processor reports "VMWRITE to any supported field", which this VMM
+ * does not report. So they need copying in one direction only, at the
+ * point this VMM writes them - the reflection.
+ *
+ * **That one-directional copy is the whole of their price**, and it is
+ * why this list and the writable one below are not interchangeable. A
+ * read-only entry costs `copy_vmcs12_to_shadow` one write per round
+ * trip, elided when the value has not moved; a writable entry costs
+ * that *plus* an unconditional VMREAD in `copy_shadow_to_vmcs12`.
+ * Measured, that second half is 34,118 cycles a round trip over the
+ * nine entries below - **3,791 cycles per entry, every round trip,
+ * whether the guest hypervisor touches the field or not.** See the
+ * arithmetic beside `shadow_read_write_fields`.
+ *
+ * **Lives here rather than in `nested_shadow_vmcs.cpp` for the same
+ * reason the writable list does**: it has to be kept disjoint from
+ * `guest_state_fields`, and while it sat in another translation unit
+ * `deferrable_field_is_shadowed` could not see it. Nothing on it is
+ * guest state today, so that was a latent gap and not a live bug -
+ * measured both ways: with the list in the other file the tree compiled
+ * **cleanly** with `guest_gdtr_base` added to it, and refuses it now.
+ * The four fields a census would most plausibly add here -
+ * `exit_qualification`, `guest_linear_address`,
+ * `guest_physical_address`, `idt_vectoring_information_field` - sit
+ * immediately beside fields that *are* guest state, and the hazard
+ * applies in full: a deferred field published from vmcs12 into the
+ * shadow region is published stale, and the guest hypervisor then reads
+ * it with no exit to repair on.
+ */
+inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
+    shadow_read_only_fields[] = {
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::exit_reason,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::
+            vm_exit_instruction_length,
+        // **Added on a re-measurement**, taken from the running guest
+        // rather than from KVM's list:
+        //
+        //     vmcs fields the guest hypervisor uses
+        //       --- vmread (627,719 total, 29 distinct) ---
+        //         0x4404 vm_exit_interruption_information 626,394 99.8%
+        //         0x6400 exit_qualification                   263  0.0%
+        //         0x6802 guest_cr3                            140  0.0%
+        //
+        // **99.8% of every VMREAD this guest hypervisor issues is this
+        // one field**, and each one was a VMX instruction trapping to
+        // the layer below. Nothing else in that census is above 0.05%,
+        // so this single entry is the whole of the remaining read
+        // traffic.
+        //
+        // Safe by the same argument the two above rest on, and the copy
+        // it needs already exists: `reflect_l2_exit` writes it into
+        // vmcs12, so `copy_vmcs12_to_shadow` publishes it. It is not
+        // guest state, so it is not deferrable and cannot trip
+        // `deferrable_field_is_shadowed` - the hazard that assert
+        // exists for is a *deferred write* never being materialised
+        // because the read that would repair it no longer exits.
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::
+            vm_exit_interruption_information,
+};
+
+/**
  * The fields the guest hypervisor may read and write against the hardware
  * shadow region **without exiting**.
  *
@@ -3188,6 +3257,102 @@ constexpr std::uint64_t supported_entry_controls =
  * obvious optimisation, and the one KVM sanctions - would make a guest
  * hypervisor read a stale second-level CR3. The assert is what stops
  * that being found the hard way.
+ *
+ * ## Why this list is not longer - priced, not argued
+ *
+ * **This list is at its measured optimum and growing it loses.** The
+ * question keeps coming back because the residue is visible and large:
+ * boot 202, cpu 0, 24,368,864 exits of which `vmwrite` is 5.9% and
+ * `vmread` 3.4% - **2.38M exits, 9.8% of all of them**, taken because
+ * the guest hypervisor touched a field these two lists do not cover.
+ * `dump_field_use` names every one by encoding, and the listed rows
+ * carry 91.0% of the vmwrite exits and 84.7% of the vmread exits.
+ *
+ * Both sides are measured, so this is arithmetic rather than judgement.
+ *
+ * **Cost, per additional read-write entry, per round trip.** The dump's
+ * `copy in: field reads` is phase slot 47, which brackets exactly the
+ * loop over this list in `copy_shadow_to_vmcs12`: 34,118 cycles a round
+ * trip over nine entries, **3,791 each**. It is unconditional - there
+ * is no way to know whether the guest hypervisor wrote the region
+ * without reading it - and it agrees with the separately measured 2,876
+ * cycles for a raw VMREAD plus the loop body. `copy out: field writes`
+ * is slot 42, which brackets both lists: 10,494 over twelve entries,
+ * **875 each**, with the `shadow_cache` elision already counted. **One
+ * more read-write entry costs 4,666 cycles on every one of 8,758,448
+ * round trips**, touched or not.
+ *
+ * **Benefit, per exit removed.** The by-reason table prices a `vmread`
+ * exit at **106,488 cycles** (44,186 exits; 102,104 and 112,426 on two
+ * other boots, so it reproduces). A `vmwrite` exit has no row of its
+ * own, and `on_guest_vmwrite` is the lighter handler - it does not
+ * materialise guest state, which is what `on_guest_vmread`'s 21.0 reads
+ * an exit are - so pricing both at the vmread figure **overstates the
+ * benefit**, deliberately.
+ *
+ * One use of a field is therefore worth 0.0122 cycles a round trip, and
+ * **a field pays for its place here only if the guest hypervisor
+ * touches it more often than once per 22.8 round trips** - 383,780 uses
+ * over that run. The hottest field the census names that is not already
+ * shadowed is `vm_exit_controls` at 267,550: **once per 32.7 round
+ * trips, 30% short.** Every other candidate is further away:
+ *
+ *     field                       uses   cyc/RT saved   cyc/RT cost
+ *     vm_exit_controls         267,550          3,253         4,666
+ *     guest_idtr_base          200,699          2,440         4,666
+ *     guest_idtr_limit         200,699          2,440         4,666
+ *     guest_gdtr_base          200,490          2,438         4,666
+ *     guest_gdtr_limit         200,490          2,438         4,666
+ *     guest_ia32_sysenter_cs   200,483          2,438         4,666
+ *     guest_ldtr_limit         200,480          2,438         4,666
+ *     vm_entry_controls        133,412          1,622         4,666
+ *     exception_bitmap         133,412          1,622         4,666
+ *     ept_pointer              133,412          1,622         4,666
+ *     vm_entry_instruction_len  77,948            948         4,666
+ *     guest_ia32_efer           67,455            820         4,666
+ *
+ * **Not one of the twelve pays.** All of them together save 25,663
+ * cycles a round trip against 55,992 spent - the fix is 2.2x the
+ * problem, which is what `dump_field_use`'s caution predicted without
+ * numbers. Taking the cost side to its floor does not rescue it: at the
+ * bare 2,876-cycle VMREAD with the copy-out write assumed free, twelve
+ * entries still cost 34,512 against 25,663. **So the break-even list
+ * length is the length it already has**, and adding anything needs a
+ * *new* census showing a field above 383,780 uses per 8.76M round
+ * trips, not a re-reading of this one.
+ *
+ * The four read-only candidates are closer and still do not pay:
+ * `idt_vectoring_information_field` 117,492 uses, `exit_qualification`
+ * 79,368, `guest_linear_address` 67,213, `guest_physical_address`
+ * 67,205, against a break-even of 71,955 at the average 875-cycle write
+ * and 175,275 at the 2,131 an unelided one costs - and all four are
+ * exit-information fields this VMM rewrites on every reflection, so
+ * they are on the unelided side by construction.
+ *
+ * KVM agrees, by a route worth knowing because it is independent.
+ * `.references/kvm/vmcs_shadow_fields.h` shadows none of the twelve
+ * above except `EXCEPTION_BITMAP` and `VM_ENTRY_INSTRUCTION_LEN`, and
+ * its header says why the descriptor-table block cannot be there:
+ * *"shadowed fields must always be synced by prepare_vmcs02, not just
+ * prepare_vmcs02_rare"*. That is the same structural constraint as
+ * `guest_state_deferrable` - a shadowed field cannot be a deferred one
+ * - reached from the other end. Six of the twelve (`guest_gdtr_base`,
+ * `guest_idtr_base`, `guest_gdtr_limit`, `guest_idtr_limit`,
+ * `guest_ldtr_limit`, `guest_ia32_sysenter_cs`) are in
+ * `guest_state_fields`, so each would have to be excluded there too -
+ * costing a further read in `save_l2_state` and a write in
+ * `build_vmcs02` per round trip, on top of the 4,666 above.
+ *
+ * **What is *not* the reason, so nobody re-derives it: none of the
+ * twelve is unsafe.** `ept_pointer` is the obvious suspect and it is
+ * not one. Nothing in `on_guest_vmwrite` acts on the encoding beyond
+ * `mark_l2_guest_state_dirty` and the cached store, and every consumer
+ * - `build_vmcs02`, `shadow_ept_pointer_for`, `on_guest_invept` - reads
+ * it out of `guest_vmcs12` *after* `copy_shadow_to_vmcs12` has run at
+ * the top of `on_guest_vmlaunch_or_resume`. The blocker is arithmetic,
+ * not correctness, and that distinction is the point: a later
+ * measurement can overturn a price, and nothing here has to be
+ * re-argued from scratch when it does.
  */
 inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
     shadow_read_write_fields[] = {
@@ -3210,6 +3375,46 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
         arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_cs_access_rights,
         arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_ss_access_rights,
 };
+
+/**
+ * The lengths the copy loops are priced against.
+ *
+ * **Not a style rule.** The two figures every estimate above rests on
+ * are per-list averages, and they are per-*entry* costs only while
+ * these lengths hold: `copy in: field reads` 34,118 cycles a round trip
+ * is 3,791 each *because* the writable list is nine long, and `copy
+ * out: field writes` 10,494 is 875 each *because* both lists together
+ * are twelve. Change a length without re-deriving them and every number
+ * above silently becomes a different quantity - which is the failure
+ * this tree records as "a number can borrow its neighbour's
+ * measurement".
+ *
+ * So it fails the build rather than the boot. Growing either list is
+ * legitimate; it needs a census showing a field above **383,780 uses
+ * per 8.76M round trips**, and nothing in the boot 202 census reaches
+ * it. Update these counts when such a measurement exists, and update
+ * the per-entry costs beside them in the same commit.
+ * @{
+ */
+inline constexpr std::size_t shadow_read_only_priced_at = 3;
+inline constexpr std::size_t shadow_read_write_priced_at = 9;
+
+static_assert(std::size(shadow_read_only_fields) ==
+                  shadow_read_only_priced_at,
+              "the read-only shadow list changed length: 'copy out: "
+              "field writes' 10,494 cycles a round trip is 875 an entry "
+              "only while both lists total twelve, so re-derive the "
+              "break-even beside shadow_read_write_fields before "
+              "updating this count");
+static_assert(std::size(shadow_read_write_fields) ==
+                  shadow_read_write_priced_at,
+              "the read-write shadow list changed length: 'copy in: "
+              "field reads' 34,118 cycles a round trip is 3,791 an "
+              "entry only while this list is nine long, and an entry "
+              "must be touched more than once per 22.8 round trips to "
+              "pay for itself - re-derive the break-even beside this "
+              "list before updating this count");
+/** @} */
 
 /**
  * Watch the IUM context block for writes, and log who makes them.

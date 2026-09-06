@@ -2917,6 +2917,132 @@ static void test_l0_precedence()
               "an encoding outside the bulk list names no slot, so a "
               "vmwrite of an unrelated field marks nothing owed");
 
+        // ------------------------------------------------------------
+        // Both shadow lists, and the lengths their prices are quoted at.
+        //
+        // The read-only list used to live in `nested_shadow_vmcs.cpp`,
+        // where `deferrable_field_is_shadowed` could not see it - so a
+        // guest-state field added there would have been published into
+        // the shadow region out of a *deferred* vmcs12, stale, with the
+        // guest hypervisor reading it with no exit to repair on. The
+        // static_assert in nested_entry.cpp is the real guard; this is
+        // here because a compile-time check has no negative control, so
+        // the same predicate is run below over a list that is
+        // deliberately wrong and has to report it.
+        {
+            auto shadowed_anywhere = [](field which) {
+                namespace nv = zpp::hypervisor::nested_vmx;
+                for (auto entry : nv::shadow_read_write_fields) {
+                    if (static_cast<std::uint64_t>(which) ==
+                        static_cast<std::uint64_t>(entry)) {
+                        return true;
+                    }
+                }
+                for (auto entry : nv::shadow_read_only_fields) {
+                    if (static_cast<std::uint64_t>(which) ==
+                        static_cast<std::uint64_t>(entry)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // Walked from the shadow lists rather than from the bulk
+            // list, because `guest_state_index_of` maps that way and a
+            // second copy of the encodings here would be the defect
+            // this tree records as "a second copy of a constant".
+            auto deferrable_and_shadowed = [](auto & list) {
+                std::size_t found{};
+                for (auto entry : list) {
+                    auto index = hypervisor_t::guest_state_index_of(
+                        static_cast<std::uint64_t>(entry));
+                    if (index &&
+                        hypervisor_t::guest_state_deferrable(*index)) {
+                        ++found;
+                    }
+                }
+                return found;
+            };
+
+            namespace nv = zpp::hypervisor::nested_vmx;
+
+            check(0 == (deferrable_and_shadowed(
+                            nv::shadow_read_write_fields) +
+                        deferrable_and_shadowed(
+                            nv::shadow_read_only_fields)),
+                  "no deferrable guest-state field is on either shadow "
+                  "list - a deferred field is written to vmcs02 lazily "
+                  "and repaired when somebody reads it, and a shadowed "
+                  "one is read out of the hardware region with no exit, "
+                  "so there is no read to repair on and the stale value "
+                  "is handed over with no fault and no counter moving");
+
+            // --------- the negative control, on the same predicate. A
+            // zero above is worthless from a predicate that answers
+            // zero to everything, and that is what this one did while
+            // the read-only list sat in another translation unit: it
+            // could not see the entries it was meant to refuse.
+            constexpr field would_be_wrong[] = {
+                field::guest_cr3,
+                field::guest_gdtr_base,
+            };
+
+            check(2 == deferrable_and_shadowed(would_be_wrong),
+                  "the guard finds both entries of a deliberately wrong "
+                  "list - guest_cr3, which KVM shadows "
+                  "(.references/kvm/vmcs_shadow_fields.h:65), and "
+                  "guest_gdtr_base, the hottest guest-state field in the "
+                  "boot 202 census at 200,490 uses. Either would hand "
+                  "the guest hypervisor a stale value invisibly");
+
+            check(!shadowed_anywhere(field::guest_cr3),
+                  "and neither is actually shadowed, so the zero above "
+                  "is a disjointness result and not an empty list");
+            check(shadowed_anywhere(field::guest_rip) &&
+                      shadowed_anywhere(field::exit_reason),
+                  "the membership predicate finds an entry on each list "
+                  "- one writable, one read-only - so it is looking at "
+                  "both, which is the whole of what the move fixed");
+
+            // The two lists must be disjoint from each other as well.
+            // `copy_shadow_to_vmcs12` indexes `shadow_cache` from the
+            // read-only list's length, so a duplicate silently shifts
+            // every elision comparison by one slot.
+            std::size_t on_both{};
+            for (auto ro : nv::shadow_read_only_fields) {
+                for (auto rw : nv::shadow_read_write_fields) {
+                    if (static_cast<std::uint64_t>(ro) ==
+                        static_cast<std::uint64_t>(rw)) {
+                        ++on_both;
+                    }
+                }
+            }
+            check(0 == on_both,
+                  "the two shadow lists are disjoint - copy_out writes "
+                  "both in order and copy_in indexes shadow_cache from "
+                  "the read-only list's length, so an encoding on both "
+                  "shifts every elision comparison by a slot");
+
+            // And the lengths the per-entry prices are quoted at. Boot
+            // 202 measured `copy in: field reads` at 34,118 cycles a
+            // round trip and `copy out: field writes` at 10,494; those
+            // are 3,791 and 875 an entry only while the lists are nine
+            // and twelve. The break-even beside the list is 383,780
+            // uses per 8.76M round trips, and the hottest unshadowed
+            // field in that census - vm_exit_controls at 267,550 - is
+            // 30% short. This failing means somebody has a newer census
+            // and both prices need re-deriving with it.
+            check(nv::shadow_read_only_priced_at ==
+                      std::size(nv::shadow_read_only_fields),
+                  "the read-only shadow list is the length its share of "
+                  "'copy out: field writes' is priced at");
+            check(nv::shadow_read_write_priced_at ==
+                      std::size(nv::shadow_read_write_fields),
+                  "the read-write shadow list is the length 'copy in: "
+                  "field reads' 34,118 cycles a round trip is divided "
+                  "by to price an entry at 3,791");
+        }
+
         // **The case that reset the guest 218 times.** Deferral is
         // licensed by "vmcs02 was last written by an exit from the
         // guest about to be entered", not by "the processor saves these

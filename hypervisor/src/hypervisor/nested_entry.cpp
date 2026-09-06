@@ -9105,9 +9105,41 @@ bool hypervisor::may_defer_guest_state(std::size_t cpu) const
 namespace
 {
 /** True where a deferrable guest-state field is also shadowed - the one
- *  combination that cannot be made safe. See the assert below. */
+ *  combination that cannot be made safe. See the assert below.
+ *
+ *  **Both shadow lists, not only the writable one.** The read-only list
+ *  used to live in `nested_shadow_vmcs.cpp`, where this could not see
+ *  it, so a guest-state field added there would have been published
+ *  into the shadow region out of a *deferred* vmcs12 - stale, with the
+ *  guest hypervisor then reading it with no exit to repair on. Same
+ *  hazard, and the direction of the copy does not soften it: the
+ *  deferral is what makes vmcs12 wrong, and read-only shadowing
+ *  publishes vmcs12. Nothing on the read-only list is guest state
+ *  today, so this half passes vacuously - which is exactly when to add
+ *  it, rather than after somebody has added `exit_qualification`'s
+ *  neighbours. Both directions were run: before the move the tree
+ *  compiled cleanly with `guest_gdtr_base` on the read-only list; after
+ *  it, that is a compile error. */
 constexpr bool deferrable_field_is_shadowed()
 {
+    auto shadowed_anywhere = [](field which) {
+        for (auto shadowed : nested_vmx::shadow_read_write_fields) {
+            if (static_cast<std::uint64_t>(which) ==
+                static_cast<std::uint64_t>(shadowed)) {
+                return true;
+            }
+        }
+
+        for (auto shadowed : nested_vmx::shadow_read_only_fields) {
+            if (static_cast<std::uint64_t>(which) ==
+                static_cast<std::uint64_t>(shadowed)) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
     for (auto deferrable : guest_state_fields) {
         if ((field::guest_cs_access_rights == deferrable) ||
             (field::guest_ss_access_rights == deferrable)) {
@@ -9117,11 +9149,8 @@ constexpr bool deferrable_field_is_shadowed()
             continue;
         }
 
-        for (auto shadowed : nested_vmx::shadow_read_write_fields) {
-            if (static_cast<std::uint64_t>(deferrable) ==
-                static_cast<std::uint64_t>(shadowed)) {
-                return true;
-            }
+        if (shadowed_anywhere(deferrable)) {
+            return true;
         }
     }
 

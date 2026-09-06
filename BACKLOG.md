@@ -73236,3 +73236,196 @@ priced against the exits removed before anything is changed.
 
 **That is the next piece of arithmetic**, and both sides of it are now
 measured quantities rather than estimates.
+
+## NEGATIVE, and it closes: extending the shadow VMCS list costs 2.2x what it saves
+
+`8c23baa` ended by naming the arithmetic as the next piece of work. It is
+done, both sides are measured quantities, and **it does not work.** No
+field in the boot 202 census pays for a place on the shadow list, the
+current list is already at its break-even length, and this entry exists
+so nobody re-derives the attractive half of it a third time.
+
+### The two prices, and where each comes from
+
+**Cost, per additional read-write entry, per round trip.** The dump's
+`copy in: field reads` is phase slot 47, which brackets *exactly* the
+`for (auto entry : shadow_read_write_fields)` loop in
+`copy_shadow_to_vmcs12` and nothing else - the two VMPTRLDs and the
+VMCLEAR are slots 46 and 48. 34,118 cycles a round trip over **nine**
+entries is **3,791 each**. It is a marginal cost, not an average
+inflated by fixed overhead, because there is no fixed overhead inside
+that slot; and it agrees with `65334f3`'s separately measured 2,876
+cycles for a raw VMREAD, plus the loop body.
+
+`copy out: field writes` is slot 42, which brackets both lists: 10,494
+over **twelve** entries is **875 each**, with the `shadow_cache` elision
+already counted (that is ~4.9 writes actually performed at 2,131).
+
+So **one more read-write entry costs 4,666 cycles on every one of
+8,758,448 round trips**, whether the guest hypervisor touches it or not.
+The copy-in read cannot be elided: there is no way to know whether the
+level above wrote the region without reading it.
+
+**Benefit, per exit removed.** The by-reason table prices a `vmread`
+exit at **106,488 cycles** (44,186 exits), reproducing at 102,104 and
+112,426 on two other boots. `vmwrite` has no row of its own, and
+`on_guest_vmwrite` is the *lighter* handler - it does not materialise
+guest state, which is what `on_guest_vmread`'s 21.0 reads an exit are -
+so pricing both at the vmread figure **overstates the benefit on
+purpose.** The answer is negative even so.
+
+### The arithmetic
+
+2.38M exits are 0.271 per round trip; the ~90% reachable is 0.241. At
+106,488 each that is **25,663 cycles a round trip saved** - and the
+copy-in figure being 7.4% of the VMM puts a round trip at ~461,000
+cycles, so the entire prize is **5.6% of the VMM.**
+
+The twelve write fields as read-write entries cost 12 x 4,666 =
+**55,992**, which is 12.2% of the VMM. **The fix is 2.2x the problem.**
+
+Taking the cost side to its floor does not rescue it. At the bare
+2,876-cycle VMREAD with the copy-out write assumed free - impossible,
+but it brackets the answer - twelve entries still cost 34,512 against
+25,663. Every way of computing it loses.
+
+### Per field, because the aggregate hides which ones were close
+
+One use of a field is worth 106,488 / 8,758,448 = **0.0122 cycles a
+round trip**. So an entry pays only if it is touched more often than
+4,666 / 0.0122 = **once per 22.8 round trips**, or 383,780 uses over
+that run.
+
+    field                       uses   cyc/RT saved   cyc/RT cost
+    vm_exit_controls         267,550          3,253         4,666
+    guest_idtr_base          200,699          2,440         4,666
+    guest_idtr_limit         200,699          2,440         4,666
+    guest_gdtr_base          200,490          2,438         4,666
+    guest_gdtr_limit         200,490          2,438         4,666
+    guest_ia32_sysenter_cs   200,483          2,438         4,666
+    guest_ldtr_limit         200,480          2,438         4,666
+    vm_entry_controls        133,412          1,622         4,666
+    exception_bitmap         133,412          1,622         4,666
+    ept_pointer              133,412          1,622         4,666
+    vm_entry_instruction_len  77,948            948         4,666
+    guest_ia32_efer           67,455            820         4,666
+
+**The hottest candidate is 30% short**, and it is the only one within a
+factor of two. There is no profitable subset, so there is no partial
+version of this change worth deploying.
+
+The four read-only candidates are the closest the census comes, because
+a read-only entry costs the copy-out write and *no* copy-in read:
+`idt_vectoring_information_field` 117,492 uses, `exit_qualification`
+79,368, `guest_linear_address` 67,213, `guest_physical_address` 67,205,
+against a break-even of 71,955 at the average 875-cycle write. Two of
+the four clear that - and all four are exit-information fields
+`reflect_l2_exit` rewrites on **every** reflection, so they are on the
+unelided side by construction and the real break-even for them is 2,131
+/ 0.0122 = **175,275 uses**, which none reaches. The best of them,
+`idt_vectoring_information_field`, would be worth +1,429 cycles a round
+trip in the impossible best case: **0.31% of the VMM**, below the noise
+floor of a tree where `ceab9a4` records identical binaries differing by
+eleven processes.
+
+### Safety was checked separately, and none of the twelve is unsafe
+
+Worth recording because the expectation going in was the opposite, and
+because "it was unsafe" is the wrong thing to remember if a later
+measurement changes the price.
+
+`on_guest_vmwrite` does nothing per-encoding beyond
+`record_vmcs_field_use`, `note_shadowing_ineffective`,
+`mark_l2_guest_state_dirty` and the store into `guest_vmcs12`. There is
+no field this VMM must *see written* at the moment it is written.
+`ept_pointer` was the obvious suspect and is not one: every consumer -
+`build_vmcs02`, `shadow_ept_pointer_for`, `on_guest_invept` - reads it
+out of `guest_vmcs12` **after** `copy_shadow_to_vmcs12` has run at the
+top of `on_guest_vmlaunch_or_resume`, and the level above cannot change
+its EPTP while its guest is running, because it is not executing then.
+
+There is a real structural condition, and it is the one the tree already
+knows: six of the twelve (`guest_gdtr_base`, `guest_idtr_base`,
+`guest_gdtr_limit`, `guest_idtr_limit`, `guest_ldtr_limit`,
+`guest_ia32_sysenter_cs`) are in `guest_state_fields`, so each would
+have to be excluded in `guest_state_deferrable` the way
+`guest_cs/ss_access_rights` are - **adding a further read in
+`save_l2_state` and a write in `build_vmcs02` per round trip, on top of
+the 4,666.** That makes the answer worse, not better.
+
+### KVM reaches the same place from the other end
+
+`.references/kvm/vmcs_shadow_fields.h` shadows **none** of the twelve
+except `EXCEPTION_BITMAP` and `VM_ENTRY_INSTRUCTION_LEN`, and its header
+says why the descriptor-table block cannot be there: *"shadowed fields
+must always be synced by prepare_vmcs02, not just prepare_vmcs02_rare"*.
+That is `guest_state_deferrable` under another name - a shadowed field
+cannot be a deferred field - arrived at by another VMM without our
+measurements.
+
+**Our list is a strict subset of KVM's, plus `guest_dr7`.** Both
+directions of that are informative. Everything we shadow, KVM shadows,
+except the one entry a measurement of *this* guest put there. And KVM's
+list is 33 long where ours is 12, so KVM is paying about twenty more
+copies per round trip than we are - which is affordable for KVM because
+its VMREAD is a real instruction on bare metal, and is not affordable
+here, where `65334f3` measured ours at 2,876 cycles because it traps to
+the layer below. **The same list is right for KVM and wrong for us, and
+the reason is the nesting depth, not the fields.**
+
+One thing that fell out and is queued rather than done: KVM classifies
+`GUEST_CS_AR_BYTES` and `GUEST_SS_AR_BYTES` as **read-only** shadows
+where we have them read-write, which costs us 2 x 3,791 = **7,582 cycles
+a round trip, 1.6% of the VMM**, for a copy-in read of two fields KVM
+asserts the level above never writes. That is the single cheapest thing
+on this page - but it is a *bet*, and the evidence to settle it cannot
+come from the census, because a shadowed field's writes do not exit and
+are not recorded. It needs a counter, not an argument.
+
+### What is now enforced rather than written down
+
+Prose does not run, so:
+
+- **`shadow_read_only_fields` moved to `nested_vmx.h`**, beside the
+  writable list, so `deferrable_field_is_shadowed` can see it. It could
+  not before, and that was a real gap, measured both ways: with the list
+  in `nested_shadow_vmcs.cpp` the tree compiled **cleanly, zero errors**
+  with `guest_gdtr_base` - a deferrable guest-state field - added to it;
+  after the move that is a compile error naming the hazard. Nothing on
+  the list is guest state today, so this was latent, and the four fields
+  a reader of this entry would most plausibly try to add there are
+  exactly the ones sitting next to guest state.
+- **`shadow_read_only_priced_at` / `shadow_read_write_priced_at`**, two
+  static_asserts that fail the build when either list changes length.
+  Not a style rule: 3,791 and 875 are per-*entry* costs only while the
+  lists are nine and twelve, so a length change silently turns every
+  number above into a different quantity - "a number can borrow its
+  neighbour's measurement", again. The assert message carries the
+  break-even and says to re-derive it.
+- **Seven checks in `tests/nested_exit`**, with the negative control the
+  static_asserts cannot have: the same predicate run over a list
+  containing `guest_cr3` and `guest_gdtr_base` must find both, and must
+  find an entry on each real list, so a passing zero is a disjointness
+  result rather than a predicate that matches nothing. 1,347 -> 1,354
+  checks, the one pre-existing failure unchanged.
+
+### The falsifiable prediction, which is that nothing changes
+
+Nothing was deployed, so the prediction is about what a boot would show
+if somebody ignores this entry and shadows the twelve anyway:
+
+- `vmread` and `vmwrite` exits fall from 9.8% of exits to about **1.0%**
+  - 2.38M to ~270,000 - and the field-use census loses its twelve top
+  rows. That half will work.
+- `copy in: field reads` rises from 34,118 to about **79,600** cycles a
+  round trip and `copy out: field writes` from 10,494 to about
+  **24,500**; together 7.4% + 2.3% of the VMM becomes about **22.6%**.
+- Net: a round trip **~30,000 cycles more expensive, +6.6%**, against a
+  measurement whose own confirmed change (`3a1213f`) was -5.2%. So it
+  should be visible, in the wrong direction, on the same instrument that
+  confirmed that one.
+
+If a boot shows the exits fall *and* the round trip get cheaper, one of
+the two measured prices above is wrong and this entry should be
+reopened - most likely `copy in: field reads`, which is the number
+carrying the whole result.
