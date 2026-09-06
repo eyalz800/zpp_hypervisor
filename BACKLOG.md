@@ -68701,3 +68701,64 @@ at the end. Read "no samples in the body of a high-IRQL routine" as "the
 body cannot be sampled", never as "the body did not run". This is the
 third distinct way an interrupt-landing census has been misread in this
 investigation; the other two are in `dab38e6`.
+
+## The 1,327/s measurement stands; the NAME on it does not
+
+`f94789f` called the hot block `ExpUpdateTimerConfigurationWorker` and drew
+a semantic conclusion from the name - "timer configuration recomputed 1,327
+times a second, and that rate is itself the anomaly". **The name does not
+survive checking.**
+
+What was verified, and what it cost to check:
+
+- **The extent check passes.** `ExpUpdateTimerConfigurationWorker` spans
+  `0x30d2b0..0x30d514` (612 bytes, next symbol
+  `KiSendClockInterruptToTargetProcessor`), so `+0x1c5` really is inside
+  it. CLAUDE.md's "a public symbol names the nearest start below, not the
+  function" is the trap here and this one clears it.
+- **But nothing ever calls that address.** A full scan of `.text` finds
+  **zero** `call`, `jmp` or `lea` referencing `0x140300d2b0`. A byte scan of
+  the entire image finds **no 8-byte pointer to it anywhere** - so it is not
+  in a DPC table, a work-item, or any callback array. The only two 4-byte
+  occurrences of the RVA are its own `.pdata` row and one incidental match.
+- **Every branch into `0x30d2b0..0x30d514` comes from inside that same
+  range.** The block is entered by fallthrough, not by call.
+- The symbol immediately before it is **`KiTimerWaitTest`**
+  (`0x30ce70..0x30d2b0`).
+
+So the executing code is most likely a tail or outlined block reached from
+`KiTimerWaitTest`, and the `ExpUpdateTimerConfigurationWorker` label is the
+nearest preceding *start* of a chained-unwind region rather than the name of
+what runs. **INFERRED** - what would settle it is the caller, which the
+`+0x1c5` landing cannot supply because the return address is consumed by
+then.
+
+### What survives, and it is still the useful part
+
+Unchanged and measured:
+
+- a block that **raises IRQL, does work, and lowers CR8 at its epilogue**
+- **completes 1,327 times per second**, one interrupt landing per pass
+- `KiDowngradeIsolationUnitLockHandle` at 10.1% and growing inside cpu 0's
+  landings, putting cpu 0 in isolation-unit lock code
+- cpu 1 spinning for those locks and never winning
+
+The convoy reading is untouched. What weakens is only the claim that the
+work is *timer configuration*, and with it the "1,327/s is pathological"
+inference - if the block is part of `KiTimerWaitTest`, a rate near the tick
+is **normal**, not anomalous, and the anomaly is only that it holds
+isolation-unit locks while cpu 1 needs them.
+
+**That matters for the fix.** "Windows is recomputing timer configuration in
+a loop" would point at a guest-side bug worth chasing. "Timer wait testing
+runs at tick rate and takes a lock" points back at the lock and at how long
+each pass holds it - which is where zpp's per-exit cost lives.
+
+### The general form, third instance in this file
+
+A symbol resolved from the nearest start below is a **lead**, and a lead
+that survives an extent check is still only a lead if **nothing calls the
+address**. CLAUDE.md already records "a public symbol names the nearest
+start below, not the function"; this adds the second half - *check for
+callers before reasoning from the name*. Two greps, and it caught a
+conclusion already committed.
