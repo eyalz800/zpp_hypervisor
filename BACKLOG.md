@@ -71890,3 +71890,61 @@ Three sessions of cost work were built on prices that were wrong by 17x
 and 48x; this is the first prediction made at measured prices and it came
 in within 2%. That is the thing worth having - the model can now be used
 to rank work without spending a boot to find out.
+
+## Four boots, four different speeds, ONE wall: 14 processes and 0x9F
+
+Boot 195, both new changes deployed, zpp resident:
+
+    boot 189  baseline                     14 processes @ 51.9 min  STOP 0x9F
+    boot 192  eagerept=0 vtlcap=0          14 processes @ 35.3 min  STOP 0x9F
+    boot 195  + read gates + write elision  14 processes @ **21.9 min**  STOP 0x9F
+
+**Boot 195 is the fastest boot recorded in this investigation** - 58%
+faster to the milestone than the baseline, 38% faster than boot 192 - and
+it stopped at the **identical** process set with the **identical**
+bugcheck, `0x9F DRIVER_POWER_STATE_FAILURE` param1 `0x3`, at 14 processes
+with `WerFault.exe` present and `LsaIso.exe` running.
+
+The stop at 21.9 minutes looked at first like a regression from two fresh
+changes. It is not: the guest got **further, sooner**.
+
+### The conclusion this forces, and it is the important one
+
+**Four boots reaching the same wall at 51.9, 45.0, 35.3 and 21.9 minutes
+all stop there.** A wall that a 58%-faster machine hits just as hard is
+not a deadline being missed. **Speed is not what stands between this guest
+and the login screen.**
+
+That retires the framing `5871b1e` left open. I wrote there that the wall
+"is a race, but against a margin far larger than the 32% boot 192 gained".
+**At 58% it is still the same wall**, so either the margin is far larger
+than any plausible optimisation, or - much more likely now - the wall is
+**functional and independent of speed**.
+
+### What is NOT claimed
+
+**Not that the changes caused the speed-up.** The measured saving is 5.2%
+of the handler, about 3.4% of wall; boot times fell 58%. Those do not
+reconcile, and `ceab9a4` records identical binaries differing by eleven
+processes at the same elapsed time. **Boot-to-boot variance almost
+certainly dominates this trend**, and three points falling monotonically
+across three configurations is suggestive, not evidence.
+
+What *is* evidence is the terminal state, because it is now **four for
+four** across a 2.4x spread in speed.
+
+### Where this points
+
+Away from cost work, which has been the whole of the last several hours.
+The measured 5.2% stands and the cost model is now trustworthy - that is
+worth keeping - but **the next question is what `services.exe` is waiting
+for that never arrives**, not how to make the machine faster so it waits
+less.
+
+`5871b1e` already has the shape: `services.exe` runnable and preempted,
+zero `svchost.exe` after 45 minutes, `winlogon` waiting on a user-mode
+object, nothing deadlocked. The `ContextSwitches` reader (`2fd08e8`) is
+built and needs a **live** guest at 14 processes - boot 195 stopped, so it
+could not be taken again. That is the measurement to prioritise on the
+next boot that gets there, and boot 195 says it will get there in about
+twenty minutes.
