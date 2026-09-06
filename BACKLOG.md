@@ -70484,3 +70484,67 @@ time is the largest single consumer**, at 186,210 cycles an exit of which
 writes explain 42,024 (22.6%). The remaining 144,186 cycles an exit is the
 biggest unexplained quantity in this investigation and nothing has looked
 at it.
+
+## Boot 192: 32% faster to the same wall, and it died the same way
+
+**zpp resident (2 markers), `ZPP_CPUS=2`, `eagerept=0 vtlcap=0 apentry=0`.**
+
+    boot 189 (eagerept=1)   3 @ 26.9   9 @ 42.6   14 @ 51.9   STOP 0x9F
+    boot 192 (eagerept=0)   5 @ 25.0             14 @ 35.3    STOP 0x9F @ 45.0
+
+**Boot 192 reached 14 processes in 35.3 minutes against boot 189's 51.9 -
+16.6 minutes, 32% faster** - and `smss.exe` was up at 25.0 min where 189
+was still at 3 processes at 26.9.
+
+**And it died in exactly the same place**: 14 processes, `WerFault.exe`
+present, `STOP 0x9F DRIVER_POWER_STATE_FAILURE` param1 `0x3`, naming
+`\Driver\IntcAudioBus` - the same driver as boot 189.
+
+### That is the finding, and it points away from speed
+
+Two boots, one 32% faster than the other, **stopped at the identical
+process set with the identical bugcheck.** If the failure were a race
+against a timer, the faster boot should have got further before losing it.
+It did not: it reached the same 14 processes and stopped.
+
+So the `0x9F` at 14 processes looks like a **functional block at that
+stage**, not a deadline the guest is failing to beat. `85ac318`'s
+reframing - "0x9F is a marker of progress, not severity" - stands, but the
+corollary now is that **progress stops at the same place regardless of how
+fast the guest gets there.**
+
+**Caveat, and it is the one this session keeps earning:** n=1 per arm, and
+`ceab9a4` records boots 189 and 190 differing by eleven processes on
+identical binaries. The 32% is one pair. What is *not* n=1 is the terminal
+state - **three boots have now ended at 14 processes with `WerFault` and
+`0x9F`** (189, 192, and the earlier one that produced the user-reported
+driver power failure).
+
+### The fixed IRP reader confirms its prediction exactly
+
+`5b52f86` changed the printer to refuse an age when `WatchdogStart` is 0,
+on the strength of a static prediction that the four "stalled" entries
+would be `IRP_MN_WAIT_WAKE`. Read on boot 192:
+
+    [1][2][4][5]  MinorFunction 0 (IRP_MN_WAIT_WAKE)   WatchdogState 0
+                  CurrentDevice <null>   WatchdogStart 0 - NEVER ARMED
+    [3]           MinorFunction 2 (IRP_MN_SET_POWER)   WatchdogState 1
+                  CurrentDevice \Driver\IntcOED
+                  WatchdogStart 18,206,743,163   age 300.0 s of 600 s
+
+**Four for four.** The entries that printed "2,881.5 s, 480% to bugcheck"
+are arm-for-wake IRPs with no deadline, exactly as predicted, and the
+printer now says so instead of inventing a number.
+
+### One thing that is odd and is recorded, not explained
+
+The armed entry reads **age 300.0 s** on boot 192 (3,000,106,544) and
+**300.0 s** on boot 189 (3,000,037,358) - two independent boots agreeing
+to within 7 ms on a quantity that should depend on when the guest died.
+Both are exactly half the 600 s budget.
+
+That is too round to accept. Either the IRP is issued at a fixed offset
+before the stop, or something pins the value. **Do not build on the 300 s
+figure until it is explained.** The bugcheck's own P4 (`0xffffcf898f23d4a0`)
+is not entry [3]'s IRP either, so the entry that reached the deadline is
+not among the six the list still holds.
