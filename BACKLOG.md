@@ -72431,3 +72431,63 @@ thread that could not be observed running. The stack of thread
 **Boot 200 is `paused (shutdown)` with memory intact**, so that stack is
 readable now, and `00ed35c`'s rule applies - a stopped guest at the wall
 is fully informative.
+
+## The guest executes 106,743 user-mode samples, and three of them are tight loops
+
+Boot 200's census, uncut, reader proven, filtered to the **user-mode**
+half (`< 0x0000800000000000`) - a population nothing in this investigation
+had looked at:
+
+    1,973 distinct user-mode addresses, 106,743 samples
+
+    0x7ffe111060c0   6,793
+    0x7ffe11000665   6,347
+    0x7ffe0eb132e7   6,303   <-+ 2 bytes apart
+    0x7ffe0eb132e5   4,658   <-+
+    0x7ffe11000565   3,432
+    0x7ffe0eb113e7   2,377   <-+ 2 bytes apart
+    0x7ffe0eb16e27   2,136   <-+ 2 bytes apart
+    0x7ff69d564180   2,007
+    0x7ffe0eb113e5   1,895   <-+
+    0x7ffe0eb16e25   1,591   <-+
+
+**Three pairs of addresses exactly two bytes apart, carrying 17.8% of all
+user-mode samples.** A two-byte gap between two hot addresses is the
+signature of a **two-byte instruction executed in a tight loop** - the
+shape of `pause` (`F3 90`) followed by a short backward branch, or a
+compare-and-branch pair.
+
+All three pairs are in **`0x7ffe0eb1xxxx`**, one module, within 0x4000 of
+each other. `0x7ffe...` is where Windows maps its system DLLs.
+
+### Why this matters and what it is not
+
+**It matters** because `d23d54e` established `services.exe` runs at 39.8
+context switches a second and produces no service. A user-mode spin is
+exactly what that looks like from inside: a thread that gets the
+processor, burns its quantum in a loop, is preempted, and comes back. The
+`WrQuantumEnd` wait reason and the rising switch count both fit.
+
+**It is not attributed.** The RIP census samples the whole guest and does
+not record which process a sample came from. So "services.exe is spinning
+in a user-mode loop" is a **hypothesis consistent with two independent
+measurements**, not a demonstrated fact. `check-existing-instruments`
+applies: before building anything, the honest next step is to attribute
+these addresses to a module, and the guest is stopped with memory intact
+so the module list of `services.exe` is readable.
+
+**INFERRED and flagged**: that `0x7ffe0eb1xxxx` is `ntdll.dll` and that
+the loop is a critical-section spin. It is the obvious reading of an
+address in that range and it may well be wrong - the tree has named two
+drivers from plausible-looking evidence this session and been wrong both
+times (`VBoxSup.sys` from a fossil stack, `IntcAudioBus` from an arbitrary
+watchdog victim). **A third such name will not be recorded without the
+module walk behind it.**
+
+### The next read, named precisely
+
+Walk `services.exe`'s PEB module list (or `_EPROCESS` -> `Peb` ->
+`Ldr` -> `InMemoryOrderModuleList`) on the stopped guest, and place
+`0x7ffe0eb132e5` in a module. That turns a plausible range into a name,
+and the two-byte pair into an instruction that can be disassembled off
+disk.
