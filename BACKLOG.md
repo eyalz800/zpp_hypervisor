@@ -73120,3 +73120,53 @@ reasons unrelated to CPUID.
 account for the guest being slow by a large factor rather than a few
 per cent**, and unlike every cost lever pursued earlier it is not about
 zpp's own exit handling at all.
+
+## RETRACTED: `int 0x2e` is not the slowdown. It costs no VM exits
+
+`c7633de` called the `int 0x2e` system-call path "the first mechanism
+found this session that could account for the guest being slow by a large
+factor". **Two checks, both cheap, both against it:**
+
+**1. zpp does not cause it.** A grep of the CPUID handler for
+`0x80000001`, for `1 << 11`, and for any SYSCALL or EFER.SCE filtering
+returns **nothing**. zpp does not touch the leaf that advertises
+SYSCALL/SYSRET and does not clear the bit. Whatever sets
+`SharedUserData->SystemCall = 1`, it is not this VMM masking the feature.
+
+**2. It costs no VM exits.** Boot 202's exit histogram, 24,368,864 exits
+on cpu 0: `vmresume` 34.8%, `ept-violation` 19.1%, `int-window` 13.3%,
+`wrmsr` 9.6%, down through `hlt` at 0.3% - and **no `exception` reason
+anywhere in the distribution.** An `int 0x2e` traverses the guest's own
+IDT and is handled entirely inside the guest. It does not exit, so
+virtualisation does not amplify it.
+
+**So the cost is whatever `int 0x2e` costs on bare metal versus
+`syscall` - a real but modest transition penalty - and a bare-metal
+Windows with the same VBS configuration would pay exactly the same and
+still boot in seconds.** It cannot explain a 100x slowdown because it is
+not virtualisation-sensitive at all.
+
+**Withdrawn**: that this explains the guest being slow, and that it is
+"architectural" in any sense that matters here. The excitement was
+misplaced and the check that deflated it was one grep and one histogram I
+already had on disk.
+
+### What survives, and it is still worth having
+
+- **the decode is right**: `0x7ffdde7d32e5` is `int 0x2e`, `0x32e7` the
+  `ret` after it, and `SharedUserData->SystemCall` reads **1** on the live
+  guest - so the guest genuinely takes the legacy path
+- **the hot user-mode addresses are system-call stubs, system-wide**, not
+  a spin and not one process's problem. That correction to `a948a1d` and
+  `2c40f5e` stands.
+- **`fontdrvhost.exe` x2 make the most system calls** of any process at
+  the wall, 12.2% of user-mode samples between them - which is a fact
+  about *what the guest is doing*, independent of what a syscall costs
+
+### The lesson, which is the third of its kind this session
+
+A finding that arrives feeling decisive is the one to check hardest.
+`9c97e8e` (the 60-cycle read), `6c1dab1` (81% read latency) and now this
+one all felt like the answer and all failed on a measurement that was
+already available. **The pattern is that the exciting reading is the one
+where I stop looking for the disconfirming instrument.**
