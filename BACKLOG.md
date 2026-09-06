@@ -72603,3 +72603,56 @@ process name.
 no new hypervisor code: take user-mode RIPs from the exit ring with their
 cr3, and look each cr3 up in the process list. It is the next read, and it
 is the only one that can say which process is making the win32k calls.
+
+## The cr3 join was tried and the data is not in the dump
+
+`108d445` named the cr3 join as the only route that can attribute the
+win32k syscalls to a process, and said it needed no new hypervisor code.
+**Tried on boot 200's stopped guest, and that was too optimistic.**
+
+Every cr3 in the dump against every process's `DirectoryTableBase`:
+
+    cr3 in the dump      matches
+      0x8800002            none
+      0x13e15b002          none
+      0x114f82000          none (labelled elsewhere as hvix64's own)
+      0x101ab3000          none (same)
+
+    DirectoryTableBase   System 0x1ae002, Secure System 0x361e90002,
+      Registry 0x361e6b002, smss 0x34cf24002, csrss 0x1ab356002,
+      wininit 0x1b804d002, csrss 0x1ae96e002, winlogon 0x34d47e002,
+      services 0x1b8de2002, WerFault 0x1b8fec002, LsaIso 0x1b8f16002,
+      lsass 0x34b0d6002, fontdrvhost 0x352127002 / 0x34c161002
+
+**Not one cr3 in the dump belongs to any of the fourteen processes.** Two
+are hvix64's, and the exit ring holds only the last few hundred exits -
+`grep` finds **zero** user-mode RIPs in it, because the guest was in kernel
+mode when it stopped. The ring is a snapshot; the census is cumulative;
+**they cannot be joined after the fact.**
+
+`0x13e15b002` carries the `...002` PCID shape of a process cr3 and matches
+nothing in the list. Recorded as an oddity, not interpreted - three
+occurrences is too few to build on and it may belong to a process that had
+already exited.
+
+### What would actually attribute it
+
+**The hot-RIP census would have to record cr3 beside the RIP**, so a
+user-mode address carries the address space that executed it. That is a
+hypervisor change - a second word per census row - and it is the only
+thing that turns "something makes win32k syscalls at high rate" into a
+named process.
+
+Cheaper and worth trying first: `closed=1` compiles in `cr3_seen`, a
+histogram of guest cr3 values per exit. It cannot pair a cr3 with a RIP,
+but **it would say whether any of the fourteen processes is executing at
+all** during the wall - and if the answer is "only hvix64's cr3s appear",
+the whole user-mode census may be sampling something other than what I
+have assumed.
+
+**That last possibility deserves stating plainly**: 106,743 user-mode
+samples exist and *no* user-mode RIP appears in the exit ring. Those two
+facts are not contradictory - different instruments, different
+populations, different windows - but they have not been reconciled, and
+until they are, "the guest is making win32k calls at high rate" rests on
+one instrument that cannot name who.
