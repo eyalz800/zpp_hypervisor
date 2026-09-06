@@ -75089,3 +75089,45 @@ Recorded before the result, so it cannot be fitted afterwards:
 This costs nothing extra - the triage runs on every boot anyway. What it
 buys is the answer to a question that, if left unasked, would make every
 subsequent measurement suspect.
+
+## The unpolled control (boot 218) is HEALTHY. The poller is now a live suspect
+
+`0279ce5` registered the prediction before the run. The result:
+
+    boot 218, UNPOLLED    cpu0 6,458.14/s   cpu1 6,420.48/s   vmcall 471.0/s
+    boot 212, healthy     cpu0 6,552.03/s   cpu1 8,791.08/s   vmcall 435.5/s
+    stalled A (x5)        cpu0 ~8,787/s     cpu1 ~1,190/s     vmcall   2.0/s
+
+**471 VTL calls per second, against 2.0 in every polled stalled boot.**
+Boot 218 is unambiguously in the healthy state, and it is the first boot
+run with no watcher at all.
+
+**Per the pre-registered plan, this does NOT convict the poller.** The
+commit said: "one sample, not proof, but it makes the poller a live
+suspect and the next step is obvious: run two more unpolled boots before
+believing it." That is binding, and it is binding precisely because the
+result came out the way it was hoped to. One unpolled boot being healthy
+is exactly as much evidence as one polled boot being stalled, and this
+file already carries five separate claims retracted for resting on one or
+two samples.
+
+What makes it *suspicious* rather than noise is the prior: **six of seven
+polled boots stalled**, and the one that did not (212) is the one whose
+watcher was repeatedly killed for measurements. Under a 1-in-7 healthy
+rate, the first unpolled boot landing healthy is not decisive but it is
+the direction the hypothesis predicted.
+
+**Boot 218 is being kept alive and unpolled**, which serves both aims at
+once: it is the goal (a healthy multicore boot that may reach the login
+screen) and it is another unpolled sample. It will be watched **only**
+through KVM's host-side counters - `nested_run`, `guest_mode` - which
+need no QEMU monitor connection and perturb nothing. That instrument
+exists for exactly this and `CLAUDE.md` already recommends it as the
+cheapest one available.
+
+If the poller is really the cause, the mechanism is not mysterious:
+`guest-processes.py` issues hundreds of `xp` reads per walk, the walk
+takes minutes, and at a 20-second cadence the guest is being read
+essentially continuously. `CLAUDE.md`'s existing entry - a gdb breakpoint
+held for seconds trips Hyper-V's synthetic watchdog - is the same
+phenomenon one layer up.
