@@ -74507,3 +74507,32 @@ differenced profile exists from a boot that *did* reach the wall, so
 "21.3% int-window is abnormal" remains uncompared. What has changed is
 that the failing state is now measured properly, so the next boot that
 reaches the wall needs only the same one command to complete the pair.
+
+## Triage a boot on its VTL-call RATE, not on wall-clock
+
+`login-screen-reached-recipe` says never call a boot wedged before an
+hour, and that rule was written because boots recovered late and were
+killed too early. It is a good rule and it is also expensive: boot 210
+cost 53 minutes to learn "still n=3".
+
+`07e82da` gives a **cheaper and better discriminator**, measured in 62
+seconds: `vmcall` is the trust-level switch, and a differenced window
+reports its rate directly.
+
+    boot 211 at n=3, no smss.exe      2.16 vmcall/s   (134 in 62 s)
+    boots that reach the wall         tens of thousands of VTL calls
+
+That is four orders of magnitude, and it is a *rate*, so unlike the
+process count it cannot sit still while the machine makes progress
+somewhere the reader cannot see. Boot 211 was killed at 28 minutes on
+this basis rather than at 60 on the clock.
+
+**The hour rule is not withdrawn - it is given a fast path.** Wall-clock
+remains the fallback when no measurement is available, because "slow" and
+"stopped" genuinely do look alike from outside. What the rate adds is a
+way to distinguish them in a minute. The honest caveat: **the two arms of
+that comparison were not measured the same way** - the "tens of
+thousands" figure is cumulative from earlier sessions, the 2.16/s is
+differenced. The gap is so large that the conclusion survives it, but a
+differenced VTL rate from a boot that reaches the wall is still owed, and
+it is the same one command that closes the int-window control.
