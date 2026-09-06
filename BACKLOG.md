@@ -71703,3 +71703,80 @@ exit-information gates at 1.7% of the exit, and the low end of this band
 matches that on its own.
 
 **Not deployed** - no rig access from this branch.
+
+## Six of the seven ungated writes are elided, into the family that reads back
+
+`7678f44`. The previous analysis's list was exactly right - seven ungated
+writes after `build_vmcs02`'s VMPTRLD - and six of them are now elided.
+
+**The decisive fact is SDM 30.3.1** (`sdm.txt:204496-204512`): every VM
+exit saves CR0/CR3/CR4 into the guest-state area **under no control at
+all**, DR7 under "save debug controls", PAT and EFER under their own, and
+BNDCFGS on any processor offering either BNDCFGS control. So all six are
+fields **the processor rewrites** - the `vm_entry_controls` hazard
+verbatim, and a `control_cache`-style record of "what zpp wrote" would be
+unsound for every one.
+
+They went into **`hot_state_saved`**, which `save_l2_state` refreshes by a
+VMREAD of vmcs02 on every reflection. That read-back is precisely what
+makes one family immune to the "somebody else moved the field" hazard and
+the other not. **No new VMREADs**: all six reads already existed inline in
+`save_l2_state` and were hoisted into locals.
+
+**CR0 and CR4 were checked hardest**, as the shape most likely to bite:
+`exit_dispatch.cpp` writes vmcs02's guest CR0, CR4 and DR7 directly with
+vmcs02 current. It does not sink the family, structurally - `build_vmcs02`
+has exactly one caller, the level above only runs after `reflect_l2_exit`
+whose first act is `save_l2_state`, and a handled or deferred L2 exit
+resumes L2 without reaching `build_vmcs02`. Every direct write is followed
+by a read-back before it can matter.
+
+**One real disagreement was found and gated.** `save_l2_state` reads
+DR7/PAT/EFER back under *vmcs12's* exit controls while the processor
+writes vmcs02's copies under *vmcs02's*, which `build_vmcs02` composes
+from vmcs01. A new `hot_state_slot_valid` bitmask records only what was
+actually read back, which is sound whichever way the two control words
+disagree.
+
+### Not elided, with both reasons recorded
+
+`vm_entry_interruption_information_field` fails two independent tests: the
+processor clears bit 31 on every exit (SDM 27.8.3) and **does not** on an
+entry failure (SDM 29.8), and five other sites write it with vmcs02
+current. Reading it back in `save_l2_state` would be a **net loss** -
+2,876 cycles every reflection against 2,131 saved on repeats, at two exits
+per L2 entry. Both rejections are in the source comment so they are not
+re-proposed.
+
+### The test, and the case that failed first
+
+74 checks, **two witnesses per case**: the vmcs02 value and a new
+per-encoding *write* counter in the shim - needed because an elided write
+leaves vmcs02 holding the same value, so a value-only test proves nothing.
+Every gate negative-controlled separately:
+
+    all six gated            1,323 checks, 1 pre-existing failure
+    guest_cr0 reverted  +3   guest_ia32_efer reverted    +1
+    guest_cr4 reverted  +2   guest_ia32_bndcfgs reverted +2
+    guest_dr7 reverted  +2   hot_state_slot_valid rev.   +3
+    guest_ia32_pat rev. +1
+
+One case failed on the first run and is recorded rather than quietly
+fixed: CR4's changed-value pair differed only in VMXE, which
+`build_vmcs02` forces in, so both composed identically and the case was
+asserting that a no-op write happens.
+
+### Falsifiable prediction, with a discriminator that needs no second boot
+
+Three fields elide unconditionally; three need Hyper-V's vmcs12 to set the
+save control, which has never been read out - so both ends are named:
+
+                              3 elide      6 elide
+    vmcs_writes_taken/exits   10.54->9.04  10.54->7.55
+    cycles/exit saved         3,189 (1.7%) 6,377 (3.4%)
+
+**The hard discriminator is `build_vmcs02` slot 5**, which must go
+**9.71 -> 7.71 writes a call** - both CR writes, ungated, so that end is
+not a guess. Slot 6 goes 6.18 -> 5.18 or -> 2.18, which reads Hyper-V's
+exit controls off the machine for free. `hot_state_writes_done` must not
+reach zero.
