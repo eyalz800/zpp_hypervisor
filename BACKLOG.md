@@ -74195,3 +74195,42 @@ the same in both directions and takes one division: **before treating a
 zero as informative, compute what the instrument would have shown if the
 hypothesis were true.** Thirty-two slots at one percent would have shown
 zero either way.
+
+## Boot 209: the power watchdog is NOT armed on the way to the wall
+
+The combined poller (`0ba6d8e`) produced the ordering evidence the
+single-sample WerFault readings could never produce.
+
+    21:26  n=2  System Registry                      watchdog: <none read>
+    21:29  n=3  + smss.exe                           watchdog: <none read>
+    21:32  n=4  + autochk.exe                        watchdog: <none read>
+    21:35  n=4  autochk gone, second smss.exe        watchdog: <none read>
+    21:38  n=4  unchanged                            watchdog: <none read>
+    21:44  n=9  + csrss x2, wininit, winlogon,       watchdog: entries read,
+                  services.exe                         ALL "NEVER ARMED"
+
+**The reader-works proof arrived on its own, which is why the early
+samples can now be quoted.** `<no power IRP entries read>` collapses two
+different facts - an empty list and a failed read - and that was flagged
+when the first one appeared rather than after it had been leaned on. At
+21:44 the *same reader, same boot, same arguments* printed entries. So
+the reader works here, and the five earlier blanks were a genuinely empty
+`PopIrpList` rather than five read failures.
+
+This is the cheap general form of the rule this file keeps relearning:
+**an instrument whose silence is ambiguous can be disambiguated by
+waiting for it to speak.** No new code, no second instrument - just
+refusing to quote the blanks until the same reader demonstrated it could
+produce a non-blank.
+
+**And the finding: power IRPs now exist and every one reads
+`WatchdogStart 0`.** So on the approach to the wall there are pending
+power IRPs and *not one has an armed watchdog*. Whatever eventually
+delivers the `0x9F` has not started counting at n=9.
+
+That is a real constraint on the prediction `7f7139a` wrote down. It does
+not confirm it and does not yet refute it - the prediction was about
+where WerFault falls relative to the arming, and WerFault does not exist
+yet. What it does establish is the **baseline**: six consecutive samples,
+spanning n=2 to n=9 and eighteen minutes, with no watchdog armed. Any
+arming seen from here is dateable against that.
