@@ -72998,3 +72998,66 @@ boundary, which is the most expensive call in this system.
 
 That is a new, concrete, named target and it was invisible to every
 instrument before this one.
+
+## NAMED: the win32k caller is fontdrvhost.exe, twice, at 12.2% of user mode
+
+The chain, each link verified:
+
+1. the address-space census (`6d2b344`) recorded **two cr3s carrying the
+   `win32u.dll + 0x32e5` syscall pair** - 5,414 and 4,273 samples - that
+   matched no `DirectoryTableBase`
+2. both carried the **same** EXE-range address `0x7ff6eade1bfb`, which
+   means two address spaces running **one image at one base**
+3. `guest-user-module.py`, proof passed:
+   **`0x7ff6eade1bfb -> fontdrvhost.exe + 0x51bfb`** (base
+   `0x7ff6ead90000`), and `0x7ffdde7d32e5 -> win32u.dll + 0x32e5`
+
+**The two unmatched address spaces are the two `fontdrvhost.exe`
+instances.** They did not match `DirectoryTableBase` because that field
+holds the **kernel-half** cr3 (`...002`) while the samples carry the
+**user-half** cr3 (`...001`) under KVA shadow - which is exactly the trap
+`6d2b344`'s reader warns about when it prints the mask.
+
+    fontdrvhost.exe #1   6.3%   of all user-mode execution
+    fontdrvhost.exe #2   5.9%
+    ------------------------------------------------------
+    together            12.2%, and both dominated by ONE win32k syscall
+
+### Why this matters for the goal
+
+`fontdrvhost.exe` is the **Font Driver Host** - the isolated user-mode
+process that does font rendering for the window manager. Two instances is
+normal (session 0 and the interactive session). **Both hammering a single
+`win32u` syscall stub is not.**
+
+And it sits directly on the path to the thing being chased: `LogonUI.exe`
+is a GUI process, and a session that cannot render text does not produce
+a login screen. **A font host stuck in a win32k call is a plausible
+proximate cause of "14 processes and no further"**, in a way that
+`services.exe` never was - `d23d54e` showed the SCM running at 39.8
+switches a second, which is a symptom of a system doing work, not one
+stuck.
+
+### What is established and what is not
+
+**Established**: two `fontdrvhost.exe` instances account for 12.2% of
+user-mode execution at the wall, and in both the single hottest address is
+the same `win32u.dll` syscall stub. Every step has a proof - the census
+sums to its own total, the module walk refuses unless the first module is
+the image itself, and the syscall pair is two bytes apart as a `syscall`
+instruction must be.
+
+**Not established**: that this is a *hang* rather than ordinary font work.
+A syscall stub is where samples land for **any** frequent call, and
+`f649eda` already corrected one reading of these same addresses from
+"tight loop" to "syscall site". What would settle it: **which** win32k
+call - the syscall number is in `eax` at the stub, four bytes before
+`0x32e5`, readable from `win32u.dll` in guest memory - and whether the
+call ever returns, which the pair's ratio hints at (2,936 before against
+2,478 after, so it does return).
+
+**That ratio is worth stating**: samples land on both sides of the
+`syscall`, and if the call never returned the "after" count would be zero.
+It is 84% of the "before" count, so **the call completes and is simply
+made very often.** That is a repeat-call pattern, not a hang - which
+narrows it further and is the opposite of what a first glance suggests.
