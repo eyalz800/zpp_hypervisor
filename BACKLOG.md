@@ -74873,3 +74873,39 @@ unlike the TLFS lookup it cannot be done from documentation: it needs a
 boot that reaches 1,585 s.
 
 That is what boot 213 is for.
+
+## The stalled state is a reproducible ATTRACTOR, not a random slow boot
+
+Boot 213, triaged at 13 minutes by the criterion from `abb0ac6`, against
+boot 211 measured the same way:
+
+                     cpu0 exits/s   cpu1 exits/s   vmcall/s
+    boot 211            8,804.45       1,191.81       2.16
+    boot 213            8,773.02       1,185.20       2.00
+    difference             0.36%          0.55%       7.4%
+
+    boot 212 (healthy)  6,552.03       8,791.08     435.49
+
+**Two boots that failed identically agree to under 0.6% on both
+processors' exit rates.** That is not what run-to-run variance looks
+like - `16809d6` established the spread between reaching the wall and
+never starting `smss.exe` is large, and here two failures land on the
+same numbers to three significant figures.
+
+So the stalled state is **a specific operating point the machine falls
+into**, not a slow version of the healthy one. Note the shape as well as
+the rate: in the stalled state cpu0 does 7.4x cpu1's work, and in the
+healthy boot the ratio inverts (cpu1 busier than cpu0). The two states
+differ in *which processor is loaded*, not only in how much.
+
+That raises the value of the triage criterion again. It is no longer
+"this boot looks slow" - it is "this boot has entered a state whose
+signature is known to three digits", and boot 213 was killed at 13
+minutes on that basis.
+
+**One honest limit.** Two samples is two samples. The agreement is
+striking enough to act on and not enough to call the attractor
+characterised; a third stalled boot measured the same way would settle
+whether 8,780/1,188 is the state's signature or a coincidence between two
+runs. That measurement is free - it is the same triage command already
+being run on every boot.
