@@ -74536,3 +74536,49 @@ thousands" figure is cumulative from earlier sessions, the 2.16/s is
 differenced. The gap is so large that the conclusion survives it, but a
 differenced VTL rate from a boot that reaches the wall is still owed, and
 it is the same one command that closes the int-window control.
+
+## The control landed, and it CORRECTS 07e82da: the signal is VTL calls, not interrupt windows
+
+Boot 212, differenced over a measured 62.102 s window at ~13 minutes,
+against boot 211's window taken the same way. Both aggregated across both
+CPUs, because the two boots put the load on *different* processors and a
+per-CPU comparison would be comparing roles rather than machines:
+
+    boot 211 stalled       9,996 exits/s   int-window 1,878.5/s   vmcall     2.16/s
+    boot 212 progressing  15,343 exits/s   int-window 1,000.0/s   vmcall   435.49/s
+
+    ratio                                  int-window   1.88x     vmcall     202x
+
+**`07e82da` called interrupt-window exiting "the striking one". The
+control says it is not.** In absolute rate the stalled boot runs
+interrupt-window exits only **1.88x** the progressing one - a factor
+smaller than the run-to-run spread this rig shows in almost everything
+else. What looked dramatic was the **percentage**: 21.3% against 1.3%.
+Those percentages are of different denominators - boot 212 takes 1.53x
+the total exits and adds 27,045 `vmcall`s that boot 211 does not - so the
+share collapsed while the rate barely moved.
+
+This is `CLAUDE.md`'s "**a percentage is of a population**" entry,
+committed by me one hour after quoting that entry approvingly, and
+against the same class of mistake it was written for. The `4.1 windows
+per interrupt delivered` ratio in `07e82da` stands as arithmetic but its
+significance does not, since nothing established what that ratio is on a
+healthy boot.
+
+**What the control does establish, at 202x, is the VTL-call rate.**
+
+    stalled       2.16 vmcall/s     (134 calls in 62 s, both CPUs)
+    progressing 435.49 vmcall/s  (27,045 calls in 62 s, both CPUs)
+
+Both differenced, both aggregated, same command, same build, same 62-second
+window length. That is the like-for-like comparison `abb0ac6` said was
+still owed, and it closes it: **a boot that is not making trust-level
+switches is not progressing, and the rate separates the two states by two
+orders of magnitude.** The triage criterion in `abb0ac6` survives -
+strengthened, since its weak arm (a cumulative figure from an earlier
+session) is now replaced by a differenced one from this build.
+
+**Boot 212 is therefore a healthy boot in progress**, at n=3 and 13
+minutes, doing 435 VTL calls a second. Boot 211 would have been killed by
+this criterion at 13 minutes instead of 28, and boot 210 at 13 instead of
+53.
