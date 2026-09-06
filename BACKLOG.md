@@ -68945,3 +68945,63 @@ skips the census cannot silently feed the comparison a stale address,
 with a counter on the fallback so the instrument can report its own
 failure. Three new members and a guard for one read; recorded rather
 than taken.
+
+## The debug build has had the VMCS cache ON all along - vcache=1
+
+Read the whole manifest before deploying the removal work, and the field
+that matters is not one of the new ones:
+
+    zpp switches: ... fb=1 vcache=1 vid=0 ...
+
+`vcache=` is `digit(arch::x86_64::vmx::vmcs_cache_enabled)`, i.e.
+`(0 != ZPP_VMCS_CACHE)`. **It reads 1 on the freshly built binary AND on
+`.rig-deployed-hypervisor.elf`**, while everything in-tree says off:
+
+    CMakeLists.txt:89   option(ZPP_VMCS_CACHE ... OFF)
+    vmcs.h:268-269      #ifndef ZPP_VMCS_CACHE / #define ZPP_VMCS_CACHE 0
+    build/release/CMakeCache.txt   ZPP_VMCS_CACHE:BOOL=OFF
+    build/debug/CMakeCache.txt     ZPP_VMCS_CACHE:BOOL=ON   <- HERE
+
+**The debug cache carries ON, release carries OFF, and debug is what is
+deployed to the rig.** Nothing in `CMakePresets.json` or `scripts/` sets
+it, so it is a cache entry that has been inherited silently - the same
+shape as the `ZPP_VERIFY_HYPERVISOR` day this file records, and the same
+shape as `ZPP_PUBLISH_REFERENCE_TSC`.
+
+**The manifest did its job.** It has been printing `vcache=1` on every
+deploy; nobody read that field. That is the third time this project has
+been saved or bitten by that one line, and the reason it exists.
+
+### What this invalidates
+
+The removal work's **cost** premise: *"a VMREAD here is an EXIT to the
+layer below at 1.4-1.8 us because the VMCS cache is off by default"*. On
+this build the cache is **on**, so a repeat read of a field is answered
+from memory, not by an exit. The per-read cost is therefore far below
+1.4 us for any field read more than once between entries, which is most of
+them.
+
+What still holds: `vmcs_reads_taken` increments on the first line of
+`vmcs::read`, **before** the cache lookup, so the predicted **6.5 fewer
+reads per exit** is still exactly right as a *count*. It is simply not a
+1.4 us x 6.5 saving. **The count prediction survives; the time prediction
+does not.**
+
+That also explains the discrepancy the analysis flagged and could not
+resolve: it configured and built locally, got `vcache=0`, and reasoned
+from that - while the rig has been running `vcache=1`. **Two
+configurations, and the analysis was of the one nobody deployed.**
+
+### Not flipping it, and why
+
+`BACKLOG.md` 5490 records that `ZPP_VMCS_CACHE=OFF` **does not boot at
+all**. If that is still true, the ON is load-bearing and turning it off to
+"restore the default" would cost a boot and prove nothing. The honest
+position is that the two entries are now reconciled - debug ON, release
+OFF - where before they looked like a contradiction.
+
+**What to do with it**: nothing yet, but no cost measurement may be quoted
+against a 1.4 us-per-VMREAD model again without checking `vcache=` first.
+The measurement that would settle the real per-read cost is the pair
+`vmcs_cache_hits` / `vmcs_cache_misses`, which exists for exactly this and
+which no reading in this investigation has used.
