@@ -73170,3 +73170,69 @@ A finding that arrives feeling decisive is the one to check hardest.
 one all felt like the answer and all failed on a measurement that was
 already available. **The pattern is that the exciting reading is the one
 where I stop looking for the disconfirming instrument.**
+
+## THE SHADOWING LIST IS IN THE DUMP: 12 fields carry ~90% of 2.38M exits
+
+`dump_field_use`'s own docstring says it exactly: *"This is what decides
+which fields VMCS shadowing should cover."* It has been printing on every
+dump and nothing had read it.
+
+Boot 202, cpu 0, 24,368,864 exits, of which **`vmwrite` 5.9% and `vmread`
+3.4% - 2.38M exits where hvix64 touches a field the shadow VMCS does not
+cover**:
+
+    --- vmread (881,833 total, 105 distinct) ---
+      0x400c vm_exit_controls                  134,138   15.2%
+      0x4408 idt_vectoring_information_field   117,492   13.3%
+      0x6400 exit_qualification                 79,368    9.0%
+      0x6818 guest_idtr_base                    67,287    7.6%
+      0x4812 guest_idtr_limit                   67,287    7.6%
+      0x640a guest_linear_address               67,213    7.6%
+      0x2400 guest_physical_address             67,205    7.6%
+      0x6816 guest_gdtr_base                    67,078    7.6%
+      0x4810 guest_gdtr_limit                   67,078    7.6%
+      0x482a guest_ia32_sysenter_cs             67,071    7.6%
+      0x480c guest_ldtr_limit                   67,068    7.6%
+
+    --- vmwrite (1,499,006 total, 97 distinct) ---
+      0x400c vm_exit_controls   0x4012 vm_entry_controls
+      0x6818 guest_idtr_base    0x6816 guest_gdtr_base
+      0x4812 guest_idtr_limit   0x4810 guest_gdtr_limit
+      0x480c guest_ldtr_limit   0x4004 exception_bitmap
+      0x482a guest_ia32_sysenter_cs   0x201a ept_pointer
+        - ten fields at **8.9% each**, 134,1xx uses apiece
+      0x401a vm_entry_instruction_length  5.2%
+      0x2806 guest_ia32_efer              4.5%
+
+**Twelve write fields at 134,1xx uses each is one code path touching them
+together, once per event.** The same cluster appears on the read side at
+67,0xx - exactly half - so hvix64 writes them twice for every once it
+reads them back.
+
+The listed rows carry **84.7% of vmread and 91.0% of vmwrite** exits.
+
+### Why this is different from every cost lever tried so far
+
+The read-gating and write-elision work removed **accesses inside an
+exit**. This removes **whole exits**: 2.38M of 24.4M, **9.8% of all
+exits**, and about 90% of them are reachable by extending the shadow VMCS
+bitmap to cover twelve field encodings.
+
+**No new mechanism is needed.** `shadowvmcs=1` is already on and its own
+recorded measurement is that shadowing took VMREAD and VMWRITE "from
+65.7% of every exit to six and 411". This is the residue that list does
+not cover, and the dump has been naming it by encoding the whole time.
+
+### The caution that belongs with it
+
+`dump_field_use`'s docstring also carries the counter-argument: *"a
+shadowed field costs a copy in each direction at every second-level exit,
+so a list longer than what the guest hypervisor touches makes the fix
+slower than the problem."* The copy is already measured -
+`copy in: field reads` is 34,118 cycles a round trip (7.4% of vmm) and
+`copy out: field writes` 10,494 (2.3%) - so **twelve more fields is
+twelve more copies on 8.76M shadow round trips**, and that has to be
+priced against the exits removed before anything is changed.
+
+**That is the next piece of arithmetic**, and both sides of it are now
+measured quantities rather than estimates.
