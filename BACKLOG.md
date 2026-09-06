@@ -69613,3 +69613,54 @@ per-IRP and the four oldest were never armed, then the deadline that
 actually killed the boot belongs to an IRP issued much later, and the gap
 is smaller than 4x. **That is the open question, and it decides whether
 speed is a viable lever at all.**
+
+## PopIrpList is EMPTY at 15 minutes - the "issued ~4 minutes in" inference is wrong
+
+Read on **live, healthy boot 190** at 15.3 min elapsed, 3 processes,
+zpp resident, VM running:
+
+    -> reader proven: well-formed EMPTY list
+    PopIrpList is EMPTY - no power IRP is in flight.
+
+`021d7a3` computed that boot 189's power IRPs were "issued ~4 minutes in",
+from `51.9 min elapsed - 2,881.5 s age = 3.9 min`, and built a **4x
+speed-up requirement** on it. **Boot 190 has no power IRP at all at 15.3
+minutes**, so that inference does not generalise and the arithmetic it
+carried is not safe.
+
+### The 2,881.5 s age is probably an artifact, not a measurement
+
+Four entries sharing an age **to the tick**, all with `CurrentDevice
+<null>`, is a much better fit for **an uninitialised or zero timestamp**
+than for four IRPs genuinely issued in the same instant and stalled for 48
+minutes. A zero timestamp differenced against "now" yields exactly the
+run's own elapsed time, which is what 2,881.5 s is - 48.0 min against a
+51.9 min boot.
+
+`guest-power-irps.py`'s own header records that it proves itself
+**structurally** because the obvious proof failed, so it is not a script
+whose derived fields should be trusted without a second reading. **This is
+that second reading, and it disagrees.**
+
+**Withdrawn**: the "boot must be 4x faster" figure in `021d7a3`, and with
+it the conclusion that per-exit cost cannot possibly close the gap. The
+honest position is that **the deadline that killed boot 189 has not been
+located in time** - the two entries with plausible ages were at 300.0 s
+and 278.9 s of 600 s, neither expired, so the IRP that actually reached
+the budget was already gone from the list by the time I read it.
+
+### A genuinely useful fact the script volunteered
+
+    A wedge here has no power IRP outstanding, so 0x9F cannot fire and the
+    wedge will persist indefinitely rather than self-terminating at 600 s.
+
+**So the two failure shapes are distinguishable by stage**, and this
+explains something that has been confusing all session: boots that sit at
+3 processes for tens of minutes **cannot** bugcheck `0x9F`, because
+nothing is outstanding to time out. They hang. Only a boot that has got as
+far as issuing device power IRPs - boot 189 did, at some point after 15
+minutes - can die that way.
+
+That means `0x9F` is a marker of **progress**, not of failure severity: a
+boot that bugchecks `0x9F` got further than one that quietly sits at 3
+processes.
