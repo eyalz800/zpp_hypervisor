@@ -72240,3 +72240,60 @@ Tests 1,323 -> 1,347 and 133 -> 138, every gate negative-controlled both
 directions. **Two controls passed on the first run** - the dirty-write and
 bounds-check cases - and in both the agent extended the case rather than
 weakening the control, which is the right way round and worth naming.
+
+## The 5.2% saving produced NO measurable change in guest scheduling
+
+Like-for-like, both in the 3-process phase, 40 `System` threads,
+`ContextSwitches` differenced over ~75 s:
+
+    boot 193  BEFORE both changes   8 of 40 scheduled   25.9 switches/s total
+    boot 196  AFTER both changes    7 of 40 scheduled   **21.5** switches/s total
+
+**The guest is not scheduling more.** If anything it is scheduling
+slightly less, and the difference is well inside the boot-to-boot variance
+`ceab9a4` recorded.
+
+That is the null result the cost work has been heading toward, and it is
+consistent with everything else measured:
+
+- the saving is **5.2% of the handler**, about **3.4% of wall** - too
+  small to see against a variance that produces eleven-process
+  differences between identical binaries
+- **four boots at 51.9, 45.0, 35.3 and 21.9 minutes all stopped at the
+  same 14-process wall** (`6cc2ba1`), so speed does not reach it
+- and now the scheduling rate itself, the quantity that would have to
+  move for the guest to boot faster in any real sense, does not move
+
+### What this closes
+
+**The cost avenue, as a route to the goal.** Not because there is nothing
+left to remove - `6fac2df` shows the write side is essentially fully
+gated, and the read side has 18.35 misses an exit still - but because
+**removing it does not change what the guest does.** Three independent
+measurements now say so from three directions.
+
+What the work leaves behind is worth keeping and is not nothing:
+
+- a cost model that **predicts reality** - 5.1% predicted, 5.2% measured,
+  the first such prediction in this investigation
+- a benchmark that prices the instruction rather than the cache
+- a latent `tsc_offset` correctness bug found and fixed
+- five instruments that did not exist or were not read: the raw price
+  members, `PopIrpThreadList`, `ContextSwitches`, the non-singleton
+  counters, and the subset write counters
+
+### Where the goal actually stands
+
+**The wall is functional, at 14 processes, and speed-independent.** The
+next measurement is the one boot 195 and 196 both denied me: `services.exe`
+`ContextSwitches` differenced on a **live** guest at 14 processes. Boot 195
+reached it and stopped; boot 196 never got there.
+
+`5871b1e` found `services.exe` runnable-and-preempted with zero
+`svchost.exe` after 45 minutes. If its `ContextSwitches` are **rising**,
+the SCM is being scheduled and is blocked on something specific - a
+different investigation entirely. If **frozen**, it is starved, and the
+question becomes what holds the processor against a thread that wants it.
+
+**Those two answers point in opposite directions and one read separates
+them.** That is the highest-value measurement outstanding.
