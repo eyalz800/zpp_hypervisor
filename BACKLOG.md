@@ -74815,3 +74815,61 @@ are **not** named here - naming them from memory is exactly what
 the wrong hypercall. Identifying those two codes against the TLFS is the
 single highest-value next step, and it is a documentation lookup rather
 than another boot.
+
+## Correction to d0579ee: most of that was already documented here
+
+`d0579ee` presented the two-code hypercall loop as a new localisation.
+**It is not.** `hypervisor/include/zpp/hypervisor/hypervisor.h:6694`
+already says it, and says it better:
+
+> The second-level guest alternates `HvCallVtlCall` and
+> `HvCallVtlReturn` - hypercall codes 0x11 and 0x12 - at two instruction
+> pointers twenty-five bytes apart in the hypercall page, tens of
+> thousands of times, with nothing else between them.
+
+Twenty-five bytes is `0x19`, which is exactly the separation I measured
+and reported as a discovery. The codes I declined to name for want of a
+TLFS copy are **named on the line that gives them**: `0x11` is
+`HvCallVtlCall`, `0x12` is `HvCallVtlReturn`. One `grep` for `HvCall`
+would have produced all of it, before the boot rather than after.
+
+This is the `check-existing-instruments-before-building-one` lesson,
+paid for again.
+
+**What in `d0579ee` does survive as new**, kept because it is worth
+having:
+
+- The page is the hypercall page **proved from its bytes** - `0f 01 c1`
+  is `VMCALL`, followed by `ret` and further `mov eax,0x11; vmcall; ret`
+  stubs. The header asserts the page's identity; nothing had read it.
+- The **census weight**: 7.5%-11.6% of all sampled instruction pointers,
+  on both processors, inside that 64-byte page.
+- The **timeline correlation** - the loop is what runs during the 300 s
+  in which no process is created (`7d76895`).
+
+### The decisive instrument already exists and has never been read here
+
+The same comment describes what to do about it, and the member is built:
+
+    vtl_differed[cpu][kind][slot]     hypervisor.h:6750
+
+It counts, per register slot, how often that register **differed from
+the previous switch of the same kind** - deliberately not from a fixed
+first capture, because the boot switches trust levels legitimately
+before the loop begins. The reading is stated in the header:
+
+> all zero is a livelock, and whichever entries are non-zero name what
+> the loop carries
+
+Slots 0-15 are the general-purpose registers, slot 4 being the VMCS's
+guest RSP rather than the context's; 16 is RIP, 17 CR3, 18 RFLAGS, 19
+the vmcs12 EPT pointer that distinguishes the two trust levels' address
+spaces.
+
+`scripts/rig-dump-state.py:4503` already prints it. **No reading of it
+appears anywhere in this file.** So the single highest-value measurement
+available is one already-implemented member, read at the wall - and
+unlike the TLFS lookup it cannot be done from documentation: it needs a
+boot that reaches 1,585 s.
+
+That is what boot 213 is for.
