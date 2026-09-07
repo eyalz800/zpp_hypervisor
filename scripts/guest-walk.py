@@ -8,6 +8,25 @@ Take the root from `l2_exit_cr3` in the singleton, NOT from `guest_cr3` -
 that one is this VMM's own, and a walk with it reports the guest kernel
 unmapped, which reads exactly like a guest that has not loaded one.
 
+**`l2_exit_cr3` is behind `census_exits` and reads ZERO on a throughput
+build** (`nested_entry.cpp:4632`, and the manifest's `census=` says
+which). It reads zero silently, which looks exactly like "no second-level
+exit has happened" rather than "this member is not compiled in", so the
+reader following this docstring on a `census=0` build hits a dead end
+with no reason given. That is most builds worth diagnosing.
+
+**Any process's CR3 works instead, because every Windows process maps
+the kernel half.** The user-mode census in `rig-dump-state.py` prints
+live guest roots and rides `userip=`, which IS on in throughput builds:
+
+    cr3 0x0000001ae000  rip 0x0000000001af54b4   155   88.1%
+
+`guest_kernel_base` is ungated, so base and root are both obtainable with
+census off. **Validate the root before reading anything through it** -
+walk `guest_kernel_base` itself and check the bytes are `4d 5a 90 00`,
+`MZ`, the kernel's own PE header. A wrong root does not fail, it returns
+a plausible page.
+
     python3 scripts/guest-walk.py <l2_exit_cr3> <guest virtual address>
 
 Traps, both paid for:
