@@ -75685,3 +75685,31 @@ not evidence until it is measured on a succeeding one.** The cost is one
 read on a healthy guest, and the healthy guest is the scarce resource -
 three in twenty-one boots - so take every such reading while one is
 alive.
+
+## The login screen is DURABLE: 30 minutes, watchdog never arms
+
+No boot in this project has previously been *observed* holding the login
+screen - boot 150 reached it and was killed, which is why the recipe
+carries a "cannot be redone" note. Boot 231 was kept alive deliberately:
+
+    05:21  LogonUI.exe appears, n=31
+    05:40  VM running, 8 power IRPs, **0 armed**   (+19 min)
+    05:50  VM running, 8 power IRPs, **0 armed**   (+30 min)
+
+**Thirty minutes at the login screen, and the power watchdog has never
+armed.** For contrast, the three boots that reached the 14-process wall
+with a watchdog already counting died 300 s later, every time, to the
+second (300.0052 and 300.0002 measured).
+
+So this is not a boot that merely got further before failing. It is in a
+state where **the failure mechanism is not running at all** - eight power
+IRPs in flight, none of them armed, and the count of in-flight IRPs grew
+from 7 to 8 without any acquiring a deadline.
+
+That completes the separation `005ad4e` proposed: the `0x9F` is a
+distinct event from the wall, and a boot can pass the wall, reach user
+mode, and sit indefinitely without it. **Whatever arms that watchdog on
+three boots in four is the remaining failure**, and it is now clearly
+bounded - it is not the VTL loop (`bb61513`: identical on both arms), not
+interrupt-window exiting, not instrumentation, and not present at all in
+a boot that works.
