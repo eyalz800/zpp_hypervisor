@@ -75900,3 +75900,68 @@ deadlocked and this VMM is not stalled; the machine is simply running one
 to two orders of magnitude slower than it needs to, and the two concrete
 asymmetries - which processor runs user mode, and `cpu0`'s twenty-exits-
 per-entry - are where to look next. Neither is a lock; both are cost.
+
+## The 2026-09-05 "multicore login screen" rests on the SAME disproved proxy
+
+The user's objection - "it's not possible we were reaching the login with
+1 cpu but multicore never did and suddenly it's there" - is correct, and
+it reaches further back than tonight.
+
+`multicore-login-screen-reached-recipe` (2026-09-05, boot 150) states:
+
+> **`LogonUI.exe` in the list is the login screen.** `dwm.exe` beside it
+> is the compositor.
+
+**That is exactly the inference the photograph disproved.** `LogonUI.exe`
+hosts winlogon's "Please wait" screen as well as the credential prompt,
+so its presence cannot distinguish them - and boot 150's screen was never
+looked at either; the claim was made from the process list alone, on a
+rig whose display cannot be captured.
+
+So the honest position is: **multicore may never have reached the login
+screen**, and the single prior claim that it did carries the same defect
+as tonight's. That dissolves the contradiction rather than explaining it
+- there is no "suddenly it's there" to account for, because tonight's
+result was withdrawn and the earlier one is now in question.
+
+**This is not a claim that boot 150 was "Please wait"** - it cannot be
+known now, the machine is long gone. It is a claim that **the evidence
+recorded for it does not distinguish the two screens**, which means the
+recipe's headline should be read as "reached `LogonUI.exe`" and not as
+"reached the login screen" until a boot is confirmed by eye.
+
+### What would settle it, cheaply, on any future boot
+
+Ask the user. Failing that, the guest-side distinction is whether
+`LogonUI.exe` has loaded the credential providers - the "Please wait"
+screen has not. Neither was ever read.
+
+## 86% of cpu0's exits are the guest hypervisor's own VMCS accesses
+
+Boot 231 at "Please wait", cpu0, differenced over 62 s:
+
+    vmwrite    410,737   55.0%   6,607.68/s
+    vmread     232,626   31.1%   3,742.34/s
+    vmresume    34,944    4.7%     562.16/s
+    invvpid     33,677    4.5%     541.77/s
+    ept-violation 18,114  2.4%     291.41/s
+    exception   15,216    2.0%     244.79/s
+
+**10,350 VMCS accesses per second, 86.1% of every exit this processor
+takes**, against 562 second-level entries - about **18 trapped VMCS
+instructions per entry**. That is Hyper-V manipulating its own VMCS while
+running nested, every one of which this VMM must intercept and emulate.
+
+This is the concrete form of "super slow", and it is a different regime
+from everything else measured tonight: every other window put `vmresume`
+near 50% on both processors - one re-entry per exit - where here it is
+4.7%.
+
+**It also relocates the cost question.** Sessions of work went into the
+per-exit price of VMCS *reads* (`afec3fc` measured 2,876 cycles for a raw
+`VMREAD`). At 10,350 accesses/s that is roughly 30 million cycles a
+second, ~1.5% of a 2 GHz processor - so **the per-access price is not the
+problem; the access COUNT is.** Eighteen trapped VMCS instructions per
+second-level entry is the number to attack, and shadow VMCS is precisely
+the mechanism for it (`shadowvmcs=1` is already on, so what remains is
+which fields are not shadowed).
