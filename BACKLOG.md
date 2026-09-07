@@ -77931,3 +77931,67 @@ contain both a triage and an unconditional `rig-kill-qemu.sh`. On a
 healthy verdict the boot is kept and worked, not cycled - the boot cycle
 exists to find a healthy guest, so cycling past one defeats its own
 purpose.
+
+## The matched healthy control, at last - and the asymmetry REVERSES
+
+Boot 263, healthy (vmcall 620.74/s, `vtl_fresh_calls` cpu0 +97.24/s),
+captured live with `rig-healthy-control.sh` and **not killed**. Same rig,
+same build, same 2-vCPU configuration as the stalled boots - which is
+what makes this a control and the 1,059/s figure from another session
+not one.
+
+**1. The tick rate.**
+
+    HalpClockTickLogIndex   598,160 -> 640,340 over 62 s = **680 ISR/s**
+    stalled boot 261                                     = 1,666 ISR/s
+
+**2.45x.** The stalled guest takes nearly two and a half times the clock
+interrupts of a healthy one on this rig. The 1,059/s quoted from
+`phase1-tail-to-smss.md` sits between them, which is why comparing
+against it was never safe.
+
+**2. The cpu0/cpu1 injection asymmetry inverts, and that is the finding.**
+
+    stalled 261   cpu0 1,009,003   cpu1   650,848   -> cpu0 **1.55x** higher
+    healthy 263   cpu0   235,433   cpu1   619,068   -> cpu1 **2.63x** higher
+
+The direction *flips*. That kills the deflating explanation this file
+raised against itself two entries ago - "a busy boot processor beside an
+idle application processor looks exactly like this when everything is
+fine". It does not: when everything is fine, **cpu1 carries more than
+twice cpu0's interrupts**. The stalled shape is not a busy cpu0, it is a
+cpu0 taking interrupts that a healthy boot puts on cpu1.
+
+**3. Corroborating, both one-line reads.** Healthy cpu0 shows **18
+distinct vectors** including 5,368 of vector `0x0e` - page faults, which
+is to say real work - against 11-13 on a stalled cpu0. And healthy cpu0's
+live stack is **2 frames deep** against the stalled boot's 48 and 30,
+which were the whole `ExSetTimerResolution -> KeGenericProcessorCallback`
+chain. A processor doing ordinary work has a shallow stack and a varied
+vector mix; the stalled one has neither.
+
+**4. Where this boot actually got to.** The tail of
+`PsLoadedModuleList` is **`cdd.dll`**, behind `win32kbase.sys`,
+`win32kfull.sys`, `win32kbase_rs.sys`, `dxgmms2.sys` and `monitor.sys` -
+the graphics and window-manager stack. Processes include
+**`winlogon.exe`, `LsaIso.exe`** (the isolated LSA, so VBS/VTL1 is
+genuinely running), `lsass.exe`, two `csrss.exe` and a `fontdrvhost.exe`
+parented to winlogon. That is far past VBoxSup and far past Phase-1
+driver loading.
+
+**`LogonUI.exe` and `dwm.exe` are NOT present yet**, so by the recorded
+recipe this is not the login screen, and - having already claimed the
+login screen once this session from a process list and been corrected by
+a photograph - **the screen is the user's to report, not mine to infer.**
+
+### A flaw in the control script, found by using it
+
+`rig-healthy-control.sh` reads the injection census *before* and *after*
+the paired tick reads rather than tightly bracketing them, so the
+injection window is ~100 s against the tick window's 62 s and **the
+healthy boot's injections-per-ISR-entry ratio is not computable from
+this capture**. The stalled boot's 0.9988 stands because those reads did
+bracket. Fix is to move both vector reads inside the tick pair.
+Sections 6 and 7 also silently produced nothing under `|| true` and had
+to be re-run by hand; the `|| true` hides a failed read as an empty one,
+which is the exact instrument fault this file keeps recording.
