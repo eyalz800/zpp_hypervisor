@@ -76387,3 +76387,59 @@ read the sixty lines of prose immediately above the array I was proposing
 to extend. `check-existing-instruments-before-building-one` covers
 instruments; this says the same for **decisions** - if a list looks
 obviously short, assume someone already asked why and go and read.
+
+## The shadow-list decision inverts at the measured rate: 34x more uses than when it was taken
+
+`nested_vmx.h` closes the shadow-list question with an explicit
+break-even and a table:
+
+> a field pays for its place here only if the guest hypervisor touches
+> it **more often than once per 22.8 round trips** ... The hottest field
+> the census names that is not already shadowed is `vm_exit_controls` at
+> 267,550: **once per 32.7 round trips, 30% short.**
+
+    field                 then (uses/RT)   now (uses/RT)   saved/RT    cost/RT   ratio
+    vm_exit_controls          0.0306           **1.05**     111,692     4,666    23.9x
+    vm_entry_controls         0.0152           **1.05**     111,692     4,666    23.9x
+    exception_bitmap             -             **1.05**     111,692     4,666    23.9x
+
+**The rate is 34x higher than when the decision was taken**, and the
+decision was 30% from flipping. Reproducing the header's own model - its
+table implies 106,373 cycles per avoided exit against the 106,488 it
+quotes, so the model is being used as written, not re-invented - three
+fields now clear its break-even by **24x**, worth **335,075 cycles a
+round trip, 16.1% of cpu0's handler cycles.**
+
+### Why these three and not the other seven in the batch
+
+The ten-field write batch occurs **1.05 times per round trip** - once
+per round trip, Hyper-V reprograms the VMCS. Of its members:
+
+- `guest_gdtr_base/limit`, `guest_idtr_base/limit`, `guest_ldtr_limit`,
+  `guest_ia32_sysenter_cs` - **guest state**, barred by
+  `deferrable_field_is_shadowed`; the header records that adding
+  `guest_gdtr_base` is refused by the assert today.
+- `ept_pointer` - nested EPT is precisely what this VMM must intervene
+  on. Cannot be shadowed at any price.
+- **`vm_exit_controls`, `vm_entry_controls`, `exception_bitmap`** -
+  control fields, not guest state, so the deferred-publish hazard that
+  bars the other four candidates does not apply.
+
+### The implementation caveat, stated before anyone tries it
+
+zpp **merges** the guest hypervisor's control words into vmcs02. Today
+that merge can happen in `on_guest_vmwrite`, because the write exits.
+Shadow the field and it no longer exits - **the merge must move to the
+copy-in path**, where `copy_shadow_to_vmcs12` reads the region back.
+That is the same 3,791-cycle read already counted in the 4,666 cost, so
+the price is right, but the code has to move with it. A field shadowed
+without moving its merge would silently run the guest on stale controls,
+which is the worst failure mode available here.
+
+**Not claimed: that the old measurement was wrong.** It was taken on a
+different run and very likely a different regime - `cpu 1` today runs
+2.00 exits per round trip where `cpu 0` runs 21.36, so a single-core or
+`cpu 1`-like measurement would legitimately see 1/32.7. **The claim is
+that the break-even is regime-dependent and was only ever evaluated in
+one regime**, and that in the regime that is actually slow it is cleared
+by more than an order of magnitude.
