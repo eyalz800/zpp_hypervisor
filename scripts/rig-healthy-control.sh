@@ -62,6 +62,24 @@ timeout 1500 python3 "$HERE/rig-dump-state.py" --elf "$ELF" --cpus 2 \
 echo "  -> $OUT/full.txt ($(wc -l < "$OUT/full.txt") lines)"
 sed -n '/^cpu 0 second-level call stack - where it is now/,/^$/p' "$OUT/full.txt" | head -12
 
+# **The reading owed since boot 265, and it can ONLY be taken here.**
+# `pending_event_lost` counts events owed to the second-level guest that
+# `reflect_l2_exit` was holding. It read 1,244 on healthy boot 265, every
+# one vector 0x2e - Windows' `int 2Eh` system-call gate - and **0 on
+# every stalled boot**, because a stalled guest makes no system calls to
+# interrupt. It is an activity counter, so only a healthy boot has
+# anything to say.
+#
+# What decides it is `pending_event_lost_while_valid`: a loss where the
+# HARDWARE idt-vectoring field was valid is a hand-over correctly
+# refused, with the architecture's own report reaching vmcs12 by the
+# normal copy. A loss where it was not is an event genuinely destroyed -
+# a system call that never returns, reported by nobody, which is the
+# shape that would leave a driver's power IRP outstanding and is a live
+# candidate for the 0x9F.
+echo "=== 2b. events owed to L2 (the reading owed since boot 265) ==="
+sed -n '/held events seen by reflect_l2_exit/,/^$/p' "$OUT/full.txt" | head -8
+
 echo "=== 3. injection census, both processors (the asymmetry control) ==="
 clear_nc
 timeout 900 python3 "$HERE/guest-l2-vectors.py" --elf "$ELF" --cpus 2 --top 6 \
@@ -80,8 +98,18 @@ if [ -n "$KB" ] && [ -n "$CR3" ]; then
     clear_nc
     timeout 300 python3 "$HERE/guest-walk.py" "$CR3" "$KB" 2>&1 | tail -2
 
-    echo "=== 5. HalpClockTickLogIndex, paired 60 s apart, with injections ==="
+    # **The vector reads must BRACKET the tick reads, not straddle them.**
+    # The first version read vectors before t0 and after t1, giving a
+    # ~100 s injection window against a 62 s tick window, so boot 263's
+    # injections-per-ISR-entry ratio was not computable at all. The
+    # stalled boot's 0.9988 stands only because those two reads did
+    # bracket. Order here is: vectors, t0, wait, t1, vectors - so both
+    # spans share their endpoints as closely as the monitor allows.
+    echo "=== 5. HalpClockTickLogIndex + injections, tightly bracketed ==="
     VA=$(python3 -c "print(hex(int('$KB',16)+0xe0a838))")
+    clear_nc
+    timeout 900 python3 "$HERE/guest-l2-vectors.py" --elf "$ELF" --cpus 2 --top 2 \
+        --base "$MODBASE" > "$OUT/vectors-2a.txt" 2>&1 || true
     clear_nc
     echo "--- t0 ---"; date +%H:%M:%S
     timeout 300 python3 "$HERE/guest-walk.py" "$CR3" "$VA" 2>&1 | tail -2 \
@@ -93,16 +121,31 @@ if [ -n "$KB" ] && [ -n "$CR3" ]; then
         | tee "$OUT/tick-t1.txt"
     clear_nc
     timeout 900 python3 "$HERE/guest-l2-vectors.py" --elf "$ELF" --cpus 2 --top 2 \
-        --base "$MODBASE" > "$OUT/vectors-2.txt" 2>&1 || true
-    grep -E "l2_injected_vector cpu|vector 0xd1" "$OUT/vectors-2.txt" | head -8
+        --base "$MODBASE" > "$OUT/vectors-2b.txt" 2>&1 || true
+    grep -E "l2_injected_vector cpu|vector 0xd1" "$OUT/vectors-2b.txt" | head -8
 
-    echo "=== 6. is VBoxSup.sys still the tail, and is its load complete ==="
+    # **`|| true` piped into `tail` hides a failed read as an empty one.**
+    # On boot 265 sections 6 and 7 printed nothing at all and had to be
+    # re-run by hand; an empty section read exactly like "no drivers
+    # loading", which is the instrument fault this tree keeps recording.
+    # Capture to a file, then say whether it is empty and why.
+    echo "=== 6. module list tail, and is its load complete ==="
     clear_nc
-    timeout 600 python3 "$HERE/guest-loading-driver.py" "$KB" "$CR3" 2>&1 | tail -12
+    timeout 600 python3 "$HERE/guest-loading-driver.py" "$KB" "$CR3" \
+        > "$OUT/driver.txt" 2>&1 || echo "  (reader exited non-zero)"
+    if [ -s "$OUT/driver.txt" ]; then tail -12 "$OUT/driver.txt"; else
+        echo "  !! EMPTY - the read FAILED. This is not 'no driver loading'."
+    fi
 
     echo "=== 7. process list (LogonUI is NOT the login screen - ASK THE USER) ==="
     clear_nc
-    timeout 600 python3 "$HERE/guest-processes.py" "$KB" "$CR3" 2>&1 | tail -40
+    timeout 600 python3 "$HERE/guest-processes.py" "$KB" "$CR3" \
+        > "$OUT/processes.txt" 2>&1 || echo "  (reader exited non-zero)"
+    if [ -s "$OUT/processes.txt" ]; then
+        grep -E "^  |processes;" "$OUT/processes.txt" | head -30
+    else
+        echo "  !! EMPTY - the read FAILED. This is not 'no processes'."
+    fi
 else
     echo "!! kernel base or cr3 not found in the dump - sections 4-7 skipped."
     echo "   That is a reader gap, NOT a fact about the guest."
