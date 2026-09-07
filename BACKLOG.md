@@ -77645,3 +77645,41 @@ not distinguished by anything measured here. Whether the worker is
 re-entered from the interrupt path, or the same activation is preempted
 indefinitely, is the open question - and it is a different question from
 the causal direction between cpu0 and cpu1, which is also still open.
+
+## Correction: the "574.7 Hz" I measured cpu0 against is contested, and the comparison never needed it
+
+Several entries above describe cpu0's clock staging as "1,021/s against
+Windows' own 574.7 Hz tick, 1.78x". The 574.7 Hz half of that is not
+safe. `.references/hyperv/clock-double-injection.md` §0 measured
+`KeTimeIncrement` (RVA `0xfc6bbc`) reading **20,000 live - a 500 Hz
+tick** - and says in terms: *"The '574.7 Hz' figure quoted throughout
+this tree is wrong for this machine."* It is the denominator that
+produced a whole refuted anomaly in that file, which is the same mistake
+I was one step from repeating.
+
+Both figures can be real - `KeQuantumEndTimerIncrement` is 17,400 and
+`KeTimeIncrement` is 20,000, they are different constants for different
+purposes - but **which one is armed on this machine is a measurement,
+not a recollection**, and the one measured live is 20,000.
+
+**The comparison that matters never needed either number.** Within a
+single boot, one pass, the same instrument on both processors:
+
+    clock stagings   cpu0  1,021/s      cpu1  574.6/s
+
+That is 1.78x **cpu0 against cpu1**, two processors of one guest running
+one tick configuration. No external frequency enters it, and it stands
+whatever `KeTimeIncrement` says. Every claim in the entries above should
+be read as that comparison; the "against Windows' own 574.7 Hz" framing
+is withdrawn.
+
+**The sound absolute denominator, when one is wanted, is
+`HalpClockTickLogIndex`** - actual clock-ISR entries - not an assumed
+frequency. That is the recipe (§2c of the same note) that made the
+refutation there decisive: `HalpClockTickLogIndex +31,767` against
+`l2_injected_vector[0xd1] +31,702` over 30 s, exactly 1.00 injections
+per ISR entry. **That reading has never been taken per processor**, and
+on a multicore stalled boot it is the read that would say whether cpu0's
+extra stagings are extra *ISR entries* or extra injections per entry -
+which are very different faults. It needs a window and two reads of two
+members, and it is the next thing to take on a stalled boot.
