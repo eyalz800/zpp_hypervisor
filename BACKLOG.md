@@ -76645,3 +76645,41 @@ matters more than the headline: an exit count that falls 37% while
 cycles fall 3.7% is either a small win being mis-read as a large one, or
 a real win masked by a phase difference. `-2.46%` measured properly in
 stalled A (`9147723`) is currently the only figure here with a control.
+
+## REPRODUCED: the blocked IRP parks at `\Driver\IntcOED` on a second boot
+
+`a4db23e` read boot 218's blocked IRP out of its own
+`CurrentStackLocation` and found `\Driver\IntcOED`, disagreeing with the
+bugcheck's `\Driver\IntcAudioBus`, and recorded that it rested on one
+boot. Boot 238, a different boot on a different binary (the shadow
+change is in), gives the same answer:
+
+    boot 218   IRP+0xb8 proof PASS   Control 0xe1   stack -> **\Driver\IntcOED**
+                                                    bugcheck -> \Driver\IntcAudioBus
+    boot 238   IRP+0xb8 proof PASS   Control 0xe1   stack -> **\Driver\IntcOED**
+                                                    bugcheck -> \Driver\IntcAudioBus
+
+Identical on both: `MinorFunction 0x02` (`IRP_MN_SET_POWER`), `Control
+0xe1` with bit `0x01` **`SL_PENDING_RETURNED`** - a lower driver marked
+it pending and never completed it - and a completion routine in
+ntoskrnl, so the waiting party is the kernel's power manager.
+
+**Two boots, two different bugcheck-named drivers' worth of noise, and
+the same driver from the IRP's own state.** `IntcAudioBus` is what the
+`0x9F` reports because it is the device object the power manager
+dispatched to; `IntcOED` is where the IRP actually sits. The distinction
+now has two samples and a proof that passes on both.
+
+That does **not** make `IntcOED` the culprit - a driver may hold a
+pending IRP while waiting on something else, and this tree has named
+five innocent drivers already. What it does is give the investigation a
+**stable, reproducible target** that is not the bugcheck's arbitrary
+finger: the question is what `IntcOED` is waiting on.
+
+### And the 300-second timeout is confirmed a third time
+
+Boot 238's watchdog armed and read `age 282.4 s` at 09:44:09; the guest
+was `paused (shutdown)` by 09:45:06. That is 300 s from arming, matching
+boots 209 (300.0052 s) and 212 (300.0002 s). **`guest-power-irps.py`
+still prints "of 600 s" and that string is wrong on three independent
+boots.**
