@@ -78889,3 +78889,35 @@ That sharpens the target again. `USBHUB3` is on the **emulated
 earlier framing - "several independent device stacks stop completing at
 once" - overstated it: sometimes it is two, and sometimes it is only the
 USB hub.
+
+## Even TEN minutes is too early: boot 282 read stalled A at 10 min and healthy at 15
+
+    boot 282   10.2 min   vmcall **2.00/s**, vtl_fresh cpu0 **+0**   -> stalled A
+               15.0 min   vmcall **548.15/s**, vtl_fresh cpu0 **+97.25/s** -> HEALTHY
+
+This is the second time a boot has inverted between an early and a
+calibrated read, and it is much sharper than the first. Boot 262 flipped
+between **4** minutes and 14, which was easy to dismiss as reading far
+too soon. Boot 282 flipped between **10** minutes and 15, and its
+10-minute reading was not marginal - it was the textbook stalled A
+signature, `vmcall` 2.00/s and `vtl_fresh_calls` +0 on cpu0, identical to
+the eleven genuinely stalled boots this session.
+
+**So the classifier's 13-minute calibration is not conservative padding;
+it is the actual threshold**, and reading at 10 minutes produces a
+confident, well-formed, wrong answer. `vmcall` at 548.15/s is also
+**above the recorded healthy band of 260-471/s**, so this was not a
+borderline boot that crept over a line - it was a boot that had not
+started yet.
+
+**Had I acted on the 10-minute read I would have killed it.** The only
+thing that saved it was the standing rule to confirm at the calibrated
+age before acting, which was itself written after boot 262 and after
+killing healthy boot 262 one minute post-verdict.
+
+The practical cost of getting this wrong is asymmetric and worth stating:
+a stalled boot cycled five minutes late costs five minutes; a healthy
+boot cycled on a false stall costs the draw, and healthy draws run about
+one in five at roughly fifteen minutes each. **Never act on a read taken
+before 13 minutes. There is no reading cheap enough to be worth a false
+negative here.**
