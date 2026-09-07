@@ -76443,3 +76443,43 @@ different run and very likely a different regime - `cpu 1` today runs
 that the break-even is regime-dependent and was only ever evaluated in
 one regime**, and that in the regime that is actually slow it is cleared
 by more than an order of magnitude.
+
+## The shadow change WORKS mechanically. The speed-up is NOT yet measured
+
+Boot 232, first boot with `vm_exit_controls`, `vm_entry_controls` and
+`exception_bitmap` shadowed (`df95d54`). zpp resident, VM running,
+2 vCPUs.
+
+**What is established.** The three encodings are **completely absent**
+from the field census - `0x400c`, `0x4012`, `0x4004` appear zero times,
+where boot 231 had each at **1,473,06x**. The header's own note gives the
+reading: "A dump showing them absent is the bitmap working, not the guest
+abstaining." The mechanism does what it was changed to do, and the guest
+boots and runs with it.
+
+**What is NOT established, and the numbers are tempting.** A differenced
+window on boot 232 reads:
+
+    boot 231, cpu0   35,180 RTs   2,083,898 cycles/RT   (at "Please wait", 105 min in)
+    boot 232, cpu0  199,606 RTs     429,474 cycles/RT   (2 minutes in)
+
+That is 5.7x the round trips at 4.9x less cost each, and **it would be
+dishonest to quote it.** The two windows are at completely different
+points in the boot - one is a settled guest at winlogon's pre-credential
+wait, the other is a kernel two minutes from reset. `CLAUDE.md` records
+what comparing across unequal conditions cost this project once already,
+and this is the same shape.
+
+The `vmread` collapse in the same window - 0.19/s and 1.74/s against boot
+231's 3,742/s - makes the point sharper rather than weaker. Only
+`vm_exit_controls` was shadowed on the read side, and it was 15.5% of
+reads; a 99.9% drop cannot be that change and **must** be the phase.
+
+**The comparison this needs** is boot 232 at the same phase boot 231 was
+measured in: at n=14 or at winlogon's wait, with the same `--delta 60
+--delta-phases`. That is 30-60 minutes away and depends on this boot
+being one of the ~1-in-7 that get there.
+
+Recorded now, before the outcome, so the standard is fixed in advance:
+**the claim to test is cpu0's exits per round trip, 21.36 before, at the
+same phase.** Anything else is a different measurement wearing its name.
