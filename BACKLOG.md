@@ -76715,3 +76715,53 @@ were 15.5% of reads and 27% of writes in boot 231's own census, which is
 the right order. But "looks like" is not a control, and this file
 carries five retractions from exactly that reasoning. It stays an
 observation.
+
+# ===== CONTROLLED: the shadow change buys 29.9% more round trips =====
+
+Boot 240 reached the same state boot 231 was measured in - `LogonUI.exe`,
+`dwm.exe`, seventeen `svchost.exe`, n=34 against boot 231's n=31-53 - so
+the same-phase comparison the last several entries said was owed can
+finally be made:
+
+                            BEFORE b231    AFTER b240    change
+    round trips in 62 s          35,180        45,687   **+29.9%**
+    cpu0 exits per RT             21.36         15.23   **-28.7%**
+    cpu0 cycles per RT        2,083,898     1,651,497   **-20.7%**
+    VMCS share of exits           86.1%         81.5%      -5.3%
+    prologue cycles a call       11,811        11,855      +0.4%
+    dispatch self a call         38,777        40,818      +5.3%
+
+**The guest completes 29.9% more second-level round trips in the same
+wall-clock second.** That is the number that matters: not exits avoided,
+but work done.
+
+### The earlier worry is resolved, and it was a phase artefact
+
+`778c7b7` recorded that exits fell 37% while cycles fell only 3.7%, with
+per-exit cost rising 20-45%, and named two possible readings - fixed work
+per round trip, or phase. **It was phase.** At the matched state the
+per-exit cost is **unchanged**: prologue 11,811 -> 11,855, +0.4%. The
+exits removed were ordinary exits, not cheap ones, and the cycles follow
+the count as they should.
+
+That is why the confounded comparison had to be refused rather than
+quoted. Had it been published, the conclusion drawn - "the change removes
+cheap exits and buys little" - would have been precisely backwards.
+
+### What is and is not established
+
+**Established:** at the `LogonUI` state, one boot before and one after,
+on the same binary one commit apart, the change removes 28.7% of cpu0's
+exits per round trip and 20.7% of its cycles, at unchanged per-exit cost,
+for 29.9% more throughput.
+
+**n=1 in each arm at this phase.** The corroboration is that stalled A -
+n=7 before, n=6 after - moves the same direction at -2.45%, and that
+the mechanism is confirmed independently by the three encodings vanishing
+from the field census. A second healthy boot at this state would make it
+n=2; it costs a ~1-in-7 draw.
+
+**Still not the login screen.** `LogonUI.exe` in the list does not mean
+the credential prompt - `9d7f07f` retracted exactly that claim when the
+screen turned out to read "Please wait". The user is the only sensor for
+what is displayed.
