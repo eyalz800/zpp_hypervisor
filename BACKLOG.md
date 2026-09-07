@@ -78543,3 +78543,53 @@ worker pool, queue congestion, and now destroyed system-call events.
 What is left unexplained is why several independent device stacks stop
 completing power transitions at once, on a guest that is otherwise
 running well enough to reach `winlogon.exe` and `LsaIso.exe`.
+
+## RETRACTED: the "cross-processor rendezvous" account of the multicore wedge
+
+Earlier today this file argued that `KeGenericProcessorCallback` "runs a
+callback on every processor and waits for all of them", that a
+one-processor guest satisfies it by construction, and that this was
+**"the first mechanism found in this investigation that is structurally
+different between one and two processors"**. It was written up twice, put
+into the project memory, and reported.
+
+**It is wrong, and it was already refuted two days before I derived it.**
+`multicore-login-screen-reached-recipe` records, from boot 166 on
+2026-09-05, in terms that include *"Do not re-derive this"*:
+
+> `ExpUpdateTimerConfiguration` (nt+0x41697c) has **no loop and no
+> enclosing loop**: it reads *one* processor number and calls
+> `KeGenericProcessorCallback` once... The two globals feeding it
+> symbolise to `KiClockTimerOwner` (rva 0xf217a4, reads **0**) and
+> `KiGlobalState`. Targeting a single processor - the clock owner - is
+> the *design*, so `NextProcessor = 0` and the absent cross-processor IPI
+> are correct behaviour, not the wedge.
+
+So cpu1 never executing `ExpUpdateTimerConfigurationWorker` is **not a
+processor failing to answer a rendezvous**. It is the callback correctly
+targeting one processor. The measurement I took - the worker absent from
+cpu1's census at any depth - is exactly what correct behaviour looks
+like, and I read a mechanism into it.
+
+**What survives**, and it is only the observation: cpu0 is in that call
+chain across two dumps eight minutes apart while cpu1 idles at an
+identical rsp, and the worker is absent from *healthy* boots entirely
+(0 occurrences in 870,000 samples). Those readings stand. The account
+does not.
+
+**That same memory also explains the injection-asymmetry spread I
+retracted separately**: *"the processor roles invert between boots"* -
+boot 166 had cpu0 idle and cpu1 spinning, the opposite of the boots I
+measured. A quantity that inverts between boots cannot discriminate, and
+that is why healthy 263 and 265 straddled the stalled value.
+
+**Third rediscovery of documented ground in one session** - after the
+hypercall-page loop at `hypervisor.h:6694` and the VBoxSup frame chain.
+All three were in the record before I started, two of them flagged with
+explicit do-not-repeat language. The correction is procedural and I am
+writing it as an instruction rather than a regret: **read
+`memory/MEMORY.md` and grep the named memory before deriving any
+mechanism for the phase-1 wedge, not after measuring one.** The measuring
+is not wasted - it replicates - but the *account* has to be checked
+against the record before it is written down, and three times today it
+was not.
