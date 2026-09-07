@@ -78821,3 +78821,36 @@ the VFIO power-management account was eliminated. So the failing
 transition is a D-state change on an emulated controller, and this is now
 the narrowest target the `0x9F` has ever had: **one device, one
 transition, on hardware QEMU is simulating.**
+
+### The screen was a BSOD. The login screen is STILL unconfirmed, and the window was three minutes
+
+Asked the user what the rig's frozen display showed after boot 278
+stopped. Answer: **blue screen / bugcheck.** The
+`DRIVER_POWER_STATE_FAILURE` repainted over whatever preceded it, so
+what was on screen at n=31 is **unknown and unrecoverable**.
+
+So boot 278 is *not* a confirmed login screen. What it is:
+
+    23:00  n=31, LogonUI.exe + dwm.exe + 12 svchost + LsaIso.exe, alive
+    23:03  paused (shutdown)
+    23:04  post-mortem: 0x9F, USBHUB3, one armed watchdog at 300.0 s
+
+**The observable window was about three minutes and I spent it reading
+counters.** The process list, the bugcheck and the power IRPs were all
+still there afterwards - memory survives `-no-reboot -no-shutdown` - and
+the *screen* was the one thing that did not. I captured the durable
+evidence and lost the perishable evidence, which is exactly backwards.
+
+**Procedure, and it is the third time this session the same rule has had
+to be restated:** [[ask-the-user-what-is-on-screen]] says the display is
+a passed-through GPU, `screendump` is impossible, and the user is the
+only sensor. Therefore **ask the moment `LogonUI.exe` and `dwm.exe`
+appear, before taking any other reading.** Everything else in the dump
+keeps; the frame does not.
+
+This also means the standing question - whether multicore has *ever*
+reached the credential prompt - remains open. Boot 150's claim was never
+verified visually, boot 231's was not either, this session's earlier
+claim was refuted by a photograph, and boot 278's screen was overwritten
+before anyone looked. **Four candidate breakthroughs, zero visual
+confirmations.**
