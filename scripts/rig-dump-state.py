@@ -8010,6 +8010,12 @@ def main():
                "shadow_ept_reclaims", "guest_nmis_reinjected",
                "pending_event_lost", "pending_event_lost_first",
                "pending_event_lost_last", "pending_event_lost_reason",
+               # Distinguishes a hand-over correctly REFUSED (the
+               # hardware idt-vectoring field was valid, so the
+               # architecture reported the interrupted delivery itself)
+               # from an event genuinely destroyed. Without it the
+               # report below can only guess, and it guessed.
+               "pending_event_lost_while_valid",
                "l2_simp_msr", "l2_siefp_msr", "l2_synic_eptp",
                # Read by `--delta` as a windowed histogram. The
                # cumulative reader has its own offsets for it; this one
@@ -8695,6 +8701,7 @@ def main():
     monitor.queue(instance + off["guest_nmis_reinjected"], 1)
     for _m in ("pending_event_lost", "pending_event_lost_first",
                "pending_event_lost_last", "pending_event_lost_reason",
+               "pending_event_lost_while_valid",
                "pending_event_handed_over"):
         if _m in off:
             monitor.queue(instance + off[_m], scalar_cpus)
@@ -11011,9 +11018,48 @@ def main():
                           f"vmcs12 got the event in its IDT-vectoring "
                           f"field; nothing was destroyed")
                 else:
-                    print(f"     handed over {given:,} of {n:,} - "
-                          f"{n - given:,} GENUINELY LOST, and an event the "
-                          f"second-level guest was owed is gone")
+                    # **"GENUINELY LOST" was asserted from `n - given`
+                    # alone, and that arithmetic cannot support it.**
+                    # `pending_event_lost_while_valid` counts the losses
+                    # where the HARDWARE idt-vectoring field was valid at
+                    # the reflection - and in exactly those cases the
+                    # architecture had its own account of the interrupted
+                    # delivery, the normal copy handed vmcs12 that field,
+                    # and nothing was destroyed. `hand_over_pending_event`
+                    # declines there deliberately, so that it never
+                    # overwrites a real report from the processor.
+                    #
+                    # So a loss that is `while_valid` is a hand-over
+                    # correctly REFUSED, not an event owed to the guest
+                    # and thrown away. The member has existed in
+                    # `hypervisor.h` since the switch was written and
+                    # this reader had never read it, which made the
+                    # switch's own stated pass criterion - *"if `lost`
+                    # stays non-zero the hand-over condition is wrong"* -
+                    # impossible to evaluate.
+                    valid = (read("pending_event_lost_while_valid", cpu)
+                             if "pending_event_lost_while_valid" in off
+                             else None)
+                    if valid is None:
+                        print(f"     handed over {given:,} of {n:,}, and "
+                              f"pending_event_lost_while_valid is ABSENT "
+                              f"from this reader - so whether the rest "
+                              f"were destroyed or were hand-overs "
+                              f"correctly refused CANNOT BE SAID")
+                    elif valid >= n - given:
+                        print(f"     handed over {given:,} of {n:,}; the "
+                              f"other {n - given:,} had a VALID hardware "
+                              f"idt-vectoring field ({valid:,} while_valid)"
+                              f" - the architecture reported the "
+                              f"interrupted delivery itself and vmcs12 got "
+                              f"it by the normal copy. Hand-over was "
+                              f"correctly refused; NOTHING WAS DESTROYED")
+                    else:
+                        print(f"     handed over {given:,} of {n:,}, "
+                              f"{valid:,} refused on a valid hardware "
+                              f"field - leaving {n - given - valid:,} "
+                              f"GENUINELY LOST, an event the second-level "
+                              f"guest was owed and nobody reported")
             print(f"     first vector 0x{first & 0xff:02x}, "
                   f"last vector 0x{last & 0xff:02x}")
         if all(0 == read("pending_event_lost", c)

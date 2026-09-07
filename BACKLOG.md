@@ -78308,3 +78308,57 @@ found a large ratio, and the third sample put the control in the middle.
 `stalled A is an attractor`, the injection asymmetry, and now this. The
 rule that keeps holding: **do not quote a ratio until every population
 that could sit between its two arms has been sampled.**
+
+## "1,244 GENUINELY LOST" was an instrument overclaim, and the counter that settles it was never read
+
+Reading the healthy boot 265 capture: **`pending_event_lost` = 1,244 on
+cpu0**, every one the same value `0x8000042e` - valid, type 4, vector
+`0x2e`, Windows' `int 2Eh` system-call gate - and the dump printed
+
+    handed over 0 of 1,244 - 1,244 GENUINELY LOST, and an event the
+    second-level guest was owed is gone
+
+The deployed binary's manifest reads **`hand=1`**, so
+`hand_over_pending_event` is ON and has rescued **zero**. Taken at face
+value that means the switch's own stated pass criterion is failing:
+*"`pending_event_handed_over` must rise and `pending_event_lost` must
+fall to zero. If `lost` stays non-zero the hand-over condition is wrong,
+not the idea."*
+
+**It cannot be taken at face value, because the reader was asserting
+"GENUINELY LOST" from `n - given` alone.** The hypervisor carries
+`pending_event_lost_while_valid` (`hypervisor.h:9767`), which counts the
+losses where the **hardware** idt-vectoring field was valid at the
+reflection. In exactly those cases the architecture had its own account
+of the interrupted delivery, the normal copy handed vmcs12 that field,
+and nothing was destroyed - `hand_over_pending_event` declines there
+**deliberately**, precisely so it never overwrites a real report from the
+processor.
+
+So a loss that is `while_valid` is a hand-over **correctly refused**, not
+an event thrown away. If all 1,244 are `while_valid`, the switch is
+working, nothing is lost, and the doc's pass criterion is simply too
+strict. If none are, we are destroying 1,244 system calls and the
+condition is broken. **Those are opposite conclusions and the reader
+could not tell them apart.**
+
+The member has existed since the switch was written and **this reader had
+never read it** - it is not in any of the three member lists. That is the
+fourth member found this session that exists in the binary and is unread
+by anything (`l2_entry_vector`, `l2_exit_cr3`, `PopIrpThreadList`'s
+worker entries, and now this), and the first where the gap caused a
+report to state a conclusion its data does not support.
+
+`rig-dump-state.py` now resolves, queues and reports it, and says
+explicitly when it is absent rather than guessing. **The reading itself
+is still owed**: boot 268 is two minutes old with `pending_event_lost` 0
+on both processors, so the new path needs a boot that has accumulated
+losses. That is the next thing to take off any boot, healthy or stalled.
+
+**Why this matters beyond tidiness.** A destroyed `int 2Eh` is a system
+call that never returns, reported by nobody - and "a driver's power IRP
+never completes" is exactly what a thread stuck in a system call that
+never returned would look like from the outside. If the losses are real,
+this is a candidate mechanism for the `0x9F` that is squarely on our side
+of the boundary. If they are refusals, it is not, and the search moves
+on. Either way it is one read.
