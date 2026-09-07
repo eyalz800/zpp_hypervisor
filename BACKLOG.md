@@ -76558,3 +76558,34 @@ screen. Stalled A never starts `smss.exe`; a 2.5% faster stall is still
 a stall. The value here is that **the mechanism is proven to work on
 hardware and its direction and sign are established**, which is what a
 change with no hardware validation lacked an hour ago.
+
+## The -2.5% holds at n=5, and stalled A is now a calibrated instrument
+
+    BEFORE n=7   mean 8,783.7/s   sd 35.5   range 8,709 - 8,835
+    AFTER  n=5   mean 8,568.0/s   sd 19.1   range 8,539 - 8,591
+    shift        -215.7/s = **-2.46%**      gap 118/s, no overlap
+
+Twelve boots across two arms of one binary, one commit apart. The
+post-change arm is **tighter** than the pre-change one (sd 19 against
+36), which is what a real shift looks like rather than a drift.
+
+**Stalled A has now been used as a measuring instrument and it worked.**
+That is worth recording as a method, because it was found by accident
+and it is much cheaper than the alternative:
+
+- it arrives in **5 boots of 7** and costs **~13 minutes**
+- its cpu0 exit rate reproduces to **sd 35/s on 8,784**, 0.4%
+- so a change of 2.5% is a **6-sigma** effect and needs 3 boots, not 30
+
+The intended comparison - cpu0's 21.36 exits per round trip at winlogon's
+pre-credential wait - needs a healthy boot that gets there, which is
+**3 in 21** and costs ~40 minutes when it lands. **Prefer the stalled
+state for any change whose effect is expected in both regimes.** It is
+the difference between an experiment that finishes in 45 minutes and one
+that takes an evening.
+
+**What stalled A cannot do**, and why the healthy measurement is still
+owed: its exit mix is `vmresume` 50%, `int-window` 21%, `wrmsr` 14% -
+not vmwrite-dominated - where at winlogon's wait `vmwrite` alone is
+**55.0%**. So stalled A **understates** any change aimed at VMCS write
+traffic, and 2.5% there is a floor, not the number.
