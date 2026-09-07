@@ -77885,3 +77885,49 @@ session's novelty**: check the existing record before building the
 instrument, not after it produces a result worth writing up. The reading
 is not wasted - it is a second, independent confirmation on a different
 processor count - but it should have been framed as that from the start.
+
+## The 4-minute triage produces FALSE STALLS - proven on boot 262, which was healthy
+
+The paired-read experiment set up three boots ago has its answer, and it
+is the one the experiment was built to catch:
+
+    boot 262   4.0 min    vmcall 2.01/s    vtl_fresh cpu0 **+0**    -> "stalled A"
+               14.0 min   vmcall **324.49/s**  vtl_fresh cpu0 **+79.27/s**  -> **HEALTHY**
+
+The early read was **wrong**, and wrong in the predicted direction: a
+healthy boot has not begun its trust-level traffic at four minutes and
+is indistinguishable from a stalled one. Five pairs agreed and the sixth
+did not, which is exactly why one agreeing pair was recorded as "luck,
+not construction" rather than as a result.
+
+**Consequence for this session's tally, and it is not small.** Boots 256
+and 257 were triaged at 6 and 4 minutes. 257 was re-read at 13.5 min and
+confirmed stalled, but **256 never was**, and any boot classified on a
+4-minute read alone is now unsafe. The running tally of "11 healthy, 43
+stalled" should be read as an upper bound on stalls.
+
+**The classifier's calibration was never the problem - ignoring it was.**
+The recipe says 13 minutes. I read at four because it was quicker, and
+the instrument cannot report that it was asked too soon.
+
+### And I killed the healthy boot
+
+The kill and the next boot were in the same command block as the late
+triage, so `rig-kill-qemu.sh` ran **unconditionally, one minute after
+the reading that said the guest was healthy**. A healthy draw is roughly
+one boot in five and about fifteen minutes of wall clock, and this one
+was thrown away without being looked at - no process list, no stack, no
+`guest-l2-vectors` control, and critically **not the matched healthy
+control that three entries above are explicitly waiting on**.
+
+That control is the single most-wanted reading in this investigation
+right now: the healthy-boot counterpart to the 1,666 ISR entries/s, the
+cpu0/cpu1 injection asymmetry, and the `ExpUpdateTimerConfigurationWorker`
+census. It was available for one minute and I destroyed it.
+
+**Procedure change, effective immediately: triage and kill are separate
+steps, and the kill is conditional on the verdict.** No command block may
+contain both a triage and an unconditional `rig-kill-qemu.sh`. On a
+healthy verdict the boot is kept and worked, not cycled - the boot cycle
+exists to find a healthy guest, so cycling past one defeats its own
+purpose.
