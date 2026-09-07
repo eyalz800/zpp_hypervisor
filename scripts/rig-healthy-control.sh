@@ -151,6 +151,41 @@ else
     echo "   That is a reader gap, NOT a fact about the guest."
 fi
 
+    # **The endgame test, and it is not the process count.**
+    # `multicore-login-screen-reached-recipe`: boots 209, 212 and 218 all
+    # reached n=13-14 with a power watchdog ALREADY ARMED and died to
+    # `0x9F` exactly 300.0002 s later; boot 231 reached the same process
+    # state with **0 of 7 armed** and went straight through to LogonUI.
+    # So the 14-process plateau is where every healthy boot arrives and
+    # the power-IRP failure is a separate event that follows it three
+    # times in four.
+    #
+    # Zero armed  -> this boot is going through. NURSE IT, do not cycle.
+    # Non-zero    -> the 300 s are already running and the boot is spent.
+    if [ -s "$OUT/processes.txt" ]; then
+        N=$(grep -cE "^  [A-Za-z]" "$OUT/processes.txt" || echo 0)
+        echo "=== 8. ENDGAME TEST at n=$N: armed power watchdogs ==="
+        clear_nc
+        timeout 400 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
+            > "$OUT/power-irps.txt" 2>&1 || echo "  (reader exited non-zero)"
+        if [ -s "$OUT/power-irps.txt" ]; then
+            ARMED=$(grep -c "ENABLED (armed" "$OUT/power-irps.txt" || echo 0)
+            TOTAL=$(grep -oE "^[0-9]+ power IRP" "$OUT/power-irps.txt" \
+                    | grep -oE "^[0-9]+" || echo "?")
+            echo "  armed: $ARMED of $TOTAL power IRPs in flight"
+            if [ "$ARMED" -eq 0 ]; then
+                echo "  -> ZERO ARMED. This is the shape that reached LogonUI."
+                echo "     NURSE THIS BOOT. Do not cycle it."
+            else
+                echo "  -> $ARMED ARMED: 0x9F in <=300 s from when each armed."
+                echo "     Capture what is wanted now; the boot is spent."
+                grep -E "CurrentDevice|age " "$OUT/power-irps.txt" | head -8
+            fi
+        else
+            echo "  !! EMPTY - the read FAILED, which is not 'none armed'."
+        fi
+    fi
+
 echo
 echo "=== captured under $OUT ==="
 echo "Nothing was killed. The guest is still running - work it before cycling."
