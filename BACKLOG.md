@@ -78752,3 +78752,25 @@ was never verified visually, and that a photograph refuted the same
 inference once already this session. If this boot reaches `LogonUI.exe`
 and `dwm.exe`, that is a process-list fact and the screen is the user's
 to report.
+
+### Boot 278 broke through: 31 processes, LogonUI.exe and dwm.exe, guest alive
+
+    23:00  n=31  LogonUI.exe pid 1500, dwm.exe pid 1492, LsaIso.exe,
+                 12+ svchost.exe, WUDFHost.exe, IntelCpHDCPSvc, wermgr.exe
+                 VM status: running
+
+Identical in count and composition to boot 231's recorded breakthrough
+("LogonUI.exe, dwm.exe, ten svchost.exe, LsaIso.exe, 31 processes"), and
+reached from the state the endgame test predicted: **0 armed watchdogs at
+n=14**. That is the test's first live prediction and it held - boots 263,
+265, 273 and 275 all had watchdogs armed at that point and all died,
+this one did not and did not.
+
+`LsaIso.exe` and `Secure System` are the proof VBS is genuinely running;
+they exist only under Credential Guard.
+
+**The screen is NOT claimed.** `LogonUI.exe` hosts the "Please wait"
+screen as well as the credential prompt, this exact inference was made
+earlier in this session and refuted by a photograph of the rig, and the
+2026-09-05 boot-150 claim has the same defect. The guest is being kept
+alive and the user asked.
