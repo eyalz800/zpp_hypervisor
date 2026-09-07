@@ -76011,3 +76011,51 @@ instructions per second-level entry**, and can the count be reduced at
 the source rather than by paying per-field to shadow them. That is a
 different question from anything attempted so far, and it is now known to
 be worth 20-55% of a processor rather than 1.5%.
+
+## zpp's OWN VMCS traffic costs ~35-70% of a processor, at a 21.4% cache hit rate
+
+Boot 231 at "Please wait", the counters for what **this VMM executes**,
+not what it traps:
+
+    vmcs_reads_taken    30,378,244   **488,705.9/s**
+    vmcs_writes_taken    8,021,466   **129,044.2/s**
+    cache hit rate      5,409,101 / 25,270,535 = **21.4%**
+
+`vcache=1` in the manifest, so the field cache is compiled in - which
+resolves the dump's own caveat that "a hit rate below cannot be
+interpreted until [the manifest] is [read]".
+
+Priced with the three measured constants (cache hit **57**, raw `VMREAD`
+**2,876**, `VMWRITE` **2,131**), and this time saying which is which:
+
+    average read   0.214 x 57 + 0.786 x 2,876 = **2,273 cycles**
+    reads          1,111M cycles/s = **55.8% of a 1.992 GHz core**
+    writes           275M cycles/s = **13.8%**
+    TOTAL                            **69.6%**  (34.8% if the counter
+                                     sums both processors)
+
+**That dwarfs the guest's trapped VMCS traffic by 60x.** The exits Hyper-V
+causes are 10,350/s; the accesses zpp performs are 617,749/s. The entry
+above chased the wrong side of the ledger - it asked why Hyper-V issues
+18 trapped instructions per entry, when this VMM issues roughly **1,100
+VMCS accesses per second-level entry** of its own.
+
+### The lever, and it is a hit rate not a redesign
+
+At the measured 21.4%, an average read costs 2,273 cycles. **At 90% it
+would cost 339**, and the total falls from 69.6% to **22.1%** of a
+processor. The cache already exists and is already on; it is simply
+missing four times out of five.
+
+**Why the hit rate is 21.4% is now the single highest-value question in
+this tree**, and it needs no boot to start on - `vmcs::read`, its cache,
+and the invalidation policy are all readable source. Candidate causes,
+none checked: the cache is invalidated too aggressively (every exit? every
+VMPTRLD?), it is too small for the working set, or the hot paths bypass
+it.
+
+**Caveat stated rather than buried:** whether `vmcs_reads_taken` is
+per-processor or summed across both was not established, so the honest
+range is 35-70% of one core. Either end makes this the largest single
+cost measured in this investigation, but the factor of two should be
+resolved before anyone quotes a figure.
