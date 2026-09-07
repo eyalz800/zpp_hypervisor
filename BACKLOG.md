@@ -75643,3 +75643,45 @@ finished". The 2026-09-06 entry already noted the queue looks upstream of
 the SCM. This measurement sharpens the contrast without resolving that,
 and the honest next question is what the SCM is *waiting for* at the
 wall, not whether it is running.
+
+## The VTL census is IDENTICAL on a boot that succeeds and one that dies
+
+`e664ee5` read boot 218's VTL census at the wall and concluded the loop
+carries work rather than spinning, killing the livelock hypothesis. That
+conclusion rested on one arm. **Here is the other**, taken on boot 231
+live at the login screen:
+
+    218, died at the wall     returns 121,155  differed 61.3%  fresh 98.3%
+                              HvCallModifyVtlProtectionMask 158,571
+    231, at the LOGIN SCREEN  returns 130,692  differed 60.7%  fresh 97.8%
+                              HvCallModifyVtlProtectionMask 168,724
+
+**Every figure matches to within a percentage point.** The boot that
+reached `LogonUI.exe` and the boot that died to `0x9F` have
+indistinguishable trust-level behaviour.
+
+So the VTL census **cannot discriminate**, and that is a stronger
+statement than `e664ee5` was entitled to make. It said the loop carries
+work; it can now also be said that **the loop looks exactly the same
+whether the boot succeeds or fails**, which closes the question rather
+than merely arguing one side of it.
+
+This is the fifth property eliminated by measuring its other arm, and the
+most rigorously, because the two arms are quantitatively matched rather
+than merely both-present:
+
+    poller                  d8cdede   unpolled boot stalled identically
+    VTL livelock            e664ee5   loop carries work at the wall
+    interrupt-window        3f98327   1.88x, not the 21%-vs-1.3% it looked
+    lsass WrVirtualMemory   6103188   absent on both arms
+    VTL census              this      identical on both arms, <1 point
+
+Against one property that *did* survive its other arm: `services.exe`
+thread count, 3 at the wall against 33 at the login screen (`70f943c`).
+
+**The rule this session kept paying for, stated once more because five
+of six went the same way: a property measured only on failing boots is
+not evidence until it is measured on a succeeding one.** The cost is one
+read on a healthy guest, and the healthy guest is the scarce resource -
+three in twenty-one boots - so take every such reading while one is
+alive.
