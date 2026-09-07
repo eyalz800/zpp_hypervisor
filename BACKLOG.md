@@ -76589,3 +76589,59 @@ owed: its exit mix is `vmresume` 50%, `int-window` 21%, `wrmsr` 14% -
 not vmwrite-dominated - where at winlogon's wait `vmwrite` alone is
 **55.0%**. So stalled A **understates** any change aimed at VMCS write
 traffic, and 2.5% there is a floor, not the number.
+
+## The healthy-regime measurement: exits per round trip 21.36 -> 13.44
+
+Boot 238, healthy (`vmcall` 153.8/s at triage), at the winlogon group,
+against boot 231's measurement before the change:
+
+                            boot 231 BEFORE   boot 238 AFTER    change
+    cpu0 exits per RT                 21.36            13.44   **-37.1%**
+    cpu0 cycles per RT            2,083,898        2,007,750     -3.7%
+    vmwrite share of exits            55.0%            20.9%    -62.0%
+    vmread  share of exits            31.1%            13.6%    -56.3%
+    **VMCS share of all exits**       86.1%            34.5%
+    prologue cycles a call           11,811           14,213    +20.3%
+    dispatch self a call             38,777           56,339    +45.3%
+
+**The registered claim was cpu0's exits per round trip, 21.36 before.
+It is 13.44.** VMCS traffic fell from 86.1% of every exit to 34.5%.
+
+### The phase caveat, which is not small
+
+Boot 231's phase tree was taken at **"Please wait", ~105 minutes in**,
+after `LogonUI`. Boot 238's is at **n=13, ~28 minutes in**, before it.
+**These are not the same point in the boot**, and this file has already
+recorded once tonight what comparing across unequal phases costs.
+
+So the honest statement: **the numbers are consistent with the change
+doing what it was designed to do, at roughly the predicted size, and
+they are not a controlled comparison.** Removing 3 of the 10 batch
+writes should remove ~3 exits a round trip; 7.92 were removed, and the
+extra is either `vm_exit_controls` reads (15.5% of vmreads, also
+shadowed now) or the phase.
+
+The same-phase measurement needs boot 238 to reach "Please wait" and is
+still owed.
+
+### The result that does NOT fit, and it is the interesting one
+
+**Cycles per round trip barely moved: -3.7%, against -37.1% in exits.**
+The per-exit cost rose to absorb almost all of it - prologue +20.3%,
+dispatch self +45.3%.
+
+Two readings, and neither is established:
+
+- **Fixed work per round trip that was spread over more exits.** If a
+  round trip has a constant amount of work, removing exits concentrates
+  it, and the per-call averages rise while the total does not move.
+  That would mean the exits removed were the *cheap* ones and the
+  change buys much less than the exit count suggests.
+- **Phase.** A guest 28 minutes in is doing different work from one at
+  105 minutes, and the per-exit cost could differ for that reason alone.
+
+**This is the question the same-phase measurement must answer**, and it
+matters more than the headline: an exit count that falls 37% while
+cycles fall 3.7% is either a small win being mis-read as a large one, or
+a real win masked by a phase difference. `-2.46%` measured properly in
+stalled A (`9147723`) is currently the only figure here with a control.
