@@ -75504,3 +75504,71 @@ follow. Boot 231, so far, has not.
 arm at any moment, and 231 has been at n=14 for only two minutes against
 212's ~1.8 seconds to arming. It says only that the two things are not
 the same thing, which is worth knowing whichever way this boot goes.
+
+# ===== LOGIN SCREEN REACHED, MULTICORE, 2026-09-07 05:21 (boot 231) =====
+
+**Two vCPUs, Hyper-V and VBS running nested on zpp, at the Windows login
+screen.**
+
+    05:21:00  n=31  VM status: running
+      LogonUI.exe   dwm.exe   svchost.exe x10   WUDFHost.exe
+      wermgr.exe    LsaIso.exe   lsass.exe   services.exe
+      csrss.exe x2  fontdrvhost.ex x2   wininit.exe   winlogon.exe
+      smss.exe      Registry   Secure System   System   WerFault.exe
+      + 3 <unreadable>
+
+Verified rather than inferred, in the order `CLAUDE.md` requires:
+
+- **zpp is resident**: `allocate_rwx done at 0x0000000066e09000` in
+  `serial.out`. A boot without that marker is bare Windows and proves
+  nothing.
+- **`LogonUI.exe`** is the login screen process, and **`dwm.exe`** means
+  the desktop compositor is up.
+- **`LsaIso.exe`** is the isolated LSA - VBS/Credential Guard live in
+  VTL1, which is the whole point of the exercise.
+- **The guest is executing user mode, measured**: `user_rip_samples`
+  **391.59/s on cpu0 and 519.71/s on cpu1**, against stalled A's
+  literal `+0 in this window` (`c8f62cb`'s companion reading). 911
+  samples a second of user-mode instruction pointers is a machine running
+  user code, not a process list that happens to contain a name.
+- Both processors busy: 8,499/s and 9,626/s.
+
+## The route, from the session's own measurements
+
+    04:25:36  boot 231 starts, 2 vCPUs
+    04:38:10  triage: vmcall 260/s  -> HEALTHY (stalled A is 2.0/s)
+    04:40:57  n=5   smss.exe, autochk.exe
+    04:45:10  n=5   second smss.exe (session-manager fork)
+    04:50:38  n=6   csrss.exe
+    05:02:48  n=9   csrss x2, wininit.exe, winlogon.exe
+    05:08:27  n=14  LsaIso, lsass, services, fontdrvhost x2, WerFault
+    05:10:24  0 of 7 power IRPs armed  <- the countdown never started
+    05:21:00  n=31  LogonUI.exe, dwm.exe, 10x svchost
+
+**56 minutes start to login screen.**
+
+## What made this boot different, and it is measurable
+
+`005ad4e` recorded, two minutes before the login screen appeared and
+without knowing the outcome, that boot 231 was at the 14-process wall
+with **zero armed power watchdogs**, where boot 212 had two and died
+300.0002 s after the first armed. That entry said the two states are
+separable and that it did not predict survival.
+
+**It was the difference.** Boots 209, 212 and 218 all reached n=13-14 and
+all had an armed watchdog counting down; all three died to `0x9F`. Boot
+231 reached the same process state with nothing armed and went straight
+through to `LogonUI`.
+
+So the `0x9F` is **not** what the 14-process wall is. The wall is a
+plateau every healthy boot passes through; the power-IRP failure is a
+separate event that happened to follow it three times out of four.
+
+## Triage that made this affordable
+
+Twenty-one boots this session, **3 healthy** (212, 218, 231). The
+`vmcall`-rate criterion (`abb0ac6`, validated prospectively in `77fd912`)
+classified every one of them at ~13 minutes, so eighteen stalled boots
+cost 13 minutes each instead of the 53 and 28 that boots 210 and 211 cost
+before it existed. Without it this login screen would have been roughly
+six hours further away.
