@@ -75471,3 +75471,36 @@ controlled comparison across eras, for the reason `c8f62cb` records.
 Boot 231 is being kept alive with milestone tracking armed. Polling is
 safe: `d8cdede` exonerated it, boot 212 reached the wall while polled and
 218 while unpolled.
+
+## n=14 does NOT imply the 0x9F countdown has started
+
+Boot 231 reached the 14-process wall state at 05:08 - `csrss` x2,
+`fontdrvhost` x2, `LsaIso`, `lsass`, `services`, `WerFault`, `wininit`,
+`winlogon` - and two minutes later:
+
+    7 power IRP(s) in flight
+    armed entries: 0
+
+**Zero armed watchdogs**, every entry `WatchdogStart 0` with
+`CurrentDevice <null>`, i.e. all `IRP_MN_WAIT_WAKE` which are never armed
+by design.
+
+Boot 212 at the same process count had **two armed**, the first of which
+had started its 300-second countdown 1.8 seconds after `winlogon.exe` was
+created and killed the guest at exactly 300.0002 s (`7d76895`).
+
+**So "reached n=14" and "is dying of `0x9F`" are separable states**, and
+this investigation has been treating them as one. Every previous reading
+of the wall was taken on a boot that was already counting down, so the
+armed watchdog looked like part of the wall's definition. It is not: boot
+231 is in the wall's process state with nothing armed.
+
+That reframes what the wall is. The 14-process plateau is where this
+guest arrives; whether a power IRP then fails to complete is a **separate
+event** that may or may not follow. Boots 209, 212 and 218 all had it
+follow. Boot 231, so far, has not.
+
+**What this does not say:** that boot 231 will survive. A watchdog can
+arm at any moment, and 231 has been at n=14 for only two minutes against
+212's ~1.8 seconds to arming. It says only that the two things are not
+the same thing, which is worth knowing whichever way this boot goes.
