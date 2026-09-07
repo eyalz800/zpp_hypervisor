@@ -76168,3 +76168,51 @@ higher. Whether that is a phase difference, a per-processor difference,
 or a different exit population is not established here - but the negative
 result rests on the smaller number, and **it should be re-derived against
 this one before the shadow list is considered closed.**
+
+## The two processors are in DIFFERENT REGIMES: 21.36 exits per round trip against 2.00
+
+Same dump, same window, boot 231 at "Please wait":
+
+                        cpu 0          cpu 1        ratio
+    round trips        35,180        226,491        1 : 6.4
+    round trips/s         567          3,653
+    exits per RT       **21.36**       **2.00**     **10.7 : 1**
+    cycles per RT   2,083,898        400,323        5.2 : 1
+    dominant cost   prologue+dispatch  reflect_l2_exit
+                    51.9%              40.4%
+
+**`cpu 1` is doing the expected thing.** Two exits per round trip is
+about the floor for a reflected nested exit, its cost is dominated by
+`reflect_l2_exit` at 40.4%, and it completes 3,653 round trips a second.
+That is what this VMM is designed to do and it is doing it.
+
+**`cpu 0` is not.** It takes **21.36 first-level exits for every one
+second-level round trip**, spends 51.9% of its cycles in the flat
+per-exit prologue and dispatch, and completes only 567 round trips a
+second - **6.4x fewer** than its partner while burning 5.2x the cycles on
+each.
+
+This is what "multicore is slow" means, stated as a measurement rather
+than an impression: **one processor is doing the work and the other is
+being ground down by a 10.7x exit multiplier.** It is the same asymmetry
+seen all session - 8,790 against 1,190 exits/s in stalled A, and one
+processor running all the user-mode code at "Please wait" - now with the
+mechanism visible.
+
+### What it settles, and what it does not
+
+**It settles the 0.241-versus-21.36 question as a per-processor
+difference.** `5c9aba1`'s figure of 0.241 exits per round trip is within
+reach of `cpu 1`'s regime; it is 88x off `cpu 0`'s. So that negative
+result is not wrong, it is **scoped** - and the shadow VMCS list should
+be re-derived for a processor in `cpu 0`'s regime, where each avoided
+exit is worth ~50,588 cycles and there are twenty-one of them per round
+trip.
+
+**It does not say why `cpu 0` is in that regime.** Twenty-one trapped
+VMCS instructions per round trip is Hyper-V's behaviour, not ours, so the
+question is what `cpu 0` is being asked to do that `cpu 1` is not.
+`cpu 0` also carries all the `on_l2_ept_fault` work (0.52 per round trip,
+5.1%) and all the user-mode execution, which is consistent with it being
+the processor Windows is actually running on - but consistent is not
+established.
