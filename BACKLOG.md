@@ -77313,3 +77313,32 @@ these six are ever deferred at all.
 counter cannot answer a per-item question, and quoting one to justify a
 per-item change is how the RDX census "confirmed" a loop by counting a
 sentinel.
+
+## Triaging at 4 minutes against a classifier calibrated at 13
+
+Boots 256 and 257 were both triaged early - 6 minutes and 4 minutes -
+against the `vmcall`-rate classifier, whose whole calibration is *"13
+minutes instead of 30-60"*. **A healthy boot has barely begun its
+trust-level traffic at 4 minutes, so an early read makes every boot look
+stalled**, and the classifier cannot report that it was asked too soon.
+
+Boot 257 re-read at 13.5 minutes, which is the first paired
+early/late reading in this tree:
+
+    4.0 min   vmcall 2.01/s   cpu0 8,566/s
+    13.5 min  vmcall 2.01/s   cpu0 8,522/s   **vtl_fresh_calls cpu0 +0**
+
+So 257 really is stalled A and the early read agreed - **but it agreed
+by luck, not by construction**, and one agreeing pair is not evidence
+that early reads are safe. It is evidence that the pair is cheap to
+collect.
+
+From here every boot gets **both** reads, at ~4 and ~13 minutes. If the
+early reading turns out to predict the late verdict across a dozen
+boots, triage gets three times faster on a cycle where triage is most of
+the wall clock. If it does not, the pairs cost one extra dump each and
+they say so.
+
+`vtl_fresh_calls` is the field that carries the verdict, not the exit
+rate: cpu0 reads **+0 in the window** here against cpu1's 1.00/s, and
+the standing goal names it specifically for that reason.
