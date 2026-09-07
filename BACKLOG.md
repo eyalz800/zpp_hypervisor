@@ -76956,3 +76956,46 @@ That reframes the remaining work. The throughput change (`df95d54`,
 it does not address the power IRP that fails to complete within 300
 seconds, which is what actually kills five boots in seven. **Those are
 two different problems, and only the first one has been worked on.**
+
+## HYPOTHESIS, registered before testing: the audio drivers have no hardware
+
+Five of seven healthy boots die to a power IRP that never completes, and
+the two drivers seen holding one are **`IntcAudioBus`** and
+**`IntcOED`** - Intel's Smart Sound / audio-offload stack.
+
+**This guest is Windows installed on the laptop's own NVMe**, so it
+carries drivers for the laptop's real hardware. Under
+`boot-zpp.sh` only the **GPU and the NVMe** are passed through. The
+Intel audio controller is not.
+
+So the hypothesis is simply: **a driver whose device is not present may
+never complete an `IRP_MN_SET_POWER`.** It is waiting on hardware that
+the VM does not expose, the wait has no timeout of its own, and the
+power manager's 300-second watchdog is what eventually notices.
+
+**Why this is worth stating rather than assuming.** It would explain, in
+one mechanism:
+
+- why the holder is always an **audio** driver across six boots
+- why two *different* audio drivers hold armed IRPs simultaneously
+  (`3d6930b`) - they are the same stack, both missing the same device
+- why the failure is a **timeout** rather than a fault - nothing errors,
+  something simply never answers
+- why it strikes at n=13-14, when the power manager first walks the
+  device tree to set device power states
+
+**And why it might be wrong.** Windows normally completes power IRPs for
+absent devices promptly - a missing device usually fails enumeration long
+before a power transition. If these drivers loaded at all, something
+enumerated *something*. `guest-devnodes.py` exists and can say what
+device node the driver is attached to and what state it is in.
+
+**The check, on the next boot that reaches n=13-14:** read the device
+node for `IntcOED`/`IntcAudioBus` and its PnP state. **Not** by touching
+config space - `never-read-config-of-a-dead-passthrough-device` records
+that `lspci -vv` on an all-ones device hangs the whole rig, and that
+prohibition covers this.
+
+Registered now so the answer cannot be fitted afterwards: **if the device
+nodes are present and started, this hypothesis is wrong** and the wait is
+on something else.
