@@ -77041,3 +77041,54 @@ started device typically waits for the device to acknowledge a state
 change, and a guest running at a fraction of speed can miss whatever
 window that needs - but consistent is not established, and this entry
 records a **refutation**, not a replacement.
+
+## The stuck power IRP is on a PASSED-THROUGH device, and that is the lead
+
+`0dddacb`'s hypothesis assumed the audio controller was absent from the
+VM. It is not absent - **it is passed through**, and the refutation is
+stronger than the device merely being `Started`.
+
+`boot-zpp.sh` passes four devices, and the variable names mislead:
+
+    GPU        00:02.0   8086:3ea0   vfio-pci   UHD Graphics 620
+    GPU_AUDIO  **00:1f.3**   **8086:9dc8**   vfio-pci   <- NOT GPU audio.
+                                                   This is the onboard
+                                                   Cannon Point-LP HD
+                                                   Audio controller.
+    WIFI       00:14.3   8086:9df0   vfio-pci
+    NVME       02:00.0   15b7:5003   vfio-pci
+
+**`8086:9dc8` is exactly the device ID the guest's `IntcAudioBus` node
+reports** - `PCI\VEN_8086&DEV_9DC8&SUBSYS_16CE1043&REV_30`. Same device,
+host and guest, read from sysfs on the host (kernel-cached, no
+config-space probe - `never-read-config-of-a-dead-passthrough-device`
+forbids the probing kind).
+
+**So the driver holding the stuck `IRP_MN_SET_POWER` is driving real
+hardware through VFIO**, and the transition it cannot complete is a
+device power-state change on a passed-through PCI function.
+
+That is a much better lead than either previous framing:
+
+- it explains why the holder is always the **audio** stack: of the four
+  passed-through devices, it is the one whose driver does aggressive
+  runtime device power management (Intel Smart Sound D0/D3 transitions).
+  The NVMe and GPU do not get `SET_POWER` during boot the same way.
+- it explains why the device is `Started` and healthy - it works, right
+  up until a power transition.
+- and **VFIO's device power management is famously partial**; a D-state
+  transition that the host does not fully virtualise can leave the guest
+  driver waiting for an acknowledgement that never comes.
+
+**Not claimed:** that VFIO is at fault, or that zpp is. This is a lead,
+not a mechanism - the next step is to find what the driver is waiting on
+inside its `SET_POWER` handler, which is a guest-stack question and needs
+a healthy boot at n=13-14 with `guest-thread-stack.py` on the thread that
+owns the IRP.
+
+**The naming lesson, which is cheap and this file keeps paying for:**
+`GPU_AUDIO` is not GPU audio. A variable name is not a device. Two hours
+of hypothesis rested on "the audio controller is not passed through",
+which one `grep` of the launcher would have refuted - the same
+`read-the-launcher-before-arguing-from-what-is-underneath-it` rule
+`CLAUDE.md` already records for `boot.sh` versus `boot-zpp.sh`.
