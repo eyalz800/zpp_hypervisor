@@ -75713,3 +75713,29 @@ three boots in four is the remaining failure**, and it is now clearly
 bounded - it is not the VTL loop (`bb61513`: identical on both arms), not
 interrupt-window exiting, not instrumentation, and not present at all in
 a boot that works.
+
+## Not just the login screen: a fully booted Windows, 53 processes and growing
+
+Boot 231, 41 minutes after `LogonUI.exe` first appeared:
+
+    05:21   n=31   LogonUI.exe, dwm.exe, 10x svchost
+    06:02   n=53   + LMS.exe, OriginWebHelpe, SIHClient.exe, upfc.exe, ...
+                   LogonUI.exe pid 1464 parent 432 (winlogon.exe)
+                   dwm.exe     pid 1456 parent 432
+
+**The process count grew from 31 to 53 while sitting at the login
+prompt.** Those additions are ordinary third-party and background
+services - Intel's `LMS.exe`, `OriginWebHelpe`, the servicing client
+`SIHClient.exe`, `upfc.exe` - which start well after the shell is up.
+`LogonUI.exe` and `dwm.exe` are still present with `winlogon.exe` as
+parent, which is what a machine waiting at the login prompt looks like.
+No `explorer.exe`, correctly - nobody has logged in.
+
+So this is not "reached a milestone and froze". It is a **complete
+Windows boot** that has settled into its normal steady state, nested
+four levels deep, with VBS in VTL1 and two virtual processors.
+
+The parent-pid cross-check matters here and the walker prints its own
+caveat: pids are reused, so `parent 432 is currently winlogon.exe` is
+consistent with rather than proof of parentage. It agrees with the two
+processes winlogon actually spawns, which is the expected answer.
