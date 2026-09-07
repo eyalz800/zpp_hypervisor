@@ -76927,3 +76927,32 @@ phase comparison (`+29.9%` round trips) from n=1 per arm to n=2 on the
 after side. That needs a healthy draw that survives long enough - boot
 240 gave 3 minutes at that state and boot 243 died at n=14 before
 reaching it.
+
+## What happens to a healthy boot: 2 of 7 reach LogonUI, the rest die at the wall
+
+Seven healthy boots this session, tracked to their end:
+
+    212   died at the wall (n=13-14), 0x9F
+    218   died at the wall, 0x9F, IntcOED holding the IRP
+    231   **reached LogonUI**, held 90+ minutes, then died
+    238   died at n=13, 0x9F, IntcOED holding the IRP
+    240   **reached LogonUI**, held ~3 minutes, then died
+    243   died at n=14, 0x9F - the one-IRP proof came from here
+    245   died at n=14, 0x9F
+
+**Five of seven die at n=13-14 without reaching `LogonUI`.** The two that
+got through held it for 90 minutes and 3 minutes respectively - an
+enormous spread, and neither reached the credential prompt (`9d7f07f`:
+boot 231's screen read "Please wait").
+
+So the wall is not only where slow boots stop; **it is where most healthy
+boots die.** Being healthy by the `vmcall` criterion buys passage through
+phase 1 and no further guarantee. The `0x9F` at n=13-14 is the dominant
+outcome for a boot that gets that far, and the 300-second countdown is
+what ends it.
+
+That reframes the remaining work. The throughput change (`df95d54`,
++29.9% round trips at matched phase) addresses how fast the guest runs;
+it does not address the power IRP that fails to complete within 300
+seconds, which is what actually kills five boots in seven. **Those are
+two different problems, and only the first one has been worked on.**
