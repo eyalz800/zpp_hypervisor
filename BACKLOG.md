@@ -78110,3 +78110,50 @@ The claim here is the observation, not an account of it.
 It does say where to look, and it is consistent with everything measured
 today: the healthy boot runs at **680 ISR entries/s** and the stalled one
 at **1,666/s**, which is the same subsystem seen from the rate side.
+
+## The stalled guest re-arms its periodic timer 400x more often, for the SAME period
+
+Comparing the saved healthy capture (boot 263) against stalled B (boot
+264), cpu0, both windowed over 62 s:
+
+                          healthy 263        stalled B 264
+    stimer_asked_arms     4  (**0.06/s**)    1,571  (**25.30/s**)
+    stimer_given_arms     3                  1,571
+    period per arm        17,400 x100ns      17,410 x100ns
+                          = **1.74 ms**      = **1.74 ms**
+    stimer_arm_count      232.5/s            1,606.9/s
+
+**The period asked for is identical - 1.74 ms, which is
+`KeQuantumEndTimerIncrement` exactly - and the stalled guest asks for it
+420 times as often.** It is not requesting a different rate. It is
+requesting the *same* rate, over and over, twenty-five times a second,
+where a healthy guest arms a periodic timer roughly once every seventeen
+seconds.
+
+A periodic timer needs arming once. Re-arming it 25 times a second means
+the guest is not accepting that it is armed - and that is exactly what
+cpu0's stack says it is doing, independently and from a different
+instrument: `KiUpdateTime -> **KiSetClockTickRate** -> HalpTimerClockArm
+-> HalpHvTimerArm`, with `wrmsr` at 35.4% of its exits. Two instruments,
+one conclusion: **the guest is stuck reprogramming its clock.**
+
+**On latency, which is the obvious next thought and is NOT supported
+here.** Cycles from arm to answering vector work out at ~2.46 ms stalled
+against ~3.01 ms healthy - the stalled boot's answers are *sooner*, not
+later. But the healthy figure is an average over **three arms**, and a
+three-sample mean is not a measurement. So this comparison neither
+supports nor refutes a latency account; it is simply not powered to say
+anything, and the arm-rate difference above does not depend on it.
+
+**What is established:** a 420x difference in how often the guest
+reprograms an already-periodic timer, for an unchanged period,
+corroborated by the call stack. **What is not:** why. A guest that
+re-arms could be failing to observe its own timer as armed, or observing
+ticks it considers wrong, or looping in `KiSetClockTickRate` for a reason
+having nothing to do with the timer. Nothing here distinguishes those.
+
+**Do not reach for the timer switches on this.** `ZPP_STRETCH_GUEST_TIMER`
+and `ZPP_TICK_FLOOR` are both recorded in CLAUDE.md as tried and failed -
+bugcheck loop and shutdown respectively - and both lied about the period,
+which is precisely the quantity measured above as *unchanged*. Whatever
+this is, the guest is not asking for the wrong thing.
