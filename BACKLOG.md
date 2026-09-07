@@ -75572,3 +75572,41 @@ classified every one of them at ~13 minutes, so eighteen stalled boots
 cost 13 minutes each instead of the 53 and 28 that boots 210 and 211 cost
 before it existed. Without it this login screen would have been roughly
 six hours further away.
+
+## The lsass `WrVirtualMemory` invariant is retired: absent on the SUCCESSFUL boot too
+
+`multicore-login-screen-reached-recipe` carried a standing instruction:
+
+> **BEFORE KILLING A SUCCESSFUL BOOT**, check whether it also has a stuck
+> `WrVirtualMemory` thread in lsass. If it does, that invariant is a
+> bystander, not a cause. Boot 150 was killed without this check and it
+> cannot be redone.
+
+**Done, on boot 231, at the login screen.** 15 lsass threads, and **not
+one in `WrVirtualMemory`**:
+
+    WrQueue x7   WrLpcReply x4   WrLpcReceive   UserRequest x2
+    WrAlertByThreadId
+    ContextSwitches 1116, 918, 593, 540, 539, 438, 264, 180, ...
+
+The high, varied switch counts also say these threads are genuinely being
+scheduled rather than parked.
+
+Combined with the 2026-09-06 entry - the invariant was **absent** on
+boots 189 and 192, which reached 14 processes and died - the matrix is
+now complete and empty:
+
+    reached 14, died      no WrVirtualMemory   (189, 192)
+    reached login screen  no WrVirtualMemory   (231)
+
+**So it discriminates nothing.** It was recorded from a boot where it
+happened to be present, and neither the failing nor the succeeding
+population shows it. Retired, and the recipe's standing check can come
+out - the answer it was waiting for is in.
+
+This is the fourth thing this session that was recorded as a possible
+cause and eliminated by looking at the other arm: the poller
+(`d8cdede`), the VTL livelock (`e664ee5`), interrupt-window exiting
+(`3f98327`), and now this. **The pattern in all four: a property measured
+only on failing boots looked diagnostic until it was measured on a
+healthy one.**
