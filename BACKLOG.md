@@ -78490,3 +78490,56 @@ ratio, check that its numerator replicates. The tick rate survived that
 test (671, 680), the injection asymmetry failed it, the re-arm rate is
 directionally right but numerically loose, and `stalled A is an
 attractor` failed it outright.
+
+## RESOLVED: nothing was destroyed. All 41,141 losses were hand-overs correctly refused
+
+Boot 273 progressed substantially - cumulative `vtl_fresh_calls` on cpu0
+reached **126,417** against ~27,000 on stalled boots - then stopped, and
+its memory was intact. That made the reading owed since boot 265
+available, taken with the reader fixed earlier today:
+
+    41,141 held events, first and last both 0x8000042e (vector 0x2e)
+    handed over 0 of 41,141; the other 41,141 had a VALID hardware
+    idt-vectoring field (41,141 while_valid) - the architecture reported
+    the interrupted delivery itself and vmcs12 got it by the normal copy.
+    **Hand-over was correctly refused; NOTHING WAS DESTROYED**
+
+**Every single one.** Not most - all 41,141. So:
+
+- **The `int 2Eh` destruction hypothesis for the `0x9F` is dead.** No
+  system call is being lost, and the shape that would have left a power
+  IRP outstanding does not exist.
+- **`hand_over_pending_event` is working correctly** with `hand=1`, and
+  its zero hand-overs are not a failure - there was nothing to rescue,
+  because the processor reported every case itself.
+- **The "1,244 GENUINELY LOST" that started this was a pure reader
+  artifact**, and so was the alarm it caused. The number had been
+  printed in every dump for as long as the reader existed.
+
+**Two documentation defects fixed, and they had been agreeing with each
+other.** The switch's doc in `nested_vmx.h` stated its pass criterion as
+*"`pending_event_lost` must fall to zero"*, and the reader computed
+"genuinely lost" as `lost - handed_over`. Both ignore `while_valid`, so
+both said "broken" about a switch that works. **The correct criterion is
+`lost - while_valid`**, which is the count genuinely destroyed and is
+**zero** here. The doc now says so and records the measurement.
+
+That is the same failure mode this file keeps recording, in its most
+pointed form yet: **a wrong criterion and a wrong reader that confirm
+each other**, exactly like the control-bit constant whose mis-derived
+arithmetic agreed with its mis-declared value.
+
+### And a third progressing boot died the same way
+
+Boot 273's post-mortem: **`0x9F` DRIVER_POWER_STATE_FAILURE param1 0x3,
+`\Driver\IntcAudioBus`** - identical to boots 263 and 265. Three
+progressing boots, three identical bugchecks, and by the cause-versus-
+consequence read taken on 263 the named driver is arbitrary among those
+stalled.
+
+So the `0x9F` remains the barrier to the goal and has now survived the
+elimination of: the audio stack itself, VFIO power management, the power
+worker pool, queue congestion, and now destroyed system-call events.
+What is left unexplained is why several independent device stacks stop
+completing power transitions at once, on a guest that is otherwise
+running well enough to reach `winlogon.exe` and `LsaIso.exe`.

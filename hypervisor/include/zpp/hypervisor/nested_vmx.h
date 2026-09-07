@@ -1952,10 +1952,36 @@ inline constexpr bool intercept_apic = (0 != ZPP_INTERCEPT_APIC);
  * violations for L0 too and still gets this right, so the
  * unconditional claim is part of the chain but not the part to fix.
  *
- * Off by default so an A/B is one variable. Self-verifying:
- * `pending_event_handed_over` must rise and `pending_event_lost` must
- * fall to zero. If `lost` stays non-zero the hand-over condition is
- * wrong, not the idea.
+ * Off by default so an A/B is one variable.
+ *
+ * **The self-verification originally stated here was wrong, and it was
+ * measured wrong on 2026-09-07.** It read: *"`pending_event_handed_over`
+ * must rise and `pending_event_lost` must fall to zero. If `lost` stays
+ * non-zero the hand-over condition is wrong, not the idea."*
+ *
+ * `pending_event_lost` does **not** fall to zero when this works, and it
+ * should not. It counts every held event `reflect_l2_exit` saw, including
+ * all the ones where the *hardware* idt-vectoring field was valid - and
+ * in exactly those cases this switch declines **on purpose**, because the
+ * architecture already reported the interrupted delivery and vmcs12 gets
+ * it by the normal copy. A refusal there is the switch behaving
+ * correctly, not failing.
+ *
+ * Measured on a progressing boot with this switch ON: `pending_event_lost`
+ * 41,141, `pending_event_handed_over` **0**, and
+ * `pending_event_lost_while_valid` **41,141** - every single one refused
+ * on a valid hardware field. By the old criterion that reads as total
+ * failure; it is total success, and nothing was destroyed.
+ *
+ * **The correct criterion is `pending_event_lost` minus
+ * `pending_event_lost_while_valid`.** That difference is the number of
+ * events genuinely destroyed, and it is what must be zero. `handed_over`
+ * rising is not required - on a boot where the hardware field is always
+ * valid there is nothing for it to rescue.
+ *
+ * `rig-dump-state.py` printed "GENUINELY LOST" off `lost - handed_over`
+ * for as long as this comment stood, because the reader had never read
+ * `while_valid` either. Both are fixed.
  */
 #ifndef ZPP_HAND_OVER_PENDING_EVENT
 #define ZPP_HAND_OVER_PENDING_EVENT 0
