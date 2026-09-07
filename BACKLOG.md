@@ -78270,3 +78270,41 @@ arbitrary (established on boot 263) and with the throughput account.
 **Replication worth noting:** `IntcOED` and `USBHUB3` are the same two
 drivers, in the same order, on two separate boots. The *pair* is
 reproducible even though which one wins the race to 300 s is arbitrary.
+
+## The timer re-arm rate is a profile marker, not a discriminator - healthy sits in the MIDDLE
+
+Boot 266 is stalled A, and it supplies the reading the "420x re-arm"
+entry above was missing: what stalled **A** does with the same counter.
+
+    stimer_asked_arms, cpu0, windowed
+
+      stalled A (boot 266)   **+0 in the window**   (1,695 cumulative)
+      healthy   (boot 263)     0.06/s
+      healthy   (boot 265)     1.27/s
+      stalled B (boot 264)   **25.30/s**
+
+**Healthy sits between the two stalled profiles**, so the counter does
+not separate healthy from stalled in either direction. The entry above
+compared healthy against stalled B only and concluded a "420x" gap; that
+gap is real but it is one arm of a spread whose other arm goes the
+opposite way. **As a discriminator it is dead.**
+
+What it is instead is a **profile marker**, and a sharp one:
+
+    stalled A   cpu0 has STOPPED asking for timer arms entirely
+    stalled B   cpu0 asks 25 times a second for a period it is not changing
+
+Two stalls that fail in opposite directions on the same counter. That
+sits oddly with the unification proposed earlier - that A and B are two
+points in one clock-rate operation - and is a fact that account now has
+to accommodate rather than a fact supporting it. It does not refute the
+unification: both stacks are still in the clock-rate machinery, and
+"stopped" and "spinning" are both failures to complete the same
+operation. But the counter was quoted as evidence *for* it, and it is
+not.
+
+**The lesson is the session's third of this shape**: a two-way comparison
+found a large ratio, and the third sample put the control in the middle.
+`stalled A is an attractor`, the injection asymmetry, and now this. The
+rule that keeps holding: **do not quote a ratio until every population
+that could sit between its two arms has been sampled.**
