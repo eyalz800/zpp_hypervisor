@@ -76340,3 +76340,50 @@ which KVM does not shadow either. `ept_pointer` genuinely cannot be -
 nested EPT is exactly what this VMM must intervene on. Why Hyper-V
 rewrites GDTR/IDTR/LDTR and both control words 1.47 million times is the
 larger question, and it is now a specific one.
+
+## CORRECTION: the four best fields are already rejected, on a hazard, in the header
+
+Two errors in the entry above.
+
+**1. The field count was wrong.** zpp shadows **10**, not 8: seven
+read-write and **three** read-only - `exit_reason`,
+`vm_exit_instruction_length` and `vm_exit_interruption_information`. Two
+are written across source lines and my `grep -oE "vmcs_field::[a-z_0-9]+"`
+could not match them. Counting a list with a regex that cannot see a
+line break is a poor way to count a list.
+
+**2. The four highest-value candidates are already considered and
+rejected, in the header, on correctness.** `nested_vmx.h` beside
+`shadow_read_only_fields`:
+
+> The four fields a census would most plausibly add here -
+> `exit_qualification`, `guest_linear_address`,
+> `guest_physical_address`, `idt_vectoring_information_field` - sit
+> immediately beside fields that *are* guest state, and the hazard
+> applies in full: a deferred field published from vmcs12 into the
+> shadow region is published stale, and the guest hypervisor then reads
+> it with no exit to repair on.
+
+Those four are **3,513,586 of the 3,599,244** read accesses I counted as
+available - **37.0% of all vmreads, barred**. What remains on the
+read-only side is `vm_exit_interruption_error_code` at 85,658, **0.9%**.
+
+**So "23.0% is already on KVM's list and available" becomes 9.4%**, and
+2,347,390 of that 9.4% is read-write, which pays exactly the 3,791-cycle
+copy-in that made `5c9aba1` negative. The genuinely cheap remainder is
+under one percent.
+
+**And the census confirms the header's own earlier fix worked.**
+`vm_exit_interruption_information` was 99.8% of all VMREADs when it was
+added to the read-only list; it does not appear in this census at all -
+because it is shadowed and no longer exits. That is the mechanism doing
+its job, and it is why the current top entries are the ones the header
+then declined.
+
+**The lesson is the one this file keeps charging for.** The answer was
+written beside the list, naming the exact four fields, before I measured
+them. I read the census, read KVM's list, computed a benefit, and did not
+read the sixty lines of prose immediately above the array I was proposing
+to extend. `check-existing-instruments-before-building-one` covers
+instruments; this says the same for **decisions** - if a list looks
+obviously short, assume someone already asked why and go and read.
