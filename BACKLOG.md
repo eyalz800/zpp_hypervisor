@@ -76829,3 +76829,39 @@ fitted on, and the fix is to re-read the discriminating instrument - here
 
 Practically: **treat anything below ~50 vmcall/s as stalled**, and when
 a boot lands between the bands, spend the one command that settles it.
+
+## TWO IRPs arm at once, and that explains six years of varying driver names
+
+Boot 243, read **live** while the watchdog was counting (187.6 s of 300,
+so ~112 s of headroom - the corrected constant made that budget legible):
+
+    Irp 0xffffc58539d04d50   WatchdogState 1   CurrentDevice **\Driver\IntcOED**
+    Irp 0xffffc5853a974010   WatchdogState 1   CurrentDevice **\Driver\USBHUB3**
+
+**Two power IRPs armed simultaneously, on different drivers.** The `0x9F`
+names whichever reaches 300 s first, and that is a race - which is
+exactly why this investigation has collected six different driver names
+from the same failure: `VBoxSup.sys`, `IntcAudioBus`, `fontdrvhost`,
+`USBHUB3` twice, and `IntcOED`.
+
+**It also means `guest-power-irps.py` could have answered this all
+along.** `CurrentDevice` on an *armed* entry names the holder directly.
+I built `guest-irp.py` to walk `CurrentStackLocation` for the same
+answer, and that walk was not wrong - it agreed on boots 218 and 238 -
+but it was **not necessary**: the reader already printed the field, on
+the rows I had been skipping because the wait-wake entries show
+`CurrentDevice <null>`. Seventh instance this session of the answer
+being in an instrument that already existed.
+
+**What this does and does not settle.** It settles why the name varies:
+multiple simultaneous arms, one race. It does **not** promote `IntcOED`
+to culprit - it is now one of at least two drivers holding an armed
+power IRP at the wall, and the other is `USBHUB3`. The earlier
+`CurrentStackLocation` samples (218, 238) found `IntcOED` because that
+was the IRP the bugcheck happened to name on those boots.
+
+**The sharper question this opens:** if two unrelated drivers both fail
+to complete a power IRP within 300 seconds, the common factor is not
+either driver - it is whatever the power manager needs from a guest that
+is running at a fraction of normal speed. That is consistent with the
+throughput account and inconsistent with a single-driver bug.
