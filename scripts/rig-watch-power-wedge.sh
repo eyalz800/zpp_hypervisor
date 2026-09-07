@@ -38,6 +38,12 @@ while :; do
              | grep -ai "VM status" || echo "VM status: UNREADABLE")
     clear_nc
     IRPS=$(timeout 300 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" 2>&1 || true)
+    # `grep -c` PRINTS 0 and EXITS NON-ZERO when it matches
+    # nothing, so `|| echo 0` appends a second line and every
+    # later integer test dies with "integer expression expected"
+    # - which in rig-healthy-control.sh fell through to the
+    # WRONG branch and reported a boot with zero armed watchdogs
+    # as spent. `|| true` keeps grep's own "0".
     ARMED=$(printf '%s' "$IRPS" | grep -c "ENABLED (armed" || true)
     echo "[$N $(date +%H:%M:%S)] $STATUS   armed watchdogs: $ARMED"
 

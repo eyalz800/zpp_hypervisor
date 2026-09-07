@@ -163,15 +163,15 @@ fi
     # Zero armed  -> this boot is going through. NURSE IT, do not cycle.
     # Non-zero    -> the 300 s are already running and the boot is spent.
     if [ -s "$OUT/processes.txt" ]; then
-        N=$(grep -cE "^  [A-Za-z]" "$OUT/processes.txt" || echo 0)
+        N=$(grep -cE "^  [A-Za-z]" "$OUT/processes.txt" || true)
         echo "=== 8. ENDGAME TEST at n=$N: armed power watchdogs ==="
         clear_nc
         timeout 400 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
             > "$OUT/power-irps.txt" 2>&1 || echo "  (reader exited non-zero)"
         if [ -s "$OUT/power-irps.txt" ]; then
-            ARMED=$(grep -c "ENABLED (armed" "$OUT/power-irps.txt" || echo 0)
+            ARMED=$(grep -c "ENABLED (armed" "$OUT/power-irps.txt" || true)
             TOTAL=$(grep -oE "^[0-9]+ power IRP" "$OUT/power-irps.txt" \
-                    | grep -oE "^[0-9]+" || echo "?")
+                    | grep -oE "^[0-9]+" || true)
             echo "  armed: $ARMED of $TOTAL power IRPs in flight"
             if [ "$ARMED" -eq 0 ]; then
                 echo "  -> ZERO ARMED. This is the shape that reached LogonUI."
