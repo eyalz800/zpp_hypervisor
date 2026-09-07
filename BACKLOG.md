@@ -78643,3 +78643,46 @@ smaller than the recorded 12.
 armed watchdog count first. If zero, nurse the boot and do not cycle -
 that is the one that goes through. If non-zero, the 300 s are already
 running and the boot is spent; capture and cycle.
+
+## Boot 275: the n=14 plateau, and the IRP pair replicates 4 for 4 with a fixed ordering
+
+Boot 275 was the strongest healthy draw of the session - vmcall
+**438.99/s**, `vtl_fresh_calls` cpu0 **+189.42/s**, `HalpClockTickLogIndex`
+**643 ISR/s** - reached **n=14**, and died to `0x9F` naming
+`\Driver\IntcAudioBus`, identically to 263, 265 and 273.
+
+**The tick rate now has three healthy samples: 680, 671, 643**, against
+1,666 stalled. Inside 5.5% of each other. That discriminator holds still,
+where the injection asymmetry and the re-arm rate did not.
+
+**And the aging pair is not arbitrary.** Four progressing boots, always
+the same two drivers, always in the same order:
+
+    boot 263            IntcOED 300.0 s   USBHUB3 279.4 s   gap 20.6 s
+    boot 265 (at arm)   IntcOED  52.8 s   USBHUB3  38.3 s   gap 14.5 s
+    boot 275            IntcOED 300.0 s   USBHUB3 278.8 s   gap 21.2 s
+
+`IntcOED` arms first every time, `USBHUB3` follows 14-21 s later, and the
+other four in-flight IRPs are `IRP_MN_WAIT_WAKE` with `WatchdogStart 0`,
+never armed by design.
+
+**That is a sequence, not a race**, and it refines what the record says.
+`multicore-login-screen-reached-recipe` notes the driver the `0x9F`
+*names* is arbitrary - five different names seen - and that is still
+true, because the name comes from the enumerator (`IntcAudioBus`, the
+parent bus printed as P2) rather than the holder. But **the holders and
+their order are stable on this build**: `IntcOED` then `USBHUB3`, four
+times out of four. The arbitrariness is in the naming, not in which
+devices stall.
+
+**Combined tally against the record:** boots 209, 212, 218 died with
+watchdogs armed at n=13-14 and boot 231 went through with none armed;
+adding 263, 265, 273, 275 gives **7 dying to 1 passing**. So it is
+roughly 7 in 8, not the 3 in 4 the earlier record suggested - still
+probabilistic, still a draw worth taking, but the passing case is rarer
+than it looked and boot 231 remains the only one.
+
+Boot 275 had **both watchdogs already armed by the time it reached
+n=14**, which by the endgame test puts it in the dying class from the
+moment it arrived at the plateau. The test called it correctly; the
+boot was spent before the process count finished moving.
