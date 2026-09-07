@@ -75610,3 +75610,36 @@ cause and eliminated by looking at the other arm: the poller
 (`3f98327`), and now this. **The pattern in all four: a property measured
 only on failing boots looked diagnostic until it was measured on a
 healthy one.**
+
+## `services.exe` thread count DOES discriminate: 3 at the wall, 33 at the login screen
+
+The other arm of the recipe's second standing claim - that the wall is
+`services.exe` unable to accumulate enough processor time to start any
+service - measured on boot 231 at the login screen:
+
+    at the wall (189, 192)     3 threads, one in **WrQuantumEnd**
+                               (runnable and preempted), ZERO svchost.exe
+    at the login screen (231)  **33 threads**, none in WrQuantumEnd,
+                               all UserRequest / WrLpcReply,
+                               TEN svchost.exe running
+
+**This one confirms rather than refutes**, which is worth stating
+explicitly beside the four eliminations above. A property measured only
+on failing boots is untrustworthy; the fix is to measure it on a healthy
+one, and that can come back either way. Four came back "no difference"
+(the poller, the VTL livelock, interrupt-window exiting, lsass
+`WrVirtualMemory`). This one comes back with an order of magnitude.
+
+So the recipe's reading stands: **at the wall the SCM has three threads
+and cannot start a service; at the login screen it has thirty-three and
+has started ten.** `WrQuantumEnd` on one of the three - a thread that
+wants the processor and is not getting it - is the mechanism, and it is
+absent when the boot succeeds.
+
+**What this does not establish** is direction. `services.exe` having 3
+threads is equally consistent with "the SCM is starved" and with "nothing
+has asked the SCM to do anything yet because something upstream has not
+finished". The 2026-09-06 entry already noted the queue looks upstream of
+the SCM. This measurement sharpens the contrast without resolving that,
+and the honest next question is what the SCM is *waiting for* at the
+wall, not whether it is running.
