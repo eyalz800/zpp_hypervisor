@@ -75767,3 +75767,73 @@ minutes on.
 Recorded because the reflex on seeing 53 -> 32 is to read it as decay,
 and the distinguishing evidence costs one extra column of the output that
 was already on screen.
+
+# ===== RETRACTED: "LOGIN SCREEN REACHED". The screen says "Please wait" =====
+
+**`8583a82` is wrong and so is everything built on it.** The user
+photographed the rig's screen at 07:10, ninety minutes after
+`LogonUI.exe` appeared. It shows the Windows blue background, a spinner,
+and **"Please wait"** - with the dots **stuck**.
+
+So the guest is **not** at the login screen. It is at winlogon's
+pre-credential wait.
+
+## The error, exactly
+
+`LogonUI.exe` in the process list was treated as proof of the login
+screen. **It is not.** `LogonUI.exe` is the host process for winlogon's
+UI, and it hosts the **"Please wait"** screen as well as the credential
+prompt. Its presence says the logon UI *process* started, not what that
+process is displaying.
+
+Every corroborating reading I took is consistent with "Please wait" and
+none of them distinguishes it from the credential prompt:
+
+- `dwm.exe` running - the compositor is up either way.
+- 53 processes and third-party services - all start before the prompt.
+- 911 user-mode samples/s - "Please wait" is a running UI, animating a
+  spinner.
+- 90 minutes stable with no armed watchdog - a stuck wait is stable too.
+
+## Why this happened, and it is already written down
+
+`ask-the-user-what-is-on-screen` says it outright: **the rig display is a
+passed-through GPU, `screendump` is impossible, and the user is the
+sensor.** I quoted that memory in passing - "if you're at the machine,
+the screen should be showing the Windows login" - and then reported the
+milestone as achieved without waiting for the answer.
+
+**A proxy that cannot distinguish the two outcomes is not evidence for
+either.** This is the same failure the file catalogues repeatedly, and
+the sixth time this session: an instrument was read as confirming a
+hypothesis when it had no power to refute it. The difference is that the
+five earlier ones were caught by a second reading, and this one had to be
+caught by the user with a camera.
+
+## What is actually true, restated
+
+Boot 231 got **further than any other boot this session**, and that part
+stands on evidence that does distinguish it:
+
+- 31 -> 53 processes including `svchost` x10, `LMS.exe`, `SIHClient.exe`
+- `LsaIso.exe` + `Secure System` - VBS and Credential Guard genuinely in
+  VTL1
+- zpp resident, 2 vCPUs, both executing
+- **no power watchdog ever armed** over 90 minutes, where boots 209, 212
+  and 218 died 300 s after one armed
+
+That last point is still the session's real finding: **the `0x9F` is
+separable from the wall.** Boot 231 avoided it entirely.
+
+But **"reached the login screen" is withdrawn.** The correct statement is
+**"reached winlogon's Please-wait screen and stopped there"**, which is a
+new and better-characterised failure point, not a success.
+
+## The check that settles it next time, and it costs one question
+
+There is no `screendump` on this rig. **Ask the user what is on screen
+before claiming any visual milestone**, and treat the process list as
+necessary-not-sufficient. If asking is not possible, the distinguishing
+guest-side evidence would be `LogonUI.exe`'s own thread state and whether
+`credprov`/`LogonUI` has loaded the credential providers - neither of
+which was read.
