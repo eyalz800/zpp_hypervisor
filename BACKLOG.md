@@ -77995,3 +77995,56 @@ bracket. Fix is to move both vector reads inside the tick pair.
 Sections 6 and 7 also silently produced nothing under `|| true` and had
 to be re-run by hand; the `|| true` hides a failed read as an empty one,
 which is the exact instrument fault this file keeps recording.
+
+## The 0x9F is a CONSEQUENCE, by the instrument's own pre-declared rule
+
+Boot 263 was healthy, reached the graphics stack, and then died at
+roughly 26 minutes with **`0x9F` DRIVER_POWER_STATE_FAILURE param1 0x3**,
+naming `\Driver\IntcAudioBus`. `-no-reboot -no-shutdown` left it in
+`paused (shutdown)` with memory intact, so the read this file has wanted
+on a *dying* boot - `guest-power-irps.py`'s `CurrentDevice` on an armed
+row - was finally available. It had never been taken.
+
+    [3]  CurrentDevice  **\Driver\IntcOED**    age **300.0 s of 300  (100.0%)**
+    [6]  CurrentDevice  **\Driver\USBHUB3**    age   279.4 s of 300  ( 93.1%)
+
+    6 power IRPs in flight; the other four are IRP_MN_WAIT_WAKE with
+    WatchdogStart 0, never armed by design, and carry no age at all.
+
+**Two armed watchdogs aging together, 20.6 seconds apart.** The script
+states the decision rule *before* printing the data, which is what makes
+this admissible: *"several entries aging together -> the wedge is
+upstream; whichever entry wins the race gets named, and the name is
+arbitrary (CONSEQUENCE). Exactly one entry aging while others come and
+go -> that device is the blocker (CAUSE)."*
+
+It is the first branch. **The 0x9F names an arbitrary victim.**
+
+**Two things follow, and the second is a consilience worth keeping.**
+
+The bugcheck's named driver is not even the holder: `\Driver\IntcAudioBus`
+is the **enumerator**, the parent bus, printed as parameter 2. The driver
+actually sitting on the expired IRP is **`\Driver\IntcOED`**. So the
+name in the bugcheck is wrong twice over - wrong device, and arbitrary
+among those stalled.
+
+And it **explains an earlier experiment that had no explanation**. This
+session removed the audio stack to test whether it was the cause, and the
+failure *moved to `USBHUB3`*. That was recorded as an elimination and
+read as puzzling. It is exactly what this reading predicts: USBHUB3 was
+already at 93.1% and 20.6 s behind, so removing the leader promotes the
+runner-up. **The experiment did not eliminate audio as a cause - it
+demonstrated the arbitrariness**, and its result should be re-read that
+way.
+
+**What this does not name is the upstream wedge**, which is the whole
+point of the first branch. Two unrelated device stacks - Intel audio
+offload and USB hub - stalled simultaneously for five minutes says the
+machine as a whole was not completing power IRPs, which is consistent
+with the throughput account and with nothing more specific yet.
+
+Boot 263 is the most complete picture this investigation has had of a
+healthy multicore boot: it ran, loaded the whole graphics stack, had
+`winlogon.exe` and `LsaIso.exe` up with VBS genuinely running, gave the
+matched control readings three entries above, **and then died of a
+timeout whose named cause is provably arbitrary.**
