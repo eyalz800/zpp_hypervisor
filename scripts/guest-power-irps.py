@@ -75,7 +75,24 @@ D_WATCHDOGSTATE = 0x128
 KUSD_INTERRUPTTIME = 0xFFFFF78000000008
 KUSD_INTERRUPTTIMEBIAS = 0xFFFFF780000003B0
 
-BUGCHECK_AT = 6_000_000_000        # 600 s in 100ns units
+# **MEASURED at 300 s on three independent boots, not 600.** The 600
+# came from `PopWatchdogSleepTimeout`'s value in the shipped image
+# (header, line 10) and it does not match what this guest does:
+#
+#     boot 209   age at death   300.0052 s
+#     boot 212   age at death   300.0002 s   (1,885.1 - 1,585.1, timestamps
+#                                             taken separately)
+#     boot 238   armed, read age 282.4 s at 09:44:09;
+#                `paused (shutdown)` by 09:45:06 -> 300 s from arming
+#
+# Three boots, computed by three different routes, agreeing to five
+# significant figures on 300. Printing "of 600 s" made every armed entry
+# read as half as urgent as it is, and made a guest 282 s into its
+# countdown look 47% of the way rather than 94%.
+#
+# The image's 600 is not disowned - it is what the constant reads - but
+# **what the machine does is 300**, and this reader reports the machine.
+BUGCHECK_AT = 3_000_000_000        # 300 s in 100ns units, measured
 
 WATCHDOG_STATE = {0: 'Disabled', 1: 'ENABLED (armed, running)',
                   2: 'Completed'}
