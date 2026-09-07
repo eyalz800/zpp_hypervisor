@@ -77683,3 +77683,76 @@ on a multicore stalled boot it is the read that would say whether cpu0's
 extra stagings are extra *ISR entries* or extra injections per entry -
 which are very different faults. It needs a window and two reads of two
 members, and it is the next thing to take on a stalled boot.
+
+## Ratio 1.00 on a stalled multicore boot: zpp is not over-injecting, the guest is over-ticking
+
+The read queued above was taken, on live stalled boot 261, over one
+61-second span:
+
+    HalpClockTickLogIndex   1,227,154 -> 1,328,806   delta **101,652**
+    l2_injected_vector[0xd1]
+        cpu0                  750,710 ->   815,707   delta    64,997
+        cpu1                  483,373 ->   519,909   delta    36,536
+        sum                                          delta **101,533**
+
+    ratio  101,533 / 101,652 = **0.9988**
+
+**Exactly one injection per clock-ISR entry**, which is the same result
+`clock-double-injection.md` §0 got on a progressing guest and is now
+confirmed to hold on a *stalled multicore* one. Whatever the stall is,
+it is **not** zpp injecting the clock more than once per tick. That
+family is closed on this side of the boundary too.
+
+**What the same reading does show is a rate difference, and it is in the
+guest's own tick, not in our delivery:**
+
+    this stalled boot     101,652 / 61 s = **1,666 ISR entries/s**
+    recorded progressing              =    1,059 ISR entries/s
+                                           (phase1-tail-to-smss.md)
+
+**1.57x as many clock interrupts actually entered**, with the injection
+ratio pinned at 1.00 in both. That is the distinction the read existed
+to make, and it comes out on the side that is *not* our bug: the guest
+is taking more ticks, we are faithfully delivering each one exactly
+once.
+
+It also fits what cpu0 is doing. Its stack is inside
+`ExSetTimerResolution -> ExpUpdateTimerResolution ->
+ExpUpdateTimerConfiguration` - the guest is **in the act of changing its
+own timer resolution** - so a tick rate that is not the settled one is
+the expected state there rather than an anomaly needing a mechanism.
+
+Per processor the split is cpu0 1,065/s and cpu1 599/s, which is the
+same 1.78x asymmetry seen earlier, now measured on entries rather than
+stagings.
+
+**Caveat, and it is not a small one.** The 1,059/s figure is from
+another session's boot recorded in `phase1-tail-to-smss.md`, not a
+matched control taken beside this one - different boot, and the
+processor count there is not stated. **A matched healthy control on this
+rig has still not been taken**, and until it is, "1.57x" compares
+against a number from elsewhere. The ratio of 1.00 needs no such
+caveat: it is internal to this boot, two members, one span.
+
+### The instrument is available on throughput builds after all
+
+`guest-walk.py` documents its input as `l2_exit_cr3`, and that member is
+behind `census_exits` (`nested_entry.cpp:4632`) - **the third member
+found compiled out of a `census=0` build this session**, after
+`l2_entry_vector` and alongside it. On the face of it that makes every
+guest-memory read - `KiBugCheckData`, process lists, this one -
+unavailable on exactly the builds worth diagnosing.
+
+It does not, and the way round is cheap: **any process's CR3 maps the
+kernel half**, and the user-mode census (`userip=1`, which *is* on in
+throughput builds) prints live guest CR3s. Taking `cr3 0x1ae000`
+straight out of the dump and walking `guest_kernel_base` with it
+returned `4d 5a 90 00` - **`MZ`**, the kernel's own PE header - which is
+the validation that the root is usable before any value is read through
+it.
+
+`guest_kernel_base` is itself ungated, so base and root are both
+obtainable with census off. This unblocks the whole guest-side
+instrument family on throughput builds and should be written into
+`guest-walk.py`'s docstring, which currently sends the reader to a
+member that reads zero and gives no reason.
