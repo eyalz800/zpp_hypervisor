@@ -78719,3 +78719,36 @@ The narrowing from boot 275 still stands and is what makes the watcher
 worth arming at all on a healthy boot: **0 of 2 IRPs in flight at n=5,
 and `IntcOED` already aged 300.0 s by n=14**, so the arming happens in a
 window of a few minutes, well before the plateau the boot dies at.
+
+## Boot 278 reached n=14 with ZERO armed watchdogs - the boot-231 shape
+
+    22:31  triage      vmcall **436.55/s**, vtl_fresh cpu0 **+106.45/s**  -> healthy
+    22:36  tick rate   1,155,491 -> 1,194,996 = **627 ISR/s**
+    22:42  n=5         module tail ks.sys, behind IntcAudioBus.sys,
+                       portcls.sys, drmk.sys - the audio stack loading
+    22:48  n=14        the plateau
+    22:52  endgame     **7 power IRPs in flight, 0 ARMED**
+
+**First boot this session to reach the plateau with nothing armed.**
+Boots 263, 265, 273 and 275 all had `IntcOED` and `USBHUB3` already
+running their 300 s by n=14 and all died. `multicore-login-screen-reached
+-recipe` records boot 231 reaching this same state with 0 of 7 armed and
+going straight through to `LogonUI`.
+
+So by the endgame test this boot is in the passing class, and it is being
+nursed rather than cycled - which is the whole reason that test was
+written and the procedure changed after boot 262 was killed one minute
+after reading healthy.
+
+**Fourth healthy tick-rate sample: 627**, against 680, 671 and 643, and
+1,666 stalled. Four samples inside 8% of each other. That discriminator
+has now survived every replication it has been given, which none of the
+others did.
+
+**Not claiming anything about the screen.** The recorded correction is
+explicit that `LogonUI.exe` also hosts the "Please wait" screen and
+cannot distinguish it from the credential prompt, that the boot-150 claim
+was never verified visually, and that a photograph refuted the same
+inference once already this session. If this boot reaches `LogonUI.exe`
+and `dwm.exe`, that is a process-list fact and the screen is the user's
+to report.
