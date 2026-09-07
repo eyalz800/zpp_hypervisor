@@ -76795,3 +76795,37 @@ this tree has paid for six times. **A refusal is a result.** The
 **The measurement was taken 2m12s before the guest died.** That is the
 whole value of taking the reading the moment the state is reached rather
 than waiting for a better moment - there was no better moment.
+
+## A stalled boot at 10 vmcall/s: the stalled band is wider than 2.0/s
+
+Boot 241 triaged **ambiguously** - `vmcall` 11.6/s, then 9.87/s on a
+second window 90 seconds later, against stalled A's 2.0/s and healthy's
+150-471/s. Two consistent samples, so a stable state rather than a
+transition. Its geometry is stalled-A's: cpu0 8,255 then 8,219 exits/s
+against cpu1 1,195 then 1,205, the same ~7:1.
+
+**The process count settles it: `n=3`, never started `smss.exe`.
+Stalled.**
+
+So the stalled population is not "2.0/s". Three variants now:
+
+    stalled A   cpu0 ~8,560/s   cpu1 ~1,190/s   vmcall **2.0**/s   n=3
+    stalled B   cpu0 ~6,800/s   cpu1 ~7,000/s   vmcall **~2**/s    n=3
+    stalled C   cpu0 ~8,240/s   cpu1 ~1,200/s   vmcall **~10**/s   n=3
+    healthy     varies                          vmcall **150-471**/s
+
+**The triage criterion survives** - 10/s against 150/s is still a 15x
+gap and the call would have been right - **but the characterisation
+"stalled means 2.0/s" was too narrow, and a boot at 10/s read as
+ambiguous when it should have read as stalled.**
+
+This is the second time this session a classifier fitted on two classes
+met a third: `nested_run` could not separate stalled B from healthy
+(`e5bb8fe`'s predecessor), and now the `vmcall` band has a third stalled
+variant five times above the one it was calibrated on. **The rule is the
+same both times: a threshold is only as good as the populations it was
+fitted on, and the fix is to re-read the discriminating instrument - here
+`guest-processes.py` - rather than to trust the number.**
+
+Practically: **treat anything below ~50 vmcall/s as stalled**, and when
+a boot lands between the bands, spend the one command that settles it.
