@@ -77342,3 +77342,73 @@ they say so.
 `vtl_fresh_calls` is the field that carries the verdict, not the exit
 rate: cpu0 reads **+0 in the window** here against cpu1's 1.00/s, and
 the standing goal names it specifically for that reason.
+
+## In a stalled-A boot, cpu1 is a healthy idle processor and cpu0 is the whole wedge
+
+Boot 258, both processors read in the same 62-second window, which is
+the comparison that needs no calibration because it is one guest, one
+run, one pass of the same instruments.
+
+    cpu1  hlt 48.5%   clock stagings 574.6/s, 99.5% in ONE 1.053 ms bucket
+    cpu0  hlt  0%     clock stagings 1,021/s, split 58.7% at 0.526 ms
+                                              and 40.9% at 1.053 ms
+
+**cpu1 is textbook healthy** - it halts half the time and meets Windows'
+574.7 Hz tick almost exactly, in a single bucket. Nothing is wrong with
+cpu1. cpu0 never halts once and is staged the clock at 1.78x cpu1's
+rate, with more than half its gaps at *half* the period.
+
+cpu0's exits, none of which are trust-level work (`vtl_fresh_calls` +0
+in the window):
+
+    vmresume    4,305.85/s   50.0%
+    int-window  1,787.27/s   20.8%      cpu1: 5.08/s
+    wrmsr       1,291.56/s   15.0%      cpu1: 6.72/s
+    tpr-below     756.31/s    8.8%      cpu1: 0.97/s
+    ext-int       470.73/s    5.5%      cpu1: 2.05/s
+
+int-window is **352x** cpu1's rate in absolute terms, not as a share -
+which is what distinguishes this from the denominator effect already
+retracted in this file, where the same field differed 1.88x absolutely
+between boots. This is one boot, two processors.
+
+**Confirmed on a second, independent member.** `l2_injected_vector`,
+read for the first time here, gives cumulative injections of
+**1,009,003 on cpu0 against 650,848 on cpu1**, 98.9% and 94.3% of them
+vector `0xd1`. Two members that share no code path agree that cpu0 is
+being handed roughly 1.6x the interrupts, so the asymmetry is not an
+artifact of `clock_gap_buckets`.
+
+## And `l2_entry_vector` cannot answer the obvious next question: census=0
+
+The obvious question is whether those extra injections are *taken*.
+`l2_entry_vector` exists for exactly that and CLAUDE.md notes nothing in
+`scripts/` has ever read it. It now has a reader, and on this build it
+reads **zero on both processors with every read answered** - including
+on cpu1, which is visibly meeting its clock.
+
+That is not a finding. Its only increment is inside
+`if constexpr (nested_vmx::census_exits)` (`resume.cpp:1553`), and the
+manifest says `census=0`, **so the counter is compiled out of the
+binary that is running**. A processor ticking at 574.7 Hz reading "never
+vectored an interrupt" is the tell, and it took one grep.
+
+`scripts/guest-l2-vectors.py` now reads `census=` out of the manifest
+itself and prints that the member is compiled out before printing its
+zeroes, so the next reader cannot make this mistake by looking at the
+output alone.
+
+**Turning census on is not free**, which is why this is a limitation and
+not a to-do: two commits in this history record that `census=OFF`
+changes guest behaviour outright - it "unblocks the phase-1 stall" and
+"progressed guest into DPC_WATCHDOG 0x133". So the instrument that would
+answer staged-versus-taken perturbs the thing it would measure, and any
+census=1 run is a different experiment rather than a closer look at this
+one.
+
+Three reader failures were caught by the reader on the way here, all of
+which printed as four rows of plausible zeroes: a 128-word `xp`, and -
+the one worth remembering - **a `--rig` default missing the `tc@` user**,
+so every ssh returned 255 and all 32 reads came back unanswered. Without
+`Monitor.unanswered` being printed, "cannot log in" and "the guest
+vectors nothing" are the same picture.
