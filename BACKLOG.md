@@ -78854,3 +78854,38 @@ verified visually, boot 231's was not either, this session's earlier
 claim was refuted by a photograph, and boot 278's screen was overwritten
 before anyone looked. **Four candidate breakthroughs, zero visual
 confirmations.**
+
+## The endgame test is 5 for 5, and it predicts the PLATEAU, not survival
+
+Boot 279 completes the first proper test of the armed-watchdog rule.
+
+    boot   armed at n=14                       outcome
+    263    IntcOED + USBHUB3                   died at the plateau
+    265    IntcOED + USBHUB3                   died at the plateau
+    275    IntcOED + USBHUB3                   died at the plateau
+    279    **USBHUB3 alone, already 300.0/300**  died 2.5 min later
+    278    **none (0 of 7)**                   **broke through to n=31**
+
+**Five for five.** Every boot with a watchdog armed at n=14 died without
+leaving the plateau; the one with none armed reached 31 processes with
+`LogonUI.exe` and `dwm.exe`. The test was read live on 279 at 00:43 and
+the guest stopped at 00:46 - a prediction made and then confirmed, not
+fitted afterwards.
+
+**What it does not predict is survival.** Boot 278 had zero armed at
+n=14, broke through, and then a *fresh* `USBHUB3` watchdog armed after
+the breakthrough and killed it 300 s later. So the rule is: **zero armed
+at n=14 is necessary to leave the plateau and not sufficient to live.**
+
+**The arming pattern itself varies, which is new.** Boots 263, 265 and
+275 armed the pair `IntcOED` then `USBHUB3` 14-21 s apart. Boot 279 armed
+**`USBHUB3` alone** with `IntcOED` never arming - the same shape as boot
+278's post-breakthrough arming. So the pair is not obligatory and
+`USBHUB3` is the constant: it is armed in **all five** of these boots,
+where `IntcOED` appears in three.
+
+That sharpens the target again. `USBHUB3` is on the **emulated
+`qemu-xhci`**, and it is the only device present in every failure. The
+earlier framing - "several independent device stacks stop completing at
+once" - overstated it: sometimes it is two, and sometimes it is only the
+USB hub.
