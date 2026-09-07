@@ -77412,3 +77412,56 @@ the one worth remembering - **a `--rig` default missing the `tc@` user**,
 so every ssh returned 255 and all 32 reads came back unanswered. Without
 `Monitor.unanswered` being printed, "cannot log in" and "the guest
 vectors nothing" are the same picture.
+
+## cpu0 EOIs every interrupt it is given, so delivery is not what is blocked
+
+Boot 259, same 62-second window, two members that share no code path:
+
+    stimer_arm_count      cpu0  1,021.38/s   ("STIMER0 writes + clock
+                                               injections, NOT arms")
+    HV_X64_MSR_EOI        cpu0  1,021.20/s
+
+**Ratio 0.9998.** cpu0 is taking and acknowledging *every single
+interrupt it is handed*. Nothing is being dropped, blocked behind a task
+priority, or left pending - it is all delivered, all serviced, all
+completed, 1,021 times a second, while `vtl_fresh_calls` reads **+0** in
+the same window.
+
+That is independent confirmation of what
+[[blocker-is-external-interrupt-delivery]] was already superseded for,
+and it should stop the delivery-blocked family of hypotheses being
+re-proposed: the guest is not starved of interrupts, it is **saturated
+by them and completing them**.
+
+Against 1,021 deliveries there are 1,787 int-window exits - 1.75 per
+delivered interrupt - so the window mechanism is being asked twice per
+interrupt, but it is not failing.
+
+cpu1 in the same window is the opposite shape: 577/s injections against
+**5.68/s EOI**, with `hlt_reflect_count` 573/s. It is halting, being
+woken, and halting again without going through the synthetic EOI path at
+all. So the two processors are not doing the same thing badly, they are
+doing two different things.
+
+**The caveat, which the entry above should have carried.** cpu0 busy and
+cpu1 idle is exactly what a boot processor running Phase1Initialization
+next to a parked application processor looks like, and none of these
+numbers on their own distinguish "wedged" from "busy". What is not
+explained by busy-versus-idle is the **rate**: 1,021/s against Windows'
+own 574.7 Hz tick, 1.78x, with 58.7% of cpu0's staging gaps at *half*
+the period.
+
+**The control that would settle it has not been run**: the same read on
+a HEALTHY boot. If a healthy cpu0 also shows ~1,021/s EOI and half-period
+staging, this whole profile is what a busy processor looks like here and
+says nothing about the stall. `guest-l2-vectors.py` and the EOI slice are
+both one pass, so the control costs nothing but a healthy draw - roughly
+one boot in five. **Take it on the next healthy boot before quoting any
+of this as a signature.**
+
+Note also `stimer_asked_arms` cpu0 reads **+0 in this window** against
+1,346 cumulative, while injections continue at 1,021/s. That is expected
+rather than alarming - Windows arms a *periodic* timer, so one arm keeps
+producing injections - but it is worth stating, because "no arms and
+injections continuing" reads like a fault if the periodic case is
+forgotten.
