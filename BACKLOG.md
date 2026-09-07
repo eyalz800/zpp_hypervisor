@@ -75400,3 +75400,43 @@ because it was one sample - which is exactly the sample that would have
 shown the overlap.
 
 Tally, fifteen boots: **2 healthy, 11 stalled A, 2 stalled B.**
+
+## Seventeen boots: the healthy rate this session is 2/17, and that is low
+
+    healthy    212, 218                                     2
+    stalled A  211,213,215,216,217,219,220,221,222,
+               223,224,225,227,228                         13
+    stalled B  214, 226                                     2
+
+    observed 2/17 = 11.8%          recipe's figure 7/20 = 35%
+    P(<= 2 healthy | n=17, p=0.35) = 0.026
+    P(10 non-healthy in a row | p=0.35) = 0.013
+
+**So the rate this session is lower than the recipe's, at about p=0.03.**
+That is worth writing down and worth not over-reading, for one specific
+reason: **it is not a controlled comparison.** The recipe's 7-in-20 was
+measured in a different session on a different binary with a different
+switch set. Comparing a rate across eras is the same error as comparing
+`boot.sh` against `boot-zpp.sh` - two things that differ in several ways
+at once - which `CLAUDE.md` records as having cost a boot and a wrong
+conclusion.
+
+What *is* controlled: all seventeen of these boots ran **one binary**
+(`16809d6`, sha `0c7219c2…`), one launcher, one host, checked for drift
+and clean (`uptime` 10 days, `vfio-pci` bound to GPU and NVMe, CPU at
+full 3.2 GHz, memory accounted for). Within this session the draw is
+homogeneous; the low rate is a property of *this* configuration, whatever
+it is, not evidence that something broke partway through - the two
+healthy boots are 212 and 218, and eleven of the thirteen stalled-A boots
+are after 218, but nine of them are also after 212.
+
+**No candidate variable is being tested**, because none survives
+inspection: the binary is fixed, the cadence produced both healthy boots,
+the poller was exonerated by an unpolled stall (`d8cdede`), and the host
+shows no drift. Inventing a variable to test here would be guessing, and
+this session has already retracted four claims that began that way.
+
+The honest position: **the login screen needs a healthy boot, healthy
+boots occur at roughly 1 in 8 here, and the cost per attempt is ~14
+minutes.** That is the situation, stated plainly rather than dressed up
+as a finding.
