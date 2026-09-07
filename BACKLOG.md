@@ -76683,3 +76683,35 @@ was `paused (shutdown)` by 09:45:06. That is 300 s from arming, matching
 boots 209 (300.0052 s) and 212 (300.0002 s). **`guest-power-irps.py`
 still prints "of 600 s" and that string is wrong on three independent
 boots.**
+
+## Two post-change samples at the winlogon group agree. The pre-change one does not exist
+
+    boot 238 (after)  winlogon group   13.44 exits/RT   VMCS 34.5% of exits
+    boot 240 (after)  winlogon group   15.03 exits/RT   VMCS 32.6% of exits
+    boot 231 (before) **"Please wait"** 21.36 exits/RT   VMCS **86.1%** of exits
+
+The two post-change samples are taken at the same state and agree to
+11%, which is what a real measurement of a phase looks like. **The
+pre-change sample is not at that state**, and there is no other: boot
+231's phase trees were taken at triage (n=3) and at "Please wait"
+(n=31-53), never at the winlogon group, and it is the only pre-change
+boot that got past n=5.
+
+So **the same-phase comparison cannot be made from the data that
+exists.** Closing it means reverting the change and cycling until a
+healthy boot reaches the winlogon group - roughly seven boots at 14
+minutes, about 1.6 hours - for a magnitude estimate.
+
+**Not doing that, and the reason is that the question is already
+answered where it can be answered properly.** The stalled-A comparison
+is controlled - same state, n=7 before, n=6 after, one commit apart -
+and gives **-2.45%**. That is the number this change is entitled to
+claim. The winlogon-group figures are recorded as observations with
+their phase stated, not as a before/after.
+
+**What the 86.1% -> 33% VMCS share does look like.** It is a very large
+move for a phase difference to produce, and the three shadowed fields
+were 15.5% of reads and 27% of writes in boot 231's own census, which is
+the right order. But "looks like" is not a control, and this file
+carries five retractions from exactly that reasoning. It stays an
+observation.
