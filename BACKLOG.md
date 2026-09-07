@@ -77545,3 +77545,56 @@ total and counts everything staged into vmcs02 including what hvix64
 staged itself - so it is not a contradiction. It does mean **"delivered
 zero" must not be carried forward as a property of the vector**; it was
 a property of one measurement of one path.
+
+### Two dumps eight minutes apart: cpu0 has not left the call chain, cpu1 has not left idle
+
+The check named above was taken, on the same boot 260, at t+8 minutes:
+
+    cpu0  first dump   48 frames, rip HvlWriteApicCommandRegister+0x1d
+          second dump  30 frames, rip KiDpcInterruptBypass+0x12
+          **both carry, unchanged:**
+              ExpUpdateTimerConfigurationWorker+0x1c5
+              KeGenericProcessorCallback+0x175
+              ExpUpdateTimerConfiguration+0xc6
+              ExpUpdateTimerResolution+0x1cd
+              ExSetTimerResolution+0xbc
+              PnpEnableWatchdog+0x41
+
+    cpu1  both dumps   6 frames, rip HalProcessorIdle+0xf,
+                       **identical rsp 0xfffff8813ae4f928**
+              KiIdleLoop+0x54 -> PoIdle+0x1c0
+                -> PpmWakeClockOwnerIfNeeded+0xd5
+                  -> PpmIdleDefaultExecute+0x2b
+
+So "passing through" is ruled out for cpu0: it is inside the same
+timer-configuration call chain, under the same driver load, eight
+minutes apart. And cpu1 is not blocked on anything - it is in Windows'
+ordinary idle loop, halting 573 times a second and going back to sleep.
+
+**cpu0 is being interrupted inside the worker, not waiting below it.**
+The frames immediately above `ExpUpdateTimerConfigurationWorker+0x1c5`
+are `KiInterruptDispatchNoLockNoEtw+0x64` and `KiDpcInterruptBypass`,
+which are interrupt frames stacked on top of the worker body. cpu0 runs
+a little of the worker, takes an interrupt, returns, and takes another -
+1,021 times a second.
+
+**An arithmetic trap avoided, and worth recording because it nearly went
+in.** It is tempting to multiply cpu0's windowed 8,552 exits/s by its
+322,692 cycles/exit and conclude the processor has no cycles left for
+the worker. That gives 2.76e9 cycles per second against a ~2 GHz clock,
+which is 138% and therefore impossible - because the rate is windowed
+and the cycles/exit is cumulative, and this file warns about exactly
+that mixture. Done consistently, cumulative against cumulative:
+2,299,034 exits x 322,692 cycles is 7.4e11 cycles, about 372 s of a
+~900 s boot, so **cpu0 is roughly 41% consumed by exit handling** - a
+lot, but not a starved processor. "No cycles left" is not supported and
+is not the explanation.
+
+**What is established:** the multicore stall has cpu0 pinned in a
+timer-reconfiguration call chain entered from `PnpEnableWatchdog` during
+driver loading, being interrupted out of it about a thousand times a
+second, while the second processor stays idle and never executes the
+worker at all. **What is not established** is the causal direction -
+whether cpu0 cannot finish because of the interrupt rate, or is waiting
+on something cpu1 owes it. `KeGenericProcessorCallback`'s own rendezvous
+state is the read that would separate those and has not been taken.
