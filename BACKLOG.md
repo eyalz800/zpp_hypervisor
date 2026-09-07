@@ -77825,3 +77825,63 @@ already documents for hvix64's equivalent.
 **And the standing constraint applies**: the rig's Windows install is not
 to be modified, so unloading or renaming VBoxSup is not a move available
 here. Anything acted on has to be on our side of the boundary.
+
+## Correction: most of that chain was already recorded, and verified more carefully than I re-derived it
+
+The entry above presents the `PnpCallDriverEntry -> VBoxSup ->
+ExSetTimerResolution -> ... -> KeGenericProcessorCallback ->
+ExpUpdateTimerConfigurationWorker` chain as this session's
+consolidation. **It is not new.** It is recorded in the project memory
+`vboxsup-busy-poll-is-the-phase1-barrier` from 2026-09-03, frame for
+frame, with every RVA checked as *the exact return address of the call to
+the next name* against the PE exception directory - a stronger check than
+the raw stack scan I used. This is the second rediscovery of documented
+ground this session, after the hypercall-page loop already at
+`hypervisor.h:6694`. **One grep of the memory index would have opened
+with it.**
+
+Worse, that record already **retires** two things the entries above lean
+on:
+
+- **`KiDpcInterruptBypass+0x12` is an artifact.** It is the instruction
+  immediately after an `sti`, and the STI shadow is one instruction wide
+  (SDM Vol. 2B), so it is the first architecturally interruptible
+  boundary and every sampler lands there. I quoted its 17.6% census
+  share as if it were a location the guest spends time at. It is not.
+  The same note flags `SkpReturnFromNormalModeRaxSet+0x114`, 8 bytes
+  past a `sti`, as the same artifact.
+- **The `ExpUpdateTimerConfigurationWorker` CR8 = 0xF account is dead**,
+  killed by direct reads: IRQL measured **0**, `DpcQueueDepth` 0,
+  `DpcRoutineActive` 0, `DpcWatchdogCount` 3 - meaning the processor
+  reaches PASSIVE constantly. The thread simply **Runs at priority 31**,
+  so `KiQuantumEnd` re-selects it and lower-priority threads starve *by
+  design*. The scheduler is correct; nothing is broken host-side.
+
+My epilogue reading does not contradict that - a `mov cr8` restoring a
+*low* IRQL is consistent with IRQL 0 - but "cpu0 is preempted at the
+epilogue and cannot retire" is a weaker and less supported story than
+the one already settled by reading KPRCB and KTHREAD directly.
+
+**What actually survives as new**, and it is worth keeping precisely
+because it is the multicore half that record does not cover:
+
+1. **The whole chain now measured on a TWO-processor guest.** That memory
+   qualifies its worker account with "on a one-processor guest".
+2. **`KeGenericProcessorCallback` is a cross-processor rendezvous**, and
+   nothing in the record draws that consequence. A one-processor guest
+   satisfies it by construction; a two-processor one needs cpu1, and cpu1
+   spends the stall in `HalProcessorIdle` with the worker absent from its
+   census at any depth, across two dumps eight minutes apart at an
+   identical rsp. This remains the only mechanism found that is
+   *structurally* different between one and two processors.
+3. **Injection ratio 1.00 on a stalled multicore boot** (101,533 against
+   101,652 over 61 s), which is new on this configuration and closes the
+   double-injection family on this side.
+4. **The guest-memory instruments work on `census=0` builds** via a
+   user-mode-census CR3, where the documented input reads zero.
+
+**The lesson is the one already in CLAUDE.md and it cost most of a
+session's novelty**: check the existing record before building the
+instrument, not after it produces a result worth writing up. The reading
+is not wasted - it is a second, independent confirmation on a different
+processor count - but it should have been framed as that from the start.
