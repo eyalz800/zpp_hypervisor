@@ -76483,3 +76483,40 @@ being one of the ~1-in-7 that get there.
 Recorded now, before the outcome, so the standard is fixed in advance:
 **the claim to test is cpu0's exits per round trip, 21.36 before, at the
 same phase.** Anything else is a different measurement wearing its name.
+
+## Stalled A is a CHEAP comparison state, and the change moves it
+
+Boot 233, first stalled-A boot with the three control fields shadowed:
+
+    stalled A, cpu0 exits/s
+      BEFORE (n=7)   8,709 - 8,835   mean 8,784
+      AFTER  (n=1)   **8,591**       -2.2% vs mean,
+                                     **below the entire pre-change range**
+
+**This is a better experiment than the one that was planned**, and it
+arrived by accident. The intended comparison - cpu0's 21.36 exits per
+round trip at winlogon's wait - needs a healthy boot that reaches that
+phase, which is a 1-in-7 draw costing ~40 minutes when it lands. Stalled
+A costs **14 minutes, arrives 5 times in 7**, and is reproducible to
+**1.4% across seven pre-change boots** (`c8f62cb`, and the samples
+after it).
+
+A state that reproducible is a measuring instrument. The seven pre-change
+samples are the control arm, already collected, on the same binary but
+one commit earlier.
+
+**One sample below a seven-sample range is suggestive and nothing more.**
+The pre-change spread is 126/s wide and the shift is 193/s, so it is
+outside - but n=1, and this session has already retracted five claims
+that rested on one or two samples. Three more stalled-A boots settle it
+either way, and they cost 45 minutes rather than the hours the healthy
+route needs.
+
+**What the change should do to stalled A, predicted before the data.**
+The three shadowed fields are written once per round trip in the
+ten-field batch. If stalled A carries that batch too, cpu0 should lose
+about three exits per round trip. It runs ~8,784 exits/s against a round
+trip rate not yet measured for stalled A - so the *size* of the expected
+drop is not predicted here, only its **direction: down**. A rise, or no
+movement, would say the batch is not present in stalled A and the
+comparison is measuring something else.
