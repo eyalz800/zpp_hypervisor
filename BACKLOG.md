@@ -77272,3 +77272,44 @@ control's claim stands and mine does not.
 
 Reverted; tree builds clean and the suite is back to its two
 pre-existing failures with none added.
+
+## And the 16.4x was optimistic: deferral is skipping ~100% of guest-state writes
+
+The pricing in the entry above rested on an assumption stated as fact:
+*"deferral was already eliding nothing for these six, because a field
+the level above rewrites every round trip is dirty every round trip."*
+**That assumption was never checked, and the counters do not support
+it.**
+
+Boot 256, one 62-second window:
+
+    guest_state_writes_skipped   cpu0  **197,782/s**   cpu1  27,016/s
+    guest_state_writes_done      cpu0        **+0**    cpu1     95.6/s
+
+**cpu0 skipped every single guest-state write in the window.** Whatever
+deferral is doing, it is not doing nothing - it is eliding essentially
+all of them.
+
+That does not prove the six batch fields specifically are being skipped
+- **the counter is an aggregate over all 46 guest-state fields and there
+is no per-field breakdown**, which is exactly the ambiguity that makes
+this a caveat rather than a refutation. But it removes the ground the
+"costs approximately zero" half of the estimate stood on, and the eager
+write I priced at 2,131 cycles each may be paid far more often than
+once per round trip.
+
+So the 16.4x figure should be read as **an upper bound with an
+unmeasured cost term**, not a result. The change remains unshipped for
+the reason already recorded - it requires weakening a negative control -
+and this is a second, independent reason to be glad of that.
+
+**What would settle the cost side:** a per-field skip counter, indexed
+the same way `guest_state_dirty` already is. `guest_state_writes_skipped`
+is one scalar where the dirty mask is 46 bits; counting per bit is the
+same shape as `shadow_field_written` and would say directly whether
+these six are ever deferred at all.
+
+**The general form, and this file has it three times now:** an aggregate
+counter cannot answer a per-item question, and quoting one to justify a
+per-item change is how the RDX census "confirmed" a loop by counting a
+sentinel.
