@@ -75837,3 +75837,34 @@ necessary-not-sufficient. If asking is not possible, the distinguishing
 guest-side evidence would be `LogonUI.exe`'s own thread state and whether
 `credprov`/`LogonUI` has loaded the credential providers - neither of
 which was read.
+
+## Amendment: the spinner is NOT stuck. It advances, very slowly
+
+Corrected by the user moments after the photo: the "Please wait" dots
+**do** continue, they are just **extremely slow**.
+
+That changes the reading again, and in the direction the file already
+predicted. `the-multicore-wedge-is-a-guest-side-livelock` records
+exactly this: **the multicore wedge is a SLOWDOWN, not a deadlock.**
+
+So the state is:
+
+- not a deadlock - the spinner animates, processes are created and torn
+  down (53 -> 43 -> 32), the VTL loop carries changing work
+- not a stall in this VMM - `vmcall` 148-260/s, both processors
+  executing, no armed watchdog in 90 minutes
+- **a guest running at a small fraction of normal speed**, far enough
+  through boot to be at winlogon's pre-credential wait after 105 minutes
+
+**"Stuck" was mine, taken from the first report and repeated without
+qualification.** Two corrections in five minutes on the same observation
+- first "login screen" for "Please wait", then "stuck" for "slow" - and
+both came from the user looking at the screen, which is the one
+instrument this rig has that I cannot read.
+
+The useful consequence: the remaining failure is **throughput**, not a
+lock. Something makes this guest one or two orders of magnitude slower
+than it needs to be, and everything measured tonight is consistent with
+that - the 21% interrupt-window exits, the 8,790-vs-1,190 processor
+asymmetry in stalled A, and a boot that takes 105 minutes to reach a
+screen a real machine reaches in seconds.
