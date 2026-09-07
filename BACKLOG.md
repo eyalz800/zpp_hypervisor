@@ -75739,3 +75739,31 @@ The parent-pid cross-check matters here and the walker prints its own
 caveat: pids are reused, so `parent 432 is currently winlogon.exe` is
 consistent with rather than proof of parentage. It agrees with the two
 processes winlogon actually spawns, which is the expected answer.
+
+## 90 minutes at the login screen, and the pids prove it is the same session
+
+Boot 231 at 06:48, 87 minutes after `LogonUI.exe` first appeared:
+
+    LogonUI.exe   pid 1464  parent 432 (winlogon.exe)
+    dwm.exe       pid 1456  parent 432
+    winlogon.exe  pid 432
+    LsaIso.exe    pid 700
+    Secure System pid 68
+    32 processes; walk ended because: reached the list head - complete
+
+**The process count fell 53 -> 43 -> 32** as boot-time transients
+(`SIHClient.exe`, `OriginWebHelpe`, ...) finished and exited. That is a
+machine settling to idle at the login prompt, and it takes a live
+scheduler to tear processes down, so a falling count is positive evidence
+rather than decay.
+
+**The pids are the check that makes this safe to say.** A large drop is
+equally consistent with "transients finished" and with "the shell died
+and something restarted it", and only the pids separate them:
+`LogonUI.exe` is still **1464** and `dwm.exe` still **1456**, the same
+values as when they first appeared. Same processes, same session, ninety
+minutes on.
+
+Recorded because the reflex on seeing 53 -> 32 is to read it as decay,
+and the distinguishing evidence costs one extra column of the output that
+was already on screen.
