@@ -77135,3 +77135,65 @@ this line is invalid.
 The file is in `~/vm` and `never-reboot-the-rig` means it persists for
 this session; it is not in `backup.sh`, so a future reboot would remove
 it. Reverting is `rm ~/vm/boot-zpp-noaudio.sh` and changing nothing else.
+
+# ===== EXPERIMENT RESULT: the audio stack was never the cause =====
+
+Boot 253, first healthy boot with the audio controller **removed from
+the VM** (verified in `/proc/<pid>/cmdline`: three `vfio-pci` devices,
+`00:1f.3` absent). `vmcall` 336.8/s, the highest of any boot this
+session.
+
+A watchdog armed at 14:59, read live at age 14.7 s of 300:
+
+    3 power IRP(s) in flight
+      Irp ...12d4e0   CurrentDevice <null>
+      Irp ...1e8710   CurrentDevice <null>
+      Irp ...184a60   **WatchdogState 1**   CurrentDevice **\Driver\USBHUB3**
+
+**`IntcAudioBus` and `IntcOED` are absent from the list entirely** - no
+device, no power IRP - and the failure happened anyway, on a different
+driver.
+
+This is **outcome 2 of the three registered in `0dddacb`'s successor**:
+"the `0x9F` still happens, on a different driver -> the audio stack was
+a symptom of something general about power transitions, and removing one
+device just moved the target." It was.
+
+## And it refutes the passthrough lead too
+
+`7519bce` concluded "the stuck power IRP is on a PASSED-THROUGH device,
+and that is the lead", reasoning that VFIO's partial device power
+management could leave a guest driver waiting forever.
+
+**`USBHUB3` is not a passed-through device.** The launcher gives the
+guest `-device qemu-xhci,id=xhci` - an **emulated** xHCI controller.
+There is no VFIO underneath it.
+
+So the failure occurs on an emulated device as readily as on a
+passed-through one, and **VFIO power management is not the mechanism.**
+That lead lasted about an hour and is now dead, killed by the experiment
+that was designed to test a different hypothesis.
+
+## What survives, and it is a much smaller space
+
+Three explanations have now been eliminated by experiment rather than
+argument:
+
+    the audio drivers lack hardware        refuted - nodes Started (this boot's own tree)
+    the audio stack is the culprit         refuted - removed it, failure persists
+    VFIO power management is the mechanism refuted - it happens on an emulated device
+
+What remains is the one thing every version of this failure has shared:
+**a device power transition that does not complete within 300 seconds,
+in a guest running at a fraction of normal speed, on whatever driver
+happens to be holding an IRP.** That is the throughput account, and it
+is now the only account left standing.
+
+**It also predicts something checkable:** if the cause is slowness, then
+making the guest faster should reduce the `0x9F` rate, and the shadow
+change (`df95d54`, +29.9% round trips) is a first instalment. The rate
+before it was 5 of 7 healthy boots; after it, boots 238, 240, 243, 245
+and 250 all still died, so **the first instalment did not fix it** - the
+guest is still far too slow, which is consistent rather than
+contradictory, but it means throughput has to improve by much more than
+30% before this test says anything.
