@@ -76273,3 +76273,70 @@ Next step, and it needs no boot: take the fields one at a time, check
 each against `deferrable_field_is_shadowed`'s hazard and against what
 `nested_entry.cpp` must intervene on, and price the survivors at 21.36
 exits per round trip rather than 0.241.
+
+## The field census names every culprit. 23% is already on KVM's shadow list
+
+`dump_field_use` was in the reader all along and prints unconditionally
+under "vmcs fields the guest hypervisor uses". Boot 231, cumulative:
+
+    --- vmread (9,495,392 total, 29 distinct) ---
+    0x400c vm_exit_controls                 1,473,061  15.5%
+    0x4408 idt_vectoring_information_field  1,217,110  12.8%  <- KVM RO
+    0x6400 exit_qualification                 823,118   8.7%  <- KVM RO
+    0x6818 guest_idtr_base                    736,770   7.8%
+    0x4812 guest_idtr_limit                   736,770   7.8%
+    0x640a guest_linear_address               736,679   7.8%  <- KVM RO
+    0x2400 guest_physical_address             736,679   7.8%  <- KVM RO
+    0x6816 guest_gdtr_base                    736,551   7.8%
+    0x4810 guest_gdtr_limit                   736,551   7.8%
+    0x482a guest_ia32_sysenter_cs             736,537   7.8%
+    0x480c guest_ldtr_limit                   736,536   7.8%
+
+    --- vmwrite (16,345,508 total, 97 distinct) ---
+    0x400c vm_exit_controls   0x4012 vm_entry_controls
+    0x6816 guest_gdtr_base    0x4810 guest_gdtr_limit
+    0x6818 guest_idtr_base    0x4812 guest_idtr_limit
+    0x480c guest_ldtr_limit   0x482a guest_ia32_sysenter_cs
+    0x4004 exception_bitmap   0x201a ept_pointer
+      - **all ten at 1,473,06x, 9.0% each**
+    0x401a vm_entry_instruction_length         788,659   4.8%  <- KVM RW
+    0x2806 guest_ia32_efer                     736,546   4.5%
+
+**Two patterns account for nearly everything.**
+
+**1. A ten-field write batch, 1,473,055 times = 90.1% of all vmwrite
+exits.** `vm_exit_controls`, `vm_entry_controls`, GDTR base+limit, IDTR
+base+limit, LDTR limit, `sysenter_cs`, `exception_bitmap` and
+**`ept_pointer`** - written together, always. That set is the state that
+differs between trust levels, and `ept_pointer` is the giveaway. This is
+Hyper-V reprogramming a VMCS for a different context, and it does it 1.47
+million times against 130,692 `HvCallVtlReturn`s - **11.3 batches per VTL
+return**, so it is not only the VTL switch.
+
+**2. A read batch at ~736,600**, the same count for `guest_idtr_*`,
+`guest_gdtr_*`, `guest_ldtr_limit`, `sysenter_cs`, `guest_linear_address`
+and `guest_physical_address` - one handler reading eight fields together.
+
+### What KVM already shadows, quantified
+
+    vmread   KVM-shadowable  3,599,244 / 9,495,392  = **37.9%**
+    vmwrite  KVM-shadowable  2,347,390 / 16,345,508 = **14.4%**
+    TOTAL                    5,946,634 / 25,840,900 = **23.0%**
+
+**Twenty-three percent of every trapped VMCS access in this boot is a
+field KVM's `vmcs_shadow_fields.h` already shadows and zpp does not** -
+`idt_vectoring_information_field`, `exit_qualification`,
+`guest_linear_address`, `guest_physical_address`,
+`vm_exit_interruption_error_code`, `exception_bitmap`,
+`vm_entry_instruction_length`, `vm_entry_exception_error_code`.
+
+At ~50,588 cycles per trapped exit and 51.9% of cpu0's cycles going to
+the flat per-exit cost, removing 23% of them is worth roughly **12% of
+that processor** - and that is the conservative half, taking only fields
+a reference implementation has already validated as safe to shadow.
+
+**The other 77% is the ten-field batch and the descriptor-table reads**,
+which KVM does not shadow either. `ept_pointer` genuinely cannot be -
+nested EPT is exactly what this VMM must intervene on. Why Hyper-V
+rewrites GDTR/IDTR/LDTR and both control words 1.47 million times is the
+larger question, and it is now a specific one.
