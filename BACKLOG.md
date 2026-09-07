@@ -76765,3 +76765,33 @@ n=2; it costs a ~1-in-7 draw.
 the credential prompt - `9d7f07f` retracted exactly that claim when the
 screen turned out to read "Please wait". The user is the only sensor for
 what is displayed.
+
+## Boot 240's outcome, and a reader that refused rather than guessed
+
+Boot 240 reached the `LogonUI` state at 10:44:52 (n=34), was measured at
+10:45:35 - the controlled comparison above - and was
+`paused (shutdown)` by 10:47:47. **About three minutes at that state**,
+against boot 231's ninety.
+
+    bugcheck   0x9f DRIVER_POWER_STATE_FAILURE
+               DRIVER NAME **\Driver\USBHUB3**
+
+Sixth driver name from a `0x9F` in this investigation, and the second
+time `USBHUB3` has appeared - still arbitrary, still the device the power
+manager dispatched to.
+
+**The IRP read refused.** `guest-irp.py` scans the IRP header for a
+pointer landing on `MajorFunction == IRP_MJ_POWER` and prints nothing if
+none does. On boot 240 none did, so **no third `IntcOED` sample exists**
+- most likely the IRP was completed or its memory reused between the
+bugcheck and the read.
+
+That is the instrument behaving correctly and it is worth recording as
+such: the alternative was a plausible driver name derived from whatever
+happened to sit at a hand-computed offset, which is precisely the failure
+this tree has paid for six times. **A refusal is a result.** The
+`IntcOED` finding stands at two samples (boots 218 and 238), not three.
+
+**The measurement was taken 2m12s before the guest died.** That is the
+whole value of taking the reading the moment the state is reached rather
+than waiting for a better moment - there was no better moment.
