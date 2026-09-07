@@ -52,7 +52,23 @@ while :; do
     esac
 
     if [ "$ARMED" -gt 0 ]; then
-        echo "=== ARMED. Reading PopIrpThreadList NOW (never read before) ==="
+        # **The decisive read, and boot 265 did not take it.** If the
+        # guest is running NORMALLY - trust-level traffic flowing, exits
+        # at healthy rates - for the whole 300 s while its power IRPs
+        # age out, then the 0x9F is not a throughput failure at all and
+        # "the machine is too slow to finish in 300 s" is refuted. If
+        # instead the guest has dropped to a stalled profile by now,
+        # the two failures are the same failure and the throughput
+        # account survives. Nothing else distinguishes those, and the
+        # window to ask is only open while the watchdogs run.
+        echo "=== ARMED. Is the GUEST still healthy right now? ==="
+        clear_nc
+        timeout 300 python3 "$HERE/rig-dump-state.py" \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 --delta 60 \
+            > "$OUT/triage-at-arm.txt" 2>&1 || true
+        grep -E "^  vmcall |vtl_fresh_calls|stimer_asked_arms" \
+            "$OUT/triage-at-arm.txt" | head -6
+        echo "=== Reading PopIrpThreadList NOW (never read before) ==="
         printf '%s\n' "$IRPS" | grep -E "CurrentDevice|age |WatchdogState" | head -20
         printf '%s\n' "$IRPS" > "$OUT/irps-at-arm.txt"
         clear_nc
