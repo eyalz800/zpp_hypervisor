@@ -76999,3 +76999,45 @@ prohibition covers this.
 Registered now so the answer cannot be fitted afterwards: **if the device
 nodes are present and started, this hypothesis is wrong** and the wait is
 on something else.
+
+## REFUTED: the audio drivers have hardware, and it is Started
+
+`0dddacb` registered the hypothesis that `IntcAudioBus`/`IntcOED` never
+complete their power IRP because the audio controller is not passed
+through, and named the falsifier: **"if the device nodes are present and
+started, this hypothesis is wrong."**
+
+Boot 250 at n=14, PnP device tree walked live:
+
+    Started  IntcAudioBus         PCI\VEN_8086&DEV_9DC8&SUBSYS_16CE1043&REV_30
+    Started  IntcOED              INTELAUDIO\DSP_CTLR_DEV_9DC8&VEN_8086&DEV_0222
+    Started  IntcAzAudAddService  INTELAUDIO\FUNC_01&VEN_10EC&DEV_0294
+    Started  IntcDAud             INTELAUDIO\FUNC_01&VEN_8086&DEV_280B
+
+**All four are `Started`, with real PCI and INTELAUDIO instance paths.**
+The hypothesis is wrong: the hardware is there, enumerated and running.
+
+**The rest of the tree is healthy too.** 103 nodes `Started`; the only
+device carrying a problem code is `ACPI\QEMU0002`, `problem 28
+CM_PROB_FAILED_INSTALL`, `service <none>` - a QEMU virtual node PnP
+matched no driver to, which is expected in a VM and unrelated.
+
+**And there is no `StartPending` node.** An earlier count said one; that
+was the reader's own legend line - `guest-devnodes.py` prints "How to
+read this" text containing the state names, and a `grep -oE` over the
+whole file counted the documentation. Same shape as the `novina=`
+mis-grep this file records: **matching a word in prose and calling it
+data.** Recounted over the tree rows only, every state is `Started`.
+
+### What this leaves
+
+The stuck `IRP_MN_SET_POWER` is on a **started device with a live driver
+stack**. So it is not enumeration, not absent hardware, and not a driver
+that failed to install. It is the power transition itself not completing
+on a device that is otherwise working.
+
+That is consistent with the throughput account - a `SET_POWER` on a
+started device typically waits for the device to acknowledge a state
+change, and a guest running at a fraction of speed can miss whatever
+window that needs - but consistent is not established, and this entry
+records a **refutation**, not a replacement.
