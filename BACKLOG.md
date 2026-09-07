@@ -75364,3 +75364,39 @@ one measurement.
 Recorded as the decision it is: **not rebuilding while the login screen
 is the goal.** When the cycling stops, `census=1` on a fresh binary with
 its own baseline is the first thing to build.
+
+## Stalled B has a second sample, and it sits INSIDE the healthy nested_run band
+
+Boot 226: cpu0 6,898.21/s, cpu1 7,655.09/s - **balanced**, not stalled
+A's 7.4:1 - with `vmcall` 134 in 62 s (2.16/s). Low VTL calls, so
+stalled; balanced load, so stalled **B**, matching boot 214's 6,781 /
+6,887.
+
+    stalled B   214   cpu0 6,781/s   cpu1 6,887/s   vmcall ~0
+    stalled B   226   cpu0 6,898/s   cpu1 7,655/s   vmcall 2.16/s
+
+**The important part is what this does to the screening classifier.**
+Boot 226's total exit rate is 14,580/s, and its `nested_run` samples read
+**14,452 and 13,482** - squarely inside the band I had built for
+*healthy* boots (11,162-19,078). A stalled boot read healthy on that
+instrument for its first two samples.
+
+So `nested_run/s` **does not separate healthy from stalled.** It
+separates stalled A from everything else, because stalled A's 7.4:1 skew
+happens to produce a low total. Stalled B and healthy both run both
+processors and both land near 14,000/s.
+
+This was already flagged as screening-only with a 5% margin on n=11 and
+n=7, and used only to decide when to spend a monitor read - never as a
+verdict. **That caution is the only reason it cost nothing.** Had the
+classifier been trusted, boot 226 would have been recorded as the third
+healthy boot and the `IntcOED` follow-up would have been attempted on a
+guest that never started `smss.exe`.
+
+The rule generalises past this instrument: **a classifier validated on
+two classes silently mislabels a third.** Stalled B existed in the data
+(boot 214) when the bands were fitted, and was excluded from the fit
+because it was one sample - which is exactly the sample that would have
+shown the overlap.
+
+Tally, fifteen boots: **2 healthy, 11 stalled A, 2 stalled B.**
