@@ -77197,3 +77197,29 @@ and 250 all still died, so **the first instalment did not fix it** - the
 guest is still far too slow, which is consistent rather than
 contradictory, but it means throughput has to improve by much more than
 30% before this test says anything.
+
+## The post-change arm is now four consistent samples; the before arm is still one
+
+    boot 238  n=13      13.44 exits/RT   VMCS 34.5% of exits
+    boot 240  n=12      15.03            32.6%
+    boot 255  n=14      15.39            32.2%
+    boot 240  LogonUI   15.23            -
+    ---------------------------------------------------
+    AFTER   n=4   mean **14.77**   range 13.44 - 15.39
+    BEFORE  n=1        **21.36**   VMCS 86.1%   (boot 231, LogonUI)
+
+**Four post-change measurements across three boots and three nearby
+states agree to +/-7%**, and the VMCS share sits at 32-35% against the
+pre-change 86.1%. That is a well-characterised *after*.
+
+**The before arm is still a single boot**, and no amount of post-change
+sampling fixes that - it is the arm that would need a revert and a
+1-in-5 healthy draw to extend. So the honest form of the claim has not
+changed since `2e071ef`: **the comparison is n=1 against n=4**, and its
+corroboration is the stalled-A control at n=7 versus n=7.
+
+Worth noting what four samples *do* buy: they rule out the possibility
+that boot 240's `LogonUI` reading was a fluke of that particular
+window. The after-state is stable across boots, states and an hour of
+wall-clock. Whatever the before-value truly is, the after-value is
+**14.77 +/- 1**.
