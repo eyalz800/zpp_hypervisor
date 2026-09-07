@@ -78048,3 +78048,65 @@ healthy multicore boot: it ran, loaded the whole graphics stack, had
 `winlogon.exe` and `LsaIso.exe` up with VBS genuinely running, gave the
 matched control readings three entries above, **and then died of a
 timeout whose named cause is provably arbitrary.**
+
+## Stalled B, characterised - and both profiles land on the guest changing its clock rate
+
+Boot 264 is the other profile, and it separates from stalled A on the
+triage alone:
+
+                        stalled A (boots 256-262)   stalled B (boot 264)
+    cpu0 exits/s        8,552                       6,810
+    cpu1 exits/s        1,189                       **7,074**
+    cpu1 hlt            **48.5%** (idle)            **none at all**
+    vmcall              cpu1 2.0/s                  **absent from both**
+    vtl_fresh_calls     cpu0 +0, cpu1 1.0/s         **+0 on BOTH**
+
+In A the application processor is a healthy idle processor and only cpu0
+is wedged. In B **both processors are busy and neither makes a single
+hypercall** - no trust-level traffic of any kind, in either direction.
+
+**Where each processor is**, named against the PDB (kernel base
+`0xfffff80793e00000`):
+
+    cpu0  rip **HalpHvTimerArm+0x7a**
+            KeClockInterruptNotify+0x2c6
+              HalPerformEndOfInterrupt+0x1a
+                EtwpLogKernelEvent+0x2e0
+                  KiSetNextClockTickDueTime+0x10a
+                    KiUpdateTime+0x38f
+                      **KiSetClockTickRate+0x19f**
+                        HalpTimerClockArm+0x31a
+                          HalpHvTimerArm+0x7a
+
+    cpu1  rip KiDpcInterrupt+0x390, with KzLowerIrql,
+          IopfCallDriver+0x5b and MiProbeAndLockComplete+0x21 below it
+
+cpu0 is **inside the clock interrupt, re-arming the timer**, and
+specifically inside `KiSetClockTickRate`. `HalpHvTimerArm` is the
+*Hyper-V* arm path - it writes the synthetic timer MSR - which is
+corroborated independently by cpu0's exit mix, where `wrmsr` is the
+largest non-`vmresume` reason at **2,411/s, 35.4%**, its highest share in
+any profile measured.
+
+**The unification, and it is the answer to "why are there two profiles":**
+
+    stalled A   cpu0 in ExSetTimerResolution -> ExpUpdateTimerConfiguration
+                -> KeGenericProcessorCallback -> ExpUpdateTimerConfigurationWorker
+    stalled B   cpu0 in KiUpdateTime -> **KiSetClockTickRate**
+                -> HalpTimerClockArm -> HalpHvTimerArm
+
+**Both are the guest changing its clock rate**, reached by two different
+callers - A from a driver calling `ExSetTimerResolution` during
+`DriverEntry`, B from the clock ISR's own tick-rate update. They are
+plausibly two points in the same operation rather than two unrelated
+failures, which is what the two-profile question has been asking.
+
+**What this does NOT establish.** These are locations, not causes: a
+stack says where a processor is, not why it cannot leave. Two profiles
+sharing a subsystem is suggestive and is not proof they share a
+mechanism, and B has been seen once where A has been seen seven times.
+The claim here is the observation, not an account of it.
+
+It does say where to look, and it is consistent with everything measured
+today: the healthy boot runs at **680 ISR entries/s** and the stalled one
+at **1,666/s**, which is the same subsystem seen from the rate side.
