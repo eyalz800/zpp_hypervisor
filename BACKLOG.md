@@ -78157,3 +78157,52 @@ and `ZPP_TICK_FLOOR` are both recorded in CLAUDE.md as tried and failed -
 bugcheck loop and shutdown respectively - and both lied about the period,
 which is precisely the quantity measured above as *unchanged*. Whatever
 this is, the guest is not asking for the wrong thing.
+
+## Second healthy boot: the ISR rate replicates, the injection asymmetry DOES NOT
+
+Boot 265, healthy (vmcall 363.82/s, `vtl_fresh_calls` cpu0 +96.55/s),
+captured live and kept. It is the second sample of the control that boot
+263 gave, and the two disagree about one of the two findings taken off
+263.
+
+**Replicates - the tick rate.**
+
+    HalpClockTickLogIndex   healthy 263   680 ISR/s
+                            healthy 265   **671 ISR/s**
+                            stalled 261   1,666 ISR/s
+
+Two independent healthy boots within 1.3% of each other, and the stalled
+boot at 2.45x both. **This is a real discriminator.**
+
+**Does NOT replicate - the cpu0/cpu1 injection asymmetry.**
+
+    stalled 261   cpu0 1,009,003   cpu1 650,848   cpu0 **1.55x** higher
+    healthy 263   cpu0   235,433   cpu1 619,068   cpu1 **2.63x** higher
+    healthy 265   cpu0   648,150   cpu1 567,120   cpu0 **1.14x** higher
+
+**The entry two above claimed "the direction flips" and that this kills
+the busy-BP-versus-idle-AP explanation. That claim does not survive its
+second sample.** Healthy boots span cpu1-heavy 2.63x to cpu0-heavy 1.14x,
+and the stalled figure of 1.55x cpu0-heavy sits *inside* that range. The
+asymmetry is not a discriminator; boot 263 was one draw from a wide
+distribution and I read a direction off it.
+
+That is the same shape as the "stalled A is an attractor" mistake earlier
+in this session, refuted by its third sample, and the same shape as
+quoting 1,059/s from another session's boot. **One control is not a
+control.** The tick rate survived the same test and is the stronger for
+having been given it.
+
+**Also looks like a discriminator, with visible spread, so treat as
+provisional:** `stimer_asked_arms` reads 0.06/s and 1.27/s on the two
+healthy boots against 25.30/s on stalled B - a 20x gap at worst, but two
+healthy samples that differ 21x between themselves. It needs more draws
+before it carries weight, and the same is true of cpu1's `ept-violation`
+rate, 3,100/s here against 0.03/s on stalled A.
+
+**Where 265 is:** module tail `igdkmd64.sys`, the 27 MB Intel graphics
+kernel driver, with five processes - `System`, `Secure System`,
+`Registry` and two `smss.exe`. That is *earlier* than boot 263 reached,
+so the two healthy boots are being compared at different phases, which
+is one plausible source of the injection spread above and another reason
+not to have read a direction off a single pair.
