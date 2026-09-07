@@ -78774,3 +78774,50 @@ screen as well as the credential prompt, this exact inference was made
 earlier in this session and refuted by a photograph of the rig, and the
 2026-09-05 boot-150 claim has the same defect. The guest is being kept
 alive and the user asked.
+
+### And it died anyway - to a SECOND, later arming. The endgame test predicts the plateau, not survival
+
+Boot 278's post-mortem, memory intact:
+
+    0x9F DRIVER_POWER_STATE_FAILURE param1 0x3
+    DRIVER NAME: **\Driver\USBHUB3**   (not IntcAudioBus)
+    9 power IRPs in flight, **exactly ONE armed**:
+      \Driver\USBHUB3   age 3,000,167,320 = **300.0 s of 300**
+    IntcOED: **not armed at all**
+
+**The timing is the finding.** At n=14 (22:52) the test read **0 of 7
+armed**. The USBHUB3 watchdog reads 300.0 s at 23:04, so it armed at
+**~22:59** - after the plateau, and right as the boot broke through from
+n=14 to n=31.
+
+So **"0 armed at n=14" predicts breaking through the plateau, not
+surviving.** It did exactly what it predicted - boots 263, 265, 273 and
+275 all had watchdogs armed at n=14 and never left the plateau; this one
+had none and went to 31 processes with `LogonUI.exe` and `dwm.exe`. Then
+a *fresh* watchdog armed and killed it 300 s later.
+
+**There are at least two separate arming events**, and the record's
+framing of one power-IRP failure following the plateau is too simple:
+
+    arming A   at or before n=14   IntcOED first, USBHUB3 ~14-21 s later
+               -> boot never leaves the plateau (263, 265, 273, 275)
+    arming B   after breakthrough  USBHUB3 alone, IntcOED never arms
+               -> boot reaches n=31 and dies there (278)
+
+Boot 231, the only recorded survivor, presumably took neither.
+
+**One more thing this boot corrects.** Four boots named `IntcAudioBus`
+while the holder was `IntcOED`, and this file recorded that the bugcheck
+names the *enumerator* rather than the holder. Here the bugcheck names
+`USBHUB3` and `CurrentDevice` is **also** `USBHUB3`, the same
+`DEVICE_OBJECT 0xffffab8def120da0` - because a USB hub is its own
+enumerator. So "the bugcheck names the enumerator" is right and is not
+the same as "the bugcheck names the wrong driver": sometimes they
+coincide. Check `CurrentDevice` regardless; do not assume it differs.
+
+**Where this points.** `USBHUB3` sits on the **emulated** `qemu-xhci`,
+not on anything passed through - established earlier this session when
+the VFIO power-management account was eliminated. So the failing
+transition is a D-state change on an emulated controller, and this is now
+the narrowest target the `0x9F` has ever had: **one device, one
+transition, on hardware QEMU is simulating.**
