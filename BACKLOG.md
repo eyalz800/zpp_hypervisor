@@ -78448,3 +78448,45 @@ smss.
 680/s healthy against 1,666/s stalled, replicated. Injection asymmetry -
 closed as *not* a discriminator, healthy spans both directions. Worker
 census - closed here, it is specific to the stall.
+
+## Stalled B replicates to ~1%, and the member I quoted is its noisiest one
+
+Boot 272 is the second stalled B, which the first characterisation could
+not test. It reproduces boot 264 closely on every tight member:
+
+    cpu0, windowed              boot 264      boot 272     apart
+      exits/s                    6,810         6,528       4.1%
+      wrmsr                      2,411.57/s    2,425.12/s  **0.6%**
+      stimer_arm_count           1,606.86/s    1,618.25/s  **0.7%**
+    cpu1 stimer_arm_count          572.86/s      573.33/s  **0.08%**
+
+    stimer_asked_arms cpu0        25.30/s       13.31/s    **1.9x**
+
+Both boots also share the qualitative signature exactly: `vtl_fresh_calls`
+**+0 on both processors**, no `hlt` on either, and cpu1 busy at ~6,800
+exits/s where stalled A leaves it idle at 1,189.
+
+**So stalled B is a reproducible state**, as tightly as stalled A is
+(recorded there as sd 35/s on 8,784). Three members agree inside 1% and
+one inside 0.1%. That is worth having: a second B was needed before
+anything measured on the first could be trusted, and it arrived.
+
+**And it lands awkwardly on my own earlier claim.** The "420x re-arm"
+entry quoted `stimer_asked_arms`, which is the **one member of the five
+that does not replicate** - 25.30/s against 13.31/s between two boots of
+the same state. The 420x figure was computed against healthy 263's
+0.06/s; against boot 272 it would be 222x, and against healthy 265's
+1.27/s it is 10x. The effect is real and large in every pairing, but
+**the magnitude was quoted to three significant figures off a member with
+a 1.9x spread between replicates.**
+
+`stimer_arm_count` is the member to quote instead - "STIMER0 writes +
+clock injections" - which reads **1,607 and 1,618/s on the two stalled B
+boots against 232.5/s on healthy 263**, a factor of ~7 with 0.7%
+reproducibility. Same phenomenon, an instrument that holds still.
+
+**The recurring lesson, now four times this session:** before quoting a
+ratio, check that its numerator replicates. The tick rate survived that
+test (671, 680), the injection asymmetry failed it, the re-arm rate is
+directionally right but numerically loose, and `stalled A is an
+attractor` failed it outright.
