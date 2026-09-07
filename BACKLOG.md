@@ -77598,3 +77598,50 @@ worker at all. **What is not established** is the causal direction -
 whether cpu0 cannot finish because of the interrupt rate, or is waiting
 on something cpu1 owes it. `KeGenericProcessorCallback`'s own rendezvous
 state is the read that would separate those and has not been taken.
+
+### The hot address is an IRQL restore, not a spin loop
+
+`ExpUpdateTimerConfigurationWorker+0x1c5` holds **34.6% of cpu0's
+interrupted samples on one address**, which reads like a tight loop.
+It is not. Disassembling `ntoskrnl.exe` at that RVA (0x30d475, image
+base 0x140000000):
+
+    14030d471:   movq  %rbp, %cr8          <- LOWER IRQL, write TPR
+    14030d475:   movq  0x40(%rsp), %rbx    <- worker+0x1c5, the hot address
+    14030d47a:   movq  0x50(%rsp), %rbp
+    14030d47f:   addq  $0x20, %rsp
+    14030d483:   popq  %r15
+    14030d487:   retq
+
+**The hot address is the instruction immediately after a CR8 write**,
+in the function's epilogue. So a third of every interrupt cpu0 takes
+lands in the one-instruction window where it has just dropped its task
+priority and has not yet returned. That is not a loop, it is the
+backlog firing the instant the gate opens.
+
+It also explains a number that was sitting unexplained beside it:
+`tpr-below` exits run at **756/s on cpu0 against 0.97/s on cpu1**. A
+`mov cr8` *is* the TPR write that produces that exit. Two independent
+readings of the same instruction.
+
+Note `llvm-objdump` labels this region `KeSetTimer+0x1745` - the export
+table has no entry for the worker, so it names the nearest export below.
+The PDB is the authority for the name and objdump for the bytes, which
+is the split CLAUDE.md already records as "a public symbol names the
+nearest start below, not the function".
+
+**What this changes.** The reading to avoid is "cpu0 spins at one
+address". What it actually does is repeatedly reach the *end* of the
+worker, lower IRQL, and get preempted before it can retire - with the
+call chain underneath still present eight minutes later.
+
+**What it does not settle**, and this needs saying because the epilogue
+reading makes a tidy story: if cpu0 were simply preempted at the
+epilogue and later resumed, the function would eventually return. It has
+not, in eight minutes. The stack shows the worker's entry address
+`0x30d2b0` at **two different depths** with interrupt frames between
+them, so re-entry rather than simple preemption is on the table and is
+not distinguished by anything measured here. Whether the worker is
+re-entered from the interrupt path, or the same activation is preempted
+indefinitely, is the open question - and it is a different question from
+the causal direction between cpu0 and cpu1, which is also still open.
