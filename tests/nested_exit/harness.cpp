@@ -3074,6 +3074,9 @@ static void test_l0_precedence()
                 {field::tpr_threshold, 0x401c},
                 {field::guest_cs_access_rights, 0x4816},
                 {field::guest_ss_access_rights, 0x4818},
+                {field::vm_exit_controls, 0x400c},
+                {field::vm_entry_controls, 0x4012},
+                {field::exception_bitmap, 0x4004},
             };
 
             check(std::size(reader_order) ==

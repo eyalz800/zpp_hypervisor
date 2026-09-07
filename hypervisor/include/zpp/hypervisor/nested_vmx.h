@@ -3444,6 +3444,38 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
         arch::x86_64::vmx::vmcs_fields::vmcs_field::tpr_threshold,
         arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_cs_access_rights,
         arch::x86_64::vmx::vmcs_fields::vmcs_field::guest_ss_access_rights,
+
+        // **Added on a re-measurement in a regime the break-even above
+        // was never evaluated in.** That note prices a field against
+        // "more often than once per 22.8 round trips" and records
+        // `vm_exit_controls` at once per 32.7, 30% short - so the
+        // avenue was closed.
+        //
+        // On a 2-processor boot at winlogon's pre-credential wait, cpu 0
+        // issues a **ten-field write batch 1.05 times per round trip** -
+        // 90.1% of all its VMWRITE exits, 1,473,06x occurrences each for
+        // `vm_exit_controls`, `vm_entry_controls`, GDTR/IDTR base and
+        // limit, `guest_ldtr_limit`, `guest_ia32_sysenter_cs`,
+        // `exception_bitmap` and `ept_pointer`. That is **34x the rate
+        // the decision was taken at**, and by the note's own model -
+        // its table implies 106,373 cycles an avoided exit against the
+        // 106,488 it quotes - each of these clears the break-even by
+        // **23.9x**: 111,692 cycles a round trip saved against 4,666.
+        //
+        // Only three of the ten are eligible and that is why only three
+        // are here. The GDTR, IDTR, LDTR and sysenter entries are guest
+        // state, so `deferrable_field_is_shadowed` refuses them - the
+        // note beside `shadow_read_only_fields` records the same assert
+        // refusing `guest_gdtr_base`. `ept_pointer` is the nested EPT
+        // this VMM exists to intervene on and can never be shadowed.
+        //
+        // No merge has to move: `build_vmcs02` reads these through
+        // `guest_vmcs12[cpu]`, and `copy_shadow_to_vmcs12` already
+        // populates that for every entry of this list. The 3,791-cycle
+        // copy-in read is what the 4,666 above is mostly made of.
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::vm_exit_controls,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::vm_entry_controls,
+        arch::x86_64::vmx::vmcs_fields::vmcs_field::exception_bitmap,
 };
 
 /**
@@ -3467,7 +3499,36 @@ inline constexpr arch::x86_64::vmx::vmcs_fields::vmcs_field
  * @{
  */
 inline constexpr std::size_t shadow_read_only_priced_at = 3;
-inline constexpr std::size_t shadow_read_write_priced_at = 9;
+
+/**
+ * **Re-derived 2026-09-07, which is what this assert asks for.** The
+ * count moved 9 -> 12 with `vm_exit_controls`, `vm_entry_controls` and
+ * `exception_bitmap`; the note beside them has the measurement.
+ *
+ * The break-even it is priced against is unchanged - *the model* is the
+ * one already here, used as written: this list's table implies 106,373
+ * cycles an avoided exit against the 106,488 quoted beside it. What
+ * changed is **the rate**, and only the rate.
+ *
+ *     vm_exit_controls    then 1 per 32.7 round trips   now **1.05 per**
+ *
+ * A 34x move, on a decision the note itself records as 30% short. At
+ * 1.05 uses a round trip each entry saves 111,692 cycles against 4,666,
+ * clearing the stated "more often than once per 22.8 round trips" by
+ * **23.9x**.
+ *
+ * **Two honesty notes, because the arithmetic is only as good as its
+ * inputs.** The 3,791 copy-in figure is marginal, which is what a
+ * length change needs. The 875 copy-out figure is an *average over
+ * twelve*, not marginal, so the 4,666 cost may be understated - the
+ * ratio has three orders of magnitude of headroom for that, but it is
+ * an estimate and not a measurement. And the rate is `cpu 0`'s at
+ * winlogon's pre-credential wait; `cpu 1` in the same window runs 2.00
+ * exits a round trip where `cpu 0` runs 21.36, so **the break-even is
+ * regime-dependent and the original 1/32.7 was very likely a correct
+ * reading of a different regime.**
+ */
+inline constexpr std::size_t shadow_read_write_priced_at = 12;
 
 static_assert(std::size(shadow_read_only_fields) ==
                   shadow_read_only_priced_at,

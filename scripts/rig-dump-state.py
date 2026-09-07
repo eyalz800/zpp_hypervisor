@@ -9928,6 +9928,11 @@ def main():
         (0x401c, "tpr_threshold"),
         (0x4816, "guest_cs_access_rights"),
         (0x4818, "guest_ss_access_rights"),
+        # Added with the three control entries in `nested_vmx.h`; the
+        # order must match that list, and `tests/nested_exit` checks it.
+        (0x400c, "vm_exit_controls"),
+        (0x4012, "vm_entry_controls"),
+        (0x4004, "exception_bitmap"),
     ]
 
     if "shadow_field_written" in off:
