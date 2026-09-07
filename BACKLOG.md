@@ -76216,3 +76216,60 @@ question is what `cpu 0` is being asked to do that `cpu 1` is not.
 5.1%) and all the user-mode execution, which is consistent with it being
 the processor Windows is actually running on - but consistent is not
 established.
+
+## zpp shadows 8 VMCS fields. KVM shadows 36. That is the 21-exits-per-round-trip
+
+Checked against the reference implementation, as `CLAUDE.md` requires -
+`.references/kvm/vmcs_shadow_fields.h`:
+
+    zpp   shadow_read_write_fields   **7**    shadow_read_only_fields   **1**
+    KVM   SHADOW_FIELD_RW           **24**    SHADOW_FIELD_RO          **12**
+
+zpp shadows: `guest_dr7`, `guest_rip`, `guest_rflags`,
+`guest_interruptibility_state`, `tpr_threshold`, `guest_cs_access_rights`,
+`guest_ss_access_rights`, and `exit_reason`.
+
+**Absent from zpp and present in KVM, read-write:** `GUEST_RSP`,
+`GUEST_CR0`, `GUEST_CR3`, `GUEST_CR4`, `CR0_GUEST_HOST_MASK`,
+`CR0_READ_SHADOW`, `CR4_READ_SHADOW`, `CPU_BASED_VM_EXEC_CONTROL`,
+`PIN_BASED_VM_EXEC_CONTROL`, `EXCEPTION_BITMAP`,
+`VM_ENTRY_INTR_INFO_FIELD`, `VM_ENTRY_INSTRUCTION_LEN`,
+`VM_ENTRY_EXCEPTION_ERROR_CODE`, `VMX_PREEMPTION_TIMER_VALUE`,
+`GUEST_INTR_STATUS`, `GUEST_PML_INDEX`, `HOST_FS_BASE`, `HOST_GS_BASE`,
+`HOST_FS_SELECTOR`, `HOST_GS_SELECTOR`.
+
+**Absent read-only:** `EXIT_QUALIFICATION`, `GUEST_PHYSICAL_ADDRESS`
+(and `_HIGH`), `GUEST_LINEAR_ADDRESS`, `VM_EXIT_INSTRUCTION_LEN`,
+`VM_EXIT_INTR_INFO`, `VM_EXIT_INTR_ERROR_CODE`,
+`IDT_VECTORING_INFO_FIELD`, `IDT_VECTORING_ERROR_CODE`.
+
+**Every one of those is a field Hyper-V touches and this VMM traps.**
+`EXIT_QUALIFICATION` and `GUEST_PHYSICAL_ADDRESS` are read on every EPT
+violation, and cpu0 takes 0.52 of those per round trip. `GUEST_CR3`,
+`GUEST_RSP` and the CR0/CR4 shadows are touched constantly.
+
+That is a direct, mechanical account of **21.36 trapped VMCS accesses per
+round trip**: the fields that would have made them free are not shadowed.
+
+### This is why `5c9aba1`'s negative result must be re-derived
+
+That commit rejected extending the list, and its arithmetic is sound for
+the regime it measured - `0.241` avoidable exits per round trip against a
+`4,666`-cycle per-field copy paid on every round trip. **`cpu 0` runs at
+21.36**, 88x higher, and each avoided exit there is worth ~50,588 cycles.
+The same per-field cost against 88x the benefit inverts the conclusion.
+
+**What is NOT being claimed:** that adding all 28 missing fields is
+correct. `nested_vmx.h` documents real hazards - a field in the shadow
+list is answered from the shadow *without* an exit, so anything this VMM
+must intervene on cannot be shadowed, and `deferrable_field_is_shadowed`
+exists to catch exactly that. KVM's list is a correctness-checked set for
+KVM's design, not a menu. **The claim is only that the gap is 28 fields
+wide, that it mechanically explains the measured exit multiplier, and
+that the arithmetic which closed this avenue was done at 1/88th of the
+real rate.**
+
+Next step, and it needs no boot: take the fields one at a time, check
+each against `deferrable_field_is_shadowed`'s hazard and against what
+`nested_entry.cpp` must intervene on, and price the survivors at 21.36
+exits per round trip rather than 0.241.
