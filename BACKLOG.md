@@ -78362,3 +78362,31 @@ never returned would look like from the outside. If the losses are real,
 this is a candidate mechanism for the `0x9F` that is squarely on our side
 of the boundary. If they are refusals, it is not, and the search moves
 on. Either way it is one read.
+
+### And the losses happen on HEALTHY boots, not stalled ones
+
+Boot 268, stalled A, read with the new reporting:
+**`pending_event_lost` = 0 on every processor.** The healthy boot 265 had
+**1,244**.
+
+The direction is the opposite of the obvious guess. Losing an event owed
+to the second-level guest is not a symptom of the stall - **a stalled
+guest does not generate the events in the first place.** Every one of
+265's losses was vector `0x2e`, `int 2Eh`, a system call; a guest that
+has stopped making system calls cannot have one interrupted mid-delivery.
+
+Two consequences:
+
+- **`pending_event_lost` is an activity counter, not a fault counter**,
+  and must never be compared between boots at different phases. Reading
+  0 on a stalled boot says nothing good about that boot.
+- **The disambiguation is still owed and can only be taken on a healthy
+  boot.** Boot 265 is dead and boot 268 has nothing to disambiguate.
+  `pending_event_lost_while_valid` now resolves and prints, so the next
+  healthy boot answers it in one dump.
+
+It does keep the lead alive for the `0x9F` specifically, which is the
+failure that kills healthy boots - both of the ones reached this session.
+A destroyed `int 2Eh` on a boot that is otherwise progressing is exactly
+the shape that would leave a driver's power IRP outstanding. That remains
+a *candidate* and not a finding, and one read settles it.
