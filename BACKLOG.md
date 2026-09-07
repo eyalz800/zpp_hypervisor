@@ -75868,3 +75868,35 @@ than it needs to be, and everything measured tonight is consistent with
 that - the 21% interrupt-window exits, the 8,790-vs-1,190 processor
 asymmetry in stalled A, and a boot that takes 105 minutes to reach a
 screen a real machine reaches in seconds.
+
+## At "Please wait", ONE processor has stopped running user mode entirely
+
+Boot 231 at 07:16, 105 minutes in, differenced over 62 s while the
+spinner was confirmed by the user to be advancing (slowly):
+
+    cpu0   12,003.51 exits/s   user-mode  541.95/s
+           vmresume  4.7%   ept-violation 291.41/s   int-window 13.74/s
+    cpu1    7,245.80 exits/s   user-mode  **+0 in this window**
+           vmresume 50.0%   int-window 20.5%   wrmsr 18.7%
+
+**`cpu1` has 704,110 user-mode samples over the boot's lifetime and zero
+in this window.** It ran user code and stopped. `cpu0` carries all of it
+at 542/s.
+
+So the processor asymmetry that defines stalled A - 8,790 against 1,190
+exits/s - is present here too, but expressed differently: **not in how
+much each processor does, but in what it does.** One runs the guest's
+user mode; the other runs an interrupt-window and `wrmsr` grind with
+`vmresume` at the usual 50%, and touches no user code at all.
+
+`cpu0`'s `vmresume` share of **4.7%** is the other oddity. Every other
+measurement this session put `vmresume` at ~50% on both processors -
+one re-entry per exit. At 4.7% with 12,003 exits/s, `cpu0` is taking
+roughly twenty exits for every second-level entry, which is a different
+regime from anything else measured tonight and is not explained.
+
+**This is the shape of the remaining problem.** The guest is not
+deadlocked and this VMM is not stalled; the machine is simply running one
+to two orders of magnitude slower than it needs to, and the two concrete
+asymmetries - which processor runs user mode, and `cpu0`'s twenty-exits-
+per-entry - are where to look next. Neither is a lock; both are cost.
