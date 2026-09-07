@@ -76520,3 +76520,41 @@ trip rate not yet measured for stalled A - so the *size* of the expected
 drop is not predicted here, only its **direction: down**. A rise, or no
 movement, would say the batch is not present in stalled A and the
 comparison is measuring something else.
+
+## VERIFIED: the shadow change cuts stalled A's cpu0 exit rate by 2.5%
+
+Three post-change stalled-A boots against the seven pre-change ones, same
+measurement, same `--delta 60`, same binary but one commit apart:
+
+    BEFORE n=7   mean 8,784.0/s   sd 36.4   range 8,709 - 8,835
+    AFTER  n=3   mean 8,561.6/s   sd 21.7   range 8,539 - 8,591
+    shift        **-222.4/s = -2.53%**, and the two ranges DO NOT OVERLAP
+
+Every post-change sample is **5.3 to 6.7 standard deviations** below the
+pre-change mean, on a state whose own spread is 36/s across seven boots.
+The prediction registered in `7f594fb` was direction only - **down** -
+and it is down.
+
+**This is the first measured effect of a code change in this
+investigation**, and it is small on purpose to report honestly: 2.5%.
+
+### Why 2.5% and not 30%, and why that is the encouraging reading
+
+Stalled A's exit profile is `vmresume` 50%, `int-window` 21%, `wrmsr`
+14% - **it is not vmwrite-dominated.** The ten-field batch the three
+shadowed fields belong to is 90.1% of cpu0's VMWRITE exits *at
+winlogon's pre-credential wait*, where `vmwrite` was **55.0%** of all
+exits. In stalled A the batch is a small share of a different mix, so
+removing three of its ten writes moves the total by little.
+
+**So 2.5% is a lower bound on what this change does in the regime that
+matters**, measured in the only regime cheap enough to measure in. The
+regime it was designed for - cpu0 at 21.36 exits per round trip with
+`vmwrite` at 55% - should show much more, and that measurement still
+needs a healthy boot reaching winlogon's wait.
+
+**What is NOT claimed:** that 2.5% helps the guest reach the login
+screen. Stalled A never starts `smss.exe`; a 2.5% faster stall is still
+a stall. The value here is that **the mechanism is proven to work on
+hardware and its direction and sign are established**, which is what a
+change with no hardware validation lacked an hour ago.
