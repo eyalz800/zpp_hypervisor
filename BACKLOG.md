@@ -78390,3 +78390,61 @@ failure that kills healthy boots - both of the ones reached this session.
 A destroyed `int 2Eh` on a boot that is otherwise progressing is exactly
 the shape that would leave a driver's power IRP outstanding. That remains
 a *candidate* and not a finding, and one read settles it.
+
+## Control closed: ExpUpdateTimerConfigurationWorker is the stall, not Tuesday
+
+`rig-healthy-control.sh`'s header names three readings the file was
+blocked on. This closes the third, and it needed no new boot - both
+healthy captures were already on disk.
+
+**The worker is absent from healthy boots entirely.**
+
+    stalled 260   ExpUpdateTimerConfigurationWorker+0x1c5
+                    **34.6%** of cpu0's census (57,904 of 167,357)
+
+    healthy 263   occurrences of RVA 0x30d475 anywhere in the dump: **0**
+                    (226,244 samples, 1,563 distinct addresses)
+    healthy 265   occurrences anywhere in the dump: **0**
+                    (643,429 samples, 1,194 distinct addresses)
+
+Not "below the top-N cut" - **absent**, across two boots and 870,000
+samples. The census prints every non-`ntoskrnl` row and reports what it
+truncates, so absence here is a reading rather than a gap. The
+`is that the stall or is that Tuesday?` question is answered: **the
+stall.**
+
+**What healthy cpu0 does instead**, named against the PDB:
+
+    healthy 263   HalProcessorIdle+0xf            31.0%   (idle)
+                  MiWalkEntireImage+0x5e6          6.9%
+                  MiUnlockWorkingSetShared+0x143   3.1%
+                  MiUnlockPageInline+0x36          2.6%
+                  KeSetTimer2+0x271                0.6%
+
+    healthy 265   KiCheckForThreadDispatch+0x7f   63.0%
+                  KiDpcInterruptBypass+0x12       20.5%
+                  HalProcessorIdle+0xf             5.6%
+                  MiWalkEntireImage+0x5e6          0.9%
+                  HalpInterruptSendIpi+0x9a        0.6%
+
+`MiWalkEntireImage` appears in **both**, which is the HVCI copy walk
+running - and that matches the negative control recorded in
+[[vboxsup-busy-poll-is-the-phase1-barrier]] from a boot that reached the
+login screen, where it was second-hottest at 11.4%. Two independent
+sessions agree on what a progressing boot's memory manager looks like.
+
+**One caveat against over-reading the healthy pair.** `KiDpcInterruptBypass+0x12`
+is 20.5% on healthy 265, and that memory's login-screen control puts it
+at 0.5% against ~57% wedged. It is also the `sti`-shadow sampling
+artifact - the first architecturally interruptible boundary - so its
+share tracks how often a processor lowers IRQL, not where it spends
+time, and it should not be read as a progress metric in either
+direction. The two healthy boots also differ enormously from each other
+(31.0% idle on 263 against 63.0% in the dispatcher on 265), which is the
+phase difference already noted: 263 was at the graphics stack, 265 at
+smss.
+
+**Status of the three blocked readings:** tick rate - closed, 671 and
+680/s healthy against 1,666/s stalled, replicated. Injection asymmetry -
+closed as *not* a discriminator, healthy spans both directions. Worker
+census - closed here, it is specific to the stall.
