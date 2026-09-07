@@ -75440,3 +75440,34 @@ The honest position: **the login screen needs a healthy boot, healthy
 boots occur at roughly 1 in 8 here, and the cost per attempt is ~14
 minutes.** That is the situation, stated plainly rather than dressed up
 as a finding.
+
+## Boot 231 is healthy - the third in twenty, and the run of twelve is broken
+
+    boot 231   cpu0 5,659.89/s   cpu1 3,964.97/s   vmcall 16,140 = 260.1/s
+
+`vmcall` at **260/s** against stalled A's 2.0/s puts it unambiguously in
+the healthy class, and it ends twelve consecutive non-healthy boots.
+
+Two things to note honestly rather than smooth over:
+
+**Its exit rates do not match the other healthy boots.** 212 ran
+6,552/8,791 and 218 ran 6,458/6,420; 231 runs 5,660/3,965, a total of
+9,625/s against their 12,878 and 14,580. So "healthy" is not a tight band
+the way stalled A is - the three healthy boots agree on having a high VTL
+rate and on nothing else. **The classifier that works is `vmcall`, and
+only `vmcall`**, which is what `3f98327` established and what every
+subsequent boot has continued to support.
+
+**And its `vmcall` rate is itself only half the others'** - 260/s against
+435 and 471. Whether that is a third state, a phase difference, or
+ordinary spread across three samples is not determinable from three
+samples, and is not being claimed.
+
+The run of twelve is now explained as what it looked like: a run. Twelve
+non-healthy at p=0.88 per boot has probability 0.22, and the observed
+3/20 = 15% remains below the recipe's 35% at about p=0.04 - still not a
+controlled comparison across eras, for the reason `c8f62cb` records.
+
+Boot 231 is being kept alive with milestone tracking armed. Polling is
+safe: `d8cdede` exonerated it, boot 212 reached the wall while polled and
+218 while unpolled.
