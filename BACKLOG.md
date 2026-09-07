@@ -77092,3 +77092,46 @@ of hypothesis rested on "the audio controller is not passed through",
 which one `grep` of the launcher would have refuted - the same
 `read-the-launcher-before-arguing-from-what-is-underneath-it` rule
 `CLAUDE.md` already records for `boot.sh` versus `boot-zpp.sh`.
+
+## EXPERIMENT, registered before running: drop the audio passthrough
+
+The `0x9F` kills five healthy boots in seven, always on the Intel audio
+stack, on a device now shown to be **passed through** (`7519bce`). The
+single-variable test is to stop passing it through.
+
+**`~/vm/boot-zpp.sh` is NOT modified.** `rig-boot.sh` already supports
+`ZPP_LAUNCHER`, so the test uses a sibling copy,
+`~/vm/boot-zpp-noaudio.sh`, differing by exactly two deleted lines:
+
+    -vfio_bind $GPU_AUDIO || true
+    -    -device vfio-pci,host=$GPU_AUDIO \
+
+`sh -n` clean. **The first attempt at this was wrong and is worth
+recording**: commenting the second line with `#` would have left a `#`
+inside a backslash-continued command, which does not comment it - it
+corrupts the continuation and QEMU would have failed for a reason
+unrelated to the experiment. Deleting the line is correct.
+
+### What each outcome means, fixed in advance
+
+- **The `0x9F` stops happening across several healthy boots** -> the
+  audio passthrough is implicated, and the failure that ends 5 of 7
+  healthy boots has a cause outside zpp. That would be the single most
+  useful result available tonight.
+- **The `0x9F` still happens, on a different driver** -> the audio stack
+  was a symptom of something general about power transitions on
+  passed-through devices, and removing one device just moved the target.
+- **The `0x9F` still happens on the audio stack** -> the device nodes
+  survive without the hardware and the driver still hangs, which would
+  mean the passthrough is irrelevant and point back at the guest.
+
+**Caveats stated now.** Removing a device is a hardware change; Windows
+may re-enumerate or react on the first boot, so the first result after
+the change is suspect and at least two are needed. And this **changes
+the configuration all 41 boots so far used**, so the stalled-A baseline
+(`8,568.6/s`, n=7) does not transfer - any performance comparison across
+this line is invalid.
+
+The file is in `~/vm` and `never-reboot-the-rig` means it persists for
+this session; it is not in `backup.sh`, so a future reboot would remove
+it. Reverting is `rm ~/vm/boot-zpp-noaudio.sh` and changing nothing else.
