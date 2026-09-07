@@ -77223,3 +77223,52 @@ that boot 240's `LogonUI` reading was a fluke of that particular
 window. The after-state is stable across boots, states and an hour of
 wall-clock. Whatever the before-value truly is, the after-value is
 **14.77 +/- 1**.
+
+## NOT SHIPPED: shadowing the six guest-state batch fields breaks a negative control
+
+The ten-field write batch has six members that are guest state -
+`guest_gdtr_base/limit`, `guest_idtr_base/limit`, `guest_ldtr_limit`,
+`guest_ia32_sysenter_cs` - each written **1.05 times a round trip**.
+Shadowing them is priced, by the tree's own model, at
+
+    benefit  670,150 cyc/RT   (6 x 1.05 x 106,373)
+    cost      40,782 cyc/RT   (6 x 4,666 copy + 6 x 2,131 eager write)
+    ratio       16.4x favourable, 35% of cpu0's cycles,
+                exits/RT 15.39 -> ~9.1
+
+and `deferrable_field_is_shadowed`'s own message names the route:
+*"Either exclude it in `guest_state_deferrable`, as
+`guest_cs/ss_access_rights` are, or do not shadow it."*
+
+**It was built. It compiles. It is not shipped.**
+
+Three things were needed, and the third is why it stopped:
+
+1. Exclude the six in `guest_state_deferrable`.
+2. **Exclude them again in `deferrable_field_is_shadowed`** - that assert
+   is `constexpr`, cannot call the runtime function, and carries a
+   *second copy* of the exclusion list. The first build failed because
+   only one copy had moved. **Two copies of one rule, and nothing but
+   this build failure ties them together.**
+3. Update `tests/nested_exit`. And that is the blocker: the suite
+   asserts **"exactly two guest-state fields are kept eager"**, **"the
+   other 44 are deferred"**, and - the important one - it runs a
+   **negative control** feeding the guard a deliberately wrong list
+   containing `guest_cr3` and `guest_gdtr_base`, checking both are
+   caught as fields that "would hand the guest hypervisor a stale value
+   invisibly".
+
+**Shipping the change means rewriting the negative control so that its
+example is no longer caught.** That is the precise shape of the mistake
+the control exists to prevent, and no amount of favourable arithmetic
+justifies doing it on a change that has never run on hardware.
+
+**What would justify it**, and this is the honest next step rather than
+a refusal: demonstrate on the rig that a shadowed, non-deferred
+`guest_gdtr_base` hands the guest hypervisor a *correct* value - which
+means an instrument comparing what vmcs12 holds against what the shadow
+region publishes for that field, over a boot. Until that exists, the
+control's claim stands and mine does not.
+
+Reverted; tree builds clean and the suite is back to its two
+pre-existing failures with none added.
