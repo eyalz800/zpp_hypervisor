@@ -78206,3 +78206,67 @@ kernel driver, with five processes - `System`, `Secure System`,
 so the two healthy boots are being compared at different phases, which
 is one plausible source of the injection spread above and another reason
 not to have read a direction off a single pair.
+
+## PopIrpThreadList read live: the power worker pool is NOT the bottleneck
+
+Boot 265 was healthy, reached `winlogon.exe` + `LsaIso.exe`, and died at
+~35 minutes with the same `0x9F` naming `\Driver\IntcAudioBus` as boot
+263. `rig-watch-power-wedge.sh` caught the watchdogs **while they were
+aging** and fired `guest-power-workers.py` - the instrument whose own
+docstring records that nothing in this tree had ever read it.
+
+**At the moment of arming** (the same two drivers as boot 263, which is
+itself a replication):
+
+    \Driver\IntcOED    52.8 s of 300  (17.6%)
+    \Driver\USBHUB3    38.3 s of 300  (12.8%)
+
+**The worker pool, read twice 45 s apart, identical both times:**
+
+    PopIrpWorkerSemaphore.Limit  0x7fffffff  -> PASS   (reader anchor)
+    header Type                  5            -> PASS
+    PopIrpThreadList head->Flink->Blink       -> reader proven
+
+    **SignalState        0**    nothing waiting to be claimed
+    **WaitListHead       set**  a worker is IDLE, waiting for work
+    PopIrpWorkerCount    2
+    PopIrpWorkerInFlight 1
+    PopIrpWorkerPending  0
+    PopPendingSetPowerDeviceIrps 2
+    PopCurrentIrpSequenceID     39   **unchanged across 45 s**
+
+    [1] Irp <null>  - **idle, not inside a driver**
+    [2] Irp set     - inside **\Driver\HidUsb**
+
+**The script's rule, declared before the data: *"some entry idle -> the
+pool is NOT the bottleneck, whatever else is wrong."* One of two workers
+is idle and blocked on a semaphore with `SignalState` 0.**
+
+So the standing hypothesis this instrument was written to test - that
+`PopInitializeIrpWorkers`' two PASSIVE_LEVEL priority-13 threads starve
+first on a slow machine - **is refuted**. There is spare worker capacity
+and nothing queued for it.
+
+**What the same read replaces it with.** The two aging IRPs are *not*
+sitting in a queue waiting for a worker, and neither is on one: the busy
+worker is inside a **third** driver, `HidUsb`. So `IntcOED` and
+`USBHUB3` were already dispatched, returned pending, and have not been
+completed by their drivers. Three unrelated device stacks are all
+failing to finish a power transition at once.
+
+**And `PopCurrentIrpSequenceID` is frozen at 39 across 45 seconds**,
+which the script flags as the thing to sample twice: **no new power IRP
+is being issued at all.** The power subsystem has not backed up - it has
+stopped. That is a different failure from congestion and rules out the
+whole "too much queued work" family alongside the worker-starvation one.
+
+**What is still not named** is why three independent drivers stop
+completing simultaneously. Nothing here reaches that. But two accounts
+are now closed by direct reads rather than by argument - the worker pool,
+and queue congestion - and the surviving shape is global rather than
+per-driver, which is consistent with the `0x9F`'s named driver being
+arbitrary (established on boot 263) and with the throughput account.
+
+**Replication worth noting:** `IntcOED` and `USBHUB3` are the same two
+drivers, in the same order, on two separate boots. The *pair* is
+reproducible even though which one wins the race to 300 s is arbitrary.
