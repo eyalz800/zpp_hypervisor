@@ -78686,3 +78686,36 @@ Boot 275 had **both watchdogs already armed by the time it reached
 n=14**, which by the endgame test puts it in the dying class from the
 moment it arrived at the plateau. The test called it correctly; the
 boot was spent before the process count finished moving.
+
+## Two monitor readers cannot run at once, and the failure is silent corruption
+
+Boot 276 was instrumented by launching `rig-watch-power-wedge.sh` early -
+to catch the arming window, which boot 275 narrowed to the few minutes
+between n=5 and n=14 - and then triaging the boot separately. **Those two
+cannot both run.**
+
+The QEMU monitor takes **one** connection, and every reader in this tree
+calls `pkill -x nc` on the rig before it reads. So a watcher polling
+every 40 s will kill a triage dump's connection mid-read, and a triage
+dump will do the same to the watcher. Neither reports an error: the
+reader's own note on `Monitor.CHUNK` records that interleaved monitor
+output **still matches the address pattern and parses into the wrong
+key**, and 26 reads once returned 78 words all zero that way.
+
+So this is not "one of them fails", it is "one of them returns
+plausible numbers for addresses nobody asked about", which is the exact
+instrument fault this file exists to catch.
+
+**Corrected order, and it is cheaper as well as safer:** triage first at
+the calibrated 13 minutes, and launch the watcher **only if the boot is
+healthy**. A stalled boot never arms a power watchdog - it never reaches
+the device power transitions at all - so a watcher on a stalled boot
+polls for ever and buys nothing. Boot 276 was stalled A, so the watcher
+was stopped and the boot cycled; nothing was lost, but the two were
+running together for three polls and any reading taken in that span
+should be treated as void.
+
+The narrowing from boot 275 still stands and is what makes the watcher
+worth arming at all on a healthy boot: **0 of 2 IRPs in flight at n=5,
+and `IntcOED` already aged 300.0 s by n=14**, so the arming happens in a
+window of a few minutes, well before the plateau the boot dies at.
