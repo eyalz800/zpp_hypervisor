@@ -76059,3 +76059,57 @@ per-processor or summed across both was not established, so the honest
 range is 35-70% of one core. Either end makes this the largest single
 cost measured in this investigation, but the factor of two should be
 resolved before anyone quotes a figure.
+
+## CORRECTION: the 21.4% hit rate is not a defect, and the lever is reads-per-exit
+
+The entry above called "why is the VMCS cache hit rate 21.4%" the
+highest-value question in the tree. **Reading the cache says that framing
+is wrong.**
+
+`vmcs_cache_forget_current(cpu)` is called on the exit path
+(`exit_dispatch.cpp:117`) and clears the tags of the row for the VMCS
+that just ran. Its own comment gives the reason, and the reason is
+architectural, not a choice:
+
+> A VM exit updates the guest-state and read-only fields of the VMCS that
+> was current and of no other, so the rows describing the VMCSs that were
+> merely resident stay true.
+
+So the cache **cannot** carry a guest-state field across an exit - the
+processor just rewrote it. It can only serve **repeat reads of the same
+field inside one exit handler**, and 21.4% is therefore a measure of how
+often a handler reads the same field twice, not of a cache malfunctioning.
+
+Two things were checked and are **not** the problem:
+
+- **The epoch is global** (`std::atomic vmcs_cache_epoch`, one counter
+  for all processors), so a bump does invalidate every processor. But the
+  per-exit path does **not** bump it - it uses the per-processor tag
+  clear. The global `vmcs_cache_forget()` is reserved for `vmclear` and
+  the pointer-swap paths, which are rare.
+- **The geometry is not tight**: 128 entries per row.
+
+### The real number, and it is per-exit
+
+    exits/s (both processors)   19,249
+    VMCS reads  per exit        **25.4**   (5.4 cached, **20.0 distinct**)
+    VMCS writes per exit          6.7
+    total VMCS accesses/exit    **32.1**
+
+**Twenty distinct VMCS field reads on every exit**, plus about seven
+writes. At the measured miss price that is 20.0 x 2,876 + 6.7 x 2,131 =
+**71,800 cycles of VMCS access per exit**, and at 19,249 exits/s,
+**69% of a 1.992 GHz core** - which is where the earlier figure came
+from, now attributed correctly.
+
+So the question is not "why does the cache miss" but **"why does this
+VMM touch thirty-two VMCS fields to handle one exit"** - and unlike the
+hit rate, that is squarely a design question with a large, already-mapped
+surface: `6cfa28a`, `e230e60`, `87b091d` and `7678f44` each removed a
+handful of accesses and are the precedent for how to remove more.
+
+**This is the third framing of the same measurement in an hour** - first
+the guest's trapped VMCS exits, then the cache hit rate, now
+reads-per-exit. Each was corrected by reading one level further down. The
+number that survived all three is the one that was never in doubt:
+**617,749 VMCS accesses a second, ~69% of a processor.**
