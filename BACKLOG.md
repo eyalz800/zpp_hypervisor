@@ -76113,3 +76113,58 @@ the guest's trapped VMCS exits, then the cache hit rate, now
 reads-per-exit. Each was corrected by reading one level further down. The
 number that survived all three is the one that was never in doubt:
 **617,749 VMCS accesses a second, ~69% of a processor.**
+
+## The cost, finally located: 21.36 exits per round trip at ~50,000 cycles each
+
+Boot 231's phase tree, cpu0, differenced over 62 s (35,180 round trips,
+**2,083,898 handler cycles a round trip**):
+
+     phase                        calls  calls/RT  cyc/call   self/RT   %vmm
+   25 exit: prologue            751,534    21.36    11,811    252,334   12.1
+   26 exit: dispatch            751,535    21.36    64,094    828,291   65.7
+    1   reflect_l2_exit          35,211     1.00   182,128      1,598    8.7
+    0     save_l2_state          35,211     1.00    59,293     59,346    2.8
+    4     copy_vmcs12_to_shadow  35,219     1.00    33,863        285    1.6
+   12     load_l1_host_state     35,211     1.00    48,513     48,556    2.3
+    9   on_l2_ept_fault          18,215     0.52   207,205    107,284    5.1
+
+**`calls/RT` is 21.36 for the prologue and the dispatch.** For every
+*one* second-level round trip, this processor takes **twenty-one
+first-level exits** - which is the same 86%-VMCS-traffic finding from the
+other side, now with a price attached.
+
+    prologue        11,811 cycles/call
+    dispatch self   828,291 / 21.36 = 38,777 cycles/call
+    per exit                        **~50,588 cycles**
+
+**Prologue + dispatch self is 1,080,625 of 2,083,898 cycles per round
+trip - 51.9% of everything this VMM does.** Not the reflection, not the
+EPT faults, not the shadow copies: the flat per-exit cost, multiplied by
+twenty-one.
+
+### Two levers, and they are independent
+
+**Cut the count.** 21.36 exits per round trip is Hyper-V executing
+VMREAD/VMWRITE that we intercept. Every one avoided is ~50,588 cycles.
+This is where `shadowvmcs` should help and where `5c9aba1` measured
+extending it as 2.2x negative - but that arithmetic used a *4,666-cycle*
+per-field copy cost against a *106,488-cycle* saving, and the ratio
+turned on the copy being paid on all 8.7M round trips. **At 21.36 exits
+per round trip rather than 0.241, that arithmetic needs redoing** - the
+benefit side is ~88x larger than the figure used.
+
+**Cut the per-exit cost.** 11,811 cycles for the *prologue alone* is
+about four uncached VMREADs, and 38,777 for dispatch self is about
+thirteen. That is consistent with the 32 VMCS accesses per exit measured
+independently, and it means the prologue and dispatch are where the
+accesses are.
+
+### The number that reframes 5c9aba1
+
+`5c9aba1` rejected extending the shadow list because "2.38M exits at 90%
+reachable is **0.241 per round trip**". This measurement says the
+relevant rate on cpu0 at "Please wait" is **21.36 per round trip**, 88x
+higher. Whether that is a phase difference, a per-processor difference,
+or a different exit population is not established here - but the negative
+result rests on the smaller number, and **it should be re-derived against
+this one before the shadow list is considered closed.**
