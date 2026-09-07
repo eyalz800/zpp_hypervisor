@@ -78921,3 +78921,43 @@ boot cycled on a false stall costs the draw, and healthy draws run about
 one in five at roughly fifteen minutes each. **Never act on a read taken
 before 13 minutes. There is no reading cheap enough to be worth a false
 negative here.**
+
+## Boot 282: the endgame test is 6 for 6, and the aging-window triage was missed AGAIN
+
+    01:39  triage    vmcall **548.15/s**, vtl_fresh cpu0 +97.25/s  -> healthy
+    ~01:51  (inferred) IntcOED's watchdog arms
+    01:55  n=14      the plateau
+    01:56  endgame   **IntcOED 300.0/300 (100%)**, USBHUB3 279.8 (93.3%)
+    02:00  dead      0x9F
+
+Two armed at n=14 in the classic pattern - `IntcOED` first, `USBHUB3`
+20.2 s behind - so the test put it in the dying class, and it died four
+minutes later. **The endgame test is now 6 for 6.**
+
+**And the read I have been chasing for four boots was missed again.** The
+question is whether the guest is *healthy* while its power IRPs age out -
+if trust-level traffic flows normally for the full 300 s then the `0x9F`
+is not a throughput failure at all. I took a `--delta 45` at 01:59 and
+**the guest died at 02:00, inside the window**, so both processors read
+`vtl_fresh_calls +0` for the trivial reason that they had stopped. That
+is the "a reading taken across a reset is a reading of two different
+machines" trap, and the reading is **void**, not evidence of a stall.
+
+**Why it keeps being missed, and the fix.** The 300 s clock starts at
+arming, and I only discover arming at n=14 - by which time `IntcOED` has
+been at 100% for a while and there are seconds left, not minutes. On this
+boot the guest was healthy at 01:39 and the watchdog armed around 01:51:
+**there were nine usable minutes and I spent them not looking.**
+
+`rig-watch-power-wedge.sh` already solves this - it polls from the start,
+fires on the *first* armed watchdog while its age is still small, and
+takes the guest triage automatically as its first action. I ran the
+*logon* watcher instead, because that one catches a breakthrough. Both
+cannot run: the monitor takes one connection.
+
+**Decision rule, corrected:** on a healthy boot run the **power-wedge**
+watcher, not the logon watcher. It catches arming early with the full
+300 s left, and if it reports zero armed as the boot approaches n=14 then
+nothing is aging, the boot is in the breakthrough class, and *that* is
+when to switch to the logon watcher. The logon watcher is for a boot that
+has already passed the test, not for finding out whether it will.
