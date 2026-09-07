@@ -74,6 +74,56 @@ while :; do
         clear_nc
         timeout 400 python3 "$HERE/guest-power-workers.py" "$KB" "$CR3" \
             2>&1 | tee "$OUT/workers-at-arm.txt" | tail -30
+        # **Are DEVICE interrupts still arriving while the IRPs age?**
+        # The three drivers seen stuck - IntcOED, USBHUB3, HidUsb - are
+        # all idle devices being powered DOWN, and a D-state transition
+        # completes when the device interrupts back. Those interrupts
+        # reach the guest through us, so "the device stopped
+        # interrupting" and "we stopped delivering" are the same
+        # observation from two sides, and either is ours to answer for.
+        #
+        # A per-vector DELTA is the read: a vector that was arriving and
+        # stops is a device that went quiet. Cumulative totals cannot
+        # show that - a vector with a large total may have stopped
+        # minutes ago, which is the failure mode this tree keeps
+        # recording.
+        MODBASE=$(ssh -o ConnectTimeout=8 "$RIG" \
+            'grep -ao "allocate_rwx done at 0x[0-9a-f]*" ~/zpp/serial.out | tail -1' \
+            2>/dev/null | grep -o '0x[0-9a-f]*')
+        clear_nc
+        timeout 600 python3 "$HERE/guest-l2-vectors.py" \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
+            --base "$MODBASE" > "$OUT/vectors-a.txt" 2>&1 || true
+        sleep 60
+        clear_nc
+        timeout 600 python3 "$HERE/guest-l2-vectors.py" \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
+            --base "$MODBASE" > "$OUT/vectors-b.txt" 2>&1 || true
+        python3 - "$OUT/vectors-a.txt" "$OUT/vectors-b.txt" <<'PY'
+import re, sys
+def load(path):
+    out, cpu = {}, None
+    for line in open(path):
+        m = re.match(r"l2_injected_vector (cpu\d+):", line)
+        if m:
+            cpu = m.group(1); out[cpu] = {}; continue
+        m = re.match(r"\s+vector (0x[0-9a-f]+)\s+([\d,]+)", line)
+        if m and cpu:
+            out[cpu][m.group(1)] = int(m.group(2).replace(",", ""))
+    return out
+a, b = load(sys.argv[1]), load(sys.argv[2])
+print("\n=== per-vector DELTA over ~60 s while the power IRPs age ===")
+for cpu in sorted(set(a) | set(b)):
+    print(f"  {cpu}:")
+    keys = sorted(set(a.get(cpu, {})) | set(b.get(cpu, {})),
+                  key=lambda v: -(b.get(cpu, {}).get(v, 0)
+                                  - a.get(cpu, {}).get(v, 0)))
+    for v in keys:
+        d = b.get(cpu, {}).get(v, 0) - a.get(cpu, {}).get(v, 0)
+        tag = "  <- STOPPED (nonzero total, zero delta)" \
+              if d == 0 and a.get(cpu, {}).get(v, 0) else ""
+        print(f"    {v}  delta {d:>9,}{tag}")
+PY
         echo "=== captured under $OUT - continuing to watch ==="
         # Keep watching: a second read while the SAME IRPs age says
         # whether the workers are stuck in one driver or cycling.
