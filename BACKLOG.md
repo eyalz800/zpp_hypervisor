@@ -77465,3 +77465,83 @@ rather than alarming - Windows arms a *periodic* timer, so one arm keeps
 producing injections - but it is worth stating, because "no arms and
 injections continuing" reads like a fault if the periodic case is
 forgotten.
+
+## The wedged processor is inside a CROSS-PROCESSOR RENDEZVOUS, which a single-core boot cannot perform
+
+Boot 260, stalled A, cpu0's live 48-frame stack named against
+`ntkrnlmp.pdb` at kernel base `0xfffff807c5200000`. Read bottom-up:
+
+    Phase1Initialization+0x3b
+      IoInitSystem+0x2c
+        IopInitializeSystemDrivers+0x1a6
+          IopLoadDriver+0x6f2
+            PnpCallDriverEntry+0x54
+              PnpEnableWatchdog+0x41
+                ExSetTimerResolution+0xbc
+                  ExpUpdateTimerResolution+0x1cd
+                    ExpUpdateTimerConfiguration+0xc6
+                      **KeGenericProcessorCallback+0x175**
+                        ExpUpdateTimerConfigurationWorker+0x1c5
+                          ... KiDispatchInterrupt -> KiQuantumEnd ...
+                          HalRequestSoftwareInterrupt+0x9d
+                            HalpInterruptSendIpi+0xa9 / +0x131
+                              HalpApicRequestInterrupt+0x96
+                                HvlWriteApicCommandRegister+0x1d  <- live rip
+
+**`KeGenericProcessorCallback` runs a callback on every processor and
+waits for all of them.** That is a rendezvous, and a one-processor guest
+satisfies it trivially by construction. Every recorded stack for this
+stall so far has been the `VslpEnterIumSecureMode` ->
+`HvlSwitchToVsmVtl1` trust-level path; this is a different caller and it
+is one that **only exists with more than one processor**.
+
+The census agrees and is sharply asymmetric:
+
+    ExpUpdateTimerConfigurationWorker+0x1c5
+        cpu0  57,904 samples  **34.6%** of its interrupted census
+        cpu1       0 samples  - not present at any depth, cut or not
+
+So cpu0 is inside the worker and cpu1 has never executed it, while cpu1
+sits in `HalProcessorIdle+0xf` halting 573 times a second.
+
+**What this does NOT establish, stated plainly.** A stack is one sample.
+`KeGenericProcessorCallback` appearing does not prove cpu0 is *blocked*
+in the rendezvous rather than passing through it repeatedly, and the
+census is cumulative over the whole boot. The trigger is also
+identifiable and mundane - `PnpEnableWatchdog` calling
+`ExSetTimerResolution` during a driver's `DriverEntry` - which is
+ordinary boot work, not something exotic.
+
+**The check that would settle it costs one read**: the callback's own
+rendezvous state, or simply whether cpu0's stack still shows
+`KeGenericProcessorCallback` on a second dump minutes later. Two dumps
+of the same stack is the difference between "passing through" and
+"stuck", and neither was taken here.
+
+### And the self-IPI family below it is closed - checked before proposing
+
+The bottom of that stack is `HalRequestSoftwareInterrupt` ->
+`HvlWriteApicCommandRegister`, and cpu0's wrmsr census shows **HV_ICR
+written 101,840 times, 27.0% of all its MSR writes, last value
+`0x0004002f`** - bit 18 is destination shorthand *Self*, vector `0x2f`
+is the deferred-call dispatch. So cpu0 self-IPIs for a DPC ~102k times.
+
+That looks like a lead and is not one. `nested_vmx.h` already records
+the whole family: `deliver_self_ipi`, `intercept_self_ipi` and
+`force_dispatch_once` have all been built and booted, the first two are
+explicitly "closed", and the third froze the guest exactly as the second
+did. The conclusion there is general and applies to anything of this
+shape: **injecting a vector the level above did not stage is not a
+complete operation**, because the acknowledgement protocol belongs to
+that level. `hlt` appears zero times in a known-good boot and once, as
+the last exit, in each experimental boot.
+
+One number does differ from the record and is worth stating rather than
+quietly reconciling. The header reports `0x2f` "requested 145,300 times
+and delivered **ZERO**"; this boot shows `l2_injected_vector` `0x2f` at
+**5,357 on cpu0 and 19,452 on cpu1**. These are not the same quantity -
+that was a 257-second window and counts our deliveries, this is a boot
+total and counts everything staged into vmcs02 including what hvix64
+staged itself - so it is not a contradiction. It does mean **"delivered
+zero" must not be carried forward as a property of the vector**; it was
+a property of one measurement of one path.
