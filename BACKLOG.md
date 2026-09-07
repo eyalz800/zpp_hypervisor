@@ -76904,3 +76904,26 @@ IntcOED IRP - four minutes later. The race account holds.
 Six names printed by this failure across the investigation. **At least
 one of them, on boot 243, is provably not the holder of the IRP it was
 printed for.**
+
+## The stalled-A result closes at seven versus seven
+
+    BEFORE n=7   mean 8,783.7/s   sd 35.5   range 8,709 - 8,835
+    AFTER  n=7   mean 8,568.6/s   sd 16.1   range 8,539 - 8,591
+    shift        -215.1/s = **-2.45%**      gap 118/s, no overlap
+
+Balanced arms, fourteen boots, and the figure has not moved as samples
+accumulated: -2.46% at n=3, -2.46% at n=5, -2.45% at n=6, -2.45% at n=7.
+The post-change spread is **less than half** the pre-change one (16.1
+against 35.5), which is what a genuine shift to a tighter operating point
+looks like rather than a drift.
+
+**This measurement is closed.** No further stalled-A boots need be spent
+on it; they cost 13 minutes each and would only narrow an interval that
+is already 6 sigma from zero.
+
+What remains owed, and it is a different question: a **second** healthy
+boot measured at the `LogonUI` state, to take the controlled
+phase comparison (`+29.9%` round trips) from n=1 per arm to n=2 on the
+after side. That needs a healthy draw that survives long enough - boot
+240 gave 3 minutes at that state and boot 243 died at n=14 before
+reaching it.
