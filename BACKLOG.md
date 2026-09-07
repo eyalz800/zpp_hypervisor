@@ -75965,3 +75965,49 @@ problem; the access COUNT is.** Eighteen trapped VMCS instructions per
 second-level entry is the number to attack, and shadow VMCS is precisely
 the mechanism for it (`shadowvmcs=1` is already on, so what remains is
 which fields are not shadowed).
+
+## CORRECTION: I priced the VMCS traffic with the wrong number, by 37x
+
+The entry above concluded "the per-access price is not the problem, the
+access COUNT is", from ~1.5% of a core. **That 1.5% is wrong.**
+
+It used **2,876 cycles**, which `afec3fc` measured for *executing a raw
+`VMREAD` instruction*. The quantity needed is the cost of **taking an
+exit** for one, which `5c9aba1` measured from the by-reason table at
+**106,488 cycles**, reproduced at 102,104 and 112,426. Those are
+different things by a factor of **37**.
+
+Recomputed on boot 231's cpu0 at "Please wait":
+
+    vmread exits   3,742.34/s x 106,488 = 399M cycles/s = **20.0% of a core**
+    vmwrite        6,607.68/s, lighter handler; at half price **17.7%**
+    both at the vmread price (upper bound)              **55.3%**
+
+So VMCS exit handling is **a fifth to a half of that processor**, not a
+rounding error. The conclusion "the count is what matters" survives - it
+is strengthened - but the magnitude I attached to it was meaningless.
+
+**The mistake is one this file names explicitly.** `9c77576` and
+`75cc576` record the same confusion twice already: a price was quoted for
+"a VMCS read" when the measured number was the *cache* price, and then
+again when it was the *instruction* price. This is the third instance,
+and the tell is identical - **a number labelled "VMCS read cost" is
+ambiguous between three quantities** (cache hit 57, raw instruction
+2,876, trapped exit 106,488) and they span 1,868x. Never quote one
+without saying which.
+
+### And the obvious fix is already refuted, which is why this matters
+
+`5c9aba1` tried extending the shadow VMCS list and measured it
+**negative at 2.2x**: each additional read-write entry costs 4,666 cycles
+on *every* round trip - 8.7M of them - because the copy-in read cannot be
+elided without first reading whether the level above wrote it, while the
+saving only applies to the 0.241 exits per round trip it actually
+prevents.
+
+So the target is **not** "shadow more fields". With the corrected
+magnitude, the target is: **why does Hyper-V issue 18 trapped VMCS
+instructions per second-level entry**, and can the count be reduced at
+the source rather than by paying per-field to shadow them. That is a
+different question from anything attempted so far, and it is now known to
+be worth 20-55% of a processor rather than 1.5%.
