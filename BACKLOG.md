@@ -78593,3 +78593,53 @@ mechanism for the phase-1 wedge, not after measuring one.** The measuring
 is not wasted - it replicates - but the *account* has to be checked
 against the record before it is written down, and three times today it
 was not.
+
+## Correction: the 0x9F is not deterministic for progressing boots, and the test is armed-count at n=14
+
+I wrote that three progressing boots died to an identical `0x9F` and
+concluded it is *"deterministic for progressing boots, not
+probabilistic, which makes it the barrier to the goal"*.
+
+**`multicore-login-screen-reached-recipe` already settled this, and the
+conclusion is the opposite:**
+
+> Boots 209, 212, 218 all reached n=13-14 **with a power watchdog already
+> armed**, and all died to `0x9F` exactly 300.0002 s later. Boot 231
+> reached the same process state with **0 of 7 power IRPs armed** and
+> went straight through to `LogonUI`.
+>
+> So the plateau is where every healthy boot arrives; the power-IRP
+> failure is a *separate* event that followed it three times of four.
+
+So it is **3 of 4, not 4 of 4**, and my three consecutive deaths are an
+unremarkable draw from that - not evidence of determinism. One boot has
+passed straight through with nothing armed.
+
+**The test is not the process count and not the bugcheck. It is
+`grep -c "WatchdogState 1"` on `guest-power-irps.py` at n=14.** Zero
+armed means the boot is going through; non-zero means it is dying in 300
+seconds. That is a five-second read that classifies the endgame, and I
+have been reading process lists and bugchecks instead.
+
+Two more corrections from the same record, both of which I had partly
+re-derived today at cost:
+
+- **The watchdog is 300 s, not 600** - already applied to
+  `guest-power-irps.py` earlier this session.
+- **The driver the `0x9F` names is arbitrary, with five different names
+  seen**, and `CurrentStackLocation` gives a better one. On boot 218 that
+  named `\Driver\IntcOED` while the bugcheck said `IntcAudioBus` -
+  **exactly what I measured independently on boot 263 today** and wrote
+  up as new. It replicates; it is not new.
+
+**And the measured draw rate matches.** That record has 3 healthy in 21
+(14%) on an unchanged binary, with a 12-boot losing run and an unpolled
+control that stalled identically, concluding *"there is nothing to
+bisect. Just draw again."* This session stands at 14 of 67 (21%) - the
+same process, and the 8-boot stalled run I flagged as "unremarkable" is
+smaller than the recorded 12.
+
+**Procedure, effective now:** on any boot that reaches n=13-14, read the
+armed watchdog count first. If zero, nurse the boot and do not cycle -
+that is the one that goes through. If non-zero, the 300 s are already
+running and the boot is spent; capture and cycle.
