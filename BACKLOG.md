@@ -76865,3 +76865,42 @@ to complete a power IRP within 300 seconds, the common factor is not
 either driver - it is whatever the power manager needs from a guest that
 is running at a fraction of normal speed. That is consistent with the
 throughput account and inconsistent with a single-driver bug.
+
+## PROVEN ON ONE IRP: the bugcheck's driver is not the driver holding it
+
+Boot 243 closes this argument with no inference at all. Read **live**,
+while the watchdog counted:
+
+    Irp **0xffffc58539d04d50**   WatchdogState 1
+                                 CurrentDevice -> **\Driver\IntcOED**
+
+Read from `KiBugCheckData` after it died:
+
+    param 4  **0xffffc58539d04d50**    <- the same IRP, exactly
+    DRIVER NAME  **\Driver\IntcAudioBus**
+
+**One IRP. Two names.** The bugcheck reports `IntcAudioBus`; the IRP's
+own `CurrentDevice` says `IntcOED`. Not two boots compared, not two
+instruments disagreeing about different objects - **the same pointer,
+0xffffc58539d04d50, read before and after the crash.**
+
+That settles what boots 218 and 238 suggested and this makes certain:
+**`param 2` of a `0x9F` is the device object the power manager
+dispatched to, and it is not the driver holding the IRP.** Anyone
+debugging a `0x9F` on this rig who takes the printed driver name is
+debugging the wrong driver, and the correct one is one field away in
+`guest-power-irps.py`'s own output.
+
+**The live read also predicted the outcome.** At 11:45 I read two armed
+IRPs and recorded that the `0x9F` would name whichever reached 300 s
+first. It named the one whose watchdog I had timed at 187.6 s - the
+IntcOED IRP - four minutes later. The race account holds.
+
+### The score for the driver names, finally
+
+    what the 0x9F prints    the device the power manager dispatched to
+    what actually holds it  CurrentDevice on the armed _POP_IRP_DATA row
+
+Six names printed by this failure across the investigation. **At least
+one of them, on boot 243, is provably not the holder of the IRP it was
+printed for.**
