@@ -77756,3 +77756,72 @@ obtainable with census off. This unblocks the whole guest-side
 instrument family on throughput builds and should be written into
 `guest-walk.py`'s docstring, which currently sends the reader to a
 member that reads zero and gives no reason.
+
+## The driver is VBoxSup.sys, its image load is COMPLETE, and the mechanism is ExSetTimerResolution
+
+Boot 262, stalled A, read with the CR3 method above (root validated to
+`MZ` first, and the walker's own proof line fired: *"first entry is
+'ntoskrnl.exe' DllBase 0xfffff800f4c00000 -> proven"*):
+
+    last entries of PsLoadedModuleList, newest last:
+      ndiscap.sys    netbios.sys    Vid.sys
+      winhvr.sys     rdbss.sys      **VBoxSup.sys  <<< TAIL**
+
+    tail VBoxSup.sys has Flags & 0x2000 SET - MiCompleteSecureDriverLoad
+    already ran, so NO image is mid-load.
+
+So the image-copy path is **not** where this boot is stuck, which
+distinguishes it from [[wedge-is-vboxsup-last-image-page]] where the HVCI
+copy stopped at page 298 of 299. The copy finished here. What has not
+finished is what runs *after* it.
+
+**That closes the loop with cpu0's stack**, which was named two boots
+ago and read, bottom-up:
+
+    IopLoadDriver -> PnpCallDriverEntry -> PnpEnableWatchdog
+      -> ExSetTimerResolution -> ExpUpdateTimerResolution
+        -> ExpUpdateTimerConfiguration -> KeGenericProcessorCallback
+          -> ExpUpdateTimerConfigurationWorker+0x1c5
+
+`PnpCallDriverEntry` is calling **VBoxSup's `DriverEntry`**, the PnP
+watchdog is armed because that entry has not returned, and the first
+thing of consequence inside it is **`ExSetTimerResolution`** - which is
+exactly what a VirtualBox support driver does, raising the system timer
+rate for its own scheduling.
+
+That single call accounts for three separate measurements taken
+independently this session:
+
+- the tick rate, **1,666 ISR entries/s against 1,059/s** on a
+  progressing guest - the driver is *in the act of raising it*;
+- the injection ratio pinned at **1.00**, so the extra interrupts are
+  the guest's own ticks and not our delivery;
+- the hot address being an **IRQL restore in the worker's epilogue**,
+  with `tpr-below` at 756/s on cpu0 against 0.97/s on cpu1.
+
+### Why this is worse with two processors than with one
+
+`ExpUpdateTimerConfiguration` reaches the worker through
+**`KeGenericProcessorCallback`**, which runs its callback on *every*
+processor. **A one-processor guest satisfies that by construction.** With
+two, it needs cpu1 - and cpu1 spends the whole stall in `KiIdleLoop ->
+PoIdle -> PpmIdleDefaultExecute -> HalProcessorIdle`, with
+`ExpUpdateTimerConfigurationWorker` appearing **nowhere in its census at
+any depth**, across two dumps eight minutes apart with an identical rsp.
+
+This is the first mechanism found in this investigation that is
+**structurally different between one and two processors**, rather than
+merely slower, and it sits directly under the driver already recorded as
+the phase-1 barrier.
+
+**What is still not established**, and it is the same gap as before: cpu0
+is interrupted *inside* the worker rather than visibly waiting below it,
+so whether it is blocked on cpu1's half of the rendezvous or simply
+cannot retire its own is not settled by anything here. The next read is
+`KeGenericProcessorCallback`'s own rendezvous state - a target set, an
+arrived set and a leader, in the shape `crash-rendezvous-barrier.md`
+already documents for hvix64's equivalent.
+
+**And the standing constraint applies**: the rig's Windows install is not
+to be modified, so unloading or renaming VBoxSup is not a move available
+here. Anything acted on has to be on our side of the boundary.
