@@ -220,8 +220,20 @@ def main():
             live.sort(key=lambda pair: -pair[1])
             total = sum(c for _, c in live)
             shown = live if args.top == 0 else live[:args.top]
-            print(f"{member} cpu{cpu}: {total:,} total across "
-                  f"{len(live)} distinct vectors")
+            # **Do not call a targeted read a census.** With --only the
+            # total is the sum of the requested slots and nothing else;
+            # printing it as "N total across K distinct vectors" reads as
+            # a whole-row figure and would be quoted as one. This tree
+            # has a long list of numbers that measured something other
+            # than their label, and the fix is always the label.
+            if wanted is None:
+                print(f"{member} cpu{cpu}: {total:,} total across "
+                      f"{len(live)} distinct vectors")
+            else:
+                print(f"{member} cpu{cpu}: TARGETED READ of "
+                      f"{len(wanted)} requested vectors "
+                      f"(sum {total:,}) - NOT a census, and not the "
+                      f"processor's total")
             if not live:
                 # Only meaningful if every read came back. The warning
                 # above is what separates "the guest vectored nothing"
