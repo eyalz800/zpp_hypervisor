@@ -79406,3 +79406,48 @@ same vectors on the same processor *before* the watchdog arms versus
 after. `0xa1`/`0x91`/`0x81` have nonzero boot totals - 262 on boot 296 -
 so they were being delivered earlier in the boot on that same processor.
 Sampling them across the arming boundary compares like with like.
+
+## The temporal control: the xHCI delivered 214 times on cpu1 before arming, and zero after
+
+Boot 302, healthy (vmcall **600.16/s**, the highest of the session), with
+the pre-arming baseline census the previous captures lacked. Watchdogs
+armed at 09:21 and the vector window was valid.
+
+    cpu1 - the processor the xHCI's MSI destination names
+
+      vector   baseline (09:14)   at arming (09:21)   delta in 30 s window
+      0xa1        **absent**             63                  **+0**
+      0x91        **absent**            113                  **+0**
+      0x81        **absent**             38                  **+0**
+      0xd1         579,366           874,386               **+19,394**
+
+**This is the like-for-like comparison the cross-processor version could
+not give.** The xHCI's vectors were **absent entirely** at baseline,
+delivered **214 times** on cpu1 between baseline and arming, and then
+delivered **nothing** during the window - while the clock on that same
+processor moved +19,394, so the processor was alive and taking
+injections throughout.
+
+That answers the objection this file raised against its own earlier
+reading. "cpu1 receives no device interrupts at all" is now known to be
+false for *these* vectors: cpu1 received them 214 times in the seven
+minutes before the watchdog armed.
+
+**The caveat, and it matters because the numbers are small.** 214
+deliveries over roughly seven minutes is 0.51/s, which predicts about 15
+in a 30-second window; observing zero is unlikely under a uniform rate
+but **device interrupt rates are not uniform.** A USB controller bursts
+during enumeration and is quiet when idle, so the 214 may all belong to
+an enumeration burst minutes earlier, and a genuinely idle controller
+would also read zero. **The window is too short and the rate too low for
+this to be conclusive on its own.**
+
+What would make it conclusive: a longer window, or the same measurement
+across several boots. It replicates in *direction* on three boots now
+(296, 298, 302) and in the strong temporal form only on this one.
+
+**What it does add, firmly:** the delivery path for these vectors works
+end-to-end in this boot - 214 of them arrived - so nothing structural
+prevents the xHCI's interrupts from reaching Windows on cpu1. Whatever
+stops them stops them mid-boot, at or near the moment the power
+transition begins.
