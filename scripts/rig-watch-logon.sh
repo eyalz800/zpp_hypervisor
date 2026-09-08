@@ -49,8 +49,24 @@ while :; do
     N=$(printf '%s' "$PS" | grep -cE "^  [A-Za-z]" || true)
     HAS_LOGON=$(printf '%s' "$PS" | grep -c "LogonUI.exe" || true)
     HAS_DWM=$(printf '%s' "$PS" | grep -c "dwm.exe" || true)
-    echo "[$(date +%H:%M:%S)] n=$N logonui=$HAS_LOGON dwm=$HAS_DWM  $STATUS" \
-        | tee -a "$OUT"
+
+    # **The armed count is read HERE, by this poller, on purpose.**
+    # Boot 335 broke through to n=29 with LogonUI and dwm up and its
+    # screen was never looked at, because the endgame test was run as a
+    # separate reader and this watcher had to be stopped for it twice -
+    # the monitor takes one connection. A missed power-IRP sample costs
+    # one point in a series of twenty-three; a missed screen costs the
+    # only evidence that answers the question, and it does not survive
+    # the stop.
+    #
+    # So one poller does both. `armed` is the endgame test: zero at
+    # n=13-14 is the escape class (boots 231, 278, 335), non-zero means
+    # 300 s from each arming.
+    clear_nc
+    ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
+            2>/dev/null | grep -c "ENABLED (armed" || true)
+    echo "[$(date +%H:%M:%S)] n=$N logonui=$HAS_LOGON dwm=$HAS_DWM " \
+         "armed=$ARMED  $STATUS" | tee -a "$OUT"
 
     if [ "$HAS_LOGON" -gt 0 ] && [ "$HAS_DWM" -gt 0 ] && [ "$SHOUTED" -eq 0 ]; then
         SHOUTED=1
