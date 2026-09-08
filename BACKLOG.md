@@ -79710,3 +79710,29 @@ and "which device" is even less informative than already recorded.
 **What is unchanged:** `USBHUB3` is present in every failure, now
 including one where it is present *twice*; the endgame test is **15 for
 15** on predicting death; and the escape rate stands at 2 of 21.
+
+## Four best-case draws, four identical armings: every measurable "the guest is doing well" is exhausted
+
+Boot 333 (vmcall 574.81/s, `vtl_fresh` cpu0 **+238.36/s** - the session's
+highest) reached n=14 at 21:57 and died at 21:58 with `IntcOED` at
+**300.0 s** and `USBHUB3` at 287.2 s. **The endgame test is 16 for 16.**
+
+That is the fourth time a draw has maximised one of the properties that
+plausibly correlates with a healthy guest, and armed exactly as usual:
+
+    boot 309   highest vtl_fresh at the time (+~30% over any other)  -> armed
+    boot 318   fastest to the plateau (20 min vs the escape's 31)    -> armed
+    boot 321   highest vmcall (810/s, a third above any other)       -> armed
+    boot 333   highest vtl_fresh outright (+238.36/s)                -> armed
+
+**Every quantity this rig can measure about how well the guest is running
+has now been at its observed maximum at least once, and the watchdogs
+armed each time.** Combined with the nine mechanism eliminations, that
+closes the search space reachable from this side: there is no measured
+property of a boot - not throughput, not trust-level work, not boot
+speed, not processor balance - that predicts whether it escapes.
+
+**The remaining variable is unobserved, not unexamined.** Whatever
+differs between boots 231/278 and the twenty that died is either inside
+hvix64, inside QEMU's xHCI model, or a timing coincidence too fine for
+any counter here to resolve. The rate is 2 in 22.
