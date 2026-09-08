@@ -79506,3 +79506,35 @@ measurements:** this failure has been chased through every mechanism zpp
 owns and each one has been cleared by direct reading. Continuing to
 instrument zpp for it is unlikely to be the productive move; the
 remaining candidates live in hvix64 or in QEMU's xHCI model.
+
+## The endgame test is 7 for 7, with a live 30-second prediction
+
+Boot 309 was the strongest healthy draw of the session - vmcall
+**541.44/s**, `vtl_fresh_calls` cpu0 **+225.75/s**, roughly 30% above any
+other - and it made no difference.
+
+    12:15  n=12   IntcOED **267.9 s of 300 (89.3%)**
+                  USBHUB3   251.1 s of 300 (83.7%)   -> DYING CLASS
+    12:18  paused (shutdown)
+
+**Predicted with a thirty-second horizon and confirmed.** The test now
+reads 7 for 7 across boots 263, 265, 275, 279, 282, 307 and 309 in the
+dying class, against 278 in the passing class.
+
+**And the throughput observation is worth recording precisely because it
+is negative.** 309 ran the guest ~30% harder than any other healthy boot
+by `vtl_fresh_calls`, reached the plateau in the usual time, and armed
+the usual pair in the usual order with the usual ~17 s gap. That is
+consistent with everything else measured today: the `0x9F` does not care
+how fast the guest is. It is the same conclusion the direct triage
+reached from the other side - 204, 163 and 482 vmcall/s at 22%, 29% and
+89% of the deadline - and the record's own note that boot 192 was "32%
+faster... and died identically".
+
+**So speed is not the lever for this failure**, and the +29.9% throughput
+work shipped earlier in this session, which was aimed at it, was aimed at
+the wrong thing. That was already suspected when the throughput account
+was eliminated; boot 309 is the cleanest single demonstration.
+
+Reaching the login screen multicore remains a **draw**: roughly 22% of
+boots progress and about 1 in 8 of those escapes the `0x9F`.
