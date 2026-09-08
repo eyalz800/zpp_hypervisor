@@ -119,10 +119,11 @@ while :; do
             'grep -ao "allocate_rwx done at 0x[0-9a-f]*" ~/zpp/serial.out | tail -1' \
             2>/dev/null | grep -o '0x[0-9a-f]*')
         clear_nc
-        timeout 600 python3 "$HERE/guest-l2-vectors.py" \
+        timeout 300 python3 "$HERE/guest-l2-vectors.py" \
             --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
+            --only 0xa1,0x91,0x81,0xd1,0x50 \
             --base "$MODBASE" > "$OUT/vectors-a.txt" 2>&1 || true
-        sleep 30
+        sleep 180
         clear_nc
         # **A dead guest and a silent device produce the same zeroes.**
         # On boot 287 the guest stopped during this pair and every vector
@@ -134,8 +135,9 @@ while :; do
                     2>/dev/null | grep -ai "VM status" || echo "UNREADABLE")
         echo "  status between the two vector reads: $MIDSTATUS"
         clear_nc
-        timeout 600 python3 "$HERE/guest-l2-vectors.py" \
+        timeout 300 python3 "$HERE/guest-l2-vectors.py" \
             --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
+            --only 0xa1,0x91,0x81,0xd1,0x50 \
             --base "$MODBASE" > "$OUT/vectors-b.txt" 2>&1 || true
         case "$MIDSTATUS" in *paused*|*UNREADABLE*)
             echo "!! THE GUEST STOPPED INSIDE THE VECTOR WINDOW."
@@ -156,7 +158,7 @@ def load(path):
             out[cpu][m.group(1)] = int(m.group(2).replace(",", ""))
     return out
 a, b = load(sys.argv[1]), load(sys.argv[2])
-print("\n=== per-vector DELTA over ~30 s while the power IRPs age ===")
+print("\n=== per-vector DELTA over ~180 s while the power IRPs age ===")
 for cpu in sorted(set(a) | set(b)):
     print(f"  {cpu}:")
     keys = sorted(set(a.get(cpu, {})) | set(b.get(cpu, {})),

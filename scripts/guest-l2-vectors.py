@@ -98,6 +98,17 @@ def main():
     ap.add_argument("--top", type=int, default=12,
                     help="rows per processor; 0 prints every non-zero "
                          "vector, which is what a census should do")
+    # **A targeted read, so a LONG window fits inside the arming budget.**
+    # The full census is 128 quadword reads per member per processor, and
+    # two of them plus a gap overran the 300 s watchdog on boots 287 and
+    # 290. But the question only ever concerns a handful of vectors - the
+    # xHCI's 0xa1/0x91/0x81 and a live control like 0xd1 - and reading
+    # four slots costs four reads, not 512. That buys a window long
+    # enough for zero to mean something: at the measured 0.51/s, 30 s
+    # predicts ~15 deliveries and 180 s predicts ~92.
+    ap.add_argument("--only", default=None,
+                    help="comma-separated vectors (e.g. 0xa1,0x91,0x81,"
+                         "0xd1) to read instead of the whole row")
     args = ap.parse_args()
 
     reader = load_reader()
@@ -135,12 +146,22 @@ def main():
     # is a risk, and this reader has no way to tell a long answer that
     # was truncated from one that was empty.
     SLICE = 16
+    wanted = None
+    if args.only:
+        wanted = sorted({int(v, 16) for v in args.only.split(",") if v})
     rows = {}
     for member in members:
         for cpu in range(args.cpus):
             start = instance + off[member] + cpu * 256 * 4
-            for word in range(0, 128, SLICE):
-                monitor.queue(start + word * 8, SLICE)
+            if wanted is None:
+                for word in range(0, 128, SLICE):
+                    monitor.queue(start + word * 8, SLICE)
+            else:
+                # Each quadword holds two 32-bit counters, so one read
+                # covers the pair (2i, 2i+1). Deduplicated, since
+                # neighbouring vectors share a word.
+                for word in sorted({v // 2 for v in wanted}):
+                    monitor.queue(start + word * 8, 1)
             rows[(member, cpu)] = start
 
     words = monitor.run()
@@ -190,7 +211,12 @@ def main():
     for member in members:
         for cpu in range(args.cpus):
             counts = unpack32(words, rows[(member, cpu)], 256)
-            live = [(v, c) for v, c in enumerate(counts) if c]
+            if wanted is None:
+                live = [(v, c) for v, c in enumerate(counts) if c]
+            else:
+                # Print the asked-for vectors even when zero - a zero
+                # that was READ is a datum, where an absent row is not.
+                live = [(v, counts[v] or 0) for v in wanted]
             live.sort(key=lambda pair: -pair[1])
             total = sum(c for _, c in live)
             shown = live if args.top == 0 else live[:args.top]
