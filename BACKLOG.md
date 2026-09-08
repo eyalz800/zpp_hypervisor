@@ -79644,3 +79644,40 @@ mechanism in the delivery path, the guest's throughput, its boot speed,
 and its trust-level work rate. A cause that survives all four is very
 unlikely to be in this codebase, which is what the nine eliminations
 already concluded from the other direction.
+
+## The escape rate, counted properly: ~1 in 10 progressing boots, not 1 in 8
+
+Boot 329 made the endgame test **14 for 14**, and fourteen consecutive
+armed boots is long enough to be worth counting the rate rather than
+repeating an estimate taken from four samples.
+
+**Every progressing boot tested at the plateau, both sessions:**
+
+    escaped (0 armed at n=14)   231, 278                    **2**
+    died    (armed at n=14)     209, 212, 218,              **18**
+                                263, 265, 273, 275, 279,
+                                282, 307, 309, 311, 315,
+                                318, 321, 323, 326, 329
+
+**2 of 20 - about 1 in 10**, not the 1 in 8 quoted from the earlier
+four-boot sample, and not the 3-of-4 the record's original note implied.
+
+**What that means for planning, stated plainly because it is not
+encouraging.** Progressing boots run about **25%** of draws, and about
+**10%** of those escape, so a breakthrough is roughly **1 boot in 40**.
+At ~16 minutes per draw that is **around ten hours of cycling per
+breakthrough**, and a breakthrough is not the goal - it is the
+*precondition* for looking at the screen, which has never yet survived
+one.
+
+**This is not a regression.** The deployed binary is `897426a8`
+throughout both sessions, boot 278 escaped inside this session, and
+fourteen armed in a row at a 9-in-10 death rate is about 23% likely -
+unremarkable. There is nothing to bisect and the estimate is simply
+worse than the small early sample suggested.
+
+**It does argue for how the remaining effort is spent.** Cycling is the
+only path currently available, it is expensive, and nine mechanism
+eliminations plus three best-case speed refutations say the cause is not
+in this codebase. Anyone picking this up should know the price before
+committing to it.
