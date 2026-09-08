@@ -78961,3 +78961,27 @@ watcher, not the logon watcher. It catches arming early with the full
 nothing is aging, the boot is in the breakthrough class, and *that* is
 when to switch to the logon watcher. The logon watcher is for a boot that
 has already passed the test, not for finding out whether it will.
+
+## Third inversion: boot 287 read stalled A at 10 min and healthy at 16
+
+    boot 262    4 min stalled A  ->  14 min HEALTHY
+    boot 282   10 min stalled A  ->  15 min HEALTHY  (vmcall 548.15/s)
+    boot 287   10 min stalled A  ->  16 min HEALTHY  (vmcall **525.25/s**,
+                                     vtl_fresh cpu0 **+135.64/s**)
+
+**Three boots would have been destroyed by acting on an early read**, and
+in two of them the early reading was the full textbook stalled A
+signature - `vmcall` 2.00/s, `vtl_fresh_calls` +0 on cpu0 - at *ten*
+minutes, indistinguishable from the seventeen genuinely stalled boots
+this session.
+
+This is no longer a caution, it is a measured property of the
+instrument: **before ~13 minutes the classifier does not distinguish a
+stalled boot from one that has not started.** Both healthy boots landed
+well above the recorded 260-471/s band once they did start, so these are
+not marginal cases that crept over a threshold.
+
+Healthy draws now stand at 18 of 83 (~22%), each costing about fifteen
+minutes. A false negative costs the whole draw; a false positive costs
+five minutes of waiting. **The asymmetry is roughly 3:1 and always in the
+same direction.**
