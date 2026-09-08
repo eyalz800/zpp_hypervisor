@@ -79044,3 +79044,50 @@ instead of tagging anything when the guest went away.
 well. Two boots agreeing exactly on a monotonic counter is either a real
 phase constant or a misread, and nothing here distinguishes them - noted
 so it is checked rather than quoted.
+
+## Boot 290 replicates it, harder: ZERO workers busy while the guest runs at 163 vmcall/s
+
+Second capture at first-arming, and it strengthens boot 287 on every
+axis. `IntcOED` at **88.1 s of 300 (29.4%)**, and in the same pass:
+
+    vmcall           cpu0  **163.68/s**
+    vtl_fresh_calls  cpu0  **+41.91/s**
+
+    PopIrpWorkerCount      2
+    **PopIrpWorkerInFlight  0**      <- BOTH workers idle
+    PopIrpWorkerPending    0
+    WaitListHead           set       <- a worker waiting for work
+    PopPendingSetPowerDeviceIrps  1
+
+Boot 287 had one worker inside `HidUsb`; here **neither worker is inside
+any driver at all**, one is explicitly parked on the semaphore waiting,
+and there is still an outstanding power IRP that `IntcOED` holds. So the
+IRP was dispatched, the driver returned pending, and **nothing anywhere
+is working on it** while the guest runs normally.
+
+That is the third independent refutation of the worker-pool account and
+the second of the throughput account, and it is the cleanest statement of
+the failure yet: **a healthy machine, an idle power-IRP pool, and an IRP
+that no one is completing.**
+
+**`PopCurrentIrpSequenceID` reads 36 here against 39 on boots 265 and
+287.** The earlier note flagged the repeated 39 as possibly a misread
+constant; it varies, so it is a real counter and that concern is closed.
+
+### The VOID banner worked
+
+The vector delta was void again - the guest died inside the window - but
+this time **the instrument said so**, printing
+`status between the two vector reads: paused (shutdown)` and
+`THE GUEST STOPPED INSIDE THE VECTOR WINDOW ... VOID` above the zeroes.
+On boot 287 the identical data was presented as every vector `STOPPED`,
+which read as the discovery the instrument exists to make. The fix added
+after that boot is confirmed working on live data.
+
+**Why it is still void, and the last fix for it.** Arming was caught at
+88.1 s leaving 212 s, and the sequence triage-60s, worker walk, vector
+pair-30s overran that. The vector delta is the **only** read here that
+has never produced a valid result, while the worker walk has now
+replicated three times with the same answer. So the order is inverted:
+triage drops to a 30 s window, the vector pair runs immediately after it,
+and the worker walk goes last where losing it costs nothing.

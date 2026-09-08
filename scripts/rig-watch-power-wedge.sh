@@ -70,16 +70,12 @@ while :; do
         echo "=== ARMED. Is the GUEST still healthy right now? ==="
         clear_nc
         timeout 300 python3 "$HERE/rig-dump-state.py" \
-            --elf .rig-deployed-hypervisor.elf --cpus 2 --delta 60 \
+            --elf .rig-deployed-hypervisor.elf --cpus 2 --delta 30 \
             > "$OUT/triage-at-arm.txt" 2>&1 || true
         grep -E "^  vmcall |vtl_fresh_calls|stimer_asked_arms" \
             "$OUT/triage-at-arm.txt" | head -6
-        echo "=== Reading PopIrpThreadList NOW (never read before) ==="
         printf '%s\n' "$IRPS" | grep -E "CurrentDevice|age |WatchdogState" | head -20
         printf '%s\n' "$IRPS" > "$OUT/irps-at-arm.txt"
-        clear_nc
-        timeout 400 python3 "$HERE/guest-power-workers.py" "$KB" "$CR3" \
-            2>&1 | tee "$OUT/workers-at-arm.txt" | tail -30
         # **Are DEVICE interrupts still arriving while the IRPs age?**
         # The three drivers seen stuck - IntcOED, USBHUB3, HidUsb - are
         # all idle devices being powered DOWN, and a D-state transition
@@ -146,6 +142,14 @@ for cpu in sorted(set(a) | set(b)):
               if d == 0 and a.get(cpu, {}).get(v, 0) else ""
         print(f"    {v}  delta {d:>9,}{tag}")
 PY
+        # **The worker walk goes LAST now.** It has replicated three
+        # times (boots 265, 287, 290) with the same answer - the pool is
+        # not the bottleneck - while the vector delta has never once
+        # produced a valid reading, so the vectors get the budget.
+        echo "=== PopIrpThreadList (replicated 3x; lowest priority) ==="
+        clear_nc
+        timeout 400 python3 "$HERE/guest-power-workers.py" "$KB" "$CR3" \
+            2>&1 | tee "$OUT/workers-at-arm.txt" | tail -20
         echo "=== captured under $OUT - continuing to watch ==="
         # Keep watching: a second read while the SAME IRPs age says
         # whether the workers are stuck in one driver or cycling.
