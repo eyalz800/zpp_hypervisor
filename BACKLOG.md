@@ -79193,3 +79193,76 @@ be compiled out behind `census_exits`. **The whole section is an artifact
 of the build.** Fourth instrument this session whose zero means "not
 measured" rather than "did not happen" - and the only one that said so
 without being asked.
+
+## The xHCI is programmed, unmasked, has interrupted 262 times this boot - and delivers ZERO while its hub's power IRP ages
+
+Boot 296, healthy (vmcall 427.34/s, `vtl_fresh` cpu0 +116.06/s), caught
+with a watchdog armed and **kept alive** through the whole measurement.
+
+**The controller's MSI-X table, read from its own BAR on QEMU's side**
+(`info pci` gives BAR0 = `0x7011100000`; the table is at +0x3000):
+
+    entry 0   addr 0xfee0300c   data 0x1a1   vector_control **0**
+    entry 1   addr 0xfee0300c   data 0x191   vector_control **0**
+    entry 2   addr 0xfee0300c   data 0x181   vector_control **0**
+    entry 3   addr 0xfee0300c   data 0x1a1   vector_control **0**
+
+The low byte of `data` is the vector, so the xHCI owns **`0xa1`, `0x91`
+and `0x81`**, and `vector_control` bit 0 is the mask bit - **all four
+entries are UNMASKED**. That kills the simplest hypothesis outright: the
+controller is fully configured and permitted to interrupt.
+
+**And it is not interrupting.** Two censuses 45 s apart, taken while
+`USBHUB3`'s watchdog ran:
+
+    cpu0   0xa1 / 0x91 / 0x81   **absent from both censuses**
+    cpu1   0xa1   71 ->   71    **delta +0**
+           0x91   96 ->   96    **delta +0**
+           0x81   95 ->   95    **delta +0**
+
+    control, same window, same instrument:
+    cpu0   0xd1 **+5,548**   0x2f **+1,347**   0x50 **+279**
+    cpu1   0xd1 **+27,991**  0x2f **+12,981**
+
+**The control is what makes this admissible.** `0x50` is another device
+vector and it moved 279 times in the same window on the same processor,
+so the instrument was counting and the interrupt path was live. The
+xHCI's three vectors carry **nonzero boot totals** - 71, 96 and 95, so
+they have delivered 262 times earlier in this boot - and delivered
+**nothing at all** while the transition hung.
+
+So: the controller worked, then stopped, and its hub's power IRP has been
+outstanding ever since.
+
+**The caveat that keeps this a lead and not a conclusion.** *An idle
+device shows exactly this signature.* A controller being powered down
+has no traffic to report, so zero deliveries is what a *successful*
+quiesce looks like too - right up until the completion interrupt, which
+is the one that never comes. Nothing here separates "stopped because it
+was told to" from "stopped when it should not have".
+
+**And one thing that does not fit yet.** zpp's own "external interrupt
+vectors reflected upward" list contains `0xef`, `0xff`, `0x50`, `0x60`,
+`0x2f`, `0xed` on cpu0 and `0xef`, `0xff`, `0x2f`, `0x60`, `0xed` on
+cpu1 - **`0xa1`, `0x91` and `0x81` appear in neither**. Yet
+`l2_injected_vector` records 262 of them on cpu1. So those interrupts
+did not arrive at zpp as host external interrupts and were injected by
+the level above through some other path. Until that is understood, "we
+are not receiving it" and "we are not delivering it" cannot be told
+apart, and neither can be blamed.
+
+### Two instrument defects found in the same capture
+
+**A negative watchdog age.** The watcher printed
+`age -248,010,314 (100ns) = -24.8 s of 300 s (-8.3% to bugcheck)`. A
+watchdog cannot start in the future. `guest-power-irps.py` guards
+`WatchdogStart == 0` but not `now < WatchdogStart`, so the two clocks
+disagreeing produces a confident negative percentage instead of a
+refusal. **Ask whether a reading is possible before asking whether it is
+believable** - this file's own rule, and the age would have been quoted.
+
+**The MSI-X section printed only its header.** The `for ... done | tee`
+pipeline wrote the entries to `/tmp/power-wedge/xhci-msix.txt` but they
+did not reach the log, so the section read as empty - which is the
+"failed read looks like an empty result" shape recorded three times
+already today. The data was recovered from the file and re-taken by hand.
