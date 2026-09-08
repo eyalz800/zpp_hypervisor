@@ -79578,3 +79578,40 @@ drivers.
 count. **Three or four more draws would show whether the breakthroughs
 sit at the fast end**, and n=1 on the breakthrough side is why this is
 written as a hypothesis rather than a finding.
+
+## REFUTED next turn: time-to-plateau does not decide it either
+
+The entry above proposed that the race is between Windows' boot progress
+and its own idle-device power-down timer, on the evidence that boot 278
+(the one breakthrough) reached n=14 in **31 minutes** against 34-35 for
+three boots that died.
+
+**Boot 318 kills it.** It reached **n=15 in 20 minutes** - eleven minutes
+faster than the breakthrough and fifteen faster than the dying boots, the
+fastest of any boot measured - and at that moment:
+
+    IntcOED   **300.0 s of 300 (100.0%)**
+    USBHUB3     209.8 s of 300  (69.9%)
+
+**Both armed, and the first already expired.** Arriving at the plateau
+sooner did not prevent arming; it did not even delay it. The hypothesis
+was written as a hypothesis with n=1 on the breakthrough side, and one
+draw was enough to end it.
+
+**What that leaves.** Neither of the two "speed" accounts survives:
+
+- **throughput** - refuted by boot 309, which ran ~30% harder by
+  `vtl_fresh_calls` and armed identically, and by the record's boot 192
+  at 32% faster;
+- **wall-clock to plateau** - refuted here by boot 318 at 20 minutes.
+
+So whatever decides whether the watchdogs arm is **not how fast the guest
+runs and not how quickly it boots**. Combined with the nine mechanisms
+already eliminated, nothing measurable from this side predicts it, and
+boots 231 and 278 remain the only two escapes out of eleven progressing
+boots tested.
+
+**One incidental variation worth noting rather than reading into.** The
+gap between the two armings is usually 14-21 s; here it is **90 s**
+(300.0 against 209.8). The pair is reproducible, the interval between
+them is not as tight as three earlier boots suggested.
