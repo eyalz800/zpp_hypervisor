@@ -30,6 +30,32 @@ mkdir -p "$OUT"
 clear_nc() { ssh -o ConnectTimeout=8 "$RIG" 'pkill -x nc' 2>/dev/null || true; sleep 2; }
 
 echo "watching power IRPs; kernel base $KB cr3 $CR3, every ${POLL}s"
+
+# **The BASELINE, and it is the control the first three captures lacked.**
+# Boots 296 and 298 both showed the xHCI's vectors (0xa1/0x91/0x81) at
+# zero delta while a watchdog ran, and that was quoted against another
+# device vector - 0x50 - which turned out to be moving on the OTHER
+# processor. On cpu1, where the xHCI's MSI destination points, NO device
+# vector moves during the window, so "the device went quiet" and "this
+# processor is device-quiet" read identically and the comparison decided
+# nothing.
+#
+# The control has to be TEMPORAL: the same vectors, on the same
+# processor, before the watchdog arms and after. Those vectors carry
+# nonzero boot totals - 262 on boot 296 - so they were being delivered
+# earlier on that very processor, which makes the two samples comparable
+# in the one way the cross-processor version was not.
+MODBASE=$(ssh -o ConnectTimeout=8 "$RIG" \
+    'grep -ao "allocate_rwx done at 0x[0-9a-f]*" ~/zpp/serial.out | tail -1' \
+    2>/dev/null | grep -o '0x[0-9a-f]*')
+clear_nc
+echo "taking the pre-arming BASELINE vector census (module base $MODBASE)"
+timeout 600 python3 "$HERE/guest-l2-vectors.py" \
+    --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
+    --base "$MODBASE" > "$OUT/vectors-baseline.txt" 2>&1 || true
+grep -E "l2_injected_vector cpu|vector 0x(a1|91|81|50|d1) " \
+    "$OUT/vectors-baseline.txt" | head -14
+
 N=0
 while :; do
     N=$((N + 1))
