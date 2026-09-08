@@ -142,6 +142,41 @@ for cpu in sorted(set(a) | set(b)):
               if d == 0 and a.get(cpu, {}).get(v, 0) else ""
         print(f"    {v}  delta {d:>9,}{tag}")
 PY
+        # **The xHCI's own MSI-X table, read from QEMU's side.**
+        # USBHUB3 is armed in every 0x9F seen, and it sits on the
+        # EMULATED qemu-xhci. A device power transition completes when
+        # the controller interrupts back, so whether the controller can
+        # interrupt AT ALL is the question - and it is answerable without
+        # touching the guest, because the MSI-X table lives in the
+        # device's own BAR and QEMU will read it.
+        #
+        # `info pci` puts qemu-xhci's BAR0 at 0x7011100000 and reports
+        # "IRQ 10, pin A" for legacy INTx. `info irq` shows only IRQ 0
+        # (1,009) and IRQ 1 (18) ever firing, so nothing uses INTx and
+        # every device is on MSI - which `info irq` cannot count.
+        #
+        # Each MSI-X entry is four dwords: address low, address high,
+        # data, vector control. **Vector control bit 0 is the MASK bit**,
+        # and the low byte of `data` is the vector. Read early on boot
+        # 295 (~7 min, before the USB driver initialises) both entries
+        # read all zero with vector control **1 - masked**. If they still
+        # read masked while USBHUB3's watchdog is running, the controller
+        # cannot raise an interrupt and the transition can never complete.
+        # If they are programmed and unmasked, it can, and the silence is
+        # elsewhere.
+        #
+        # Narrow reads, per the device-register rule this tree records:
+        # a wide `xp` over a BAR once reported a live NVMe as disabled.
+        XHCI=0x7011100000
+        echo "=== xHCI MSI-X table (mask bit = vector control bit 0) ==="
+        for E in 0 1 2 3; do
+            A=$(python3 -c "print(hex($XHCI + 0x3000 + $E * 16))")
+            clear_nc
+            ssh -o ConnectTimeout=8 "$RIG" \
+                "printf 'xp /4xw $A\n' | nc -w 8 127.0.0.1 4446 | strings" \
+                2>/dev/null | grep -E "^7011" | sed "s/^/  entry $E  /"
+        done | tee "$OUT/xhci-msix.txt"
+
         # **The worker walk goes LAST now.** It has replicated three
         # times (boots 265, 287, 290) with the same answer - the pool is
         # not the bottleneck - while the vector delta has never once
