@@ -79681,3 +79681,32 @@ only path currently available, it is expensive, and nine mechanism
 eliminations plus three best-case speed refutations say the cause is not
 in this codebase. Anyone picking this up should know the price before
 committing to it.
+
+## Correction: an armed boot CAN leave the plateau, and two USBHUB3 watchdogs can arm at once
+
+Boot 331 (healthy, vmcall 526.31/s, `vtl_fresh` cpu0 **+221.80/s**, the
+session's second-highest) reached **n=14 at 20:57**, then **n=16 at
+21:04** - and died at 21:08 with **two armed watchdogs, both
+`\Driver\USBHUB3`**, at **300.0 s** and **299.6 s**, four tenths of a
+second apart, with **7 power IRPs in flight** rather than the usual 5-6.
+
+**Two things this corrects.**
+
+**1. "Armed at n=14 means it never leaves the plateau" is wrong.** That
+is how this file has phrased the endgame test for fifteen boots, and
+331 moved from 14 to 16 while both its watchdogs were past 99%. The test
+predicts **death within 300 s of arming**, not stasis at exactly
+fourteen processes. The distinction matters because a boot creeping to
+n=16 could otherwise be read as an escape beginning - it is not, and
+boot 278's escape went 14 -> **31**, an order of magnitude further.
+
+**2. The arming pair is not always two different drivers.** Every prior
+capture showed either `IntcOED` then `USBHUB3` 14-90 s apart, or
+`USBHUB3` alone. This is **two separate `USBHUB3` device objects**
+(`0xffff998e0b686d60` and `0xffff998e0db747f0`) armed essentially
+simultaneously. So the hub can have more than one outstanding power IRP,
+and "which device" is even less informative than already recorded.
+
+**What is unchanged:** `USBHUB3` is present in every failure, now
+including one where it is present *twice*; the endgame test is **15 for
+15** on predicting death; and the escape rate stands at 2 of 21.
