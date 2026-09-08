@@ -79736,3 +79736,62 @@ speed, not processor balance - that predicts whether it escapes.
 differs between boots 231/278 and the twenty that died is either inside
 hvix64, inside QEMU's xHCI model, or a timing coincidence too fine for
 any counter here to resolve. The rate is 2 in 22.
+
+## Boot 335: third breakthrough (n=29, LogonUI + dwm) - and two errors of mine in reading it
+
+**The result.** Boot 335 was healthy on both processors (vmcall 284.03/s
+and 174.62/s), read **ZERO armed watchdogs at n=14** at 22:46 - the
+escape class - and broke through to **n=29** with `LogonUI.exe` (pid
+1492) and `dwm.exe` (pid 1512) both parented to `winlogon.exe`, plus
+`LsaIso.exe` and eleven `svchost.exe`. Third breakthrough on record
+(231, 278, 335) and the second observed directly. It then armed **three**
+`USBHUB3` watchdogs and died to `0x9F` naming `USBHUB3`.
+
+**That is exactly boot 278's arc**: unarmed at the plateau -> breakthrough
+-> *fresh* arming afterwards -> death. Two of three breakthroughs now
+follow it, which strengthens the earlier finding that zero-armed predicts
+**leaving the plateau, not surviving.**
+
+### Error 1: I announced "zero armed" from a truncated read
+
+At 22:46 I reported zero armed and called it the escape class. The
+reading was **correct at that instant** - the script's own summary said
+`4 power IRP(s) in flight` and all four were `IRP_MN_WAIT_WAKE` - but I
+announced it from a `grep ... | head -12` that could not have shown a
+fifth entry if one existed. Two minutes later there were **5**, one
+armed. The conclusion held; the *method* did not, and on a different
+draw the same shortcut would have produced a false negative.
+
+**Read the summary count, not the head of a filtered list.** The script
+prints `N power IRP(s) in flight` for exactly this reason.
+
+### Error 2: three watchdogs at 187.4 s, and a bugcheck that should not have fired
+
+Post-mortem the three armed entries all read **187.4 s of 300 (62.5%)**,
+identical to the digit, yet `KiBugCheckData` holds a real `0x9F`. A
+watchdog at 62.5% has not expired, so either a fourth entry did expire
+and is not in the list, or the ages froze when the machine stopped and
+187.4 s is simply where `now` stopped advancing - **which is the reading
+I take, because a stopped guest freezes `now` and this file already
+records that a reading spanning a stop describes two different
+machines.** The identical ages across three entries also say they were
+armed in the same operation.
+
+**Neither is quotable as "it died at 62.5%".** The bugcheck is real; the
+ages are post-mortem and cannot date it.
+
+### And the screen was lost again
+
+`LogonUI.exe` and `dwm.exe` were up at n=29 and the guest died before I
+looked. That is the **third** breakthrough whose screen was never read
+(150, 278, 335) - the evidence that cannot be recovered, on a rig where
+`screendump` is impossible and the user is the only sensor. The logon
+watcher exists precisely to prevent this and it was **restarted twice
+during the endgame reads**, so it was not polling at the moment the
+processes appeared.
+
+**Fix: never stop the logon watcher to take another read.** Accept the
+monitor contention, or take the endgame test once and leave the watcher
+running. A missed power-IRP sample costs one data point in a series of
+twenty-two; a missed screen costs the only evidence that answers the
+actual question.
