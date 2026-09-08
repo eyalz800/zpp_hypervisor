@@ -367,9 +367,30 @@ while cur and cur != head and n < 64:
         else:
             age = now_unbiased - start
             print(f'      WatchdogStart {start:,}')
-            print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
-                  f'of {BUGCHECK_AT / 1e7:.0f} s '
-                  f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
+            # **A negative age is IMPOSSIBLE, not merely surprising.** A
+            # watchdog cannot start in the future. Measured on boot 296:
+            # `age -248,010,314 (100ns) = -24.8 s of 300 s (-8.3% to
+            # bugcheck)` - printed with the same confidence as a real
+            # figure, and it would have been quoted.
+            #
+            # The guard above rejects `WatchdogStart == 0`; this rejects
+            # the other unphysical case. It happens because `start` and
+            # `now_unbiased` come from different places and are not
+            # sampled atomically, so a read that straddles an update can
+            # invert them. Refuse rather than print: CLAUDE.md's rule is
+            # to ask whether a reading is *possible* before asking
+            # whether it is believable.
+            if age < 0:
+                print(f'      age would be {age:,} (100ns) = '
+                      f'{age / 1e7:,.1f} s - **NEGATIVE, THEREFORE '
+                      f'IMPOSSIBLE**. A watchdog cannot start in the '
+                      f'future, so `now` and WatchdogStart were not read '
+                      f'consistently. NO AGE REPORTED; re-read before '
+                      f'concluding anything about this entry.')
+            else:
+                print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
+                      f'of {BUGCHECK_AT / 1e7:.0f} s '
+                      f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
     cur = rq(cur)
 
 print(f'\n{n} power IRP(s) in flight.')
