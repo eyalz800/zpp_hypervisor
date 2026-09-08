@@ -62,9 +62,23 @@ while :; do
     # So one poller does both. `armed` is the endgame test: zero at
     # n=13-14 is the escape class (boots 231, 278, 335), non-zero means
     # 300 s from each arming.
-    clear_nc
-    ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
-            2>/dev/null | grep -c "ENABLED (armed" || true)
+    # **Only from n>=12, because merging made the poll too slow.**
+    # Boot 338 got ONE poll in six minutes with the power read on every
+    # pass, and died between samples - a sampling interval coarser than
+    # the three-minute breakthrough window this watcher exists to catch,
+    # which is the opposite of the fix it was meant to be.
+    #
+    # The armed count is only meaningful at the plateau anyway: the
+    # endgame test is calibrated at n=13-14, and `armed=0` at n=5 says
+    # nothing (boot 338 read exactly that and still died at n=14). So
+    # skip it while the process count is low, where polls must stay fast
+    # to see the count move, and take it once the plateau is in reach.
+    ARMED="-"
+    if [ "$N" -ge 12 ]; then
+        clear_nc
+        ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
+                2>/dev/null | grep -c "ENABLED (armed" || true)
+    fi
     echo "[$(date +%H:%M:%S)] n=$N logonui=$HAS_LOGON dwm=$HAS_DWM " \
          "armed=$ARMED  $STATUS" | tee -a "$OUT"
 
