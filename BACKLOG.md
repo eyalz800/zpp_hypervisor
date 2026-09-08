@@ -79538,3 +79538,43 @@ was eliminated; boot 309 is the cleanest single demonstration.
 
 Reaching the login screen multicore remains a **draw**: roughly 22% of
 boots progress and about 1 in 8 of those escapes the `0x9F`.
+
+## Endgame test 9 for 9, and a testable hypothesis: time-to-plateau, not throughput
+
+Boot 315 (healthy, vmcall 480.17/s, `vtl_fresh` +170.97/s) reached n=14
+with **both watchdogs armed** - `IntcOED` **300.0 s of 300** and
+`USBHUB3` 285.1 s, the classic ~15 s gap - and died within four minutes.
+**The test is 9 for 9.**
+
+Nine progressing boots tested at the plateau: nine armed, nine died. The
+only two on record that broke through (231, 278) had **zero** armed at
+that point. So roughly **2 in 11** progressing boots escape.
+
+**A hypothesis the timings support, offered as a hypothesis:**
+
+    boot 278  breakthrough   started 22:17, n=14 at 22:48  = **31 min**
+    boot 315  died           started 14:11, n=14 at 14:45  = 34 min
+    boot 311  died           started 12:37, n=14 at 13:12  = 35 min
+    boot 309  died           started 11:38, n=12 at 12:13  = 35 min
+
+**The race may be between Windows' boot progress and its own idle-device
+power-down timer.** Get past the plateau before the power manager decides
+to idle those devices, and no watchdog arms; arrive later and it has
+already started one. Boot 278 fits exactly: zero armed at n=14, broke
+through to n=31, and *then* a fresh `USBHUB3` watchdog armed and killed
+it - the timer fired after the breakthrough rather than before.
+
+**This is not the throughput lever already refuted.** Boot 309 ran the
+guest ~30% harder by `vtl_fresh_calls` and still armed early, and boot
+192 in the record was 32% faster and died identically. What this
+hypothesis points at is **wall-clock time to reach the plateau**, which
+is not the same quantity as second-level entry rate - a boot can be
+executing more VTL work per second and still take longer to load its
+drivers.
+
+**How to test it, and it costs nothing:** the logon watcher already logs
+`n=` with a timestamp every poll, so time-to-n=14 is recoverable from
+`/tmp/logon-watch.txt` on every healthy boot. Record it beside the armed
+count. **Three or four more draws would show whether the breakthroughs
+sit at the fast end**, and n=1 on the breakthrough side is why this is
+written as a hypothesis rather than a finding.
