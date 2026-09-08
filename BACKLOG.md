@@ -79266,3 +79266,47 @@ pipeline wrote the entries to `/tmp/power-wedge/xhci-msix.txt` but they
 did not reach the log, so the section read as empty - which is the
 "failed read looks like an empty result" shape recorded three times
 already today. The data was recovered from the file and re-taken by hand.
+
+## Correction: the two vector counters measure different LEVELS, so there was never a contradiction
+
+The entry above flagged as "one thing that does not fit yet" that
+`0xa1`/`0x91`/`0x81` appear in zpp's external-interrupt list on neither
+processor while `l2_injected_vector` records 262 of them, and concluded
+that until this was understood, "we are not receiving it" and "we are not
+delivering it" could not be told apart.
+
+**They are not the same population, and reading the code says so
+directly:**
+
+- `external_interrupt_vector_counts` is incremented in
+  `exit_dispatch.cpp:1154`, on an **external-interrupt exit** - what zpp
+  receives from L0.
+- `l2_injected_vector` is incremented in `nested_entry.cpp:3906`, inside
+  `build_vmcs02`, from **vmcs12's** `vm_entry_interruption_information_field`
+  - what **hvix64 asked to inject** into Windows.
+
+So one counts arrivals at our level and the other counts the level
+above's injections into the level below. A guest vector like `0xa1` is
+assigned by *Windows*; there is no reason for it to appear in a list of
+what L0 hands us. **The mismatch was my own category error, not an
+anomaly.**
+
+**What the reading actually says, restated correctly:** during that 45 s
+window **hvix64 did not stage the xHCI's vectors into vmcs02 even once**,
+having staged them 262 times earlier in the same boot. That is a
+statement about the level above's view - it had nothing to deliver, or
+chose not to - and it is still the sharpest thing measured about this
+failure.
+
+**What is still genuinely open**, and it is narrower than before:
+whether zpp *received* anything for the xHCI in that window. Answering it
+needs the host-side vector that carries the emulated controller's MSI,
+which is not `0xa1` - that is the guest's number. `external_interrupt_vector_counts`
+already records the answer per vector; what is missing is knowing which
+row to read.
+
+**The general lesson, and it is one this file keeps relearning:** two
+counters with similar names measured at different levels of a four-level
+stack are not comparable, and comparing them manufactures a puzzle. The
+declaration of each says which level it belongs to, and reading both
+declarations took one grep and would have prevented the claim.
