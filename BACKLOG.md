@@ -79310,3 +79310,49 @@ counters with similar names measured at different levels of a four-level
 stack are not comparable, and comparing them manufactures a puzzle. The
 declaration of each says which level it belongs to, and reading both
 declarations took one grep and would have prevented the claim.
+
+## zpp never receives the xHCI's vector at all - so it cannot be dropping it
+
+`external_interrupt_vector_counts` is incremented at
+`exit_dispatch.cpp:1154` on **every** external-interrupt exit whose
+interruption-information carries the valid bit. **It is behind no build
+switch and no sampling cut**, and it sits immediately before
+`queue_external_interrupt`, so anything zpp receives and queues is
+counted.
+
+Boot 294's dump reports cpu0's list as *"266,379 over **6 distinct**"* -
+six vectors with a nonzero count, `0xef`, `0xff`, `0x50`, `0x60`, `0x2f`,
+`0xed` - and cpu1's as five. So the zero for `0xa1`, `0x91` and `0x81`
+is a **measured zero across the whole boot**, not a row below a cut.
+
+**zpp has never received an external interrupt carrying the xHCI's
+vector, on either processor, in any boot measured.** Yet hvix64 staged
+that vector into vmcs02 262 times on boot 296.
+
+So the interrupt reaches the level above by a path that does not produce
+an external-interrupt exit in zpp - posted-interrupt delivery into the
+virtual APIC, or hvix64 synthesising it - and **"zpp drops the xHCI's
+interrupt" is refuted.** We are not in that path to drop anything.
+
+That is the **eighth** elimination for the `0x9F`, and the first that
+clears zpp of the specific mechanism rather than clearing a subsystem:
+
+    audio stack, VFIO power management, power worker pool (x3),
+    queue congestion, destroyed system calls, throughput (x2),
+    masked MSI-X, **and now zpp dropping the device interrupt**
+
+**What that leaves.** The failure is a device power transition that never
+completes, on an emulated controller whose interrupt path does not run
+through us, on a guest that is measurably healthy the whole time. On the
+evidence gathered, the remaining candidates sit **above or beside zpp**:
+hvix64's handling of the interrupt it does inject, or QEMU's xHCI model
+not raising the completion at all. Both are outside the code this project
+owns, which is a conclusion worth stating plainly rather than continuing
+to look for a zpp-side cause that eight measurements have now failed to
+find.
+
+**Caveat that keeps it honest:** all of this rests on `l2_injected_vector`
+and `external_interrupt_vector_counts` being what their declarations say,
+and on the 45 s window of boot 296 being representative. The window is one
+sample on one boot; the *zero across a whole boot* in the external list is
+much stronger and is what the elimination actually rests on.
