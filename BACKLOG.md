@@ -79451,3 +79451,58 @@ end-to-end in this boot - 214 of them arrived - so nothing structural
 prevents the xHCI's interrupts from reaching Windows on cpu1. Whatever
 stops them stops them mid-boot, at or near the moment the power
 transition begins.
+
+## REFUTED, by the test built to settle it: the xHCI keeps interrupting the whole time
+
+Boot 307, healthy (vmcall **482.70/s**, `vtl_fresh` cpu0 **+169.99/s**,
+the session's highest), two watchdogs armed at 11:07, and a **180-second**
+window with the guest alive throughout (`status between the two vector
+reads: VM status: running`).
+
+    cpu1 - the processor the xHCI's MSI destination names
+
+      0x91  delta **+9**       0xa1  delta **+3**      0x81  delta **+2**
+      0xd1  delta +105,031     0x50  delta +4
+
+**The xHCI delivers 14 interrupts across its three vectors while its
+hub's power IRP ages.** The hypothesis this file has been building
+toward for six boots - that the controller goes silent when the
+transition begins - **is false.**
+
+**And the earlier zeros were arithmetic, not evidence.** 14 in 180 s is
+**0.078/s**. A 30-second window predicts **2.3** deliveries, so
+observing zero on boots 296, 298 and 302 was entirely unremarkable -
+p = e^-2.3 = 0.10, one time in ten by chance alone, three times running
+at 1 in 1,000 which is uncomfortable but nowhere near proof. The 214
+deliveries before arming on boot 302 came at a much higher rate because
+the controller was enumerating; comparing an enumeration burst against
+an idle rate is what made the zeros look meaningful.
+
+**This is why the window was lengthened.** The 30 s result was recorded
+as "suggestive, not decisive... the window is too short and the rate too
+low for this to be conclusive on its own", and the targeted `--only`
+read existed only to afford a longer one. The instrument built to
+strengthen a lead refuted it instead, which is the outcome it was
+supposed to be able to produce.
+
+**Ninth elimination, and the interrupt path is now clear end to end:**
+
+    the controller is programmed          (MSI-X data 0x1a1/0x191/0x181)
+    the controller is unmasked            (vector_control 0, three boots)
+    the controller is interrupting        (**+14 in 180 s while armed**)
+    zpp never sees those vectors          (whole-boot zero, ungated counter)
+    the guest is healthy                  (482 vmcall/s with watchdogs run)
+    the power worker pool is idle         (InFlight 0, one worker parked)
+    no work is queued for it              (SignalState 0, SequenceID frozen)
+
+**So the device interrupts, the guest runs, the pool is free, and the IRP
+still does not complete.** Nothing left in the delivery path explains it.
+What remains is the handling *after* delivery - the driver's completion
+routine, or hvix64's presentation of the interrupt to it - and neither is
+zpp's code.
+
+**Stated plainly, because it is the honest conclusion of nine
+measurements:** this failure has been chased through every mechanism zpp
+owns and each one has been cleared by direct reading. Continuing to
+instrument zpp for it is unlikely to be the productive move; the
+remaining candidates live in hvix64 or in QEMU's xHCI model.
