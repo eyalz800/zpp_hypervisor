@@ -79137,3 +79137,59 @@ armed in every failure. Candidate approaches, cheapest first: read the
 guest's `_KINTERRUPT` for the xHCI device object, or correlate against
 `external_interrupt_vector_counts` which records what arrives at zpp
 from the host and is currently not sampled by the reader.
+
+## Only TWO device vectors reach the guest at all, and both were flowing while the IRP aged
+
+The dump prints what zpp *receives* from the host under a different name
+than expected - "external interrupt vectors reflected upward" - which is
+why `external_interrupt_vector_counts` appeared unsampled. Boot 294,
+cumulative:
+
+    cpu0 RECEIVED from host (266,379 over 6)   cpu0 INJECTED into L2 (13)
+      0xef  263,100  98.8%                       0xd1  626,224   (clock)
+      0xff    1,636                              0x2f   20,694   (DPC)
+      **0x50    1,249**                          0x40   10,585
+      **0x60      218**                          **0x50    2,824**
+      0x2f      127                              **0x60      437**
+      0xed       49                              0x2e, 0xd2, 0x0e, ...
+
+`0xef`, `0xff` and `0xed` are received in quantity and **injected zero
+times** - they are consumed at our level or hvix64's and never reach
+Windows. `0xd1`, `0x2f`, `0x40`, `0x2e`, `0x0e` are injected far more
+than received, because they are generated inside the guest (clock, DPC,
+system calls, faults) rather than arriving from hardware.
+
+**That leaves exactly two vectors that arrive from the host AND are
+passed through to the guest: `0x50` and `0x60`.** Whatever the emulated
+xHCI's interrupt is, on cpu0 it can only be one of those two.
+
+**And both were moving during the aging window.** From boot 294's valid
+delta, taken while `USBHUB3`'s watchdog ran: **`0x50` delta 190, `0x60`
+delta 50** over thirty seconds.
+
+So the targeted form of the mechanism is now in serious doubt as well:
+it is not just that interrupts in general are flowing, it is that *the
+only candidate device vectors on that processor* are flowing. "We stop
+delivering the xHCI's interrupt and the transition never completes" has
+no room left unless the device stops raising it at the source.
+
+**What is still not proven** is which of `0x50`/`0x60` is the xHCI, and
+the two are not distinguished here. The identification would come from
+the guest's `_KINTERRUPT` for the controller. Stated plainly because the
+conclusion above holds for either assignment but the *reason* it holds
+differs: if the xHCI is one of them, it is being delivered; if it is
+neither, then it never arrives from the host at all, which is a QEMU-side
+fact and not ours.
+
+### And the "injection reconciliation" section is void on this build
+
+It prints every vector as `** STAGED AND NOT CARRIED - dropped here`,
+including 626,301 clock interrupts, which reads as catastrophic loss. Its
+own closing note says why it is not: *"Either the census is off (needs
+census=1 in the manifest) or every injection is being lost before
+entry."* The manifest is `census=0`, and the carried side is
+`l2_entry_vector`, which was established at the start of this session to
+be compiled out behind `census_exits`. **The whole section is an artifact
+of the build.** Fourth instrument this session whose zero means "not
+measured" rather than "did not happen" - and the only one that said so
+without being asked.
