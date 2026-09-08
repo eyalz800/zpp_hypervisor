@@ -79356,3 +79356,53 @@ and `external_interrupt_vector_counts` being what their declarations say,
 and on the 45 s window of boot 296 being representative. The window is one
 sample on one boot; the *zero across a whole boot* in the external list is
 much stronger and is what the elimination actually rests on.
+
+## Boot 298 replicates it - and exposes that the control was on the WRONG PROCESSOR
+
+Second capture, caught at the first poll with **2 armed watchdogs**, and
+the vector window was valid (`status between the two vector reads: VM
+status: running`).
+
+**The MSI-X table is byte-identical to boot 296's:**
+
+    entry 0  data 0x1a1  vector_control 0     entry 2  data 0x181  vc 0
+    entry 1  data 0x191  vector_control 0     entry 3  data 0x1a1  vc 0
+
+So "programmed and unmasked" replicates on a second boot. That is solid.
+
+**The delta, and the problem with how I read the first one:**
+
+    cpu0   0xd1 **+3,434**   0x50 **+152**
+    cpu1   0xd1 +19,854   0x50 **+0**   0x91 **+0**   0xa1 **+0**   0x81 **+0**
+
+The xHCI's vectors live on **cpu1** - that is where their boot totals are,
+and the MSI address `0xfee0300c` names a single destination. And on cpu1,
+**every device vector reads zero**, including `0x50`, which is the very
+vector I quoted as the control.
+
+`0x50` moved +152 on **cpu0**. It moved **+0 on cpu1**, the processor
+that matters. Boot 296 was the same shape: `0x50` +279 on cpu0, and
+9 total with +0 delta on cpu1.
+
+**So the control does not control.** "The xHCI is silent while other
+device interrupts flow" is true only across processors; on the processor
+the xHCI targets, *nothing* device-like moved in the window. A processor
+receiving no device interrupts at all and a device that has gone quiet
+produce the same reading, and I asserted the second while measuring the
+first.
+
+**What survives**, stated at the strength the data supports:
+
+- The xHCI is **programmed and unmasked** - two boots, byte-identical.
+  This is unaffected and remains a real elimination.
+- **zpp never receives the vector** - a whole-boot zero in a counter with
+  no gate and no cut. Also unaffected, and it is the elimination that
+  matters most because it is about our code.
+- The xHCI **delivered nothing during the window**. True, but **not
+  distinguished** from cpu1 delivering nothing device-like at all.
+
+**The control that would actually work** is temporal, not spatial: the
+same vectors on the same processor *before* the watchdog arms versus
+after. `0xa1`/`0x91`/`0x81` have nonzero boot totals - 262 on boot 296 -
+so they were being delivered earlier in the boot on that same processor.
+Sampling them across the arming boundary compares like with like.
