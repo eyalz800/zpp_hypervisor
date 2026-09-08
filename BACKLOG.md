@@ -79615,3 +79615,32 @@ boots tested.
 gap between the two armings is usually 14-21 s; here it is **90 s**
 (300.0 against 209.8). The pair is reproducible, the interval between
 them is not as tight as three earlier boots suggested.
+
+## Third refutation of the speed family: 810 vmcall/s arms identically
+
+Boot 321 was the **highest-throughput healthy boot of the session** -
+vmcall **810.52/s**, a third above the previous best of 600, with
+`vtl_fresh_calls` cpu0 +170.83/s. It reached n=14 in 24 minutes and had
+**both watchdogs armed**, `IntcOED` at **300.0 s of 300** and `USBHUB3`
+at 262.1 s. It died. **The endgame test is 11 for 11.**
+
+That completes three independent refutations of the speed family, each
+by its own best case:
+
+    boot 309   ~30% more vtl_fresh_calls than any other healthy boot  -> armed
+    boot 318   plateau in **20 min**, 11 faster than the breakthrough -> armed
+    boot 321   **810 vmcall/s**, a third above any other              -> armed
+
+**Whatever governs the arming is indifferent to how hard the guest runs,
+how fast it boots, and how much trust-level work it completes.** Taken
+with the nine mechanisms already eliminated by direct reading, and with
+boots 231 and 278 showing no property that distinguishes them from the
+eleven that died, **nothing measurable from this side predicts the
+outcome.**
+
+This is worth stating as a result rather than as an absence. The session
+has now tested, and failed to find any effect from: every zpp-side
+mechanism in the delivery path, the guest's throughput, its boot speed,
+and its trust-level work rate. A cause that survives all four is very
+unlikely to be in this codebase, which is what the nine eliminations
+already concluded from the other direction.
