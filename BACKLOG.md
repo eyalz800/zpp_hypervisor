@@ -79091,3 +79091,49 @@ has never produced a valid result, while the worker walk has now
 replicated three times with the same answer. So the order is inverted:
 triage drops to a 30 s window, the vector pair runs immediately after it,
 and the worker walk goes last where losing it costs nothing.
+
+## FIRST VALID vector delta: interrupts are flowing while the power IRPs age
+
+Boot 294, caught at first-arming with the reordered watcher, and this
+time `status between the two vector reads: VM status: running` - the
+guest survived the whole window, so the reading is real. It is the first
+valid output this instrument has produced after being voided on boots
+287 and 290.
+
+    per-vector injections over ~30 s WHILE the watchdogs run
+
+    cpu0   0xd1  3,166   (clock)     cpu1   0xd1  19,945
+           0x2e  2,634   (int 2Eh)          0x2f   8,536
+           0x2f    861   (DPC)              0x50       2
+           0x40    491
+           0x0e    453   (page faults)
+           0x50    190
+           0xd2     75
+           0x60     50
+
+**Interrupt delivery is not broken.** Thousands of injections per thirty
+seconds across eight distinct vectors on cpu0 and three on cpu1, while
+a device power IRP sits uncompleted. Clock, system calls, DPCs and page
+faults are all flowing.
+
+That is the third independent line of evidence for the same conclusion
+the throughput refutation reached: **the machine is working normally and
+the power transition alone is stuck.** It also rules out the specific
+mechanism this read was built to test in its global form - "we stopped
+delivering interrupts, so the device transition never completes" is
+false as a blanket statement.
+
+**What it does NOT yet answer** is the targeted version: several vectors
+on cpu0 carry a nonzero boot total and a **zero** delta - `0x80`,
+`0x20`, `0xe1`, `0xb2`, `0x61`, `0x90`, `0x71` - and one of those may be
+the xHCI. A device that is idle shows exactly the same signature as a
+device that has gone silent, so the zero-delta rows are **not** evidence
+on their own.
+
+**The missing step is identification**: which vector belongs to
+`USBHUB3`'s controller. Until that is known, this reading says interrupt
+delivery works in general and says nothing about the one device that is
+armed in every failure. Candidate approaches, cheapest first: read the
+guest's `_KINTERRUPT` for the xHCI device object, or correlate against
+`external_interrupt_vector_counts` which records what arrives at zpp
+from the host and is currently not sampled by the reader.
