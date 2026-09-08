@@ -102,9 +102,25 @@ while :; do
             --base "$MODBASE" > "$OUT/vectors-a.txt" 2>&1 || true
         sleep 60
         clear_nc
+        # **A dead guest and a silent device produce the same zeroes.**
+        # On boot 287 the guest stopped during this pair and every vector
+        # on both processors printed "STOPPED (nonzero total, zero
+        # delta)" - which reads as the finding this instrument exists to
+        # make, and was only the guest having gone. Check status between
+        # the reads and refuse to tag anything if it did.
+        MIDSTATUS=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 \
+                    2>/dev/null | grep -ai "VM status" || echo "UNREADABLE")
+        echo "  status between the two vector reads: $MIDSTATUS"
+        clear_nc
         timeout 600 python3 "$HERE/guest-l2-vectors.py" \
             --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
             --base "$MODBASE" > "$OUT/vectors-b.txt" 2>&1 || true
+        case "$MIDSTATUS" in *paused*|*UNREADABLE*)
+            echo "!! THE GUEST STOPPED INSIDE THE VECTOR WINDOW."
+            echo "   Every delta below is zero because the machine is"
+            echo "   gone, NOT because a device went quiet. VOID."
+            ;;
+        esac
         python3 - "$OUT/vectors-a.txt" "$OUT/vectors-b.txt" <<'PY'
 import re, sys
 def load(path):

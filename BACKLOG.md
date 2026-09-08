@@ -78985,3 +78985,62 @@ Healthy draws now stand at 18 of 83 (~22%), each costing about fifteen
 minutes. A false negative costs the whole draw; a false positive costs
 five minutes of waiting. **The asymmetry is roughly 3:1 and always in the
 same direction.**
+
+## DECISIVE: the guest is HEALTHY while its power IRPs age out. The throughput account of the 0x9F is refuted
+
+Boot 287, caught by `rig-watch-power-wedge.sh` at the **first** armed
+poll rather than at n=14, so the watchdogs were young and the guest was
+still ordinary:
+
+    IntcOED   66.3 s of 300  (**22.1%**)
+    USBHUB3   53.5 s of 300  (**17.8%**)
+
+    and AT THAT MOMENT, same pass:
+      vmcall           cpu0  12,703  = **204.45/s**
+      vtl_fresh_calls  cpu0   3,120  = **50.22/s**
+
+**The machine is not too slow to finish in 300 seconds. It is running
+normally and the power IRPs are simply not completing.** A stalled boot
+reads `vmcall` 2.00/s and `vtl_fresh_calls` +0; this reads 204/s and
++50/s with two watchdogs already running.
+
+That is the read this file has wanted for five boots and missed four
+times, always for the same reason - arming was only ever discovered at
+n=14, by which point `IntcOED` was at 100% and there were seconds left.
+Polling from the start fixed it.
+
+**What it eliminates.** The throughput account has been the surviving
+explanation of the `0x9F` since the audio stack, VFIO power management,
+the worker pool, queue congestion and destroyed system-call events were
+each eliminated. It said: the guest is slow, so a 300 s deadline
+expires. **It is not slow at the moment the deadline is running.** The
++29.9% throughput improvement shipped earlier was aimed at this and
+"wasn't enough"; on this evidence it was aimed at the wrong thing
+entirely.
+
+**What it does not settle** is why the IRPs do not complete. The worker
+pool is confirmed not to be it, again: `PopIrpWorkerCount` 2,
+`InFlight` 1, one worker **idle**, and the busy one inside
+`\Driver\HidUsb` - the same third driver as boot 265, which is a
+replication.
+
+### And the vector delta from the same capture is VOID
+
+The per-vector injection delta - built to ask whether device interrupts
+are still arriving - printed **every vector on both processors** as
+`STOPPED (nonzero total, zero delta)`. That reads exactly like the
+finding it was built to make. It is not: the guest **stopped inside the
+60-second window** (`VM status: paused (shutdown)` immediately after),
+so every counter froze because the machine was gone.
+
+A dead guest and a silent device produce identical zeroes, and the
+printer could not tell them apart - the same shape as
+`pending_event_lost`'s "GENUINELY LOST" and the `grep -c` verdict
+inversion, both caught earlier today. The watcher now reads `info
+status` **between** the two vector samples and prints a VOID banner
+instead of tagging anything when the guest went away.
+
+`PopCurrentIrpSequenceID` read **39** here and **39** on boot 265 as
+well. Two boots agreeing exactly on a monotonic counter is either a real
+phase constant or a misread, and nothing here distinguishes them - noted
+so it is checked rather than quoted.
