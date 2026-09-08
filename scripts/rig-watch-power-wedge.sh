@@ -100,7 +100,7 @@ while :; do
         timeout 600 python3 "$HERE/guest-l2-vectors.py" \
             --elf .rig-deployed-hypervisor.elf --cpus 2 --top 0 \
             --base "$MODBASE" > "$OUT/vectors-a.txt" 2>&1 || true
-        sleep 60
+        sleep 30
         clear_nc
         # **A dead guest and a silent device produce the same zeroes.**
         # On boot 287 the guest stopped during this pair and every vector
@@ -134,7 +134,7 @@ def load(path):
             out[cpu][m.group(1)] = int(m.group(2).replace(",", ""))
     return out
 a, b = load(sys.argv[1]), load(sys.argv[2])
-print("\n=== per-vector DELTA over ~60 s while the power IRPs age ===")
+print("\n=== per-vector DELTA over ~30 s while the power IRPs age ===")
 for cpu in sorted(set(a) | set(b)):
     print(f"  {cpu}:")
     keys = sorted(set(a.get(cpu, {})) | set(b.get(cpu, {})),
