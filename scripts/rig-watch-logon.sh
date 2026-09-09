@@ -32,6 +32,8 @@ clear_nc() { ssh -o ConnectTimeout=8 "$RIG" 'pkill -x nc' 2>/dev/null || true; s
 
 echo "watching for LogonUI+dwm; base $KB cr3 $CR3, every ${POLL}s" | tee -a "$OUT"
 SHOUTED=0
+POLLN=0
+ARMED_EVERY=4
 while :; do
     clear_nc
     STATUS=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 2>/dev/null \
@@ -78,9 +80,32 @@ while :; do
     # watchdogs and died at n=8, so the gate skipped every poll and it
     # has no endgame reading at all. The reading still cannot CLASSIFY
     # below n=13-14 - that calibration is unchanged - but a boot arming
-    # early is worth seeing, and the cost is one power read per poll on
-    # boots that are moving anyway.
-    if [ "$N" -ge 6 ]; then
+    # early is worth seeing.
+    #
+    # **On a SUBSET of polls, not all of them - measured on boot 395.**
+    # Lowering the gate made every poll past n=6 pay for the power read:
+    # polls ran **85 s** apart below the gate and **4m07s and 5m35s**
+    # above it. That boot then went from the n=14 plateau to
+    # `paused (shutdown)` in **32 seconds**, so a five-minute poll cannot
+    # see the window this watcher exists to catch. That is boot 338's
+    # failure - one poll in six minutes - re-appearing at the lowered
+    # gate instead of the raised one, which means the threshold was never
+    # the right knob.
+    #
+    # So take it every ARMED_EVERY'th poll. Early arming is still seen
+    # (within 4 polls of it happening), and the mean poll interval stays
+    # near the process-only cost instead of the power-read cost:
+    # 4 polls = 3*85 + 250 = ~127 s each, against ~300 s before.
+    #
+    # `armed=-` means BELOW THE GATE and `armed=skip` means NOT READ THIS
+    # POLL. Neither is a zero, and the difference matters: `armed=0` is
+    # the escape class and a reader that cannot tell "not read" from
+    # "read as zero" turns a skipped poll into a breakthrough call.
+    POLLN=$((POLLN + 1))
+    if [ "$N" -ge 6 ] && [ $((POLLN % ARMED_EVERY)) -ne 0 ]; then
+        ARMED="skip"
+    fi
+    if [ "$N" -ge 6 ] && [ $((POLLN % ARMED_EVERY)) -eq 0 ]; then
         clear_nc
         ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
                 2>/dev/null | grep -c "ENABLED (armed" || true)
