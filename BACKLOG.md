@@ -79890,3 +79890,27 @@ caught this one.
 **It does not change the conclusion**, only the coverage: `USBHUB3` and
 `IntcOED` armed together, in the usual pair, naming the usual enumerator.
 The rate is now 4 escapes in 36 progressing boots.
+
+## The lowered gate works, and it buys lead time on the precursor too
+
+Boot 386 (healthy, vmcall 616.62/s, `vtl_fresh` +185.64/s) is the first
+boot with the armed read gated at n>=6 instead of n>=12:
+
+    18:06  **n=9   armed=2**    <- visible five and a half minutes early
+    18:11  n=14  armed=2
+    18:12  dead
+
+The old gate would have shown `armed=-` at 18:06 and reported nothing
+until 18:11. **Arming at n=9 confirms boot 383's lesson generally**: the
+watchdogs are not waiting for the plateau, and a boot can be classified
+before it gets there.
+
+**That cuts both ways, and the useful direction is the escape.** The
+precursor - `armed=0` while the count climbs - is the thing worth seeing
+early, because it is what buys time to look at the screen. On boot 359 it
+was first read at n=12 and `LogonUI` came 18 minutes later; if it can be
+read from n=6, the lead grows rather than shrinks.
+
+The endgame test is **29 for 29**. It remains uncalibrated below n=13-14
+- an `armed=0` at n=9 is not yet evidence of escape - but an `armed=2`
+at n=9 is already a death sentence, since no boot has ever disarmed one.
