@@ -24,6 +24,14 @@
 #     the kernel, holding every pinned guest page - twice measured at
 #     ~12-13 GB - and nothing reaps it. TERM first gives it the chance to
 #     unwind cleanly; KILL is the fallback.
+
+# **Kill any watcher before the guest goes.** A watcher left running
+# from the previous boot polls a stale kernel base against the new
+# guest and fights the real one for the monitor's single connection.
+# Boot 372 ran two and produced alternating n=0 / n=5 lines.
+pkill -f rig-watch-logon.sh 2>/dev/null || true
+pkill -f rig-watch-power-wedge.sh 2>/dev/null || true
+
 set -u
 
 RIG=${ZPP_TARGET:-tc@192.168.1.199}

@@ -79,8 +79,22 @@ while :; do
         ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
                 2>/dev/null | grep -c "ENABLED (armed" || true)
     fi
-    echo "[$(date +%H:%M:%S)] n=$N logonui=$HAS_LOGON dwm=$HAS_DWM " \
-         "armed=$ARMED  $STATUS" | tee -a "$OUT"
+    # **`n=0` is a FAILED READ, not an empty guest.** The walker always
+    # finds at least `System`, so zero means the read did not answer -
+    # and the commonest cause is a second watcher left running from the
+    # previous boot, against a stale kernel base, fighting this one for
+    # the monitor's single connection. That happened on boot 372 and
+    # produced alternating n=0 / n=5 lines that look like a guest
+    # flickering rather than two readers colliding.
+    if [ "$N" -eq 0 ]; then
+        echo "[$(date +%H:%M:%S)] **READ FAILED** (n=0 is impossible - the" \
+             "walker always finds System). Stale watcher or monitor" \
+             "contention; not a fact about the guest.  $STATUS" \
+             | tee -a "$OUT"
+    else
+        echo "[$(date +%H:%M:%S)] n=$N logonui=$HAS_LOGON dwm=$HAS_DWM " \
+             "armed=$ARMED  $STATUS" | tee -a "$OUT"
+    fi
 
     if [ "$HAS_LOGON" -gt 0 ] && [ "$HAS_DWM" -gt 0 ] && [ "$SHOUTED" -eq 0 ]; then
         SHOUTED=1
