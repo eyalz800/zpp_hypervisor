@@ -74,7 +74,13 @@ while :; do
     # skip it while the process count is low, where polls must stay fast
     # to see the count move, and take it once the plateau is in reach.
     ARMED="-"
-    if [ "$N" -ge 12 ]; then
+    # **Lowered from 12 to 6 after boot 383.** That boot armed both
+    # watchdogs and died at n=8, so the gate skipped every poll and it
+    # has no endgame reading at all. The reading still cannot CLASSIFY
+    # below n=13-14 - that calibration is unchanged - but a boot arming
+    # early is worth seeing, and the cost is one power read per poll on
+    # boots that are moving anyway.
+    if [ "$N" -ge 6 ]; then
         clear_nc
         ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
                 2>/dev/null | grep -c "ENABLED (armed" || true)

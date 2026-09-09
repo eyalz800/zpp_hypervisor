@@ -79861,3 +79861,32 @@ failed.
 
 That is the only way the screen gets read, and it costs one message at a
 moment that occurs roughly once in seven progressing boots.
+
+## The 0x9F can strike BEFORE the plateau: boot 383 died at n=8
+
+Boot 383 was healthy (vmcall 449.51/s, `vtl_fresh` cpu0 +129.83/s) and
+died with the watcher's last reading at **n=8**, both watchdogs armed
+(`IntcOED` and `USBHUB3`) and `0x9F` naming `IntcAudioBus`.
+
+**Every previous death was at n=12-16.** This one is four processes
+earlier, which matters for two reasons:
+
+- **The `armed=` gate at n>=12 missed it entirely.** The watcher read
+  `armed=-` on every poll because the count never reached twelve, so
+  this boot has no endgame-test reading at all and is **not counted in
+  the 28-for-28** - the test was never run on it. That is the honest
+  bookkeeping, not a failure of the test.
+- **"The plateau is where every healthy boot arrives" is too strong.**
+  It is where most arrive; boot 383 armed and died before getting
+  there. The arming is not gated on reaching n=14.
+
+**The gate should be lowered.** n>=12 was chosen because the endgame test
+is calibrated at n=13-14 and early readings say nothing about escape -
+which remains true - but a boot that arms at n=8 is worth *seeing* even
+if the reading cannot classify it. Lowering to n>=6 costs one extra
+power-IRP read per poll on boots that are moving anyway, and would have
+caught this one.
+
+**It does not change the conclusion**, only the coverage: `USBHUB3` and
+`IntcOED` armed together, in the usual pair, naming the usual enumerator.
+The rate is now 4 escapes in 36 progressing boots.
