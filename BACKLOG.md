@@ -79795,3 +79795,39 @@ monitor contention, or take the endgame test once and leave the watcher
 running. A missed power-IRP sample costs one data point in a series of
 twenty-two; a missed screen costs the only evidence that answers the
 actual question.
+
+## Boot 359: fourth breakthrough (n=24), and the screen was lost to MY polling gap
+
+    07:37  n=12  **armed=0**       <- escape class, first since boot 335
+    07:41  n=12  armed=0
+    07:47  n=16  armed=0           <- LEFT the plateau, still nothing aging
+    07:55  **n=24, LogonUI + dwm up** - watcher fired its banner
+    ~07:56 paused (shutdown)
+    07:57  I read the banner. Already dead.
+
+Asked the user what the frozen frame showed: **"Driver power state
+failure"** - the `0x9F` bugcheck screen. So the login screen is
+**still unconfirmed**, on the fourth breakthrough (231, 278, 335, 359).
+
+**This one is not the instrument's fault.** The watcher did exactly its
+job: it kept polling through the breakthrough without being stopped, saw
+`LogonUI` and `dwm` within ~40 s of them appearing, and printed the
+banner telling me to ask immediately. **I was not reading it.** My
+previous check was 07:52 and my next was 07:57 - a five-minute gap that
+swallowed the entire breakthrough and the death.
+
+**And the signal to tighten was already on screen at 07:47**: `n=16`
+with `armed=0` is a boot that has *left the plateau with nothing aging*,
+which no dying boot has ever done. That is the moment to switch from
+five-minute checks to tight ones, and I did not.
+
+**Procedure, and it is the last gap left:** once a boot reads
+`armed=0` **and** `n` has moved past 14, poll the watcher log **every
+20-30 seconds**. The breakthrough-to-death window has been three
+minutes (278), under two (335) and **under one** here, so the check
+interval has to be shorter than a minute, not shorter than five.
+
+**Rates after four breakthroughs:** 4 escapes in 29 progressing boots
+(~1 in 7), 175 boots total. Every one died to `0x9F`, and the two whose
+timing is known died 1-3 minutes after `LogonUI` appeared - so even a
+perfect capture leaves a very short window in which to look.
