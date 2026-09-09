@@ -79831,3 +79831,33 @@ interval has to be shorter than a minute, not shorter than five.
 (~1 in 7), 175 boots total. Every one died to `0x9F`, and the two whose
 timing is known died 1-3 minutes after `LogonUI` appeared - so even a
 perfect capture leaves a very short window in which to look.
+
+## The precursor gives ~18 minutes of warning. Alert on THAT, not on the breakthrough
+
+Four breakthroughs, four lost screens, and the reason is now precisely
+known: **the breakthrough-to-death window is under a minute** (boot 359),
+which is shorter than the round trip of noticing a banner and asking the
+user to look. Chasing the event cannot work.
+
+**But the event has a precursor with a long lead time.** On boot 359:
+
+    07:37  n=12, **armed=0**   <- precursor visible HERE
+    07:47  n=16, armed=0       <- confirmed: left the plateau unarmed
+    07:55  LogonUI + dwm       <- 18 minutes after the precursor
+    07:56  dead
+
+`armed=0` at the plateau has occurred **four times in 29 progressing
+boots** and **every one of them broke through**. It has never once been
+followed by a death at n=14 - that is what the 21-for-21 endgame test
+says from the other side. So it is not a hint, it is the reliable
+antecedent, and it arrives **eight to eighteen minutes early**.
+
+**Therefore: tell the user to watch the rig the moment `armed=0` is read
+at n>=12, not when LogonUI appears.** By the time `LogonUI` shows up
+there is under a minute left, and the user cannot be asked to watch a
+passed-through GPU for hours on the chance of a draw - but they can be
+asked to look for the ten minutes after a precursor that has never
+failed.
+
+That is the only way the screen gets read, and it costs one message at a
+moment that occurs roughly once in seven progressing boots.
