@@ -79914,3 +79914,39 @@ read from n=6, the lead grows rather than shrinks.
 The endgame test is **29 for 29**. It remains uncalibrated below n=13-14
 - an `armed=0` at n=9 is not yet evidence of escape - but an `armed=2`
 at n=9 is already a death sentence, since no boot has ever disarmed one.
+
+## Boot 395 - the ninth triage inversion, and the 30th endgame call
+
+**Inverted between 10 and 18 minutes.** At 21:10 it read the complete
+stalled-A signature - `vmcall` **2.04/s**, `vtl_fresh_calls` cpu0 **+0**,
+frozen at 33,900. At 21:18 the same reader gave **406.89/s** and cpu0
+**+115.92/s**, inside the healthy band of 260-471/s. Killing it on the
+early read - which is what the previous five boots' procedure would have
+done at ten minutes - would have thrown away the only progressing boot
+in six.
+
+That is the ninth recorded inversion (262, 282, 287, 290, 294, 296, 302,
+307, 395) and the first in this session's later run, so the 13-minute
+calibration is not an artefact of the boots it was derived from.
+
+**Endgame test: 30 for 30.** `armed=2` at n=14 (21:34:41), guest
+`paused (shutdown)` at 21:35:13 - 32 seconds later. The first arming was
+read at 21:29 with n=6, and 300 s from there lands at 21:34, so the
+death is the watchdog expiring on the earlier of the two, not on the one
+just read.
+
+**What the early `armed` reading is worth: nothing, still.** The gate was
+lowered to n>=6 after boot 383 so that early arming would at least be
+*seen*, and here it was - `armed=1` at n=6, eleven minutes before the
+end. But it cannot classify: boot 338 read `armed=0` at n=5 and died at
+n=14 anyway. The calibration remains n=13-14, and this boot's n=6 reading
+is recorded as a datum, not as a prediction that succeeded.
+
+**Cost of the merged read, measured.** Polls before the n>=6 gate ran
+85 s apart; the first poll after it took **4m07s** (21:24:59 -> 21:29:06)
+and the next **5m35s**. The plateau-to-death window here was under a
+minute, so a watcher polling every five minutes cannot see a
+breakthrough it is pointed at. This is the boot-338 problem re-appearing
+at the lowered gate rather than the raised one, and it is the argument
+for reading `armed` on a *subset* of polls rather than on all of them
+past a threshold.
