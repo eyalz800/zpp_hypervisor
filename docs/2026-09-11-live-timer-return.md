@@ -172,3 +172,80 @@ New artifacts: `cache-live-stack-11min/`, `cache-vbox/`,
 `cache-delta-10min.out`, and `cache-timer-10min.out` in the session directory.
 The resident reader's module-base overwrite and truncated manifest were
 fixed separately in `57fd2ef`; the new delta report reads the full manifest.
+
+## The reserved-access-rights boot reaches the release call
+
+The previous cache boot stopped around 15:53 UTC after about 34 minutes.
+Its final complete process walk still had three processes. In 32.148 seconds,
+CPU 0 made zero fresh VTL calls and CPU 1 made 33; handler shares were
+70.07%/10.75%. Three final validated reads still found grant zero, kernel
+resolution count 1 and requested/pseudo interval 9,765. Supported teardown
+returned the NVMe and 15,491 MiB free RAM. The archived loader's MD5 matches
+`2ac8432cd5f20272a6eeef00564a2844`.
+
+The next boot started around **15:54 UTC**, carrying `fe1955ec`'s cache fix
+for processor-dependent reserved access-rights bits. Fresh-mount loader MD5
+is **`476ff7711e5232f748513e40cb83c22b`**; build switches and CPU count are
+unchanged. Module base is `0x66e08000`, singleton `0x682f3000`, Windows base
+**`0xfffff800a5800000`**, CR3 `0x1ae000`. The new counter's ELF offset is
+`0x14eaec8`, physical `0x682f2ec8`.
+
+Eleven live CPU 0 captures around eight minutes took 5–15 ms. Eight valid
+unwinds agree on this chain; three yielded invalid RIP `0x18` and are
+discarded. Four valid samples have the interrupted RIP directly:
+
+```
+nt+0x2bb96b KiCheckForThreadDispatch+0x7f
+  KeSetSystemGroupAffinityThread+0x18e
+  KeGenericProcessorCallback+0x14e
+  ExpUpdateTimerConfiguration+0xc6
+  ExpUpdateTimerResolution+0x1cd
+  ExSetTimerResolution+0xbc
+  VBoxSup+0x25d24
+  VBoxSup+0xf148
+  VBoxSup+0x9a63, +0x194c9
+  PnpCallDriverEntry / IopLoadDriver / IopInitializeSystemDrivers
+  IoInitSystem / Phase1Initialization / PspSystemThreadStartup
+  KxStartSystemThread -> 0
+```
+
+The sampled `nt+0x2bb96b` follows `mov cr8, rbp` at `+0x2bb967`; its
+remaining instructions restore registers and return. The callback is
+inside its call to `KeSetSystemGroupAffinityThread` at `+0x30e239`, before
+the timer worker call at `+0x30e260`. This is another interruption immediately
+after lowering IRQL, now on the way into the release's worker.
+
+A complete 105-module walk, with every backlink and the kernel anchor
+validated, identifies VBoxSup base **`0xfffff8003a600000`**, size `0x12b000`.
+Its 18 absent tail pages are excluded from all instruction/unwind reads.
+The live import `VBoxSup+0x108188` equals this boot's
+`nt+0x416570` (`ExSetTimerResolution`). At `VBoxSup+0x25d1a`/`+0x25d1c`,
+the code zeros EDX and ECX before calling this import at `+0x25d1e`.
+Thus this is the **release** operation. The caller at `+0xf139` loads
+extension `+0xa8`, skips release if zero, calls at `+0xf143`, then clears
+the field only at the unreturned `+0xf148`.
+
+Reconstructed nonvolatile RBX identifies extension
+**`0xffffb48a4ce861a0`**. Three validated reads at 16:02:43–16:02:46 UTC (about nine minutes) find
+**grant 500,000**, kernel resolution count **0**, last requested interval
+**156,250**, pseudo interval **9,765**, and clock owner **0**. The nonzero
+stored grant and release frame prove the preceding request returned. They
+do not prove the release completed. CPU 0 runs Phase1 thread
+`0xffffb48a494de080`; CPU 1's current thread is its idle thread
+`0xffffb48a494f5040`. DPC counts advance, with empty queues at the samples.
+
+The six-minute 31.990-second window has fresh VTL calls +0/+32, L2 entries
+on both CPUs and handler shares 70.08%/10.53%. The reserved-bit counter is
+zero in the early cumulative report, has delta zero in this window, and is
+still **cumulatively zero at 16:03:27 UTC**. Therefore this boot's further
+progress cannot be attributed to that cache path being exercised. VMREAD
+and VMWRITE failures remain zero in the measured window. A complete process
+walk at the same time still has only System, Secure System and Registry.
+
+Artifacts under `/tmp/zpp-20260911/`: `access-rights-live-stack-8min/`,
+`access-rights-vbox/`, `access-rights-vbox-unwind-8min.out`,
+`access-rights-vbox-release-disassembly.txt`, `access-rights-affinity-disassembly.txt`,
+`access-rights-vbox-release-10min.out`, `access-rights-counter-10min.txt`,
+`access-rights-delta-6min.out`, and `access-rights-processes-10min.txt`.
+The new VMCS write-elision build is verified locally but is **not running
+in this guest**. The `ar-logon` watcher owns the monitor again.

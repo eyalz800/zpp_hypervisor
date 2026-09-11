@@ -80362,3 +80362,30 @@ skip returns before incrementing them. This has not been deployed: the
 running guest carries only the earlier reserved-access-rights fix. Its
 measured hit rate and boot effect are still unknown. Artifacts under
 `/tmp/zpp-20260911/` use the `cache-write-elision-` prefix.
+
+## 2026-09-11: VBoxSup's request returned; the next boot stops in its release
+
+The cache boot stopped around 15:53 UTC after a final three-process walk,
+fresh VTL calls +0/+33 in 32.148 seconds, and grant still zero. Supported
+teardown returned NVMe and 15,491 MiB free RAM. The newly deployed loader
+`476ff7711e5232f748513e40cb83c22b` carries `fe1955ec` with unchanged switches;
+the next two-CPU boot started around 15:54 UTC and all channels answered.
+
+Eight valid live unwinds now recover VBoxSup's **release** call to
+`ExSetTimerResolution(0, FALSE)`, through `KeSetSystemGroupAffinityThread`
+and `KiCheckForThreadDispatch+0x7f`. That instruction follows the CR8 restore;
+the timer worker itself has not been called on this release yet. The
+reconstructed extension's grant is 500,000, proving the earlier request
+returned and stored its result. The release has not returned to clear it.
+Kernel resolution count is zero, requested interval 156,250, pseudo interval
+9,765. The cumulative reserved-bit-write counter remains zero at 16:03:27
+UTC, so the further progress cannot be credited to that path being exercised.
+Windows still has three processes. Full validated addresses and code are in
+the newest section of `docs/2026-09-11-live-timer-return.md`.
+
+This guest is still running; `ar-logon` owns the monitor. The write-elision
+build `9f1caf2b` is locally verified but has not been deployed. Do not use
+its newer ELF for resident offsets. Current Windows base is
+`0xfffff800a5800000`, CR3 `0x1ae000`; module/singleton remain
+`0x66e08000`/`0x682f3000`. The previous boot's extension address is invalid
+here; this boot's extension is `0xffffb48a4ce861a0`.

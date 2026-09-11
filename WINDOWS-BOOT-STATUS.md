@@ -44,7 +44,7 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   that region, preserving unrelated cached fields. Hardware VMCLEAR and
   pointer restoration remain. The helper is limited to the two shadow-copy
   sites; generic clears still invalidate globally. This depends on the
-  preceding borrow-write fix. Both are deployed. All 63 cache
+  preceding borrow-write fix. Both are deployed. Their original 63 cache
   assertions pass; `vmcs_cache_owned_clears` measures use on the rig.
 - The resident reader preserves the module base across its VMCALL and
   VTL1 resume-ring reports. They previously replaced that variable with a
@@ -58,16 +58,51 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   processor behaviors. Three regression comparisons failed before the fix;
   all 107 cache checks now pass. The new counter is
   `vmcs_cache_reserved_bit_writes`, also available in delta reports.
-  This change has not been deployed yet and is not a demonstrated stall cause.
+  This change is deployed; its counter remains zero through the latest
+  nine-minute read, so its cache path does not explain this boot's progress.
 
 All 27 rebuilt host tests passed after these code changes. All 224 Python
 tests, including fragmented replies and incomplete list cases, passed.
 The debug hypervisor and loaders build, and the ELF and bootability checks pass.
 These checks do not prove that Windows boots.
 
-## Rig evidence and next step
+## Current boot and next step
 
-The **current boot** started around **15:19 UTC** with both cache changes:
+The current boot started around **15:54 UTC**, with loader MD5
+`476ff7711e5232f748513e40cb83c22b` verified from a fresh mount. It carries
+`fe1955ec`'s reserved-access-rights cache fix, two CPUs and unchanged switches.
+Module base is `0x66e08000`, singleton `0x682f3000`, Windows base
+**`0xfffff800a5800000`**, CR3 **`0x1ae000`**. Resolve from the archived
+`.rig-deployed-hypervisor.elf`, which differs from the newer local build.
+The `ar-logon` watcher in `zpp-rig-20260911` owns the monitor.
+
+This guest has returned from VBoxSup's first timer-resolution request and
+is inside its release call. Eight valid live unwinds agree on
+`KiCheckForThreadDispatch+0x7f`, immediately after restoring CR8, beneath
+`KeSetSystemGroupAffinityThread` and `ExSetTimerResolution`. The driver's
+stored grant is 500,000 and has not yet been cleared; the kernel resolution
+count is zero. See the latest section of
+[the timer-return evidence](docs/2026-09-11-live-timer-return.md) for complete
+addresses, validated code and discarded captures. The process list still
+has three entries. The reserved-bit counter is cumulatively zero, so this
+boot's further progress is not proof of benefit from that code path.
+
+The six-minute 31.990-second window has fresh VTL calls +0/+32, L2 entries
+on both CPUs, handler shares 70.08%/10.53%, and no VMREAD/VMWRITE failures.
+Keep observing before cycling. Take another late process walk and counter
+window, then recheck the release frame if progress remains absent.
+
+**Next build, not deployed:** `9f1caf2b` skips hardware VMWRITE only when
+this VMCS's valid current cache window already contains the identical field
+and value. Borrows, invalidated observations and read-only fields still
+write. Six negative-control assertions fail before elision; all 145 cache
+checks and all 27 rebuilt host tests pass after it (224 Python tests).
+Debug loaders and ELF/bootability checks pass. `vmcs_cache_write_hits`
+will measure use on the rig; no live performance result exists yet.
+
+## Earlier boots
+
+The prior cache boot started around **15:19 UTC** with both cache changes:
 loader MD5 `2ac8432cd5f20272a6eeef00564a2844`, verified from a fresh mount.
 It has two CPUs, unchanged build switches and all startup channels answering.
 The corrected five-minute report proves the module base from its complete
@@ -86,7 +121,7 @@ L1 shares 23.66%/52.18%, L2 shares 7.56%/3.89%. The CPUs are doing different
 work from the previous stalled boot, so these are not an isolated speedup
 measurement or proof of a successful Windows boot.
 
-Current addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
+That prior boot's addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
 base `0xfffff8017fc00000`, CR3 `0x1ae000`. The private-clear counter is at
 ELF offset `0x50f7028`, physical `0x6beff028`; borrow-write invalidations
 are at offset `0x14eaec0`, physical `0x682f2ec0`. Use
@@ -99,9 +134,13 @@ request. Nine valid live unwinds recover the same unreturned call documented
 in [the timer-return evidence](docs/2026-09-11-live-timer-return.md), now with
 device extension `0xffffa30f8beaf1a0` and grant still zero. The ten-minute
 32.106-second window has no fresh CPU 0 VTL calls, 32 on CPU 1, and a 70.08%
-CPU 0 handler share. Global epoch bumps remain zero. The cache changes are
-exercised but have not removed this stall. The observer is resumed; keep
-measuring before deciding whether this boot has stopped progressing.
+CPU 0 handler share. Global epoch bumps remain zero. The cache changes were
+exercised but did not remove this stall. The boot stopped around 15:53 UTC
+after about 34 minutes, following a final complete three-process walk and
+32.148-second counter window: fresh VTL calls +0/+33, handler shares
+70.07%/10.75%, and grant still zero. Supported teardown returned NVMe and
+15,491 MiB free RAM. The ELF and freshly read loader are archived as
+`cache-deployed.elf` and `cache-loader.efi` in the session directory.
 
 The unchanged baseline loader had MD5 `cb729d76cb6adb055ccbe4776cea0a38`.
 It still had only System, Secure System and Registry at 43 minutes.
