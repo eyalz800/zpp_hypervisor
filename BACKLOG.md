@@ -80025,3 +80025,37 @@ rows, bad process anchors, truncated/cyclic process and power lists,
 and successful empty lists. The 26-test rebuilt host suite passed after
 the reader change; the added list-completion cases also pass separately.
 No guest state or launch configuration was changed by this work.
+
+## 2026-09-11: live unwinds recover the missing VBoxSup frames
+
+The fixed-loader boot still had three processes after 24 minutes. Its
+31.915-second late window had 2.01 vmcalls/s, CPU 0 fresh VTL calls fixed
+at 27,667 and user-mode samples fixed at 177. The watched-store length
+fix has not demonstrated a boot improvement over the unchanged baseline.
+
+A different observation now closes one ambiguity in the old stack scans.
+Actual register captures followed by PE-metadata unwinding recovered
+`ExpUpdateTimerConfigurationWorker+0x1c5 -> ... -> ExSetTimerResolution
+-> VBoxSup+0x25d66 -> +0xc051 -> +0xedc8 -> +0x9a63 -> +0x194c9 ->
+PnpCallDriverEntry -> ... -> Phase1Initialization`. Seven captures, in
+two passes about five minutes apart, recovered the same outer chain.
+The reads took 5–13 ms and are not atomic; failed unwinds were excluded.
+A complete 105-module walk identifies VBoxSup 7.0.10.158379, and its
+captured code confirms each driver call in this chain.
+
+The driver asks for 976,563 ns, divides by 100, and calls the live
+`ExSetTimerResolution` pointer. Its result is stored at extension+0xa8
+only after returning. Three independent reads found that grant still
+zero, `ExpKernelResolutionCount` 1 and both requested/committed Windows
+intervals 9,765. This supports ONE unreturned request, not a driver loop
+polling time after it returns. `PnpEnableWatchdog` is not in the unwind.
+
+DPC counts advanced while the queues sampled empty, and another live
+capture was inside the progress-indicator timer DPC. Thus "the DPC queue
+never drains" is not an explanation. Why the timer worker cannot return
+is still unresolved: these reads do not isolate service cost from a
+virtualization defect. No driver, guest memory or launch setting changed.
+The guest remains running with the process watcher resumed.
+
+Full addresses, validation, missing driver pages, source references and
+artifact locations are in `docs/2026-09-11-live-timer-return.md`.

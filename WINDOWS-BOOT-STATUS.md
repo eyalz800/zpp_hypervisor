@@ -53,6 +53,15 @@ MD5 `12ad606548c29d04763ec5f07c53863b`. A new two-vCPU boot started around
 resident log showed Hyper-V entering its nested guest. The boot is still
 under observation; recheck live state rather than assuming it is running.
 
+At 24 minutes it still had three processes. A late window measured 2.01
+hypercalls/s with no new CPU 0 VTL calls or user-mode samples. Repeated
+live-register captures and PE unwinds recovered VBoxSup's first call to
+`ExSetTimerResolution`; the driver has not stored the result, while Windows
+has committed the requested interval. See
+[the live timer-return evidence](docs/2026-09-11-live-timer-return.md).
+This narrows the earlier driver-loop account; the reason the timer worker
+does not return remains unresolved.
+
 Session artifacts are under `/tmp/zpp-20260911/`, including the baseline
 loader, baseline ELF, serial/log captures, counter samples and test output.
 The tmux session is `zpp-rig-20260911`; the current observer is `fixed-logon`.
