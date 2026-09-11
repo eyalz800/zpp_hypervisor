@@ -759,6 +759,8 @@ VMCS_GLOBAL_COUNTERS = [
      "VMCS field writes this VMM executed"),
     (VMX_NS + "vmcs_cache_hits",
      "reads answered from the per-processor cache"),
+    (VMX_NS + "vmcs_cache_write_hits",
+     "hardware VMWRITEs skipped with a matching current cache value"),
     (VMX_NS + "vmcs_cache_misses",
      "reads that went to the processor (a real VMREAD)"),
     (VMX_NS + "vmcs_cache_unarmed",

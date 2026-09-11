@@ -80324,3 +80324,41 @@ census is compiled out, so its zeros cannot settle delivery. These results
 repeat prior stalled-boot observations rather than identifying a new cause.
 Artifacts: `cache-delta-phases-18min.out`, `cache-vector-samples.json` and
 `cache-vectors-20min.out` under the session directory.
+
+## 2026-09-11: elide identical writes only within the current VMCS cache window
+
+SDM VMWRITE's operation and KVM `handle_vmwrite` assign the addressed field;
+repeating an already observed value has no further field effect. `vmcs::write`
+now skips the instruction only when the selected hardware VMCS has a valid
+current-epoch cache tag for that exact encoding and exactly that 64-bit value.
+This uses the same observation that licenses a cached read. A VM exit removes
+the observation; a borrow disables this check; enlightened selections still
+perform their memory stores. No extra VMREAD is introduced. Inputs with
+different upper bits are conservatively written even if width truncation
+would make them equal. Full/high aliases must match the exact encoding.
+
+Read-only VM-exit fields always execute VMWRITE, preserving capability-based
+failure behavior even when the value matches (SDM 27.11.2, Table 27-22).
+This is distinct from the rejected long-lived entry-interruption-info write
+record in the August history: no observation survives a VM exit, and every
+ordinary intervening write updates or invalidates this cache. The raw
+CR3-target startup probe uses an otherwise unread field; `try_write` has no
+callers. Existing shadow publication elision remains separate.
+
+The test shim can now refuse read-only writes. The rebuilt negative control
+has 145 checks and six failures, naming the repeated-write and read-then-write
+cases for guest RIP/RSP and host RSP. The initial version's changed-write
+counter used the preceding repeated-write baseline and produced three
+cascading failures; it now takes its own baseline. With elision all 145
+checks and all 27 host tests pass (34.24 seconds), including 224 Python tests.
+The debug loaders, ELF invariants and bootability checks pass. Fixtures also
+require changed writes, post-exit writes and borrowed writes to reach hardware,
+keep full/high aliases separate, and preserve read-only write failures.
+
+`vmcs_cache_write_hits` counts skipped hardware writes, approximately like
+the read-hit counter. It is included in the resident delta report.
+`vmcs_writes_taken` and the field census still count executed accesses; the
+skip returns before incrementing them. This has not been deployed: the
+running guest carries only the earlier reserved-access-rights fix. Its
+measured hit rate and boot effect are still unknown. Artifacts under
+`/tmp/zpp-20260911/` use the `cache-write-elision-` prefix.

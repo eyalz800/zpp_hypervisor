@@ -188,6 +188,80 @@ void access_rights_reads_follow_the_processors_reserved_bit_behavior()
     }
     vx::g_vmwrite_access_rights_mask = 0xffffffffu;
 }
+void repeated_writes_need_a_current_observation_of_the_same_field()
+{
+    vx::vmcs vmcs;
+    for (auto encoding :
+         {field::guest_rip, field::guest_rsp, field::host_rsp}) {
+        select(0, 0x1000);
+        vx::vmcs_cache_forget_current(0);
+        vmcs.write(encoding, 0x1111);
+        auto & writes =
+            vx::g_vmwrite_field_count[static_cast<unsigned>(encoding)];
+        auto before = writes;
+        vmcs.write(encoding, 0x1111);
+        check(hardware(encoding) == 0x1111,
+              "repeated write retains value");
+        check(writes == before, "known identical write avoids VMWRITE");
+        before = writes;
+        vmcs.write(encoding, 0x2222);
+        check(hardware(encoding) == 0x2222, "changed write reaches VMCS");
+        check(writes == before + 1, "changed write executes VMWRITE");
+
+        hardware(encoding) = 0x3333;
+        vx::vmcs_cache_forget_current(0);
+        check(vmcs.read(encoding) == 0x3333,
+              "read observes hardware update");
+        before = writes;
+        vmcs.write(encoding, 0x3333);
+        check(hardware(encoding) == 0x3333,
+              "read-then-write retains value");
+        check(writes == before, "observed identical value avoids VMWRITE");
+
+        hardware(encoding) = 0x4444;
+        vx::vmcs_cache_forget_current(0);
+        before = writes;
+        vmcs.write(encoding, 0x3333);
+        check(hardware(encoding) == 0x3333,
+              "a VM exit prevents reuse of the previous observation");
+        check(writes == before + 1,
+              "write after VM exit reaches hardware");
+        {
+            vx::vmcs_cache_borrow borrow;
+            before = writes;
+            vmcs.write(encoding, 0x3333);
+            check(writes == before + 1,
+                  "writes during a borrow bypass any cached equality");
+        }
+    }
+
+    // Full and high-half encodings share a slot but are different writes.
+    vmcs.write(field::vmcs_link_pointer, 0x22);
+    auto high = static_cast<field>(
+        static_cast<unsigned>(field::vmcs_link_pointer) | 1);
+    auto before = vx::g_vmwrite_field_count[static_cast<unsigned>(high)];
+    vmcs.write(high, 0x22);
+    check(vx::g_vmwrite_field_count[static_cast<unsigned>(high)] ==
+              before + 1,
+          "equal values in full/high aliases do not suppress a write");
+}
+
+void cached_read_only_fields_must_still_report_write_failure()
+{
+    vx::vmcs vmcs;
+    select(0, 0x1000);
+    vx::vmcs_cache_forget_current(0);
+    constexpr auto encoding = static_cast<field>(0x4402); // VM-exit reason
+    hardware(encoding) = 0x12;
+    check(vmcs.read(encoding) == 0x12, "cache a readable VM-exit field");
+    vx::g_vmwrite_readonly_allowed = false;
+    auto failures_before = vx::vmcs_write_failures;
+    vmcs.write(encoding, 0x12);
+    check(vx::vmcs_write_failures == failures_before + 1,
+          "same value cannot hide VMWRITE to a read-only field");
+    check(hardware(encoding) == 0x12, "refused write preserves hardware");
+    vx::g_vmwrite_readonly_allowed = true;
+}
 } // namespace
 
 int main()
@@ -199,6 +273,8 @@ int main()
     clearing_a_private_shadow_preserves_unrelated_rows();
     zero_physical_clear_preserves_enlightened_selection();
     access_rights_reads_follow_the_processors_reserved_bit_behavior();
+    repeated_writes_need_a_current_observation_of_the_same_field();
+    cached_read_only_fields_must_still_report_write_failure();
     std::println("vmcs_cache: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

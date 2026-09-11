@@ -435,6 +435,9 @@ inline constinit std::atomic<std::uint64_t> vmcs_cache_epoch{1};
 inline constinit std::atomic<std::uint64_t> vmcs_cache_suspended{};
 inline constinit std::uint64_t vmcs_cache_revalidations{};
 inline constinit std::uint64_t vmcs_cache_hits{};
+/** Approximate, like read hits: writes avoided within a valid cache
+ * window. */
+inline constinit std::uint64_t vmcs_cache_write_hits{};
 inline constinit std::uint64_t vmcs_cache_misses{};
 inline constinit std::uint64_t vmcs_cache_unarmed{};
 
@@ -958,6 +961,34 @@ public:
      */
     void write(field field, std::uint64_t value) const
     {
+        // SDM VMWRITE operation and KVM handle_vmwrite assign the field.
+        // Repeating an observed value has no additional field effect.
+        // Use only this VMCS's current window, never a record surviving
+        // its VM exit or a borrowed selection. Read-only fields still
+        // execute the instruction so a matching value cannot hide failure
+        // (SDM 27.11.2 / Table 27-22: type 1 in encoding bits 11:10).
+        if constexpr (vmcs_cache_enabled) {
+            if (0 ==
+                vmcs_cache_suspended.load(std::memory_order_relaxed)) {
+                auto row = vmcs_cache_row_index();
+                if (row < vmcs_cache_processors) {
+                    auto & current =
+                        vmcs_cache[row][vmcs_cache_active[row]];
+                    auto encoding = static_cast<std::uint64_t>(field);
+                    auto slot = static_cast<std::size_t>(
+                        (encoding >> 1) % vmcs_cache_entries);
+                    if (current.vmcs != 0 && current.evmcs == 0 &&
+                        current.epoch == vmcs_cache_epoch &&
+                        ((encoding >> 10) & 3) != 1 &&
+                        current.tag[slot] == encoding + 1 &&
+                        current.value[slot] == value) {
+                        vmcs_cache_write_hits = vmcs_cache_write_hits + 1;
+                        return;
+                    }
+                }
+            }
+        }
+
         vmcs_writes_taken = vmcs_writes_taken + 1;
         if constexpr (vmcs_census_enabled) {
             vmcs_record_use(static_cast<std::uint64_t>(field),
