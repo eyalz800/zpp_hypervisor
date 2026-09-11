@@ -371,6 +371,7 @@ bool hypervisor::dmar_mmio(std::size_t cpu,
     // violation; SDM 30.2.5).
     context.rip = context.rip + instruction->length;
     this->vmcs.guest_rip(context.rip);
+    this->vmcs.clear_instruction_interrupt_shadow();
     return true;
 }
 

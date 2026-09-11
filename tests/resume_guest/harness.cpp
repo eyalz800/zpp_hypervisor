@@ -1208,7 +1208,8 @@ void only_an_nmi_clears_blocking_by_nmi()
                               original_event::valid |
                                   original_event::external_interrupt |
                                   clock_interrupt_vector);
-    resume(built);
+    // An exit during event delivery did not complete an instruction.
+    resume(built, false);
 
     check_equal(interruptibility::blocking_by_nmi |
                     interruptibility::blocking_by_sti,
@@ -1328,6 +1329,23 @@ void a_slot_outside_the_table_is_left_alone()
  * where the processor is meant to resume - adding to it would land the
  * guest a few bytes into its own entry point.
  */
+void retiring_an_instruction_ends_its_interrupt_shadow()
+{
+    // SDM Table 27-3: STI and MOV-SS blocking last for one instruction.
+    // NMI blocking lasts until IRET and must survive this retirement.
+    for (auto shadow : {0ull, 1ull, 2ull}) {
+        for (auto advance : {false, true}) {
+            auto built = make();
+            built.state->vmcs.guest_interruptibility_state(8 | shadow);
+            resume(built, advance);
+            check_equal(8 | (advance ? 0 : shadow),
+                        built.state->vmcs.guest_interruptibility_state(),
+                        "only a completed instruction ends STI/MOV-SS "
+                        "blocking; NMI blocking survives");
+        }
+    }
+}
+
 void rip_advances_only_when_asked()
 {
     auto advanced = make();
@@ -2115,6 +2133,7 @@ int main()
     nothing_is_put_back_without_a_pending_event();
     a_slot_outside_the_table_is_left_alone();
     rip_advances_only_when_asked();
+    retiring_an_instruction_ends_its_interrupt_shadow();
     queued_interrupts_go_out_highest_first();
     a_second_vector_does_not_displace_the_first();
     the_same_vector_twice_is_counted_as_a_drop();

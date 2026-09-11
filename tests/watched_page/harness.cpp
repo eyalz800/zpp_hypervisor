@@ -1888,6 +1888,9 @@ static void test_filter_notify()
             g_filter_refuses = refuse;
             mov_mem_reg32();
             put32(0x300, 0x12345678);
+            // Both allowed and filtered stores retire the instruction.
+            // Alternate STI/MOV-SS blocking, retaining NMI blocking.
+            hv().vmcs.guest_interruptibility_state(8 | (refuse ? 2 : 1));
 
             zpp::arch::x86_64::context registers{};
             registers.rbx = base() + 0x300;
@@ -1909,6 +1912,9 @@ static void test_filter_notify()
                 "RIP advances by the decoded store, despite stale length");
             check(0x400002 == registers.rip,
                   "context RIP agrees with the resumed instruction");
+            check(8 == hv().vmcs.guest_interruptibility_state(),
+                  "emulated stores end STI/MOV-SS blocking, retaining "
+                  "NMI blocking even when the store is filtered");
             check((refuse ? 0x12345678u : 0xabcdef01u) == at32(0x300),
                   "the filter still decides whether the store lands");
             check((refuse ? 0u : 1u) == g_notified.size(),

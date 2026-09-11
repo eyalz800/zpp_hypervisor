@@ -6586,6 +6586,7 @@ bool hypervisor::on_nested_cr8_access(std::size_t cpu,
         auto advanced_by = this->vmcs.vm_exit_instruction_length();
 
         this->vmcs.guest_rip(rip_before + advanced_by);
+        this->vmcs.clear_instruction_interrupt_shadow();
 
         // One of the three arithmetic writers. See `low_rip_source`:
         // the reflection below copies vmcs02's RIP into vmcs12, so an

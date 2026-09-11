@@ -434,6 +434,10 @@ inline constinit std::uint64_t vmcs_cache_hits{};
 inline constinit std::uint64_t vmcs_cache_misses{};
 inline constinit std::uint64_t vmcs_cache_unarmed{};
 
+/** Completed emulations that ended STI/MOV-SS blocking; rig evidence. */
+inline constinit std::atomic<std::uint64_t>
+    vmcs_interrupt_shadows_cleared{};
+
 /**
  * Ends the window every cached value describes. No GS, no processor
  * index, no memory beyond one counter - which is what makes it safe to
@@ -2144,6 +2148,26 @@ public:
     void guest_interruptibility_state(std::uint64_t value) const
     {
         return write(field::guest_interruptibility_state, value);
+    }
+
+    /**
+     * End the interrupt shadow after successfully emulating an
+     * instruction. SDM Table 27-3 limits STI/MOV-SS blocking to one
+     * instruction boundary; software retirement counts too. KVM's
+     * skip_emulated_instruction calls vmx_set_interrupt_shadow(vcpu, 0)
+     * for the same reason (vmx.c:1771). Preserve NMI/SMI blocking. A
+     * fault, retry, or reflected fault-like exit has not retired an
+     * instruction and must not call this.
+     */
+    void clear_instruction_interrupt_shadow() const
+    {
+        constexpr std::uint64_t sti_or_mov_ss = 3;
+        auto blocking = guest_interruptibility_state();
+        if (0 != (blocking & sti_or_mov_ss)) {
+            guest_interruptibility_state(blocking & ~sti_or_mov_ss);
+            vmcs_interrupt_shadows_cleared.fetch_add(
+                1, std::memory_order_relaxed);
+        }
     }
 
     std::uint64_t guest_activity_state() const

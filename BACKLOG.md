@@ -80059,3 +80059,46 @@ The guest remains running with the process watcher resumed.
 
 Full addresses, validation, missing driver pages, source references and
 artifact locations are in `docs/2026-09-11-live-timer-return.md`.
+
+## 2026-09-11: emulated retirement must end STI/MOV-SS blocking
+
+The live timer-return investigation led to an architectural defect in the
+instruction-retirement paths. Ordinary emulation in `resume_guest`, both
+watched-store outcomes, synthetic VT-d MMIO and the CR8 fallback's synthetic
+TPR trap advanced RIP without clearing the one-instruction interrupt shadow.
+That carries blocking over an additional guest instruction. It is not yet a
+proven cause of the Windows stall.
+
+References actually read: SDM Table 27-3 (`.references/sdm.txt:199259-199286`)
+and section 30.1's completed-instruction exits (`203489-203501`); KVM
+`skip_emulated_instruction` (`.references/kvm/vmx.c:1712-1774`) and
+`vmx_set_interrupt_shadow` (`1607-1621`). KVM explicitly clears STI/MOV-SS
+blocking when software retires an instruction, retaining other bits.
+
+`vmcs::clear_instruction_interrupt_shadow` now does that at the five retirement
+sites, before CR8's trap is reflected to L1. Fault-like reflections and retries
+retain their blocking. The helper does not change IF or NMI/SMI blocking.
+An atomic `vmcs_interrupt_shadows_cleared` counter, included in the resident
+reader, records actual clearings so the rig can distinguish an exercised fix
+from one that was never reached with a shadow set.
+
+Negative control: the rebuilt tests failed 14 assertions before the fix:
+normal resume 2/144, watched stores 10/1725, nested exit 2/1375. The tests
+cover STI and MOV-SS, preservation of NMI blocking, no retirement, allowed
+and filtered stores, and a reflected TPR trap's RIP and blocking state. The
+existing event-delivery fixture now correctly requests no RIP advance for
+an exit that did not retire an instruction.
+
+After the fix all 26 rebuilt host checks passed (33.53 s), including all 219
+Python tests. The debug hypervisor/loaders build, ELF invariants pass and the
+EFI passes the bootability check. Build switches remain unchanged.
+
+The prior watched-store-fix boot was still at three processes after about
+45 minutes. A final 31.910 s window had no new CPU 0 VTL calls, about 8,495
+CPU 0 exits/s and 70.51% of CPU 0 wall time in zpp's handler. These are from
+one window; the older 41% cumulative estimate must not stand in for them.
+The final process walk completed. Artifacts: `/tmp/zpp-20260911/`, especially
+`interrupt-shadow-before.txt`, `interrupt-shadow-final-tests.txt`,
+`interrupt-shadow-build.txt`, `fixed-delta-45min.out` and
+`fixed-processes-final.txt`. The timer-arm ratio printed by the delta reader
+is not used: it mixes timer programming from different trust levels.

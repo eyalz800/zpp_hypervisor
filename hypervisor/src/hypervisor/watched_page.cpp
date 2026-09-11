@@ -674,6 +674,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     // instruction and the disagreement would be silent.
                     context.rip = context.rip + length;
                     this->vmcs.guest_rip(context.rip);
+                    this->vmcs.clear_instruction_interrupt_shadow();
                     note_low_emulated_rip(cpu,
                                           context.rip - length,
                                           context.rip,
@@ -817,6 +818,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
 
                 context.rip = context.rip + advance;
                 this->vmcs.guest_rip(context.rip);
+                this->vmcs.clear_instruction_interrupt_shadow();
                 note_low_emulated_rip(
                     cpu, context.rip - advance, context.rip, advance);
                 return true;

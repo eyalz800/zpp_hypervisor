@@ -762,6 +762,8 @@ VMCS_GLOBAL_COUNTERS = [
     # to prefer the windowed number.
     (VMX_NS + "vmcs_cache_epoch",
      "cache windows ended (epoch bumps)"),
+    (VMX_NS + "vmcs_interrupt_shadows_cleared",
+     "emulated instructions that ended STI/MOV-SS blocking"),
     # "A non-zero count here is never normal" - the header says so in
     # terms.  These used to be `__builtin_trap()`.
     (VMX_NS + "vmcs_read_failures",

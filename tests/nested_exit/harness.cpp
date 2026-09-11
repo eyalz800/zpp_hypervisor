@@ -8328,6 +8328,41 @@ static void test_cr8_encoding_four()
     hv().nested_tpr_threshold[cpu] = 0;
 }
 
+static void test_emulated_cr8_retires_before_reflecting()
+{
+    // SDM 30.1: a trap-like TPR exit reports a completed instruction,
+    // including the end of any STI/MOV-SS blocking. The real exit here
+    // is fault-like MOV CR8, which zpp emulates before reflecting it.
+    constexpr std::uint64_t virtual_apic = 0x00000000'60000000ull;
+    for (auto blocking : {0ull, 1ull, 2ull}) {
+        zpp::arch::x86_64::context registers{};
+        asked_controls asked;
+        check(compose(asked, registers).has_value(),
+              "the CR8 retirement fixture composes vmcs02");
+        page_of(virtual_apic);
+        hv().running_l2[cpu] = true;
+        hv().nested_virtual_apic_address[cpu] = virtual_apic;
+        hv().nested_tpr_threshold[cpu] = 2;
+        hv().vmcs.guest_rip(0x400000);
+        hv().vmcs.guest_interruptibility_state(8 | blocking);
+        hv().vmcs.write(field::vm_exit_instruction_length, 4);
+        registers.rax = 0;
+        bool advance = true;
+        check(hv().on_nested_cr8_access(cpu, 8, registers, advance),
+              "MOV CR8 is emulated and reflected below the threshold");
+        auto & shadow = hv().guest_vmcs12[cpu];
+        check(!advance && !hv().running_l2[cpu],
+              "the reflected exit returns to L1 without a second advance");
+        check(0x400004 == shadow.read(fields::guest_rip),
+              "L1 sees the instruction already completed");
+        check(
+            8 == shadow.read(fields::guest_interruptibility_state),
+            "the reflected trap ends STI/MOV-SS blocking and retains NMI");
+    }
+    hv().nested_virtual_apic_address[cpu] = 0;
+    hv().nested_tpr_threshold[cpu] = 0;
+}
+
 // ---- 21. the exit-information fields the SDM leaves undefined
 /**
  * What `reflect_l2_exit` puts in vmcs12's exit-information block, and
@@ -8641,6 +8676,7 @@ int main()
     test_guest_thread_sample_stride();
     test_control_registers_a_vm_entry_refuses();
     test_cr8_encoding_four();
+    test_emulated_cr8_retires_before_reflecting();
     test_the_exit_information_fields_the_sdm_leaves_undefined();
 
     // Last, because it resets the shim's region table. See its comment.

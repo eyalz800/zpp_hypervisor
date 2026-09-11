@@ -1204,6 +1204,7 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
 
         context.rip += advanced_by;
         vmcs.guest_rip(context.rip);
+        vmcs.clear_instruction_interrupt_shadow();
         resume_rip = context.rip;
 
         // The largest of the three arithmetic writers, and the only one
