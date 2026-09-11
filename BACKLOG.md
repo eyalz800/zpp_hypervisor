@@ -80745,3 +80745,28 @@ after header/checksum/section-table and resident code validation.
 Full identities, evidence paths, interpretation limits and next-step
 handoff are in docs/2026-09-11-winlogon-scm-debug.md. No source, binary,
 manifest or Windows configuration change was made for this investigation.
+
+
+The failed guest was torn down through rig-kill-qemu.sh. NVMe returned,
+15,445 MB was free, and disk signatures/ESP size matched. The fresh-mount
+loader retained MD5 d564ca8f8057eabdb36a09db2c1e34d5. Legacy scp also
+failed through the rig's Dropbear multicall dispatch this time; direct
+SSH cat archived the loader and its local MD5 matched. Final resident
+report and deployed ELF are preserved separately. The resident report's
+CPUID census check failures remain explicit; those counts are not used.
+
+A same-binary, unchanged two-CPU GDB startup run began around 19:21 UTC.
+All channels answered. Module base is 66d47000; new Windows base is
+fffff80096a00000 with PE identity/system CR3 1ae000 validated. At 19:34
+three processes are present and SCM is not yet mapped. The rpc-guard
+window holds KeBugCheckEx; rpc-discovery alone owns the monitor.
+
+Matched services.exe code places the sole immediate 1070 assignment in
+ScLookForHungServices at RVA 4f7a4, calling CleanupStartFailure (823f8).
+That routine writes internal failure state 4 and start error +ac. A
+prepared GDB sequence will capture its entry and the failed dependency
+at AreDependenciesStarted+1b1 (18f49), including service names and stacks,
+then watch RpcEptMapper's actual state changes. The rpcepmap ServiceMain
+export is f870; its matched PDB GUID has Info/DBI ages 3/1 for image age 1.
+Its initialization call and final status report are now mapped in the
+validated executable. No transition has yet been caught in this new run.

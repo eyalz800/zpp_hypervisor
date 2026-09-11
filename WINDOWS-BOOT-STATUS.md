@@ -68,6 +68,27 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
+The same-binary GDB startup run began around **19:21 UTC** with two CPUs.
+Startup channels passed. Resident module base remains `0x66d47000`, but
+Windows now has base **`0xfffff80096a00000`**, system CR3 `0x1ae000`.
+The physical kernel PE and complete process walk validate those new
+coordinates. At 19:34 the walk still has three processes; services.exe
+has not appeared. No current thread location is inferred from that count.
+
+`rpc-guard` in tmux `zpp-rig-20260911` runs a bounded KeBugCheckEx hardware
+breakpoint at **`0xfffff80096ef90b0`** with capture/detach. `rpc-discovery`
+is the sole monitor reader and exits when services.exe's current
+EPROCESS, PEB, CR3 and PE base have been validated. Its context output is
+`/tmp/zpp-20260911/rpc-gdb-discovery/services-context.json`. The prepared
+`gdb-scm-startup.py` has not yet attached: it will catch CleanupStartFailure
+and AreDependenciesStarted's failed dependency, then watch RpcEptMapper's
+internal start-state writes. It also captures RPCSS-host stacks at a
+1070 failure, with a bounded stop and current module list. Transition
+from the guard only after discovery; never run two GDB clients or monitor
+readers together. Current artifacts use the `rpc-gdb-` prefix.
+
+The completed preceding run is recorded below.
+
 The per-CPU borrow build **`6adda123` crashed with 0x9F** at
 **19:03:32 UTC**, September 11, after starting at 17:27 UTC. Loader MD5
 **`d564ca8f8057eabdb36a09db2c1e34d5`** and the full unchanged manifest
@@ -122,15 +143,14 @@ requires GUID equality, Info age >= image age, and nonzero DBI age equal
 to image age; Info-age inequality alone incorrectly rejected usable WDF
 symbols earlier. The detailed note cites Microsoft's implementation.
 
-No watcher or GDB session remains running. The actual bugcheck artifacts
+The preceding boot's watcher and GDB sessions exited. Its actual bugcheck artifacts
 are `cache-local-borrow-gdb-scm-child/index.json` and `stack.bin`, under
 `/tmp/zpp-20260911/`; the later redundant generic guard produced no index.
 Final driver images, power stacks, SCM records and RPC component images
 are preserved. Supported teardown completed: NVMe returned and 15,445 MB was free,
 without a host reboot. The final resident report, ELF and freshly mounted
-loader are archived; loader MD5 still matches. A same-binary two-CPU
-GDB startup run is now being launched to catch RpcEptMapper startup and
-SCM's 1070/1068 state transitions early. No new hypervisor fix is yet
+loader are archived; loader MD5 still matches. The new same-binary GDB run described above targets RpcEptMapper startup
+and SCM's 1070/1068 state transitions. No new hypervisor fix is yet
 justified, and no Windows service/registry/boot configuration was changed.
 
 The preceding cache-slot boot ran from 16:55 to 17:25 UTC, stayed at three

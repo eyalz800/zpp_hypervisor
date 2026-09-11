@@ -37,6 +37,12 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/ntdll-to-smss.md` (256 lines).
 - `docs/bare-metal-windows.md` (319 lines).
 - `.references/hyperv/ntoskrnl.md` (492 lines).
+- `.references/hyperv/eoi-delivery-adversarial.md` (165 lines).
+- `.references/hyperv/posted-interrupt-fix-design.md` (215 lines).
+- `.references/hyperv/ap-post-handshake.md` (87 lines).
+- `.references/hyperv/scheduler-runnable-predicate.md` (227 lines).
+- `.references/hyperv/scheduler-idle-decision.md` (218 lines).
+- `.references/hyperv/idle-halt-wake-path.md` (278 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -48,7 +54,9 @@ Corrections that matter when continuing:
 - The bare-metal guide's old VMX-hiding/Hyper-V-stand-down phase is not
   the current nested-boot objective. Its old TinyCore/QEMU versions and
   password-only/no-SCP account are historical; the current rig uses QEMU
-  11.0.3, working BatchMode SSH and legacy `scp -O` when copying files.
+  11.0.3 and working BatchMode SSH. The latest loader archive also found
+  legacy `scp -O` failing in Dropbear's multicall dispatch; direct SSH
+  `cat` transferred the file successfully and its local MD5 matched.
 - The ntoskrnl note retracts both its missing-binary claim and its claim
   that no boot enlightenment can relax the DPC watchdog. Read its later
   UseRelaxedTiming correction before relying on the early caller list.
@@ -75,6 +83,25 @@ Corrections that matter when continuing:
 - `smss-to-logonui.md` is a historical stage map, not proof that particular
   subsystems are permanently excluded or that a process count guarantees
   display readiness. Its early residency mistake was explicitly withdrawn.
+
+- The older posted-interrupt/EOI reviews are explicitly anchored to
+  2d93273 and a one-CPU device-vector stall. Their correct-looking code
+  maps and counter comparisons do not prove that every delivery path is
+  fault-free. A generic EOI count does not associate each EOI with the
+  affected device request; unavailable hardware controls are a separate
+  question from software delivery. Their recommendations to toggle old
+  defaults do not supersede this investigation's fixed full manifest.
+- The idle/scheduler notes revise the meaning of several VP fields, but
+  still overstate what a short observation excludes. A breakpoint on
+  HvlSwitchToVsmVtl1 not firing establishes no call at that site during
+  the observed interval, not that VTL0 cannot be running other code.
+  A halted CPU or old event-queue entries do not establish global system
+  idleness or healthy delivery of every source. Revalidate these old
+  private Hyper-V layouts and mode-specific paths before a new live read.
+- The AP post-handshake note is an old eight-CPU investigation map, not
+  evidence that current per-CPU VMCS/AP startup is broken. The present
+  two-CPU stack reaches both Hyper-V and Windows; no change is selected
+  from its ranking alone.
 
 - The old IOMMU transparency note describes commit `2d93273`; it predates
   the resident nested VT-d implementation. Its claim that no resident
