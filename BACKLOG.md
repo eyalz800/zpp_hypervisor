@@ -80132,3 +80132,48 @@ latches are 2, suppression counters are frozen. A few device vectors continue
 to be staged. `l2_entry_vector` is compiled out with census=0, so its zeroes
 are not a delivery result. Full chains, module identities, limitations and
 artifact paths: `docs/2026-09-11-live-storage-returns.md`.
+
+## 2026-09-11: a write during another CPU's VMCS borrow can leave a stale cache
+
+A deterministic host interleaving reproduces a field-cache coherence defect:
+CPU 0 caches RIP 0x1111; CPU 1 enters `vmcs_cache_borrow`; CPU 0 writes RIP
+0x3333 while the global suspension count is nonzero; CPU 1 leaves the scope
+without changing the epoch. CPU 0's next read returns 0x1111 while its modeled
+hardware VMCS contains 0x3333. RSP and CR3 reproduce the same failure.
+
+The suspension gate skipped both cache filling and invalidation on writes.
+A normal completed shadow copy bumps the epoch through VMCLEAR, hiding the
+defect. But the borrow scope starts before the `previous == 0` and failed-
+VMPTRLD returns in the copy functions: a scope can end without that bump.
+This corrects the claim that a globally suspended cache is safe merely because
+another CPU temporarily stops using it. It does not prove that this rig boot
+took an early return or suffered a stale read.
+
+Writes during suspension now invalidate a matching cached field, including
+its high/full-width alias, while reads continue to bypass the cache. An
+unrelated tag collision is retained. The new atomic
+`vmcs_cache_bypass_invalidations` counter is included in the resident reader;
+it counts discarded cached fields, not stale values consumed by a guest.
+
+References read: SDM 27.11.1 (single-processor active VMCS ownership),
+27.11.2/Table 27-22 (high/full-width field aliases), and VMCLEAR operation
+at `.references/sdm.txt:207802-207824`; KVM `copy_shadow_to_vmcs12` and
+`copy_vmcs12_to_shadow` (`nested.c:1593-1654`) plus `__loaded_vmcs_clear`
+(`vmx.c:779-805`). The host test uses the real vmcs.h with the cache enabled;
+the other VMX harnesses compile that cache out.
+
+Negative control: the new harness failed 3 of 46 assertions before the fix;
+the other 26 checks passed. All 27 rebuilt host checks pass after the fix
+(33.88 seconds), including all 219 Python tests. Borrowed shadow reads and
+per-exit invalidation of only the current VMCS are also covered. The debug
+hypervisor and all loaders build; ELF invariants and bootability pass with
+unchanged switches. Artifacts: `/tmp/zpp-20260911/cache-before-tests.txt`,
+`cache-after-tests.txt`, `cache-debug-build.txt`, `cache-invariants.txt`,
+`cache-bootable.txt`, and the initial `cache-borrow-probe.cpp`.
+
+Separately, the live 32.197-second sample has 427,262 global epoch bumps,
+13,270.4/s, about one per exit. The old note calling those bumps rare does
+not describe this boot: both shadow copies clear their borrowed VMCS on every
+nested round trip. No invalidation policy or optimization flag changed in
+this fix. A more precise policy would have to preserve coherence during
+borrowed-pointer windows as well as obey VMCS ownership.

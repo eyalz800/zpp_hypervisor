@@ -304,6 +304,13 @@ zpp_add_host_test(mtrr
 zpp_add_host_test(reference_tsc
     SOURCES reference_tsc/harness.cpp)
 
+# Exercise the production field cache, including deterministic interleavings
+# between two logical processors. Other VMX harnesses leave this switch off.
+zpp_add_host_test(vmcs_cache
+    SOURCES vmcs_cache/harness.cpp
+    INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/shim"
+    DEFINES ZPP_VMCS_CACHE=1)
+
 # The host page table, the OS page table walker and the paging-structure
 # helpers underneath both. The two translation units are the real ones,
 # compiled rather than copied, so a change to either is a change to what

@@ -404,12 +404,16 @@ inline constinit std::atomic<std::uint64_t> vmcs_cache_epoch{1};
  * sound precisely because the row still describes the VMCS that is
  * current again, and nothing in between could have changed it.
  *
- * Global rather than per-processor, and safe that way round: another
- * processor seeing it set merely stops caching for a moment. The one
- * thing that would *not* be safe is restoring the epoch to a saved value,
- * because a second processor may have bumped it meanwhile and lowering it
- * would revive that processor's stale rows. Hence re-validating a row
- * forward to the current epoch rather than winding the epoch back.
+ * Global rather than per-processor: another processor seeing it set
+ * stops reading and filling its cache. Writes must still invalidate any
+ * cached value they replace. Otherwise an early-returning borrower can
+ * leave the epoch unchanged, and the other processor resumes reading a
+ * value from before its own VMWRITE. See tests/vmcs_cache.
+ * The one thing that would *not* be safe is restoring the epoch to a saved
+ * value, because a second processor may have bumped it meanwhile and
+ * lowering it would revive that processor's stale rows. Hence
+ * re-validating a row forward to the current epoch rather than winding the
+ * epoch back.
  */
 // **Atomic, because the increment is a read-modify-write done from
 // every processor.** The paragraph above argues this is safe global
@@ -433,6 +437,10 @@ inline constinit std::uint64_t vmcs_cache_revalidations{};
 inline constinit std::uint64_t vmcs_cache_hits{};
 inline constinit std::uint64_t vmcs_cache_misses{};
 inline constinit std::uint64_t vmcs_cache_unarmed{};
+
+/** Cached fields discarded by writes made while caching was suspended. */
+inline constinit std::atomic<std::uint64_t>
+    vmcs_cache_bypass_invalidations{};
 
 /** Completed emulations that ended STI/MOV-SS blocking; rig evidence. */
 inline constinit std::atomic<std::uint64_t>
@@ -949,20 +957,31 @@ public:
         // so every write was arming a guaranteed miss on a path where a
         // miss is an exit to the layer below at about 4,900 cycles.
         if constexpr (vmcs_cache_enabled) {
-            auto row = (0 == vmcs_cache_suspended.load(
-                            std::memory_order_relaxed))
-                           ? vmcs_cache_row_index()
-                           : vmcs_cache_processors;
+            // The enlightened lookup above already reads GS. A borrow
+            // suspends cache use, not coherence: another
+            // CPU may write its own current VMCS while the borrow is live.
+            auto row = vmcs_cache_row_index();
 
             if (row < vmcs_cache_processors) {
                 auto & current =
                     vmcs_cache[row][vmcs_cache_active[row]];
+                auto encoding = static_cast<std::uint64_t>(field);
+                auto slot = static_cast<std::size_t>((encoding >> 1) %
+                                                     vmcs_cache_entries);
 
-                if (current.epoch == vmcs_cache_epoch) {
-                    auto encoding = static_cast<std::uint64_t>(field);
-                    auto slot = static_cast<std::size_t>(
-                        (encoding >> 1) % vmcs_cache_entries);
-
+                if (0 !=
+                    vmcs_cache_suspended.load(std::memory_order_relaxed)) {
+                    auto tag = current.tag[slot];
+                    // Full-width and high-half accesses alias the same
+                    // 64-bit field (SDM 27.11.2). An unrelated field that
+                    // hashes to this slot is still valid.
+                    if ((0 != tag) &&
+                        (((tag - 1) >> 1) == (encoding >> 1))) {
+                        current.tag[slot] = 0;
+                        vmcs_cache_bypass_invalidations.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+                } else if (current.epoch == vmcs_cache_epoch) {
                     // Width 0 is 16-bit and width 2 is 32-bit; widths 1
                     // and 3 are 64-bit and natural, which this
                     // processor stores whole. A "high" access - bit 0 -

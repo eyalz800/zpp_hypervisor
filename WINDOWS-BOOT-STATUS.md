@@ -35,8 +35,13 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   instruction retires, preserving NMI/SMI blocking and leaving retries alone.
   Fourteen assertions failed before this fix across three harnesses. The new
   `vmcs_interrupt_shadows_cleared` counter records actual clearings.
+- The VMCS field cache now invalidates a cached field when a write bypasses
+  the cache during a borrow. A new harness reproduces stale RIP/RSP/CR3
+  reads after another CPU's borrow ends without an epoch change. Three
+  assertions fail before the fix and pass after it. This fix is built and
+  **not yet deployed**; its counter is `vmcs_cache_bypass_invalidations`.
 
-All 26 rebuilt host tests passed after these code changes. All 219 Python
+All 27 rebuilt host tests passed after these code changes. All 219 Python
 tests, including fragmented replies and incomplete list cases, passed.
 The debug hypervisor and loaders build, and the ELF and bootability checks pass.
 These checks do not prove that Windows boots.

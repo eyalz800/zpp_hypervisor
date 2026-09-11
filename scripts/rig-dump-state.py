@@ -756,6 +756,8 @@ VMCS_GLOBAL_COUNTERS = [
      "cache lookups with no armed GS row (see the note below)"),
     (VMX_NS + "vmcs_cache_revalidations",
      "rows revalidated after a borrow"),
+    (VMX_NS + "vmcs_cache_bypass_invalidations",
+     "cached fields discarded by writes during a VMCS borrow"),
     # Monotonic: the only writer is `fetch_add(1)` in
     # `vmcs_cache_forget`.  It starts at 1, not 0, so a cumulative
     # reading is one high and a *difference* is exact - another reason
