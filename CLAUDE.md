@@ -801,6 +801,15 @@ running`, 30 of 537 counters moving, no reset.
 
 So:
 
+- Direct Windows hardware breakpoints are supported on the current rig.
+  On September 11, GDB stopped inside `MiUnlockPageInline`, at its next
+  instruction and at its caller with the expected RSP. The old backlog
+  claim that the stub can never expose VTL0 is superseded. See
+  [the measured sequence](docs/2026-09-11-gdb-windows-returns.md).
+- Delete or disable the breakpoint at the current instruction before
+  continuing to a different hardware breakpoint. This avoids GDB's
+  transparent step-over of an enabled breakpoint; the no-`stepi` rule below
+  still applies. Prepare captures before attaching and detach on errors.
 - **Detach between samples**, or script the whole read as one
   breakpoint hit and `continue` immediately. Do not leave the machine
   stopped while thinking.

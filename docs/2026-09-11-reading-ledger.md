@@ -28,6 +28,12 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/clock-double-injection.md` (303 lines).
 - `.references/hyperv/timer-resolution-worker.md` (351 lines).
 - `.references/hyperv/phase1-timer-stall.md` (330 lines).
+- `.references/hyperv/smss-to-logonui.md` (277 lines).
+- `.references/hyperv/phase1-barrier-unmask-point.md` (240 lines).
+- `.references/hyperv/timer-config-reentry.md` (341 lines).
+- `.references/hyperv/phase1-tail-to-smss.md` (285 lines).
+- `.references/hyperv/storage-stall-worker-thread.md` (388 lines).
+- `.references/hyperv/clock-preemption-race.md` (195 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -35,6 +41,21 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The GDB/watchdog passages in CLAUDE.md and BACKLOG.md were checked against
+  KVM's nested debug-exit handling. Direct Windows hardware breakpoints on
+  September 11 supersede the old claim that the stub can never expose VTL0.
+  Single-stepping and long stops retain their documented restrictions.
+
+- These older timer/stack notes include unproven inferences even after their
+  headline retractions. A plausible word above RSP is not by itself a live
+  frame; the current work uses checked PE unwind metadata. Matching clock
+  injection and ISR-entry counts alone does not establish the number of
+  injections per timer expiry. The old copy-versus-entry inequalities also
+  mix entry attempts with delivery and are not used as loss counts here.
+- `smss-to-logonui.md` is a historical stage map, not proof that particular
+  subsystems are permanently excluded or that a process count guarantees
+  display readiness. Its early residency mistake was explicitly withdrawn.
 
 - The old IOMMU transparency note describes commit `2d93273`; it predates
   the resident nested VT-d implementation. Its claim that no resident

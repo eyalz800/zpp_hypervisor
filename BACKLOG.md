@@ -80619,3 +80619,44 @@ not establish continuous residence for the boot's full duration. Invalid
 unwinds are excluded. The timer count is zero, last request ffffffff,
 pseudo interval 156250; DPC counts advance and a transient CPU 0 queue
 of two returns to zero. The watcher resumed as sole monitor owner.
+
+## 2026-09-11: GDB reaches Windows and proves a return sequence executes
+
+The slot build ran from 16:55 to 17:25 UTC, remained at three processes,
+and was stopped through the supported teardown. Its final fresh VTL/user
+counters did not move; repeated validated image-loading unwinds retained
+the same interrupted unlock return. The saved MmLoadSystemImageEx argument
+identifies Npfs.SYS. No armed power request, reset or bugcheck was observed.
+NVMe returned with 15,489 MB free and no host reboot. The full record is
+in docs/2026-09-11-slot-image-return.md; the old ELF is archived separately.
+
+6adda123 then deployed, fresh-mount loader MD5
+d564ca8f8057eabdb36a09db2c1e34d5 and full manifest matched. It booted at
+17:27 UTC with two CPUs and all channels answering. New module base
+66d47000, singleton offset 15ac000; use the current deployed ELF. Windows
+base fffff801d4a00000, CR3 1ae000, timestamp 51a135d9 and size 1450000
+are validated. The complete process walk around eight minutes has three
+entries. This deployment supersedes the preceding "NOT deployed" entry.
+
+The user requested GDB debugging. It works both in zpp and directly in
+Windows. A 17:33 on_l2_exit breakpoint captured the nested context and zpp
+call stack. At 17:35, Windows breakpoints at MiUnlockPageInline+36, its next
+instruction, and the saved caller proved CPU 0 executed add rsp,20 and
+returned to MiGetSystemPage+0xb2 at the expected RSP. At 17:36, a stopped
+stack at MiGetPageFromSlabAllocator+129 unwinds through driver-image
+validation and a PnP worker on CPU 0. A bounded twelve-call follow-up
+observed only CPU 0; it did not locate CPU 1's current path.
+
+Each breakpoint was deleted before continuing, with no stepi or inferior
+calls, and scripts detach on completion/errors. Capture reads were about
+0.1-4 ms; this does not measure the entire stop latency. KVM's nested
+L0-wants-exit handler explicitly retains host-debug exceptions from L2.
+The old assertion that the stub never exposes VTL0 is superseded. The
+single-step and long-stop restrictions remain. See
+docs/2026-09-11-gdb-windows-returns.md for exact addresses and limitations.
+
+By 17:40 the list has five processes, including two smss instances. At
+17:41 GDB was armed at KeBugCheckEx with automatic capture/detach and a
+forty-minute running timeout. The guest remains running. The monitor
+watcher is separate and sole owner of port 4446. Neither the five-process
+list nor an armed debugger establishes the boot goal.

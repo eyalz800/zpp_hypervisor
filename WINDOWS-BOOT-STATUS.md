@@ -68,74 +68,59 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The cache-slot build **`48bcfc9c` is now deployed**. Its loader MD5
-**`5756af63a9cbdfdf5a84ff2b353ee35b`** and complete manifest matched the
-fresh mount. The supported two-CPU boot began at **16:55 UTC**; monitor,
-gdb and serial all answered. The previous elision-only guest ended with
-an audio power watchdog, described below.
+The per-CPU borrow build **`6adda123` is deployed and running**. The
+supported two-CPU boot began at **17:27 UTC**, September 11. Loader MD5
+**`d564ca8f8057eabdb36a09db2c1e34d5`** and the full unchanged manifest
+matched the fresh mount. All startup channels answered.
 
-Use `.rig-deployed-hypervisor.elf`. The larger cache moved the module base
-from the preceding boot to **`0x66d48000`**. Its singleton offset is now
-`0x15ab000`, so the singleton happens to remain at `0x682f3000`.
-`vmcs_cache_write_hits` is at ELF offset `0x15aaeb0`; interrupt-shadow
-clearings are at `0x51b7020`. These resolve to physical `0x682f2eb0` and
-`0x6beff020`, respectively. Their unchanged physical addresses are a
-coincidence of this boot's module relocation, not reusable layout constants.
+Use `.rig-deployed-hypervisor.elf`. Current module base is **`0x66d47000`**,
+singleton offset `0x15ac000`, singleton physical `0x682f3000`. The write-hit
+counter offset is `0x15ab6e0`; local borrow depths are at `0x15aaec0`,
+unknown-owner depth at `0x15aae88`, aggregate depth at `0x51b8028`, and
+interrupt-shadow clearings at `0x51b8020`. Resolve every field from this ELF.
+Windows base **`0xfffff801d4a00000`**, CR3 `0x1ae000`, PE timestamp
+`0x51a135d9` and size `0x1450000` are validated. At about eight minutes the
+complete process walk still has System, Secure System and Registry.
 
-Windows base **`0xfffff800a3000000`** was read from the resident kernel-base
-field using the deployed DWARF. CR3 `0x1ae000` successfully walks its PE
-header, matching timestamp `0x51a135d9` and image size `0x1450000`.
-At about three minutes, the complete process walk has System, Secure System
-and Registry. The timer sample has resolution count zero, last requested
-value `0xffffffff`, pseudo interval 156,250, and no interrupt-shadow
-clearings. Both validated PRCBs have active threads and advancing DPC counts.
+The new gate keeps private shadow-copy suspension on its owning processor;
+an unidentifiable owner retains a global fallback. Generic clears/migration
+retain global epoch invalidation. The aggregate gauge remains diagnostic.
+All 222 cache assertions, 27 rebuilt host tests and 228 Python tests pass;
+debug loaders, invariants and bootability checks pass. This adds two atomic
+owner-depth updates per borrow, 2,048 bytes of padded owner depths and a
+fallback scalar. No isolated live performance benefit is established.
 
-The early cumulative report has 313,184 skipped writes and zero
-VMREAD/VMWRITE failures. These cumulative figures span startup phases;
-use a valid delta window to assess the running workload. Artifacts use
-`cache-slots-` under `/tmp/zpp-20260911/`. The `slots-boot` tmux window is
-in `zpp-rig-20260911`; allow only one monitor reader at a time.
+**The user requested GDB debugging, and direct Windows hardware breakpoints
+work on this rig.** At 17:33 a breakpoint at zpp's `on_l2_exit` captured
+nested guest state and a zpp backtrace. At 17:35 three Windows hardware
+breakpoints proved CPU 0 executed `MiUnlockPageInline`'s `add rsp,0x20`
+and returned to `MiGetSystemPage+0xb2` at the expected RSP. No `stepi` or
+inferior call was used; each breakpoint was removed before continuing.
+The state capture at the first Windows stop took 1.7 ms. The old claim
+that the QEMU stub can never expose VTL0 is superseded by these direct hits.
 
-The slot projection gives all 156 currently used fields distinct slots;
-the old mapping squeezed them into 26. All 191 cache assertions and all
-27 rebuilt host tests passed before deployment. It adds 786,432 bytes of
-BSS and increases the number of tags cleared during invalidation. Its live
-net effect is still being measured. The latest reader-only changes passed
-all 27 host tests, including 228 Python tests, without altering this binary.
+A further stopped stack at `MiGetPageFromSlabAllocator+0x129` unwinds through
+`MiWalkEntireImage`, driver-image validation and a PnP worker on CPU 0.
+This is not the earlier slot boot's Phase1 thread. A bounded twelve-call
+experiment observed only CPU 0 at the unlock return and does not establish
+CPU 1's current path. Continue with targeted GDB debugging; do not promote
+one returning call into proof that all boot paths progress. Details and
+artifacts are in [the GDB note](docs/2026-09-11-gdb-windows-returns.md).
 
-At about thirteen minutes, the complete process walk still has three entries.
-Eight CPU 0 captures and a later capture of both CPUs remain non-atomic;
-invalid/torn unwinds are excluded. Repeated valid CPU 0 chains reach
-KeSwapProcessOrStack through KiSwapThread+0x795, with the successful wait
-result in RBX. CPU 1 repeatedly reaches **MiUnlockPageInline+0x36** inside
-MiWalkEntireImage -> driver image validation/loading -> Phase1Initialization.
-One direct CPU 1 capture independently has RIP nt+0x296dd6, RBX=0 and
-RSP fffff50644e06ab0. Matched disassembly puts that RIP immediately after
-`mov cr8, rbx`, before the three-instruction return sequence. This is an
-interrupted release after restoring PASSIVE, not a page-unlock polling loop.
-The samples do not prove a continuous stall across the full boot. Artifacts
-are `cache-slots-{stack-12min,both-stacks-13min}*` and
-`cache-slots-unlock-page-disassembly.txt`. The timer resolution count remains
-zero, last request 0xffffffff and pseudo interval 156,250. DPC counts advance;
-CPU 0's sampled queue briefly has two entries and is then empty again.
-The `slots-logon` watcher is again the sole monitor reader.
+By 17:40 UTC the complete list has five processes, including two smss.exe
+instances. At 17:41 GDB was armed at **KeBugCheckEx, nt+0x4f90b0**, with an
+automatic stopped-register/stack capture and detach on hit. Its bounded
+continue expires after forty minutes. The `gdb-bugcheck` tmux window owns
+port 1234; `local-borrow-logon` alone owns the monitor. They use separate
+QEMU channels. The running guest has no observed bugcheck or login yet.
 
-**Next local candidate, not deployed:** shadow-copy suspension now belongs
-to its owning CPU. The previous global gate disabled unrelated CPUs' caches
-while any borrow was active. Three harness assertions reproduce extra
-VMREAD/VMWRITE operations before the change. Owner depths remain atomic,
-nested scopes remain suspended until the owner's last release, and an
-unidentifiable owner keeps a global fallback. Generic clears/migration keep
-global epoch invalidation. The original `vmcs_cache_suspended` scalar remains
-an aggregate diagnostic gauge; `vmcs_cache_unknown_borrows` is a separate
-fallback depth, read as state rather than a delta counter.
-
-All 222 cache assertions and 27 rebuilt host tests pass, including 228 Python
-tests. Debug loaders, ELF invariants and bootability checks pass with the
-same manifest. The staged loader MD5 is `d564ca8f8057eabdb36a09db2c1e34d5`.
-This adds two atomic owner-depth updates per borrow and 2,048 bytes of padded
-per-CPU depth storage, plus the fallback scalar. Its net live effect is
-unmeasured. Keep using the deployed slot-build ELF while this guest runs.
+The preceding cache-slot boot ran from 16:55 to 17:25 UTC, stayed at three
+processes, and was stopped using the supported teardown. NVMe returned and
+15,489 MB was free without a host restart. Repeated validated unwinds reached
+an interrupted unlock return while validating **Npfs.SYS**; final fresh VTL
+calls and user-mode samples did not advance. No reset, bugcheck or armed
+power IRP was observed. Its archived ELF and evidence are described in
+[the completed slot-boot note](docs/2026-09-11-slot-image-return.md).
 
 ## Previous elision boot: progress followed by 0x9F
 
