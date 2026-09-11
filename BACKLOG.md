@@ -80770,3 +80770,27 @@ then watch RpcEptMapper's actual state changes. The rpcepmap ServiceMain
 export is f870; its matched PDB GUID has Info/DBI ages 3/1 for image age 1.
 Its initialization call and final status report are now mapped in the
 validated executable. No transition has yet been caught in this new run.
+
+
+The same-binary GDB run stayed at three processes through early 20:15,
+then smss.exe PID 568 appeared by 20:16. The 19:37:40 stopped System
+thread walk completed all 109 entries and identified one Phase1 thread
+by both start addresses; State was Running, so its saved stack was
+correctly excluded. A later paired on_l2_exit/Windows probe stopped at
+on_l2_exit, but refused the now-changed Phase1 ETHREAD start address.
+Its first bare assertion was initially ambiguous; the second capture
+preserves the exact rejected anchor and traceback. Neither is a guest
+failure or a valid Phase1 unwind.
+
+At 20:20:38, direct GDB NtCreateUserProcess captured smss requesting
+\??\C:\WINDOWS\system32\autochk.exe, command line ending ` *`.
+GS.CurrentThread/Process, PID and kernel PE validate the caller; the
+capture took 40 ms and retained 1,560 stack bytes before detaching.
+Complete subsequent process walks show autochk appear and leave, without
+proving its exit code or disk-check result. No armed power watchdog or
+LogonUI/dwm is observed. The guest is progressing and remains running.
+Current GDB guard is in rpc-create; rpc-startup-watch alone owns the
+monitor and checks process/power state until SCM discovery. See current
+WINDOWS-BOOT-STATUS.md for exact artifact names and remaining breakpoint
+handoff. The hypervisor, full manifest and Windows configuration remain
+unchanged.

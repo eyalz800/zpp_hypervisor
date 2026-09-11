@@ -71,21 +71,44 @@ These checks do not prove that Windows boots.
 The same-binary GDB startup run began around **19:21 UTC** with two CPUs.
 Startup channels passed. Resident module base remains `0x66d47000`, but
 Windows now has base **`0xfffff80096a00000`**, system CR3 `0x1ae000`.
-The physical kernel PE and complete process walk validate those new
-coordinates. At 19:34 the walk still has three processes; services.exe
-has not appeared. No current thread location is inferred from that count.
+The physical kernel PE and complete process walks validate those coordinates.
+At 20:21 the run has smss.exe PID 568, after an autochk process appeared
+and left; no LogonUI/dwm or armed power watchdog is observed. SCM has not
+appeared yet. Preserve this progressing guest.
 
-`rpc-guard` in tmux `zpp-rig-20260911` runs a bounded KeBugCheckEx hardware
-breakpoint at **`0xfffff80096ef90b0`** with capture/detach. `rpc-discovery`
-is the sole monitor reader and exits when services.exe's current
-EPROCESS, PEB, CR3 and PE base have been validated. Its context output is
-`/tmp/zpp-20260911/rpc-gdb-discovery/services-context.json`. The prepared
+A 19:37:40 GDB stop walked all 109 System threads and identified Phase1
+by both start-address fields. It was Running (context switches 693), so
+its saved stack was explicitly excluded. Later on_l2_exit breakpoints
+at 20:16/20:17 hit, but the Phase1 ETHREAD start-address check failed.
+The second capture preserves the exact failing assertion. smss had
+appeared by 20:16; no valid Phase1 live unwind was obtained, and no guest
+failure is inferred from those debugger-side checks.
+
+At **20:20:38**, GDB caught NtCreateUserProcess on CPU 0. The validated
+caller is smss.exe PID 568, and the captured process parameters name
+`\??\C:\WINDOWS\system32\autochk.exe` with command line ending ` *`.
+The 40-ms capture preserved registers and 1,560 kernel-stack bytes and
+detached. The later complete process lists show autochk appearing and
+leaving, without establishing its exit code or disk-check result.
+
+`rpc-create` in tmux `zpp-rig-20260911` now runs the subsequent bounded
+KeBugCheckEx guard at **`0xfffff80096ef90b0`**; its artifact prefix is
+`rpc-gdb-after-create-guard`. The process-creation capture is under
+`rpc-gdb-process-create`. Prior guard interruptions were manual probe
+transitions, not timeout verdicts or guest failures despite the generic
+helper's wording. No two GDB clients run together.
+
+`rpc-startup-watch` is the sole monitor reader. It retains complete
+process and power replies under `/tmp/zpp-20260911/rpc-gdb-watch`, and its
+status log is `rpc-gdb-startup-watch.txt`. It exits when services.exe's
+EPROCESS, PEB, CR3 and PE base validate, writing
+`rpc-gdb-discovery/services-context.json`. The prepared
 `gdb-scm-startup.py` has not yet attached: it will catch CleanupStartFailure
 and AreDependenciesStarted's failed dependency, then watch RpcEptMapper's
-internal start-state writes. It also captures RPCSS-host stacks at a
-1070 failure, with a bounded stop and current module list. Transition
-from the guard only after discovery; never run two GDB clients or monitor
-readers together. Current artifacts use the `rpc-gdb-` prefix.
+internal start-state writes. It captures RPCSS-host stacks at a 1070
+failure, with a bounded stop and current module list. Transition from the
+current guard after discovery, then restart the normal logon watcher as
+sole monitor owner. Current artifacts use the `rpc-gdb-` prefix.
 
 The completed preceding run is recorded below.
 
