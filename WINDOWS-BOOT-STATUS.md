@@ -90,6 +90,26 @@ encountered an absent PRCB pointer. These are failed early reads, not an
 empty process list or a completed boot. Let startup proceed, then take a
 complete process walk and a delta sample before estimating benefit.
 
+**Progress at about fifteen minutes:** the complete process walk now has
+`System`, `Secure System`, `Registry`, `smss.exe` (PID 540) and `autochk.exe`
+(PID 564). The timer sample at 16:29:45 UTC has resolution count zero and
+both requested and pseudo intervals at 156,250; both CPUs have changed
+threads since the early timer-stall sample. The power-IRP list is well-formed
+and empty. A later 32.147-second window has **4,026 fresh CPU 0 VTL calls**
+and zero fresh CPU 1 calls, with continued L2 entries on both CPUs. Preserve
+this progressing guest and hold the slot deployment. There is no login
+evidence yet. Artifacts include `cache-write-elision-{timer-16min.out,
+processes-16min.txt,power-16min.txt,delta-17min.out}`. Their minute suffixes
+are approximate; sample timestamps are authoritative.
+
+The twelve live CPU 0 stack captures around this transition do not recover
+a repeated complete timer stack: several unwind into invalid addresses,
+and others stop at missing switched stacks. They cannot establish a current
+stalled call. An initial delta accidentally used the singleton as `--base`,
+which expects the module base. Its changed fingerprint rejected the sample;
+it is archived as `cache-write-elision-delta-wrong-base-rejected.out` and
+must not be used. The valid rerun uses module base `0x66e08000`.
+
 **Next build, not deployed:** `48bcfc9c` gives field width/type separate
 cache slots. The old mapping squeezed 156 fields into 26 slots; the new
 projection gives all 156 distinct slots. All 191 cache assertions and all

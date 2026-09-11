@@ -80469,3 +80469,23 @@ still verify refusal of inconsistent tables and acceptance within that
 tolerance. All 27 rebuilt host tests pass (30.61 seconds), including all
 224 Python tests. `git diff --check` passes. This reader-only change needs
 no hypervisor deployment; the rig is still running the elision-only loader.
+
+## 2026-09-11: preserve the elision boot as it reaches smss and autochk
+
+At about fifteen minutes, a complete process walk on the elision-only boot
+has System, Secure System, Registry, smss.exe (540) and autochk.exe (564).
+The validated timer sample at 16:29:45 UTC has resolution count zero and
+requested/pseudo intervals both 156,250. Both CPUs have changed threads
+since the earlier timer stall. A complete power-IRP walk is empty. The next
+32.147-second delta has 4,026 fresh CPU 0 VTL calls, zero fresh CPU 1 calls
+and L2 entry rates 893.35/s and 2,986.01/s. This is active boot progress;
+the next slot build stays local while this guest runs. No login is proven.
+
+Twelve live CPU 0 captures near the transition yield no repeated complete
+timer stack; invalid unwinds and missing switched stacks are not evidence
+of a new stall. A first delta invocation mistakenly supplied the singleton
+as `--base`; the changed fingerprint rejected it. It is retained under
+`cache-write-elision-delta-wrong-base-rejected.out`, not used for rates.
+The valid rerun uses module base `0x66e08000` and the deployed ELF. The
+watcher has resumed as sole monitor reader. Artifacts are listed in the
+current status file.
