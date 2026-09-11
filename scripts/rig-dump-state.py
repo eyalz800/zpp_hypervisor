@@ -6306,15 +6306,14 @@ def delta_level_split_lines(before, after, slots, seconds, l2_entries):
     - the reasons this table cannot see, because
       `handler_reason_slots` stops at 64.
 
-    Refuses, rather than reporting, three impossibilities:
+    Refuses, rather than reporting, three inconsistent measurements:
 
     - a bucket that went backwards, for the four reasons
       `delta_impossible_lines` gives;
     - **`from_l2` exceeding `exits` for the same reason**, which is a
-      subset larger than its superset.  They are written by adjacent
-      statements over one span (`resume.cpp:1388` and `:1392`), so this
-      cannot happen to a coherent pair and means the two members were
-      read at different strides or from different binaries.  Without
+      subset larger than its superset. The live reads are not atomic:
+      the guest can advance between reading the two members. Sampling
+      skew, incorrect offsets or different binaries can cause this. Without
       this the reader prints an L1 count as a negative number and a
       share above 100%, both of which look like findings;
     - a total that is not the sum of its parts.
@@ -6355,18 +6354,14 @@ def delta_level_split_lines(before, after, slots, seconds, l2_entries):
             for r in sorted(exits) if from_l2[r] > exits[r]]
     if over:
         lines = ["",
-                 "*** IMPOSSIBLE: a SUBSET exceeds its superset ***"]
+                 "*** INCONSISTENT LIVE SAMPLE: a SUBSET exceeds its superset ***"]
         for reason, l2, total in over:
             lines.append(f"    {EXIT_REASON.get(reason, reason)}: "
                          f"from_l2 {l2:,} of {total:,} exits")
-        lines.append("    `handler_reason_from_l2` is incremented only "
-                     "inside the `if` that")
-        lines.append("    increments `handler_reason_exits` "
-                     "(resume.cpp:1388-1394), so it cannot")
-        lines.append("    exceed it. One of the two was read at the "
-                     "wrong stride, or the two")
-        lines.append("    samples are from different binaries. Nothing "
-                     "below is printed.")
+        lines.append("    The guest runs between these non-atomic counter reads;")
+        lines.append("    sampling skew can produce this mismatch. Incorrect offsets")
+        lines.append("    or different binaries can also cause it. The exit-by-level")
+        lines.append("    split is withheld; this sample does not establish the cause.")
         return lines
 
     total = sum(exits.values())
@@ -6584,26 +6579,23 @@ def delta_handler_reason_lines(before, after, slots, seconds,
                 "distribution. The handler took",
                 "  no exit here, which is a reading, not an absence."]
 
-    # At most one exit can straddle each of the two sample boundaries,
-    # so two exits' worth of cycles is the tolerance and anything past
-    # it means the two members are not describing the same span.
+    # Preserve the existing tolerance of two average exits. The members
+    # are read separately while the guest runs, so this is not a bound on
+    # sampling skew. Refuse a larger mismatch without diagnosing its cause.
     if handler_delta:
         slack = 2 * (split_cycles / split_exits)
         if split_cycles > handler_delta + slack:
             return ["",
-                    "*** IMPOSSIBLE: the split is LARGER than what it "
+                    "*** INCONSISTENT LIVE SAMPLE: the split is LARGER than what it "
                     "splits ***",
                     f"    handler_reason_cycles summed  "
                     f"{split_cycles:,}",
                     f"    handler_cycles summed over cpus "
                     f"{handler_delta:,}",
-                    "    Both are closed in `resume_guest` from the "
-                    "same pair of reads, so the",
-                    "    first cannot exceed the second. One of: the "
-                    "two were read from",
-                    "    different binaries, or handler_cycles was "
-                    "summed over the wrong set of",
-                    "    processors. Nothing below is printed."]
+                    "    These counters are read separately while the guest runs.",
+                    "    Sampling skew, incorrect offsets, different binaries or",
+                    "    the wrong processor set can cause this mismatch. The",
+                    "    reason-cost split is withheld; its cause is not established."]
 
     lines = ["",
              f"where the handler's time went, BY REASON, IN THIS WINDOW "

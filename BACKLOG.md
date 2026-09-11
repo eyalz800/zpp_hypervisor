@@ -80451,3 +80451,21 @@ Current Windows base `0xfffff80477e00000`, CR3 `0x1ae000`; module/singleton
 `0x14eaed0`, physical `0x682f2ed0`. `elision-logon` owns the monitor.
 The local slot-build commit `48bcfc9c` is **not deployed**; use the archived
 deployed ELF for every resident read. Artifacts use `cache-write-elision-`.
+
+## 2026-09-11: live counter mismatches do not establish bad offsets
+
+The elision-only boot's five-minute window measured 42,489 second-level
+WRMSR exits against 42,488 total WRMSR exits. The reader correctly withheld
+the exit-by-level table, but incorrectly said the only possible causes were
+a bad stride or different binaries. These counters are read separately while
+the guest runs, so sampling skew can also produce the mismatch.
+
+The two affected diagnostics now say `INCONSISTENT LIVE SAMPLE`, name
+sampling skew alongside layout/binary errors, and specify which split is
+withheld. No arithmetic, tolerance or refusal decision changes. The existing
+reason-cycle tolerance of two average exits is not a bound on live sampling
+skew; the comment and test description no longer claim it is. Existing tests
+still verify refusal of inconsistent tables and acceptance within that
+tolerance. All 27 rebuilt host tests pass (30.61 seconds), including all
+224 Python tests. `git diff --check` passes. This reader-only change needs
+no hypervisor deployment; the rig is still running the elision-only loader.

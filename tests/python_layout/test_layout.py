@@ -1984,9 +1984,9 @@ class TheExitHistogramCannotSayWhoseExitItWas(unittest.TestCase):
         """**The negative control.**
 
         `handler_reason_from_l2` is incremented inside the `if` that
-        increments `handler_reason_exits`, over one span, so it cannot
-        exceed it.  If it does, the two were read at different strides
-        or from different binaries.
+        increments `handler_reason_exits`, but live reads are not atomic.
+        Sampling skew, incorrect offsets or different binaries can produce
+        a measured subset larger than its superset.
 
         Without this the reader prints an L1 column of `-5,000` and a
         second-level share of 105%, and both read as findings: "the
@@ -1997,7 +1997,7 @@ class TheExitHistogramCannotSayWhoseExitItWas(unittest.TestCase):
         before, after = self.samples()
         after[("handler_reason_from_l2", 32)] += 5_000   # 95,000 of 90,000
         text = self.split(before, after)
-        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("INCONSISTENT LIVE SAMPLE", text)
         self.assertIn("SUBSET exceeds its superset", text)
         self.assertIn("wrmsr", text)
         # And nothing is rated: no table, no identity, no percentage.
@@ -3021,33 +3021,30 @@ class PerHandlerCyclesAreWindowedNotBootWide(unittest.TestCase):
         self.assertIn("handler_reason_cycles[reason 24]", text)
         self.assertNotIn("cyc/exit", text)
 
-    def test_a_split_larger_than_what_it_splits_is_impossible(self):
-        """`handler_reason_cycles` and `handler_cycles` are closed from
-        the same pair of reads in `resume_guest`, so the first cannot
-        exceed the second - and a reader that prints it anyway reports
-        a coverage above 100%, which reads as a finding."""
+    def test_a_split_larger_than_what_it_splits_is_refused(self):
+        """A split exceeding the existing tolerance is withheld even though
+        non-atomic sampling can cause it. Printing it would report coverage
+        above 100% as a finding without establishing the cause."""
         boot = {24: {"handler_reason_cycles": 1_000_000,
                      "handler_reason_exits": 1_000}}
         window = {24: {"handler_reason_cycles": 500_000,
                        "handler_reason_exits": 500}}
         text = self.report(boot, window, handler=10_000, exits=500)
-        self.assertIn("IMPOSSIBLE", text)
+        self.assertIn("INCONSISTENT LIVE SAMPLE", text)
         self.assertIn("LARGER than what it splits", text)
 
-    def test_one_exit_straddling_a_boundary_is_not_an_impossibility(self):
+    def test_a_small_mismatch_within_the_existing_tolerance_is_accepted(self):
         """The negative control for the check above.
 
-        At most one exit can be open at each of the two sample
-        boundaries, so a split a whisker over its denominator is the
-        expected case and refusing it would make this section useless on
-        every real reading.
+        Keep the existing allowance of two average exits. It is a display
+        tolerance, not a bound on skew between non-atomic counter reads.
         """
         boot = {24: {"handler_reason_cycles": 1_000_000,
                      "handler_reason_exits": 1_000}}
         window = {24: {"handler_reason_cycles": 500_000,
                        "handler_reason_exits": 500}}
         text = self.report(boot, window, handler=499_000, exits=500)
-        self.assertNotIn("IMPOSSIBLE", text)
+        self.assertNotIn("INCONSISTENT LIVE SAMPLE", text)
         self.assertIn("covers 100.2%", text)
 
     def test_an_unread_row_is_unknown_and_not_zero(self):
