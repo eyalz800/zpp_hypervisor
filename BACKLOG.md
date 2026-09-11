@@ -80222,3 +80222,46 @@ shares 69.81%/74.18%, L2 shares 6.72%/6.76%, and 13,239.7 global epoch
 bumps/s. Its interrupt-shadow-clear counter did not move. This is measured
 unnecessary invalidation work, not proof of the stall's cause. Both cache
 changes are ready for deployment; no result from that next boot exists yet.
+
+## 2026-09-11: the cumulative reader overwrote its own module base
+
+The first report of the cache boot printed zero for every VMCS global,
+including `vmcs_cache_epoch`, whose initializer is 1, and an empty log.
+The same boot's delta reader measured thousands of private clears per second.
+This disagreement was in the reader: two loops in `main`, for the L1 VMCALL
+codes and VTL1 resume RIP ring, assigned their row address to `base`. The
+later manifest, globals and log used that address as the module base.
+The singleton remained correct, making the earlier sections look sound.
+Those row addresses now have their own variable names.
+
+The common manifest reader also stopped at 256 bytes, before `vcache` and
+`uevmcs`. It now reads 256-byte chunks until the terminator, bounded to
+4096 bytes, rejects missing words instead of inventing zero terminators,
+and clears any previous manifest before reading. An invalid prefix still
+returns its bytes for the caller's base diagnostic. This changes no guest
+memory or deployed hypervisor code.
+
+Five new Python tests failed six assertions before the fixes: both real
+diagnostic blocks misaddressed a subsequent global; the long manifest was
+truncated; missing data and absent terminators were accepted; and an invalid
+prefix retained a previous manifest. All 27 rebuilt host checks now pass
+(30.47 seconds), including 224 Python tests. The corrected live full report
+proves the module base from the complete manifest, reads the log, and reports
+2,734,634 private clears, 252,944 bypass invalidations and epoch 9. Those
+totals were sampled during a running boot, not atomically with each other.
+Artifacts: `/tmp/zpp-20260911/resident-identity-{before-tests,after-tests}.txt`
+and `cache-state-5min.out`. Old cumulative globals/log output after the two
+loops is invalid; the delta path returns before those loops and is unaffected
+by that base overwrite.
+
+The cache boot started around 15:19 UTC, loader MD5
+`2ac8432cd5f20272a6eeef00564a2844`, after supported teardown returned NVMe
+and 15,476 MiB free RAM. Fresh-mount readback and manifests agree. Both CPUs
+have Hyper-V VMX operation and L2 entries. At about six minutes the process
+list still has three entries. A 32.071-second sample has 1,365 fresh VTL
+calls (5/1,360), 11,076.3 private clears/s, 964.9 bypass invalidations/s and
+zero global epoch bumps. Handler shares are 68.78%/43.94%, L1 23.66%/52.18%,
+L2 7.56%/3.89%. This is active work, not an isolated speedup measurement
+against the old stalled boot. CPU 0 changed threads in the separate validated
+timer sample; DPC counts advance, and no timer-resolution request is active.
+The guest remains running with the watcher resumed. Windows login is unproven.

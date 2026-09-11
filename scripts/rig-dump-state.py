@@ -229,19 +229,28 @@ def read_build_manifest(args, base):
     all-`0xff` failed read from a wrong base needs the bytes, and that
     guard has already cried wolf once.
     """
+    global BUILD_MANIFEST
+    BUILD_MANIFEST = None
     manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
     mon = Monitor(args.rig, args.port)
-    # The whole string, not the first two words. The prefix is all the
-    # base check needs; the rest says what was compiled in, and more than
-    # one switch below changes what the numbers above *mean*.
-    mon.queue(manifest_va, 32)
-    got = mon.run()
-    raw = b"".join(got.get(manifest_va + 8 * i, 0).to_bytes(8, "little")
-                   for i in range(32))
-    if raw.startswith(b"zpp switches:"):
-        global BUILD_MANIFEST
-        BUILD_MANIFEST = raw.split(b"\0")[0].decode("ascii", "replace")
-    return manifest_va, raw
+    # The manifest exceeds the old 256-byte read: vcache and uevmcs are
+    # near its end. Require its terminator, and never invent one for a
+    # missing word. Bound a malformed string to one page of bytes.
+    raw = b""
+    for offset in range(0, 4096, 256):
+        address = manifest_va + offset
+        mon.queue(address, 32)
+        got = mon.run()
+        wanted = [address + 8 * i for i in range(32)]
+        if not all(at in got for at in wanted):
+            raise RuntimeError("build manifest read is incomplete")
+        raw += b"".join(got[at].to_bytes(8, "little") for at in wanted)
+        if not raw.startswith(b"zpp switches:"):
+            return manifest_va, raw
+        if b"\0" in raw:
+            BUILD_MANIFEST = raw.split(b"\0")[0].decode("ascii", "replace")
+            return manifest_va, raw
+    raise RuntimeError("build manifest has no terminator within 4096 bytes")
 
 
 def census_caveat(what):
@@ -11949,13 +11958,13 @@ def main():
                   f"rcx 0x{read('l1_vmcall_rcx', cpu):x} "
                   f"rdx 0x{read('l1_vmcall_rdx', cpu):x} "
                   f"rax 0x{read('l1_vmcall_rax', cpu):x}")
-            base = instance + off['l1_vmcall_codes'] + cpu * 16 * 8
+            codes_base = instance + off['l1_vmcall_codes'] + cpu * 16 * 8
             cbase = instance + off['l1_vmcall_code_counts'] + cpu * 16 * 8
             for i in range(16):
-                monitor.queue(base + 8 * i, 1)
+                monitor.queue(codes_base + 8 * i, 1)
                 monitor.queue(cbase + 8 * i, 1)
             got = monitor.run()
-            seen = [(got.get(cbase + 8 * i, 0), got.get(base + 8 * i, 0))
+            seen = [(got.get(cbase + 8 * i, 0), got.get(codes_base + 8 * i, 0))
                     for i in range(16)]
             for count, code in sorted(seen, reverse=True):
                 if count:
@@ -11993,12 +12002,12 @@ def main():
                 continue
             if not count:
                 continue
-            base = instance + off['vtl1_resume_rip'] + cpu * CAP * 8
+            ring_base = instance + off['vtl1_resume_rip'] + cpu * CAP * 8
             for i in range(CAP):
-                monitor.queue(base + 8 * i, 1)
+                monitor.queue(ring_base + 8 * i, 1)
             got = monitor.run()
             live = min(count, CAP)
-            rips = [got.get(base + 8 * ((count - 1 - k) % CAP), 0)
+            rips = [got.get(ring_base + 8 * ((count - 1 - k) % CAP), 0)
                     for k in range(live)]
             distinct = len(set(rips))
             print(f"\ncpu {cpu} where VTL1 RESUMED, newest first "
