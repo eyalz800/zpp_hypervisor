@@ -23,6 +23,7 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/vp-flags-188-not-run-state.md`.
 - `.references/hyperv/zpp-iommu-vtl-switch.md` (199 lines).
 - `.references/hyperv/secure-dma-hvcall.md` (all 2,337 lines).
+- `REGRESSION-COVERAGE.md` (all 590 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -44,13 +45,16 @@ Corrections that matter when continuing:
   paths. The companion MMIO note corrects the CF9 account: the 8042 reset
   write is unconditional; the CF9 write is conditional. The later PCI-
   sweep note supersedes the earlier VT-d interpretation of bulk MMIO.
+- The regression-coverage inventory is historical: its claim of no Python
+  tests and its old CI/harness counts no longer describe the tree. The
+  latest rebuilt run contains 228 Python tests and 27 CTest entries. Its
+  ranked recommendations are leads to verify, not a current work order.
 - The first CMake implementation report used C++17 and host SDK headers;
   later implementation and current project instructions use C++26 and
   freestanding configuration. Do not restore the report's old workaround.
 
 Known incomplete large reads include `BACKLOG.md` (over 80,000 lines;
-selected relevant ranges and the current tail have been read) and
-`REGRESSION-COVERAGE.md` (first 220 lines read earlier). Many other
+selected relevant ranges and the current tail have been read). Many other
 reference notes were read earlier in the session; this incremental list
 does not claim to enumerate all of them. Third-party Markdown under the
 reference tooling is also not covered by this ledger.

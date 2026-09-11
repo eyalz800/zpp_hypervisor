@@ -80520,3 +80520,49 @@ At about twenty-five minutes, a complete six-process walk includes csrss.exe
 VMWRITE failures remain zero. The complete power list has two disabled
 wait-wake entries. Artifacts use `cache-write-elision-{delta,processes,power}
 -25min`. Preserve the guest; the watcher now checks power requests every poll.
+
+
+## 2026-09-11: elision boot ended in audio 0x9F; slot projection boot started
+
+The elision-only guest reached fourteen processes but no LogonUI/dwm and
+stopped at 16:47:24 UTC with 0x9F, p1=3. PDO ffffbf8157c538f0 and IRP
+ffffbf815aa84be0 match the armed audio request observed earlier. Its PDO
+belongs to IntcAudioBus and its current device to IntcOED. A USB request
+was also armed; two complete worker reads showed one idle worker and one
+inside that USB request, so the sampled worker pool was not saturated.
+Fresh VTL calls and CPU 0 user-mode samples continued while requests aged.
+
+Three non-atomic saved stacks covering 0.3 seconds show the USB worker Ready
+before/after capture. Matched SwapContext instructions establish how to
+recover RIP/RSP/RBP from KTHREAD.KernelStack. PE metadata then agrees on
+interrupt dispatch -> KiCheckForThreadDispatch -> affinity setup ->
+KeGenericProcessorCallback -> KeFlushQueuedDpcs -> Wdf01000+4341f.
+The unwind stops at Wdf01000 because this boot's bytes were not captured.
+This does not prove a continuous five-minute worker stall or causality for
+the separate audio timeout. Detailed identities, disassembly provenance
+and limits are in docs/2026-09-11-elision-power-watchdog.md.
+
+The stopped guest's ELF, fresh-mounted loader and driver/stack evidence
+were archived. Loader MD5 remains 98542ddf33cdd78402529b4b6b72423c.
+Supported teardown returned NVMe and 15,488 MiB free RAM without a host
+restart. The previously tested cache-slot build 48bcfc9c then deployed:
+fresh-mount loader MD5 5756af63a9cbdfdf5a84ff2b353ee35b, full manifest
+unchanged, same two CPUs. It booted at 16:55 UTC with all channels answering.
+
+New module base is 66d48000 and singleton offset 15ab000. The singleton
+therefore happens to remain at 682f3000. Use the new deployed ELF.
+Windows base fffff800a3000000, CR3 1ae000, PE timestamp 51a135d9 and
+image size 1450000 are validated. The first complete walk has three
+processes. A valid 32.131-second window has fresh VTL calls +30/+0,
+L2 entries 3,328.06/s and 3,631.35/s, handler shares 66.50%/73.99%,
+and no VMREAD/VMWRITE failures. Cache hits are 67,257.2/s, misses
+207,244.5/s, executed writes 150,376.3/s and skipped writes 1,490.0/s.
+This phase is not a controlled comparison with the elision guest's later
+user-mode activity. An exit-by-level subset mismatch of one count correctly
+withheld that split. Artifacts use cache-slots- under /tmp/zpp-20260911/;
+slots-logon in tmux zpp-rig-20260911 now owns the monitor.
+
+REGRESSION-COVERAGE.md has now been read in full. Its claims of no Python
+tests and its old harness/CI counts are historical, not current conditions.
+The incremental reading ledger records this correction; the full Markdown
+corpus is still not claimed complete.

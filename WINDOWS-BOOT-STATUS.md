@@ -68,71 +68,65 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The current boot started around **16:15 UTC**, with the archived write-elision
-loader from `9f1caf2b`, MD5 **`98542ddf33cdd78402529b4b6b72423c`**, verified
-from a fresh mount. Two CPUs and build switches are unchanged. All startup
-channels answered. Module base is `0x66e08000`, singleton `0x682f3000`.
-Windows base **`0xfffff80477e00000`** was derived from the LSTAR value and
-validated against its PE timestamp and image size; CR3 is `0x1ae000`.
+The cache-slot build **`48bcfc9c` is now deployed**. Its loader MD5
+**`5756af63a9cbdfdf5a84ff2b353ee35b`** and complete manifest matched the
+fresh mount. The supported two-CPU boot began at **16:55 UTC**; monitor,
+gdb and serial all answered. The previous elision-only guest ended with
+an audio power watchdog, described below.
 
-Use **`.rig-deployed-hypervisor.elf`**, which differs from the newer local
-build. `vmcs_cache_write_hits` is at ELF offset `0x14eaeb0`, physical
-`0x682f2eb0`; reserved-bit writes are at offset `0x14eaed0`, physical
-`0x682f2ed0`. The `elision-logon` watcher in `zpp-rig-20260911` owns the
-monitor. Artifacts use the `cache-write-elision-` prefix under the session
-directory. The deployed candidate also exists in `elision-ready/`.
+Use `.rig-deployed-hypervisor.elf`. The larger cache moved the module base
+from the preceding boot to **`0x66d48000`**. Its singleton offset is now
+`0x15ab000`, so the singleton happens to remain at `0x682f3000`.
+`vmcs_cache_write_hits` is at ELF offset `0x15aaeb0`; interrupt-shadow
+clearings are at `0x51b7020`. These resolve to physical `0x682f2eb0` and
+`0x6beff020`, respectively. Their unchanged physical addresses are a
+coincidence of this boot's module relocation, not reusable layout constants.
 
-The early cumulative report records 49,300 skipped VMWRITEs and zero
-VMREAD/VMWRITE failures. CPU 0 has Hyper-V VMX operation and L2 entries;
-CPU 1 is still at its early startup state. The two-minute kernel identity
-check passed, but the process walk was incomplete and the timer reader
-encountered an absent PRCB pointer. These are failed early reads, not an
-empty process list or a completed boot. Let startup proceed, then take a
-complete process walk and a delta sample before estimating benefit.
+Windows base **`0xfffff800a3000000`** was read from the resident kernel-base
+field using the deployed DWARF. CR3 `0x1ae000` successfully walks its PE
+header, matching timestamp `0x51a135d9` and image size `0x1450000`.
+At about three minutes, the complete process walk has System, Secure System
+and Registry. The timer sample has resolution count zero, last requested
+value `0xffffffff`, pseudo interval 156,250, and no interrupt-shadow
+clearings. Both validated PRCBs have active threads and advancing DPC counts.
 
-**Progress at about fifteen minutes:** the complete process walk now has
-`System`, `Secure System`, `Registry`, `smss.exe` (PID 540) and `autochk.exe`
-(PID 564). The timer sample at 16:29:45 UTC has resolution count zero and
-both requested and pseudo intervals at 156,250; both CPUs have changed
-threads since the early timer-stall sample. The power-IRP list is well-formed
-and empty. A later 32.147-second window has **4,026 fresh CPU 0 VTL calls**
-and zero fresh CPU 1 calls, with continued L2 entries on both CPUs. Preserve
-this progressing guest and hold the slot deployment. There is no login
-evidence yet. Artifacts include `cache-write-elision-{timer-16min.out,
-processes-16min.txt,power-16min.txt,delta-17min.out}`. Their minute suffixes
-are approximate; sample timestamps are authoritative.
+The early cumulative report has 313,184 skipped writes and zero
+VMREAD/VMWRITE failures. These cumulative figures span startup phases;
+use a valid delta window to assess the running workload. Artifacts use
+`cache-slots-` under `/tmp/zpp-20260911/`. The `slots-boot` tmux window is
+in `zpp-rig-20260911`; allow only one monitor reader at a time.
 
-The twelve live CPU 0 stack captures around this transition do not recover
-a repeated complete timer stack: several unwind into invalid addresses,
-and others stop at missing switched stacks. They cannot establish a current
-stalled call. An initial delta accidentally used the singleton as `--base`,
-which expects the module base. Its changed fingerprint rejected the sample;
-it is archived as `cache-write-elision-delta-wrong-base-rejected.out` and
-must not be used. The valid rerun uses module base `0x66e08000`.
+The slot projection gives all 156 currently used fields distinct slots;
+the old mapping squeezed them into 26. All 191 cache assertions and all
+27 rebuilt host tests passed before deployment. It adds 786,432 bytes of
+BSS and increases the number of tags cleared during invalidation. Its live
+net effect is still being measured. The latest reader-only changes passed
+all 27 host tests, including 228 Python tests, without altering this binary.
 
-At about twenty-one minutes, autochk is absent and a second smss.exe (PID
-700, parent 540) is present. The complete power list has two wait-wake
-entries, both disabled/unarmed. `cache-write-elision-processes-21min.txt`
-and `cache-write-elision-power-21min.txt` preserve these reads. The watcher
-continues. The reader now suppresses all later delta sections when identity
-or timing fails; its previous rejection only stopped the main table.
+## Previous elision boot: progress followed by 0x9F
 
-At about twenty-five minutes, csrss.exe (PID 908, parent 700) appears:
-six processes in a complete walk. A valid 32.182-second window has fresh
-VTL calls **+2,957/+1,761** and user-mode samples **+1,178/+2,681** on
-CPUs 0/1. VMREAD/VMWRITE failures remain zero. The complete power list has
-two disabled wait-wake entries. These are continuing boot stages, not
-login evidence or an isolated speedup measurement. Artifacts use
-`cache-write-elision-{delta,processes,power}-25min`; the watcher now checks
-power requests every poll because the process count reached six.
+The elision-only boot (`9f1caf2b`, loader MD5
+`98542ddf33cdd78402529b4b6b72423c`) ran from about 16:15 until
+**16:47:24 UTC**. It reached smss/autochk around fifteen minutes, csrss
+around twenty-five minutes and eventually fourteen processes, including
+services, winlogon and lsass. It did not produce LogonUI/dwm or verified
+login evidence. Fresh VTL calls and user-mode samples continued while two
+power requests aged.
 
-**Next build, not deployed:** `48bcfc9c` gives field width/type separate
-cache slots. The old mapping squeezed 156 fields into 26 slots; the new
-projection gives all 156 distinct slots. All 191 cache assertions and all
-27 rebuilt host tests pass (224 Python tests); debug loaders and ELF/
-bootability checks pass. It adds 786,432 bytes of BSS and increases the
-number of tags cleared on invalidation. Its live net effect is unknown.
-Keep it separate from the elision-only experiment now running.
+The preserved bugcheck is **0x9F, parameter 1 = 3**. Its PDO
+`ffffbf8157c538f0` and IRP `ffffbf815aa84be0` match the previously observed
+audio request: IntcAudioBus's PDO, with IntcOED as the current device.
+A separate USB request was also armed. Two worker-list reads showed one
+idle worker and one associated with the USB request; the pool was not
+saturated. Three saved Ready-thread stacks consistently reach
+KeFlushQueuedDpcs through affinity setup and interrupt dispatch, called
+from Wdf01000. They cover only 0.3 seconds and do not establish that this
+USB worker caused the separate audio timeout.
+
+See [the detailed evidence](docs/2026-09-11-elision-power-watchdog.md) for
+request identities, the checked saved-context reconstruction and its limits.
+The old ELF/loader and post-failure evidence were archived before supported
+teardown. NVMe and 15,488 MiB free RAM returned without a host reboot.
 
 ## Earlier boots
 
