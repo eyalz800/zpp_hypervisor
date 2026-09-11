@@ -15,6 +15,7 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/hvix64-current-vp-lookup.md`.
 - `.references/hyperv/secure-lock-address-and-vtl0-silence.md`.
 - `.references/hyperv/vbs-graceful-degrade.md`.
+- `.references/hyperv/vbs-phase1-dma-stall.md` (166 lines).
 - `.references/hyperv/securekernel-fault-d93a4.md`.
 - `.references/hyperv/vp1-pmtimer-convergence.md`.
 - `.references/hyperv/nvme-io-queue-submission.md`.
@@ -57,6 +58,12 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The VBS Phase1 DMA note infers a repeated failed attach from static
+  wrapper code and declares a loop it did not observe. Its own correction
+  retracts the advertised-capability gate. Current nested VT-d support and
+  later secure-DMA corrections supersede its inert-IOMMU premise; neither
+  faking successful hypercalls nor clearing guest policy follows from it.
 
 - The IUM work-item note's zero-list-link test does not establish a lost
   wakeup: an item can be dequeued/executing, no work may be pending, or a

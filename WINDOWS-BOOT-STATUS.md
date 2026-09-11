@@ -81,14 +81,20 @@ All startup channels answered; the real guest's USB topology is now five
 direct root ports, without an external hub. Module base **66d47000**;
 new Windows base **fffff801e1c00000**, system CR3 **1ae000**. Kernel PE
 identity and complete three-process walks validate these coordinates.
-No armed power request or LogonUI/dwm is observed at 21:15:43 UTC.
-**GDB PID 78231** guards KeBugCheckEx at **fffff801e20f90b0**. The sole
+SMSS PID 544 appeared by 21:24:07 UTC (11m26s after launch). No armed
+power request or LogonUI/dwm is observed through 21:24:47 UTC.
+**GDB PID 81451** guards KeBugCheckEx at **fffff801e20f90b0**. The sole
 monitor owner is `hub-startup-watch` (Python PID 78437); coordinator
-`hub-scm-coordinator` (PID 78438) will hand off to direct SCM breakpoints
+`hub-scm-coordinator` (see the current hub-scm-coordinator tmux pane for its PID) will hand off to direct SCM breakpoints
 when services.exe validates. Artifacts/state are `hub-direct-*` under
 `/tmp/zpp-20260911/`; coordinator state is
 `hub-direct-scm-coordinator.json`. Do not replace the GDB client without
 first updating/stopping its coordinator.
+
+A short Phase1 probe identified a Running thread, excluded its saved
+stack, then rejected a host context RSP and later changed ETHREAD identity.
+No Phase1 Windows unwind was obtained. The above guard replaces the
+interrupted old guard 78231; the coordinator was restarted with 81451.
 
 The first observer attempt mistook the brief GDB attach pause for a guest
 shutdown and exited. Its error is preserved separately. The replacement

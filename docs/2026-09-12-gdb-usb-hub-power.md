@@ -116,3 +116,34 @@ on `paused (shutdown)`. The continuing logon watcher has the same fix.
 The observer's rejected first attempt is preserved; later complete walks
 succeed. Shell syntax checks pass. No guest source/binary change or host
 suite rerun was needed for this launcher/observer experiment.
+
+
+The matching UsbHub3 PDB was fetched from Microsoft after the next boot
+started. GUID 22b2bc36-58b4-f6e1-69d3-bfa9bf10447c, image age 1, Info age
+4 and DBI age 1 agree. RVA 1c910 is exactly
+HUBPDO_WdmPnpPowerIrpCompletionRoutineForAsynchronousCompletion. Its
+successful path creates a work item, stores the IRP in its typed context,
+enqueues the work item and returns c0000016 (MORE_PROCESSING_REQUIRED).
+The callback is HUBPDO_EvtCompleteIrpWorkItem at 15370. The saved current
+WDF function table resolves offsets bd8/be0 to WdfWorkItemCreate/Enqueue,
+so these calls are identified from current pointers as well as symbols.
+This maps a future entry/callback breakpoint pair; it does not establish
+that this particular IRP reached either call. The old guest's work-item
+object/context was not captured and is no longer available after teardown.
+
+At 21:21:56 a 303-ms GDB capture completed all 115 System threads and
+identified Phase1 ffff9784b54de080 by both start-address fields. It was
+Running, so its saved stack was excluded. At 21:23:26 a hardware stop at
+zpp on_l2_exit matched that current Windows thread and an NT RIP, but
+refused its proposed stack: context.rsp is the host context pointer, not
+VMCS.GUEST_RSP. This is also explicit in exit_dispatch.cpp. That frame
+must not be unwound as a Windows stack. A paired Windows-address probe
+at 21:24:25 then rejected the changed Phase1 identity, without capturing
+a Windows stack or return. Preserve these debugger checks as failed
+probes, not guest failures.
+
+The complete process walk first observed smss PID 544 at 21:24:07, about
+11m26s after launch, versus roughly 55 minutes in the preceding run.
+This is a progress comparison from one run, not causal proof. All fresh
+probe artifacts are hub-direct-phase1*, and the current GDB guard was
+restored afterwards. No armed power request was observed through 21:24.
