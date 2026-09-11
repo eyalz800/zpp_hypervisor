@@ -42,9 +42,9 @@ froze *before* an entry's `WatchdogStart`, that IRP cannot be the cause.
 
 usage: guest-power-irps.py <kernel_base_hex> <cr3_hex>
 """
-import re, socket, sys, time
+import sys
+from qemu_monitor import read_physical
 
-RIG, PORT = '192.168.1.199', 4446
 
 # ntoskrnl RVAs, from the agent's disassembly of the shipped image.
 POPIRPLIST = 0xf0bd70              # LIST_ENTRY head; Link is at +0 of the
@@ -102,68 +102,16 @@ MINOR = {0: 'IRP_MN_WAIT_WAKE', 1: 'IRP_MN_POWER_SEQUENCE',
          2: 'IRP_MN_SET_POWER', 3: 'IRP_MN_QUERY_POWER'}
 
 
-# **Filter to DATA ROWS before matching.** The monitor ECHOES the command
-# it was sent, so the response contains the literal text `xp /1xw
-# 0x351f61dd0`. A physical address there is 9-12 hex digits, so a regex of
-# `0x([0-9a-f]{8})` matches the ECHO's first eight digits and returns the
-# address as if it were the value. `{16}` happens to be safe because an
-# echoed address is never that long - which is exactly why pointer reads
-# looked fine while every dword and byte read was garbage.
-#
-# Measured: SizeOfImage printed 0x11c71c9d where the row-filtered read
-# gives 0x12b000, and Flags printed SizeOfImage+2 - two independent fields
-# cannot differ by 2, which is what gave it away. Ask whether a reading is
-# POSSIBLE before asking whether it is believable.
-def _rows(d):
-    import re as _re
-    return [l for l in d.splitlines()
-            if _re.match(r'^[0-9a-f]{6,}: ', l.strip())]
-
-
-def monitor(cmds):
-    s = socket.create_connection((RIG, PORT), timeout=12)
-    time.sleep(0.35)
-    for c in cmds:
-        s.sendall((c + '\n').encode())
-        time.sleep(0.28)
-    time.sleep(1.1)
-    s.setblocking(False)
-    out = b''
-    try:
-        while True:
-            b = s.recv(65536)
-            if not b:
-                break
-            out += b
-    except Exception:
-        pass
-    s.close()
-    d = out.decode('utf-8', 'replace')
-    return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', d).replace('\x1b', '')
-
-
 def xp_q(phys, n=1):
-    d = monitor([f'xp /{n}xg 0x{phys:x}'])
-    out = []
-    for l in _rows(d):
-        out += [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', l)]
-    return out
-
-
-def xp_w(phys, n=1):
-    d = monitor([f'xp /{n}xw 0x{phys:x}'])
-    out = []
-    for l in _rows(d):
-        out += [int(x, 16) for x in re.findall(r'0x([0-9a-f]{8})', l)]
-    return out
+    return read_physical(phys, n, 8)
 
 
 def xp_b(phys, n):
-    d = monitor([f'xp /{n}xb 0x{phys:x}'])
-    out = []
-    for l in _rows(d):
-        out += [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', l)]
-    return out
+    return read_physical(phys, n, 1)
+
+
+def xp_w(phys, n=1):
+    return read_physical(phys, n, 4)
 
 
 BASE = int(sys.argv[1], 16)
@@ -303,13 +251,17 @@ if cur is None:
 if cur == head:
     print('\nPopIrpList is EMPTY - no power IRP is in flight. '
           'A wedge here has no power IRP outstanding, so 0x9F cannot '
-          'fire and the wedge will persist indefinitely rather than '
-          'self-terminating at 600 s.')
+          'fire from this sample; a later IRP may still arm one.')
     sys.exit(0)
 
 print(f'\nPopIrpList at {head:#x}:')
 n = 0
+seen = set()
+previous = head
 while cur and cur != head and n < 64:
+    if cur in seen or rq(cur + 8) != previous:
+        sys.exit('READ FAILED: cyclic or changing PopIrpList; no armed count is valid')
+    seen.add(cur)
     n += 1
     irp = rq(cur + D_IRP)
     pdo = rq(cur + D_PDO)
@@ -318,6 +270,8 @@ while cur and cur != head and n < 64:
     minor = rb(cur + D_MINORFUNCTION)
     pstype = rw(cur + D_POWERSTATETYPE)
     state = rw(cur + D_WATCHDOGSTATE)
+    if None in (irp, pdo, curdev, start, minor, pstype, state) or state not in WATCHDOG_STATE:
+        sys.exit('READ FAILED: incomplete power IRP; no armed count is valid')
     print(f'\n  [{n}] _POP_IRP_DATA {cur:#x}')
     print(f'      Irp {irp:#x}' if irp else '      Irp <null>')
     print(f'      WatchdogState {state} '
@@ -391,7 +345,10 @@ while cur and cur != head and n < 64:
                 print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
                       f'of {BUGCHECK_AT / 1e7:.0f} s '
                       f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
-    cur = rq(cur)
+    previous, cur = cur, rq(cur)
+
+if cur != head or rq(head + 8) != previous:
+    sys.exit('READ FAILED: incomplete or changing PopIrpList; no armed count is valid')
 
 print(f'\n{n} power IRP(s) in flight.')
 print('\nHOW TO READ THIS - sample again in ~15 s:')

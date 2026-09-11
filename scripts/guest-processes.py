@@ -16,8 +16,8 @@ walk cross-checks that the first entry is `System`.
 
 usage: guest-processes.py <kernel_base_hex> <cr3_hex> [--head-rva 0xf05c60]
 """
-import re, socket, sys, time
-RIG, PORT = '192.168.1.199', 4446
+import sys
+from qemu_monitor import read_physical
 LINKS, NAME = 472, 824
 # `_EPROCESS.UniqueProcessId` and `InheritedFromUniqueProcessId`, both
 # `void*`, both from `llvm-pdbutil dump --types`. Printing the parent is
@@ -29,43 +29,13 @@ LINKS, NAME = 472, 824
 # another struct and reads as garbage here.
 PID, PPID = 464, 720
 
-def monitor(cmds):
-    s = socket.create_connection((RIG, PORT), timeout=12); time.sleep(0.35)
-    for c in cmds:
-        s.sendall((c + '\n').encode()); time.sleep(0.28)
-    time.sleep(1.1); s.setblocking(False); out = b''
-    try:
-        while True:
-            b = s.recv(65536)
-            if not b: break
-            out += b
-    except Exception: pass
-    s.close()
-    d = out.decode('utf-8', 'replace')
-    return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', d).replace('\x1b', '')
-
-# **Filter to DATA ROWS before matching.** The monitor echoes the
-# command it was sent, and a physical address in that echo is 9-12 hex
-# digits, so any width narrower than sixteen matches the address. `{16}`
-# was safe here only by that accident; `xp_b`'s `{2}` was not. It
-# returned the address's leading two digits as the first byte, so a
-# process name at an address beginning `0x20`-`0x7e` grew a leading
-# character (`:lsass.exe`, `Acsrss.exe`) and one beginning `0x1f` or
-# below did not, since `rname` filters to printable. The `System`
-# cross-check below did catch it - and reported it as "offsets or head
-# RVA are wrong - do not believe the list above", which sends the reader
-# to re-derive a KASLR base that was never the problem.
-def _rows(d):
-    return '\n'.join(l for l in d.splitlines()
-                     if re.match(r'^[0-9a-f]{6,}: ', l.strip()))
-
 def xp_q(phys, n=1):
-    d = _rows(monitor([f'xp /{n}xg 0x{phys:x}']))
-    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{16})', d)]
+    return read_physical(phys, n, 8)
+
 
 def xp_b(phys, n):
-    d = _rows(monitor([f'xp /{n}xb 0x{phys:x}']))
-    return [int(x, 16) for x in re.findall(r'0x([0-9a-f]{2})', d)]
+    return read_physical(phys, n, 1)
+
 
 BASE = int(sys.argv[1], 16)
 CR3 = int(sys.argv[2], 16) & 0x000ffffffffff000
@@ -148,3 +118,10 @@ else:
     print(f'cross-check FAILED: first entry is {names[:1]}, expected '
           f'`System`. Offsets or head RVA are wrong - do not believe '
           f'the list above.')
+
+# A partial list can contain System and still miss LogonUI. Do not let
+# the watcher turn a transport failure or a torn walk into a process count.
+if (why != 'reached the list head - complete' or not names
+        or names[0] != 'System' or '<unreadable>' in names
+        or any(pid is None or ppid is None for _, pid, ppid in parents)):
+    sys.exit(1)

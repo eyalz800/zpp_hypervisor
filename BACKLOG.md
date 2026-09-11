@@ -79987,3 +79987,41 @@ base 0x66e08000, singleton 0x682f3000. It remained at System, Secure
 System and Registry through 28 minutes; its empty PopIrpList was read
 with a complete structural check. The new hypervisor has not yet been
 deployed. Session artifacts are in `/tmp/zpp-20260911/`.
+
+
+## 2026-09-11: complete monitor replies, and unreadable is not zero armed
+
+The process and power-IRP readers opened a new monitor socket for every
+physical read, slept 0.35 + 0.28 + 1.1 seconds, then returned whatever
+nonblocking recv had collected. The logon watcher discarded exit status
+and counted matching lines. A failed or timed-out power walk could
+therefore report `armed=0`, and a truncated process walk could report a
+plausible positive count. The previous every-fourth-poll workaround
+reduced average delay without fixing those false successes.
+
+A shared prompt-framed reader now consumes the greeting separately,
+sends one command at a time on one connection, and requires the closing
+prompt plus every requested address and value. Timeout, EOF, missing
+rows, wrong addresses and duplicate rows fail explicitly. No fixed
+per-word sleeps remain. The process reader requires a complete walk and
+its System anchor; the power reader requires a complete bounded list
+with valid back-links and watchdog state. The watcher checks exit status,
+prints UNREADABLE for a failed power walk, and saves failure output.
+It now samples power IRPs on every poll once n>=6, preserving the gate
+that caught early arming in boot 383.
+
+On the same unchanged running guest, the three-process walk completed
+in 0.047 seconds, with System, Secure System and Registry and a complete
+head-to-head walk. The old transport alone imposed at least 34.6 seconds
+for twenty reads; its actual watcher polls were about 57 seconds apart
+with POLL=20. The updated watcher was measured at 24-second intervals.
+The empty power list independently passed its head/back-link proof.
+This validates transport and the early empty-list case; a populated
+live power list still needs measurement on a progressing boot.
+
+Seven hermetic tests cover fragmented greeting/response prompts,
+partial data followed by EOF or timeout, missing/wrong/duplicate memory
+rows, bad process anchors, truncated/cyclic process and power lists,
+and successful empty lists. The 26-test rebuilt host suite passed after
+the reader change; the added list-completion cases also pass separately.
+No guest state or launch configuration was changed by this work.

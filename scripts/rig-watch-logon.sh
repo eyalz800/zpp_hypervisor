@@ -32,8 +32,6 @@ clear_nc() { ssh -o ConnectTimeout=8 "$RIG" 'pkill -x nc' 2>/dev/null || true; s
 
 echo "watching for LogonUI+dwm; base $KB cr3 $CR3, every ${POLL}s" | tee -a "$OUT"
 SHOUTED=0
-POLLN=0
-ARMED_EVERY=4
 while :; do
     clear_nc
     STATUS=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 2>/dev/null \
@@ -44,7 +42,12 @@ while :; do
     esac
 
     clear_nc
-    PS=$(timeout 300 python3 "$HERE/guest-processes.py" "$KB" "$CR3" 2>&1 || true)
+    if ! PS=$(timeout 300 python3 "$HERE/guest-processes.py" "$KB" "$CR3" 2>&1); then
+        echo "[$(date +%H:%M:%S)] **READ FAILED** incomplete process walk; $STATUS" | tee -a "$OUT"
+        printf '%s\n' "$PS" > /tmp/logon-process-read-failed.txt
+        sleep "$POLL"
+        continue
+    fi
     # `grep -c` prints 0 and EXITS NON-ZERO on no match, so `|| echo 0`
     # would append a second line and break every integer test after it -
     # the bug that inverted the endgame verdict on boot 275.
@@ -52,63 +55,22 @@ while :; do
     HAS_LOGON=$(printf '%s' "$PS" | grep -c "LogonUI.exe" || true)
     HAS_DWM=$(printf '%s' "$PS" | grep -c "dwm.exe" || true)
 
-    # **The armed count is read HERE, by this poller, on purpose.**
-    # Boot 335 broke through to n=29 with LogonUI and dwm up and its
-    # screen was never looked at, because the endgame test was run as a
-    # separate reader and this watcher had to be stopped for it twice -
-    # the monitor takes one connection. A missed power-IRP sample costs
-    # one point in a series of twenty-three; a missed screen costs the
-    # only evidence that answers the question, and it does not survive
-    # the stop.
-    #
-    # So one poller does both. `armed` is the endgame test: zero at
-    # n=13-14 is the escape class (boots 231, 278, 335), non-zero means
-    # 300 s from each arming.
-    # **Only from n>=12, because merging made the poll too slow.**
-    # Boot 338 got ONE poll in six minutes with the power read on every
-    # pass, and died between samples - a sampling interval coarser than
-    # the three-minute breakthrough window this watcher exists to catch,
-    # which is the opposite of the fix it was meant to be.
-    #
-    # The armed count is only meaningful at the plateau anyway: the
-    # endgame test is calibrated at n=13-14, and `armed=0` at n=5 says
-    # nothing (boot 338 read exactly that and still died at n=14). So
-    # skip it while the process count is low, where polls must stay fast
-    # to see the count move, and take it once the plateau is in reach.
+    # One reader owns the monitor for both lists. A second reader can
+    # block the logon observation during its short window of visibility.
+    # The old per-word sleeps made a power walk take minutes, requiring
+    # one sample every four polls. Prompt-framed reads remove that cost.
+    # Read every poll from n>=6: boot 383 armed and died before n=12.
+    # Below that gate "-" means not sampled. Only a complete successful
+    # power-list walk can produce an armed count of zero.
     ARMED="-"
-    # **Lowered from 12 to 6 after boot 383.** That boot armed both
-    # watchdogs and died at n=8, so the gate skipped every poll and it
-    # has no endgame reading at all. The reading still cannot CLASSIFY
-    # below n=13-14 - that calibration is unchanged - but a boot arming
-    # early is worth seeing.
-    #
-    # **On a SUBSET of polls, not all of them - measured on boot 395.**
-    # Lowering the gate made every poll past n=6 pay for the power read:
-    # polls ran **85 s** apart below the gate and **4m07s and 5m35s**
-    # above it. That boot then went from the n=14 plateau to
-    # `paused (shutdown)` in **32 seconds**, so a five-minute poll cannot
-    # see the window this watcher exists to catch. That is boot 338's
-    # failure - one poll in six minutes - re-appearing at the lowered
-    # gate instead of the raised one, which means the threshold was never
-    # the right knob.
-    #
-    # So take it every ARMED_EVERY'th poll. Early arming is still seen
-    # (within 4 polls of it happening), and the mean poll interval stays
-    # near the process-only cost instead of the power-read cost:
-    # 4 polls = 3*85 + 250 = ~127 s each, against ~300 s before.
-    #
-    # `armed=-` means BELOW THE GATE and `armed=skip` means NOT READ THIS
-    # POLL. Neither is a zero, and the difference matters: `armed=0` is
-    # the escape class and a reader that cannot tell "not read" from
-    # "read as zero" turns a skipped poll into a breakthrough call.
-    POLLN=$((POLLN + 1))
-    if [ "$N" -ge 6 ] && [ $((POLLN % ARMED_EVERY)) -ne 0 ]; then
-        ARMED="skip"
-    fi
-    if [ "$N" -ge 6 ] && [ $((POLLN % ARMED_EVERY)) -eq 0 ]; then
+    if [ "$N" -ge 6 ]; then
         clear_nc
-        ARMED=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" \
-                2>/dev/null | grep -c "ENABLED (armed" || true)
+        if POWER=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" 2>&1); then
+            ARMED=$(printf '%s\n' "$POWER" | grep -c "ENABLED (armed" || true)
+        else
+            ARMED="UNREADABLE"
+            printf '%s\n' "$POWER" > /tmp/logon-power-read-failed.txt
+        fi
     fi
     # **`n=0` is a FAILED READ, not an empty guest.** The walker always
     # finds at least `System`, so zero means the read did not answer -
