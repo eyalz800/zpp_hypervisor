@@ -93,3 +93,11 @@ cache-local-borrow-gdb-bugcheck/ and transcript has the same stem with .txt.
 The gdb-bugcheck tmux window owns port 1234; local-borrow-logon is the sole
 monitor reader and records process/power progress through port 4446. A
 breakpoint merely being armed is not evidence of a bugcheck.
+
+The first bugcheck watch was manually interrupted at 17:42:40 to verify
+its target against the kernel export table and prologue. The export agrees:
+KeBugCheckEx is nt+4f90b0, beginning with saves of RCX/RDX/R8/R9 into the
+home slots. That interruption did not hit KeBugCheckEx; its artifacts carry
+-bugcheck-interrupted and must not be treated as a guest failure. The watch
+was rearmed immediately afterward at the same validated address. The
+latest complete watcher read still has five processes and a running guest.

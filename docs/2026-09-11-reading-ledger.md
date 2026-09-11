@@ -34,6 +34,7 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/phase1-tail-to-smss.md` (285 lines).
 - `.references/hyperv/storage-stall-worker-thread.md` (388 lines).
 - `.references/hyperv/clock-preemption-race.md` (195 lines).
+- `.references/hyperv/ntdll-to-smss.md` (256 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -82,6 +83,11 @@ Corrections that matter when continuing:
   interrupt-unmasking epilogue can be current without an internal loop or
   repeated requests. Its single-CPU clock-log discriminator must not be
   applied as a proof about one thread in a multiple-CPU guest.
+- The ntdll-to-smss note gives useful call/phase landmarks, but its blanket
+  exclusion of remaining hypervisor dependencies and its secure-call timing
+  conclusions are not measurements of this run. Three processes alone do
+  not locate execution inside RtlpCreateUserProcess; earlier phases also
+  have three. No current thread location is inferred from that table.
 - The regression-coverage inventory is historical: its claim of no Python
   tests and its old CI/harness counts no longer describe the tree. The
   latest rebuilt run contains 228 Python tests and 27 CTest entries. Its
