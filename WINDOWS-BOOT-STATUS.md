@@ -1,6 +1,6 @@
 # Nested Windows boot investigation
 
-Updated 2026-09-11. The goal remains a verified Windows login or desktop
+Updated 2026-09-12. The goal remains a verified Windows login or desktop
 with Hyper-V running above zpp. This has **not** been achieved by this session.
 Earlier appearances of `LogonUI.exe` and `dwm.exe` did not prove a login screen:
 the user observed "Please wait" on one long-lived run. Keep that distinction.
@@ -68,73 +68,50 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The same-binary GDB startup run began around **19:21 UTC** with two CPUs.
-Startup channels passed. Resident module base remains `0x66d47000`, but
-Windows now has base **`0xfffff80096a00000`**, system CR3 `0x1ae000`.
-The physical kernel PE and complete process walks validate those coordinates.
-At 20:52:39 UTC the run has fourteen processes, including wininit PID 432,
-winlogon PID 592 and services PID 716. No LogonUI/dwm is observed. One
-USB power request has an armed watchdog; preserve its identity/start time
-when comparing ages. The service-failure GDB sequence is now active.
-Preserve this progressing guest.
+The unchanged **6adda123** startup run, begun around **19:21 UTC** on
+September 11, crashed at **20:55:05 UTC**. Direct GDB caught KeBugCheckEx
+on CPU 0: **0x9F, parameter 1 = 3**, PDO `ffffe6044844a870`, triage
+`fffff8002952c600`, IRP `ffffe60448a40560`. The capture took 14.7 ms.
+The bugcheck stack reaches PopIrpWatchdog and the idle timer/DPC path.
+The run reached fifteen processes, without LogonUI/dwm or a verified login.
+No SCM failure breakpoint fired before the bugcheck; no RpcEptMapper/LSM
+ordering was established. Both the GDB coordinator and monitor watcher
+have exited. The stopped guest is preserved pending supported teardown.
 
-A 19:37:40 GDB stop walked all 109 System threads and identified Phase1
-by both start-address fields. It was Running (context switches 693), so
-its saved stack was explicitly excluded. Later on_l2_exit breakpoints
-at 20:16/20:17 hit, but the Phase1 ETHREAD start-address check failed.
-The second capture preserves the exact failing assertion. smss had
-appeared by 20:16; no valid Phase1 live unwind was obtained, and no guest
-failure is inferred from those debugger-side checks.
+The PDO's validated device node names
+`USB\VID_0409&PID_55AA\MSFT20314159-0000:00:05.0-4`, service USBHUB3.
+QEMU's actual `info usb` places its automatically added USB hub at port 4,
+with two keyboards behind it. The launcher contains Bluetooth passthrough,
+a tablet and **three** keyboards. The earlier shorthand of one keyboard
+was incorrect. QEMU inserts a hub as its default four root ports fill.
 
-At **20:20:38**, GDB caught NtCreateUserProcess on CPU 0. The validated
-caller is smss.exe PID 568, and the captured process parameters name
-`\??\C:\WINDOWS\system32\autochk.exe` with command line ending ` *`.
-The 40-ms capture preserved registers and 1,560 kernel-stack bytes and
-detached. The later complete process lists show autochk appearing and
-leaving, without establishing its exit code or disk-check result.
+The IRP is at stack location 11 of 14, IRP_MJ_POWER/IRP_MN_SET_POWER,
+with completion UsbHub3+1c910 and context `ffffe6044aa480d0`. Both power
+workers are idle in the final stopped capture. The full System walk has
+173 threads: 172 Ready/Waiting stacks saved, one Running stack excluded.
+With current WDF/UsbHub3 images, 92 unwind to null and 80 stop at missing
+module metadata; no saved stack was accepted for the Running thread.
+The complete final resident report, serial, NVRAM, objects, driver images,
+exact deployed ELF and an 800-file SHA-256 manifest are preserved under
+`/tmp/zpp-20260911/rpc-gdb*`. CPUID census cross-check failures remain
+explicit and those census counts are not used.
 
-The active GDB script retains a KeBugCheckEx guard at
-**`0xfffff80096ef90b0`**. The process-creation capture is under
-`rpc-gdb-process-create`. Prior guard interruptions were manual probe
-transitions, not timeout verdicts or guest failures despite the generic
-helper's wording. No two GDB clients run together.
+The next single-variable experiment changes the launcher's controller from
+`qemu-xhci,id=xhci` to `qemu-xhci,id=xhci,p2=8`, retaining all five devices
+and input objects, two CPUs, full manifest and the same loader. An isolated
+128-MiB stopped TCG preflight with the rig's QEMU 11.0.3 confirmed five
+direct ports and no hub. It used generic devices and no Windows disk,
+VFIO or host input; it proves the configuration, not Windows success.
+Preserve evidence, tear down with rig-kill-qemu.sh, back up/change/validate
+the launcher only after its old interpreter exits, and verify the loader
+from a fresh mount before the supported next boot. See
+[the hub crash evidence](docs/2026-09-12-gdb-usb-hub-power.md).
 
-A 209-ms stopped GDB capture of all four smss PID 568 threads at 20:32:50
-found the main thread waiting in SmpWaitForSubSysStartup through
-RtlSleepConditionVariableSRW. A separate asynchronous memory-configuration
-worker waits in PnpSerializeBoot on device enumeration; two thread-pool
-workers are idle. Matched kernel/user unwinds reach their native entry
-points and null returns. This does not prove a permanent wait or identify
-an unfinished device. See [the SMSS GDB evidence](docs/2026-09-11-smss-startup-gdb.md).
-
-At 20:47:27, another 192-ms GDB capture found three csrss PID 916 threads.
-The thread whose Win32 start is csrss+1010 was Running, so its saved stack
-was excluded. A later on_l2_exit probe refused a changed ETHREAD identity
-and detached; it obtained no live CSRSS stack or matched return. Startup
-advanced to wininit/winlogon in that interval. Artifacts are
-`rpc-gdb-csrss` and `rpc-gdb-csrss-live` under `/tmp/zpp-20260911/`.
-
-`rpc-startup-watch` exited at 20:49:26 after validating services.exe and
-writing `rpc-gdb-discovery/services-context.json`: image base
-`7ff681350000`, CR3 `1b01b3002`, EPROCESS `ffffe6044ab610c0`.
-The coordinator verified old GDB guard PID 69543 had exited and started
-**GDB PID 69804** at 20:49:27. It runs `gdb-scm-startup.py` with output
-prefix **`rpc-gdb-scm-startup`**, catching CleanupStartFailure and
-AreDependenciesStarted's failed dependency, then watching RpcEptMapper's
-internal start-state writes. It captures RPCSS-host stacks at a 1070
-failure, with a bounded stop and current module list. The capture allows
-256 events within thirty minutes, avoiding an early 32-event cutoff.
-No target event has been captured as of 20:52:39.
-
-**`rpc-logon` is now the sole monitor owner.** Its status log is
-`rpc-gdb-logon-watch.txt`, with complete replies under
-`rpc-gdb-logon-captures/`. Check the LogonUI/dwm trigger before other reads.
-`rpc-scm-coordinator` (Python PID 69732, script
-`rpc-scm-coordinator-csrss.py`) owns the GDB lifecycle; its state is
-`rpc-scm-coordinator.json`. Do not replace GDB PID 69804 without first
-stopping/updating this coordinator. It starts another guard only if the
-SCM script exits without a captured bugcheck. The previous startup
-observer/guards have exited; no second monitor or GDB client is running.
+The prior startup probes remain documented in
+[the SMSS note](docs/2026-09-11-smss-startup-gdb.md): actual autochk creation,
+SMSS main subsystem wait, separate asynchronous PnP wait, and rejected
+Phase1/CSRSS identity checks. No live CSRSS frame or matched return was
+obtained. New boots require fresh kernel/process/module coordinates.
 
 The completed preceding run is recorded below.
 

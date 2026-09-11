@@ -80815,3 +80815,30 @@ continuous stall duration, unfinished device or VMM fix is proved.
 The guest remains running with a hardware bugcheck guard and the SCM
 coordinator ready for services.exe. Exact evidence/ownership is in
 docs/2026-09-11-smss-startup-gdb.md and WINDOWS-BOOT-STATUS.md.
+
+
+## 2026-09-12: direct GDB bugcheck identifies QEMU's added USB hub
+
+The unchanged 19:21 UTC 6adda123 run ended at 20:55:05 September 11 in
+KeBugCheckEx(9f,3,ffffe6044844a870,fffff8002952c600,ffffe60448a40560),
+captured by hardware GDB breakpoint in 14.7 ms. Fifteen processes, no
+verified login. No SCM failure target fired. The validated PDO/devnode
+identifies USB VID0409/PID55AA, QEMU USB Hub, with two keyboards behind it
+at ports 4.1/4.2. The launcher has Bluetooth, tablet and three keyboards;
+QEMU auto-adds this hub as four default xHCI root ports fill. Both final
+power workers are idle, unlike the preceding boot's captured busy workers.
+
+173 System threads were fully walked; 172 stopped Ready/Waiting stacks
+were captured, one Running thread excluded. Current WDF/UsbHub3 metadata
+allows 92 complete unwinds; 80 explicitly stop at other module metadata.
+The final resident/serial/NVRAM/ELF/object/image evidence is archived, with
+800 files hashed. Census cross-check failures are retained and not used.
+
+Choose a reversible single-variable launcher experiment: p2=8 on xHCI,
+keeping all five USB devices and all input objects, same two CPUs/binary/
+manifest and Windows configuration. An isolated stopped 128-MiB QEMU
+11.0.3 TCG preflight shows five direct ports and no hub. This is not proof
+of the underlying VMM or QEMU fault, nor a Windows boot. Removing devices
+or changing Windows USB power settings would confound the comparison.
+Detailed identities, source links and lifecycle are in
+docs/2026-09-12-gdb-usb-hub-power.md and WINDOWS-BOOT-STATUS.md.

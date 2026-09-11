@@ -75,3 +75,11 @@ status is rpc-scm-coordinator.json, with SCM output rpc-gdb-scm-startup.
 At 20:52:39, fourteen processes are present, no LogonUI/dwm and one armed
 USB power request. No SCM breakpoint event has yet been captured. There
 is no new VMM fix or Windows configuration change from this evidence.
+
+
+At 20:55:05 UTC this run ended in a GDB-captured 0x9F/3. The sole SCM-script
+event was KeBugCheckEx; the intended service-failure sequence did not fire.
+The coordinator and logon watcher exited. The PDO resolves to QEMU's added
+USB hub, with two keyboards behind it; both final power workers are idle.
+The earlier paragraphs describe historical live ownership, not active
+clients. See [the final crash evidence](2026-09-12-gdb-usb-hub-power.md).
