@@ -103,6 +103,40 @@ BSS and increases the number of tags cleared during invalidation. Its live
 net effect is still being measured. The latest reader-only changes passed
 all 27 host tests, including 228 Python tests, without altering this binary.
 
+At about thirteen minutes, the complete process walk still has three entries.
+Eight CPU 0 captures and a later capture of both CPUs remain non-atomic;
+invalid/torn unwinds are excluded. Repeated valid CPU 0 chains reach
+KeSwapProcessOrStack through KiSwapThread+0x795, with the successful wait
+result in RBX. CPU 1 repeatedly reaches **MiUnlockPageInline+0x36** inside
+MiWalkEntireImage -> driver image validation/loading -> Phase1Initialization.
+One direct CPU 1 capture independently has RIP nt+0x296dd6, RBX=0 and
+RSP fffff50644e06ab0. Matched disassembly puts that RIP immediately after
+`mov cr8, rbx`, before the three-instruction return sequence. This is an
+interrupted release after restoring PASSIVE, not a page-unlock polling loop.
+The samples do not prove a continuous stall across the full boot. Artifacts
+are `cache-slots-{stack-12min,both-stacks-13min}*` and
+`cache-slots-unlock-page-disassembly.txt`. The timer resolution count remains
+zero, last request 0xffffffff and pseudo interval 156,250. DPC counts advance;
+CPU 0's sampled queue briefly has two entries and is then empty again.
+The `slots-logon` watcher is again the sole monitor reader.
+
+**Next local candidate, not deployed:** shadow-copy suspension now belongs
+to its owning CPU. The previous global gate disabled unrelated CPUs' caches
+while any borrow was active. Three harness assertions reproduce extra
+VMREAD/VMWRITE operations before the change. Owner depths remain atomic,
+nested scopes remain suspended until the owner's last release, and an
+unidentifiable owner keeps a global fallback. Generic clears/migration keep
+global epoch invalidation. The original `vmcs_cache_suspended` scalar remains
+an aggregate diagnostic gauge; `vmcs_cache_unknown_borrows` is a separate
+fallback depth, read as state rather than a delta counter.
+
+All 222 cache assertions and 27 rebuilt host tests pass, including 228 Python
+tests. Debug loaders, ELF invariants and bootability checks pass with the
+same manifest. The staged loader MD5 is `d564ca8f8057eabdb36a09db2c1e34d5`.
+This adds two atomic owner-depth updates per borrow and 2,048 bytes of padded
+per-CPU depth storage, plus the fallback scalar. Its net live effect is
+unmeasured. Keep using the deployed slot-build ELF while this guest runs.
+
 ## Previous elision boot: progress followed by 0x9F
 
 The elision-only boot (`9f1caf2b`, loader MD5

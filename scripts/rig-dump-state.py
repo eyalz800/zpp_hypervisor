@@ -812,7 +812,9 @@ VMCS_GLOBAL_STATE = [
     (VMX_NS + "vmcs_write_failed_field",
      "first field encoding a VMWRITE was refused for"),
     (VMX_NS + "vmcs_cache_suspended",
-     "borrow depth AT THIS INSTANT (0 at rest; a gauge, not a count)"),
+     "aggregate borrow depth AT THIS INSTANT (0 at rest; a gauge, not a count)"),
+    (VMX_NS + "vmcs_cache_unknown_borrows",
+     "global fallback borrow depth for unidentified owners (gauge)"),
     # Not in vmcs.h but in the same class exactly: `extern "C"` globals
     # in `vmx/asm.h`, written by the naked `vmlaunch`/`vmresume` stubs
     # and readable nowhere else.  Non-zero means a VM entry failed on

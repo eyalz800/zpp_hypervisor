@@ -24,6 +24,10 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/zpp-iommu-vtl-switch.md` (199 lines).
 - `.references/hyperv/secure-dma-hvcall.md` (all 2,337 lines).
 - `REGRESSION-COVERAGE.md` (all 590 lines).
+- `.references/hyperv/dispatch-level-pin.md` (237 lines).
+- `.references/hyperv/clock-double-injection.md` (303 lines).
+- `.references/hyperv/timer-resolution-worker.md` (351 lines).
+- `.references/hyperv/phase1-timer-stall.md` (330 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -45,6 +49,18 @@ Corrections that matter when continuing:
   paths. The companion MMIO note corrects the CF9 account: the 8042 reset
   write is unconditional; the CF9 write is conditional. The later PCI-
   sweep note supersedes the earlier VT-d interpretation of bulk MMIO.
+- The clock double-injection note explicitly retracts its original
+  mechanism: clock-ISR entries and injections matched when compared using
+  the right population. Its proposed event-bit fix was already implemented.
+- The early Phase1 timer note infers a missing per-VTL contract without
+  a live measurement. Hyper-V owns the inner VTL timers; identical MSR
+  numbers alone do not demonstrate aliasing in zpp. Its later correction
+  says EOM is conditional on MessagePending and empty-slot interrupts
+  still enter Windows clock accounting.
+- The timer-worker note predates the checked live unwinds. A frame at an
+  interrupt-unmasking epilogue can be current without an internal loop or
+  repeated requests. Its single-CPU clock-log discriminator must not be
+  applied as a proof about one thread in a multiple-CPU guest.
 - The regression-coverage inventory is historical: its claim of no Python
   tests and its old CI/harness counts no longer describe the tree. The
   latest rebuilt run contains 228 Python tests and 27 CTest entries. Its

@@ -372,8 +372,8 @@ inline constinit std::uint64_t
 
 /**
  * Ends the window every cached row describes, and **atomic for the same
- * reason `vmcs_cache_suspended` below is.** Every processor bumps this,
- * several times per exit, and a plain `epoch = epoch + 1` is a
+ * reason `vmcs_cache_suspended` below is.** Any processor may bump this
+ * on global invalidation, and a plain `epoch = epoch + 1` is a
  * read-modify-write whose load and store the compiler is free to
  * separate. The note further down states the hazard precisely: restoring
  * the epoch to a value another processor has already moved past revives
@@ -410,35 +410,49 @@ inline constinit std::atomic<std::uint64_t> vmcs_cache_epoch{1};
  * sound precisely because the row still describes the VMCS that is
  * current again, and nothing in between could have changed it.
  *
- * Global rather than per-processor: another processor seeing it set
- * stops reading and filling its cache. Writes must still invalidate any
- * cached value they replace. Otherwise an early-returning borrower can
- * leave the epoch unchanged, and the other processor resumes reading a
- * value from before its own VMWRITE. See tests/vmcs_cache.
+ * This counter is the aggregate diagnostic gauge. Suspension itself is
+ * per processor: a shadow copy changes only that processor's current
+ * VMCS. SDM 27.11.1 forbids a VMCS active on two logical processors;
+ * KVM's copy_shadow_to_vmcs12/copy_vmcs12_to_shadow load a private
+ * shadow and restore that vCPU's loaded VMCS. Suspending another CPU's
+ * unrelated row only adds hardware reads and defeats write elision.
+ * An unidentifiable owner still suspends all rows conservatively.
+ * Writes made while suspended must still invalidate cached values;
+ * the global fallback and nested owner scopes retain that rule.
  * The one thing that would *not* be safe is restoring the epoch to a saved
  * value, because a second processor may have bumped it meanwhile and
  * lowering it would revive that processor's stale rows. Hence
  * re-validating a row forward to the current epoch rather than winding the
  * epoch back.
  */
-// **Atomic, because the increment is a read-modify-write done from
-// every processor.** The paragraph above argues this is safe global
-// rather than per-processor, and that argument is about the *value* -
-// another processor seeing it set merely stops caching. It says nothing
-// about the *update*, and `x = x + 1` from two processors loses one.
-//
-// Two ways that bites, both silent. A lost increment lets the count
-// reach zero while a borrow is still live, so caching resumes during
-// the borrow and rows are filled from the shadow VMCS the borrower made
-// current - every later read of those fields then answers with the
-// wrong VMCS's contents. The mirror interleaving leaves it stuck
-// non-zero, which only disables the cache and is the safe direction.
-//
-// Impossible with one processor, which is why it survived. The load on
-// the read path is relaxed and compiles to a plain load on x86-64, so
-// the hot path is unchanged; only the borrow and release become locked
-// read-modify-writes, and those are not hot.
+// Keep the aggregate atomic: it is updated by every processor. It no
+// longer controls cache use. Owner depths are separate cache lines so
+// one CPU's shadow copies do not invalidate another CPU's hot gate.
 inline constinit std::atomic<std::uint64_t> vmcs_cache_suspended{};
+struct alignas(64) vmcs_cache_borrow_depth
+{
+    std::atomic<std::uint64_t> depth{};
+};
+inline constinit vmcs_cache_borrow_depth
+    vmcs_cache_local_suspended[vmcs_cache_processors]{};
+inline constinit std::atomic<std::uint64_t> vmcs_cache_unknown_borrows{};
+
+inline std::atomic<std::uint64_t> &
+vmcs_cache_borrow_count(std::size_t cpu)
+{
+    return cpu < vmcs_cache_processors
+               ? vmcs_cache_local_suspended[cpu].depth
+               : vmcs_cache_unknown_borrows;
+}
+
+inline bool vmcs_cache_is_suspended(std::size_t cpu)
+{
+    return vmcs_cache_unknown_borrows.load(std::memory_order_relaxed) !=
+               0 ||
+           (cpu < vmcs_cache_processors &&
+            vmcs_cache_local_suspended[cpu].depth.load(
+                std::memory_order_relaxed) != 0);
+}
 inline constinit std::uint64_t vmcs_cache_revalidations{};
 inline constinit std::uint64_t vmcs_cache_hits{};
 /** Approximate, like read hits: writes avoided within a valid cache
@@ -505,11 +519,9 @@ inline std::size_t vmcs_cache_row_index()
  * describes, and nothing has changed a field of it in between - which is
  * exactly the shadow-copy case `vmcs_cache_suspended` exists for.
  */
-inline void vmcs_cache_revalidate()
+inline void vmcs_cache_revalidate(std::size_t row)
 {
     if constexpr (vmcs_cache_enabled) {
-        auto row = vmcs_cache_row_index();
-
         if (row < vmcs_cache_processors) {
             vmcs_cache[row][vmcs_cache_active[row]].epoch =
                 vmcs_cache_epoch;
@@ -528,6 +540,12 @@ public:
     vmcs_cache_borrow()
     {
         if constexpr (vmcs_cache_enabled) {
+            // Both shadow-copy callers already run with the cache's GS
+            // token armed. Remember ownership for this scope, including
+            // nested/overlapping borrows; never infer it at release.
+            processor = vmcs_cache_row_index();
+            vmcs_cache_borrow_count(processor).fetch_add(
+                1, std::memory_order_acq_rel);
             vmcs_cache_suspended.fetch_add(
                 1, std::memory_order_acq_rel);
         }
@@ -536,24 +554,24 @@ public:
     ~vmcs_cache_borrow()
     {
         if constexpr (vmcs_cache_enabled) {
-            // The test uses the value *this* release produced, not a
-            // re-read: between the decrement and a re-read another
-            // processor can borrow again, and revalidating then would
-            // do it inside somebody else's window.
-            auto remaining = vmcs_cache_suspended.fetch_sub(
+            auto remaining = vmcs_cache_borrow_count(processor).fetch_sub(
                                  1, std::memory_order_acq_rel) -
                              1;
+            vmcs_cache_suspended.fetch_sub(1, std::memory_order_acq_rel);
 
             // After the borrower's own `vmptrld` back, so the pointer is
             // the one the row describes again.
             if (0 == remaining) {
-                vmcs_cache_revalidate();
+                vmcs_cache_revalidate(processor);
             }
         }
     }
 
     vmcs_cache_borrow(const vmcs_cache_borrow &) = delete;
     vmcs_cache_borrow & operator=(const vmcs_cache_borrow &) = delete;
+
+private:
+    std::size_t processor{vmcs_cache_processors};
 };
 
 /**
@@ -974,10 +992,9 @@ public:
         // execute the instruction so a matching value cannot hide failure
         // (SDM 27.11.2 / Table 27-22: type 1 in encoding bits 11:10).
         if constexpr (vmcs_cache_enabled) {
-            if (0 ==
-                vmcs_cache_suspended.load(std::memory_order_relaxed)) {
-                auto row = vmcs_cache_row_index();
-                if (row < vmcs_cache_processors) {
+            auto row = vmcs_cache_row_index();
+            if (row < vmcs_cache_processors) {
+                if (!vmcs_cache_is_suspended(row)) {
                     auto & current =
                         vmcs_cache[row][vmcs_cache_active[row]];
                     auto encoding = static_cast<std::uint64_t>(field);
@@ -1041,8 +1058,8 @@ public:
         // miss is an exit to the layer below at about 4,900 cycles.
         if constexpr (vmcs_cache_enabled) {
             // The enlightened lookup above already reads GS. A borrow
-            // suspends cache use, not coherence: another
-            // CPU may write its own current VMCS while the borrow is live.
+            // suspends cache use, not coherence: writes must invalidate
+            // fields they replace while the owner's cache is bypassed.
             auto row = vmcs_cache_row_index();
 
             if (row < vmcs_cache_processors) {
@@ -1051,8 +1068,7 @@ public:
                 auto encoding = static_cast<std::uint64_t>(field);
                 auto slot = vmcs_use_slot(encoding);
 
-                if (0 !=
-                    vmcs_cache_suspended.load(std::memory_order_relaxed)) {
+                if (vmcs_cache_is_suspended(row)) {
                     auto tag = current.tag[slot];
                     // Full-width and high-half accesses alias the same
                     // 64-bit field (SDM 27.11.2). An unrelated field that
@@ -1131,10 +1147,10 @@ public:
         }
 
         if constexpr (vmcs_cache_enabled) {
-            auto row = (0 == vmcs_cache_suspended.load(
-                            std::memory_order_relaxed))
-                           ? vmcs_cache_row_index()
-                           : vmcs_cache_processors;
+            auto row = vmcs_cache_row_index();
+            if (vmcs_cache_is_suspended(row)) {
+                row = vmcs_cache_processors;
+            }
 
             if (row < vmcs_cache_processors) {
                 auto slot =

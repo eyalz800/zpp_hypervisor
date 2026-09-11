@@ -62,6 +62,119 @@ void writes_during_another_cpus_borrow()
     }
 }
 
+void a_foreign_borrow_keeps_local_cache_reads_and_writes_enabled()
+{
+    vx::vmcs vmcs;
+    select(0, 0x1000);
+    vmcs.write(field::guest_rip, 0x1234);
+    auto & reads =
+        vx::g_vmread_field_count[static_cast<unsigned>(field::guest_rip)];
+    auto & writes =
+        vx::g_vmwrite_field_count[static_cast<unsigned>(field::guest_rip)];
+    select(1, 0x2000);
+    {
+        vx::vmcs_cache_borrow borrow;
+        select(0, 0x1000);
+        auto before_reads = reads;
+        check(vmcs.read(field::guest_rip) == 0x1234,
+              "foreign borrow preserves the local field value");
+        check(reads == before_reads,
+              "foreign borrow does not force a local VMREAD");
+        auto before_writes = writes;
+        vmcs.write(field::guest_rip, 0x1234);
+        check(writes == before_writes,
+              "foreign borrow preserves local write elision");
+        vmcs.write(field::guest_rip, 0x5678);
+        check(
+            hardware(field::guest_rip) == 0x5678,
+            "changed local write reaches hardware during foreign borrow");
+        before_reads = reads;
+        check(vmcs.read(field::guest_rip) == 0x5678,
+              "local write fills the cache during foreign borrow");
+        check(
+            reads == before_reads,
+            "foreign borrow does not prevent local write-through caching");
+        select(1, 0x2000);
+    }
+}
+
+void overlapping_borrows_keep_each_owner_suspended_until_its_release()
+{
+    vx::vmcs vmcs;
+    select(0, 0x1000);
+    vx::vmcs_cache_forget_current(0);
+    {
+        vx::vmcs_cache_borrow outer;
+        {
+            vx::vmcs_cache_borrow nested;
+            select(1, 0x2000);
+            {
+                vx::vmcs_cache_borrow foreign;
+                select(0, 0x1000);
+                hardware(field::guest_rip) = 0xabcd;
+                check(vmcs.read(field::guest_rip) == 0xabcd,
+                      "overlapping owners still read their borrowed "
+                      "hardware");
+                select(1, 0x2000);
+            }
+            select(0, 0x1000);
+            hardware(field::guest_rip) = 0xbcde;
+            check(vmcs.read(field::guest_rip) == 0xbcde,
+                  "foreign release cannot resume this owner's caching");
+        }
+        hardware(field::guest_rip) = 0xcdef;
+        check(vmcs.read(field::guest_rip) == 0xcdef,
+              "inner release cannot resume the outer borrow's caching");
+    }
+    hardware(field::guest_rip) = 0xdef0;
+    check(vmcs.read(field::guest_rip) == 0xdef0,
+          "borrowed reads never left cached values behind");
+    auto before =
+        vx::g_vmread_field_count[static_cast<unsigned>(field::guest_rip)];
+    check(vmcs.read(field::guest_rip) == 0xdef0,
+          "caching resumes after the final owner release");
+    check(vx::g_vmread_field_count[static_cast<unsigned>(
+              field::guest_rip)] == before,
+          "final release permits a cache hit");
+    check(
+        vx::vmcs_cache_suspended == 0,
+        "all overlapping borrow scopes have released the aggregate gauge");
+}
+
+void an_unidentified_borrow_owner_keeps_the_global_fallback()
+{
+    vx::vmcs vmcs;
+    select(0, 0x1000);
+    vmcs.write(field::guest_rip, 0x1111);
+    zpp::arch::x86_64::g_gs_qword = 0;
+    {
+        vx::vmcs_cache_borrow unknown_owner;
+        select(0, 0x1000);
+        auto before = vx::g_vmread_field_count[static_cast<unsigned>(
+            field::guest_rip)];
+        check(vmcs.read(field::guest_rip) == 0x1111,
+              "unknown borrow owner preserves the hardware value");
+        check(vx::g_vmread_field_count[static_cast<unsigned>(
+                  field::guest_rip)] == before + 1,
+              "unknown owner suspends every identifiable row");
+        vmcs.write(field::guest_rip, 0x2222);
+        check(hardware(field::guest_rip) == 0x2222,
+              "global fallback still permits hardware writes");
+    }
+    check(vmcs.read(field::guest_rip) == 0x2222,
+          "fallback release cannot revive the pre-write cached value");
+    auto before =
+        vx::g_vmread_field_count[static_cast<unsigned>(field::guest_rip)];
+    check(vmcs.read(field::guest_rip) == 0x2222,
+          "global fallback release permits caching again");
+    check(vx::g_vmread_field_count[static_cast<unsigned>(
+              field::guest_rip)] == before,
+          "global fallback depth is released even with a different GS "
+          "token");
+    check(vx::vmcs_cache_suspended == 0,
+          "unknown owner releases the aggregate borrow gauge");
+}
+
 void borrowed_shadow_reads_never_fill_the_cache()
 {
     vx::vmcs vmcs;
@@ -306,6 +419,9 @@ int main()
 {
     static_assert(vx::vmcs_cache_enabled);
     writes_during_another_cpus_borrow();
+    a_foreign_borrow_keeps_local_cache_reads_and_writes_enabled();
+    overlapping_borrows_keep_each_owner_suspended_until_its_release();
+    an_unidentified_borrow_owner_keeps_the_global_fallback();
     borrowed_shadow_reads_never_fill_the_cache();
     exit_invalidates_only_the_current_vmcs();
     clearing_a_private_shadow_preserves_unrelated_rows();

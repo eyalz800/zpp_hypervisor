@@ -80566,3 +80566,56 @@ REGRESSION-COVERAGE.md has now been read in full. Its claims of no Python
 tests and its old harness/CI counts are historical, not current conditions.
 The incremental reading ledger records this correction; the full Markdown
 corpus is still not claimed complete.
+
+
+## 2026-09-11: shadow-copy cache suspension is local to its owning CPU
+
+The slot boot's early window has substantial handler cost and 67,073
+borrow-time write invalidations. Static audit shows the borrow depth is
+still global: CPU 1 copying its private shadow disables cache reads,
+write-through fills and equal-value write elision on CPU 0. This is not
+required by ownership. SDM 27.11.1 says an active VMCS belongs to one
+logical processor; VMCLEAR affects its named VMCS. KVM's
+copy_shadow_to_vmcs12/copy_vmcs12_to_shadow load a private shadow and
+restore that vCPU's loaded VMCS. Those passages and both current zpp
+shadow-copy sites were read before changing the gate.
+
+The RAII scope now remembers its armed GS processor index and maintains
+an atomic owner depth on a separate cache line. Read/write cache gates
+consult that depth and a conservative global depth for unknown owners.
+The aggregate vmcs_cache_suspended scalar remains atomic and diagnostic.
+Nested owner scopes and overlapping foreign scopes release independently;
+only the owner's last release revalidates its row. Suspended writes still
+invalidate aliases. Private-shadow clearing and global epoch invalidation
+for generic clears/migration are unchanged.
+
+Three new assertions fail against the old implementation: a foreign borrow
+forces a local VMREAD, defeats an identical VMWRITE's elision and prevents
+a changed write from filling its own cache. All pass afterward. Additional
+cases verify nested/overlapping owner lifetimes and an unarmed GS token's
+global fallback, including a write that must not revive its old cached
+value. All 222 cache checks pass. The first full suite caught the new
+fallback scalar missing from the reader; it is now included in
+VMCS_GLOBAL_STATE, with an assertion that it is never differenced.
+The rerun passes all 27 host tests and 228 Python tests in 30.44 seconds.
+
+Debug hypervisor/loaders, invariants and bootability checks pass with the
+same full manifest. Staged loader MD5 d564ca8f8057eabdb36a09db2c1e34d5.
+The extra cost is two owner-depth atomic updates per borrow, 2,048 bytes
+of padded owner state and the fallback scalar. No live benefit is claimed.
+Artifacts use cache-local-borrow- under /tmp/zpp-20260911/. This candidate
+is NOT deployed; the slot build is still running and its deployed ELF is
+the only correct source of resident offsets.
+
+At thirteen minutes the slot boot still has three complete process entries.
+Repeated valid CPU 0 unwinds reach KeSwapProcessOrStack through a successful
+wait's return. CPU 1 repeatedly reaches MiUnlockPageInline+36 through
+MiWalkEntireImage and Phase1's driver-image loading path. A direct CPU 1
+capture independently has RIP nt+296dd6, RBX=0, RSP fffff50644e06ab0.
+Matched disassembly places it just after mov cr8,rbx, before add rsp,20;
+pop rbx; ret. It has already released the page and lowered IRQL, so this
+is not a page-unlock polling loop. Captures cover short intervals and do
+not establish continuous residence for the boot's full duration. Invalid
+unwinds are excluded. The timer count is zero, last request ffffffff,
+pseudo interval 156250; DPC counts advance and a transient CPU 0 queue
+of two returns to zero. The watcher resumed as sole monitor owner.

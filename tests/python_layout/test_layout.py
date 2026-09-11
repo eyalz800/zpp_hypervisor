@@ -3415,6 +3415,7 @@ class CountersOutsideTheSingletonAreAllRead(unittest.TestCase):
         differenced = {s.rsplit("::", 1)[-1] for s, _ in
                        self.module.VMCS_GLOBAL_COUNTERS}
         self.assertNotIn("vmcs_cache_suspended", differenced)
+        self.assertNotIn("vmcs_cache_unknown_borrows", differenced)
         self.assertNotIn("vmcs_read_failed_field", differenced)
         self.assertNotIn("vmcs_write_failed_field", differenced)
 
