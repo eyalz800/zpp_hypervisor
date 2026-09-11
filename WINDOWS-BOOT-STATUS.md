@@ -68,39 +68,49 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The current boot started around **15:54 UTC**, with loader MD5
-`476ff7711e5232f748513e40cb83c22b` verified from a fresh mount. It carries
-`fe1955ec`'s reserved-access-rights cache fix, two CPUs and unchanged switches.
-Module base is `0x66e08000`, singleton `0x682f3000`, Windows base
-**`0xfffff800a5800000`**, CR3 **`0x1ae000`**. Resolve from the archived
-`.rig-deployed-hypervisor.elf`, which differs from the newer local build.
-The `ar-logon` watcher in `zpp-rig-20260911` owns the monitor.
+The current boot started around **16:15 UTC**, with the archived write-elision
+loader from `9f1caf2b`, MD5 **`98542ddf33cdd78402529b4b6b72423c`**, verified
+from a fresh mount. Two CPUs and build switches are unchanged. All startup
+channels answered. Module base is `0x66e08000`, singleton `0x682f3000`.
+Windows base **`0xfffff80477e00000`** was derived from the LSTAR value and
+validated against its PE timestamp and image size; CR3 is `0x1ae000`.
 
-This guest has returned from VBoxSup's first timer-resolution request and
-is inside its release call. Eight valid live unwinds agree on
-`KiCheckForThreadDispatch+0x7f`, immediately after restoring CR8, beneath
-`KeSetSystemGroupAffinityThread` and `ExSetTimerResolution`. The driver's
-stored grant is 500,000 and has not yet been cleared; the kernel resolution
-count is zero. See the latest section of
-[the timer-return evidence](docs/2026-09-11-live-timer-return.md) for complete
-addresses, validated code and discarded captures. The process list still
-has three entries. The reserved-bit counter is cumulatively zero, so this
-boot's further progress is not proof of benefit from that code path.
+Use **`.rig-deployed-hypervisor.elf`**, which differs from the newer local
+build. `vmcs_cache_write_hits` is at ELF offset `0x14eaeb0`, physical
+`0x682f2eb0`; reserved-bit writes are at offset `0x14eaed0`, physical
+`0x682f2ed0`. The `elision-logon` watcher in `zpp-rig-20260911` owns the
+monitor. Artifacts use the `cache-write-elision-` prefix under the session
+directory. The deployed candidate also exists in `elision-ready/`.
 
-The six-minute 31.990-second window has fresh VTL calls +0/+32, L2 entries
-on both CPUs, handler shares 70.08%/10.53%, and no VMREAD/VMWRITE failures.
-Keep observing before cycling. Take another late process walk and counter
-window, then recheck the release frame if progress remains absent.
+The early cumulative report records 49,300 skipped VMWRITEs and zero
+VMREAD/VMWRITE failures. CPU 0 has Hyper-V VMX operation and L2 entries;
+CPU 1 is still at its early startup state. The two-minute kernel identity
+check passed, but the process walk was incomplete and the timer reader
+encountered an absent PRCB pointer. These are failed early reads, not an
+empty process list or a completed boot. Let startup proceed, then take a
+complete process walk and a delta sample before estimating benefit.
 
-**Next build, not deployed:** `9f1caf2b` skips hardware VMWRITE only when
-this VMCS's valid current cache window already contains the identical field
-and value. Borrows, invalidated observations and read-only fields still
-write. Six negative-control assertions fail before elision; all 145 cache
-checks and all 27 rebuilt host tests pass after it (224 Python tests).
-Debug loaders and ELF/bootability checks pass. `vmcs_cache_write_hits`
-will measure use on the rig; no live performance result exists yet.
+**Next build, not deployed:** `48bcfc9c` gives field width/type separate
+cache slots. The old mapping squeezed 156 fields into 26 slots; the new
+projection gives all 156 distinct slots. All 191 cache assertions and all
+27 rebuilt host tests pass (224 Python tests); debug loaders and ELF/
+bootability checks pass. It adds 786,432 bytes of BSS and increases the
+number of tags cleared on invalidation. Its live net effect is unknown.
+Keep it separate from the elision-only experiment now running.
 
 ## Earlier boots
+
+The reserved-access-rights boot (`fe1955ec`, loader MD5
+`476ff7711e5232f748513e40cb83c22b`) ran from about 15:54 to 16:13 UTC.
+It returned from VBoxSup's first timer request but remained in its release
+call, interrupted immediately after restoring CR8 during thread-affinity
+setup. Its stored grant stayed 500,000; the reserved-bit counter stayed
+zero. The final complete process walk still had three entries. Its late
+32.121-second sample had fresh VTL calls +0/+32, handler shares
+70.15%/10.59%, and no VMREAD/VMWRITE failures. Supported teardown returned
+NVMe and 15,479 MiB free RAM. The ELF and freshly read loader are archived
+as `access-rights-deployed.elf` and `access-rights-loader.efi`.
+See [the timer-return evidence](docs/2026-09-11-live-timer-return.md).
 
 The prior cache boot started around **15:19 UTC** with both cache changes:
 loader MD5 `2ac8432cd5f20272a6eeef00564a2844`, verified from a fresh mount.

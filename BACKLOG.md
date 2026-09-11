@@ -80424,3 +80424,30 @@ write-elision loader/ELF were archived under `elision-ready/` before the
 slot change; loader MD5 `98542ddf33cdd78402529b4b6b72423c`. That artifact is
 being deployed first to isolate the elision's effect. Do not use the newer
 local slot-build ELF to read that guest.
+
+## 2026-09-11: elision-only boot started; slot build stays local
+
+The access-rights boot stopped around 16:13 UTC after about nineteen minutes.
+The final process walk still had three entries. Its late 32.121-second
+window had fresh VTL calls +0/+32, handler shares 70.15%/10.59%, and zero
+VMREAD/VMWRITE failures. The release's grant was still 500,000, requested
+interval 156,250 and pseudo interval 9,765. Supported teardown returned NVMe
+and 15,479 MiB free RAM. The freshly read archived loader matches
+`476ff7711e5232f748513e40cb83c22b`; its ELF is `access-rights-deployed.elf`.
+
+The archived elision-only candidate was deployed explicitly from
+`/tmp/zpp-20260911/elision-ready/zpp_loader.efi`. Fresh-mount MD5 and manifest
+match: `98542ddf33cdd78402529b4b6b72423c`. A two-CPU boot started around
+16:15 UTC and all channels answered. The early cumulative report has 49,300
+skipped writes and zero VMREAD/VMWRITE failures, but is not a performance
+comparison. CPU 0 has Hyper-V VMX operation/L2 entries; CPU 1 is still early.
+At two minutes the Windows PE validates, but the process walk is incomplete
+and a PRCB pointer is absent. Let startup proceed rather than calling that
+an empty list or a halt.
+
+Current Windows base `0xfffff80477e00000`, CR3 `0x1ae000`; module/singleton
+`0x66e08000`/`0x682f3000`. The write-hit counter is at ELF offset
+`0x14eaeb0`, physical `0x682f2eb0`; reserved-bit counter is now at offset
+`0x14eaed0`, physical `0x682f2ed0`. `elision-logon` owns the monitor.
+The local slot-build commit `48bcfc9c` is **not deployed**; use the archived
+deployed ELF for every resident read. Artifacts use `cache-write-elision-`.
