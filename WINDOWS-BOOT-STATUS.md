@@ -31,6 +31,10 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   reads as `UNREADABLE`. A three-process read on the rig took 0.047 seconds;
   watcher polls with a 20-second delay fell from about 57 to 24 seconds.
   Power requests are now sampled every poll once the process count reaches six.
+- `755d2b7`: instruction emulation clears STI/MOV-SS blocking when the
+  instruction retires, preserving NMI/SMI blocking and leaving retries alone.
+  Fourteen assertions failed before this fix across three harnesses. The new
+  `vmcs_interrupt_shadows_cleared` counter records actual clearings.
 
 All 26 rebuilt host tests passed after these code changes. All 219 Python
 tests, including fragmented replies and incomplete list cases, passed.
@@ -47,11 +51,12 @@ zero instruction-length disagreements, so the fix above is **not a demonstrated
 cause of this baseline stall**. The guest was stopped with the supported script;
 NVMe returned and the host recovered its memory.
 
-The tested loader was then deployed and verified from a fresh mount:
+The watched-store fix was then deployed and verified from a fresh mount:
 MD5 `12ad606548c29d04763ec5f07c53863b`. A new two-vCPU boot started around
 13:35 UTC on September 11. Channels passed their startup checks, and the
-resident log showed Hyper-V entering its nested guest. The boot is still
-under observation; recheck live state rather than assuming it is running.
+resident log showed Hyper-V entering its nested guest. This boot was stopped
+with the supported script around 14:21 UTC after a final complete three-process
+walk and a late activity sample. NVMe returned and the host recovered its RAM.
 
 At 24 minutes it still had three processes. A late window measured 2.01
 hypercalls/s with no new CPU 0 VTL calls or user-mode samples. Repeated
@@ -62,9 +67,25 @@ has committed the requested interval. See
 This narrows the earlier driver-loop account; the reason the timer worker
 does not return remains unresolved.
 
+At about 45 minutes the request's grant field was still zero, and CPU 0 had
+no new VTL calls. The last 31.910-second window measured 70.51% of CPU 0 time
+inside zpp's handler. The old cumulative 41% figure is not a current estimate.
+
+The interrupt-shadow fix is now deployed: loader MD5
+`afecb8bfd26426c201d6d4dd7fa857cf`, verified from a fresh mount. It started
+around **14:22 UTC**, with two CPUs and unchanged build switches. All 26
+rebuilt host checks and the debug build passed before deployment; the EFI and
+ELF checks also pass. Startup channels answered and Hyper-V entered L2.
+Recheck live state before drawing conclusions: early process-list reads were
+incomplete, and the shadow-clear counter was zero at about one minute.
+
+Current addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
+base `0xfffff801aa000000`, CR3 `0x1ae002`. The new counter's ELF offset is
+`0x50f7020` (physical `0x6beff020`). Use `.rig-deployed-hypervisor.elf`.
+
 Session artifacts are under `/tmp/zpp-20260911/`, including the baseline
 loader, baseline ELF, serial/log captures, counter samples and test output.
-The tmux session is `zpp-rig-20260911`; the current observer is `fixed-logon`.
+The tmux session is `zpp-rig-20260911`; the current observer is `shadow-logon`.
 `/tmp/logon-watch.txt` holds the latest observation. Temporary files and tmux
 sessions are evidence locations, not durable completion claims.
 
