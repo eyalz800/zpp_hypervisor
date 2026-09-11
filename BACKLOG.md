@@ -80698,3 +80698,50 @@ power watchdogs, no LogonUI/dwm and no observed bugcheck. GDB is armed at
 KeBugCheckEx in gdb-wininit; local-borrow-logon alone owns the monitor.
 The complete evidence and current artifact names are in
 docs/2026-09-11-local-borrow-gdb-progress.md. Goal remains unverified.
+
+
+## 2026-09-11: Winlogon waits on TermSrvReadyEvent; SCM failures precede USB 0x9F
+
+The 6adda123 boot ended at 19:03:32 UTC after about 96 minutes, with
+GDB directly capturing KeBugCheckEx(9f, 3, ffff920946256060,
+fffff801674ec600, ffff920946165010). The USB IRP was already about 301
+seconds old before the 35-ms debugger capture. QEMU paused (shutdown)
+and the watcher exited. Maximum process count was 73, without LogonUI,
+dwm or verified login. This supersedes the preceding running/armed status.
+
+At 18:22 a 92-ms scripted GDB capture recovered Winlogon's kernel/user
+stacks and its named Global\TermSrvReadyEvent wait. The main path is
+_WinStationWaitForConnectEx; the event remained unsignaled at the crash.
+A separate 18:41 stop caught services.exe terminating svchost PID 2388
+through LogonAndStartImage's cleanup, with recovered error 1053. Its
+specific hosted service was not captured. A later exit was wermgr exiting
+itself, not another demonstrated service-start failure.
+
+Matched services.exe disassembly validates a complete 748-record SCM
+walk and the forward dependency graph. LSM is Stopped with 1068 and
+internal failure state 4. Its dependencies are RpcSs, DcomLaunch and
+RpcEptMapper. All three are currently Running; RpcEptMapper retains
+internal error 1070 but state 3 (completed). Correction: retained 1070
+alone is not a current failed dependency in AreDependenciesStarted.
+Late endpoint-mapper completion after LSM failed remains a hypothesis.
+Its rpcepmap.dll and rpcss.dll images are preserved for early next-boot
+GDB breakpoints to catch the actual state/error transitions.
+
+The two busy final power workers are Ready, their saved stacks unwinding
+through affinity change/KeFlushQueuedDpcs, WDF, UsbHub3, HidUsb, HIDCLASS
+and PopIrpWorker to system-thread startup. A third worker is idle. This
+is a post-crash saved state, not proof of continuous 300-second residence
+or full worker-pool saturation. A final 199-module walk exposed driver
+unload/reload within the boot: use final HidUsb at fffff80170fc0000,
+not its earlier base. Final exception directories and full unwinds pass.
+
+PDB correction: Microsoft OpenValidate4 compares matching GUID, Info age
+at least image age, and nonzero DBI age equal to image age. Services
+Info/DBI ages are 3/1, NT 6/1, WDF 4/1, each matched to image age 1.
+Rejecting WDF from Info age 4 alone was overly conservative. Matched
+server executables filled explicitly reported paged-out metadata only
+after header/checksum/section-table and resident code validation.
+
+Full identities, evidence paths, interpretation limits and next-step
+handoff are in docs/2026-09-11-winlogon-scm-debug.md. No source, binary,
+manifest or Windows configuration change was made for this investigation.

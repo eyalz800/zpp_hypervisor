@@ -68,73 +68,70 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The per-CPU borrow build **`6adda123` is deployed and running**. The
-supported two-CPU boot began at **17:27 UTC**, September 11. Loader MD5
+The per-CPU borrow build **`6adda123` crashed with 0x9F** at
+**19:03:32 UTC**, September 11, after starting at 17:27 UTC. Loader MD5
 **`d564ca8f8057eabdb36a09db2c1e34d5`** and the full unchanged manifest
-matched the fresh mount. All startup channels answered.
+matched the fresh mount. The two-CPU guest reached 73 processes but no
+LogonUI/dwm or verified login. QEMU subsequently paused (shutdown).
 
-Use `.rig-deployed-hypervisor.elf`. Current module base is **`0x66d47000`**,
-singleton offset `0x15ac000`, singleton physical `0x682f3000`. The write-hit
-counter offset is `0x15ab6e0`; local borrow depths are at `0x15aaec0`,
-unknown-owner depth at `0x15aae88`, aggregate depth at `0x51b8028`, and
-interrupt-shadow clearings at `0x51b8020`. Resolve every field from this ELF.
-Windows base **`0xfffff801d4a00000`**, CR3 `0x1ae000`, PE timestamp
-`0x51a135d9` and size `0x1450000` are validated. At about eight minutes the
-complete process walk still has System, Secure System and Registry.
+The failed boot's module base was `0x66d47000`, singleton offset
+`0x15ac000`, physical `0x682f3000`. Windows base was
+`0xfffff801d4a00000`, system CR3 `0x1ae000`, timestamp `0x51a135d9`,
+size `0x1450000`. These are evidence coordinates, not reusable next-boot
+addresses. Resolve every resident field from the matching deployed ELF.
 
 The new gate keeps private shadow-copy suspension on its owning processor;
 an unidentifiable owner retains a global fallback. Generic clears/migration
 retain global epoch invalidation. The aggregate gauge remains diagnostic.
 All 222 cache assertions, 27 rebuilt host tests and 228 Python tests pass;
-debug loaders, invariants and bootability checks pass. This adds two atomic
-owner-depth updates per borrow, 2,048 bytes of padded owner depths and a
-fallback scalar. No isolated live performance benefit is established.
+debug loaders, invariants and bootability checks pass. No isolated live
+performance benefit or successful boot is established.
 
-**The user requested GDB debugging, and direct Windows hardware breakpoints
-work on this rig.** At 17:33 a breakpoint at zpp's `on_l2_exit` captured
-nested guest state and a zpp backtrace. At 17:35 three Windows hardware
-breakpoints proved CPU 0 executed `MiUnlockPageInline`'s `add rsp,0x20`
-and returned to `MiGetSystemPage+0xb2` at the expected RSP. No `stepi` or
-inferior call was used; each breakpoint was removed before continuing.
-The state capture at the first Windows stop took 1.7 ms. The old claim
-that the QEMU stub can never expose VTL0 is superseded by these direct hits.
+**Direct Windows hardware breakpoints work through QEMU's GDB stub.**
+They proved an interrupted MiUnlockPageInline call returned and captured
+real Windows kernel/user stacks through a physical-memory CR3 walker.
+Use targeted scripted stops, remove a breakpoint before continuing, and
+detach automatically. Do not use single-stepping or inferior calls.
+See [the initial GDB evidence](docs/2026-09-11-gdb-windows-returns.md).
 
-A further stopped stack at `MiGetPageFromSlabAllocator+0x129` unwinds through
-`MiWalkEntireImage`, driver-image validation and a PnP worker on CPU 0.
-This is not the earlier slot boot's Phase1 thread. A bounded twelve-call
-experiment observed only CPU 0 at the unlock return and does not establish
-CPU 1's current path. Continue with targeted GDB debugging; do not promote
-one returning call into proof that all boot paths progress. Details and
-artifacts are in [the GDB note](docs/2026-09-11-gdb-windows-returns.md).
+The final [Winlogon/SCM and crash evidence](docs/2026-09-11-winlogon-scm-debug.md)
+establishes:
 
-By **18:11:31 UTC**, the watcher has **nineteen processes**, a running
-guest, no armed power watchdogs and no LogonUI/dwm. The audio request
-observed at ages 6.7/33 seconds left the list; subsequent USB batches also
-left before their deadlines. Some IRP addresses were reused for different
-requests. A stopped GDB capture found both previously busy HidUsb workers
-back at PopIrpWorker's wait for new work. This is continuing startup, not a
-verified login. The current driver images and detailed request history are
-preserved in [the continuing-run note](docs/2026-09-11-local-borrow-gdb-progress.md).
+- Winlogon's main thread waits on the named Global\TermSrvReadyEvent.
+  Matched kernel/user PE unwinds reach _WinStationWaitForConnectEx;
+  the event remained unsignaled at the bugcheck.
+- GDB caught services.exe terminating svchost PID 2388 through startup
+  cleanup with recovered error 1053. The specific service is not identified.
+- A complete 748-entry SCM database/dependency walk finds LSM Stopped
+  with error 1068. RpcEptMapper is Running but retains internal startup
+  error 1070. Its internal state is already completed (3), so the earlier
+  failure/late-completion sequence is a hypothesis requiring a new capture.
+- The actual bugcheck is 0x9F, parameter 1 = 3, USB PDO
+  ffff920946256060, IRP ffff920946165010. Its watchdog age already exceeded
+  300 seconds in a complete monitor reply before the 35-ms GDB capture.
+- Two final power workers are Ready inside affinity changes reached from
+  KeFlushQueuedDpcs through WDF/UsbHub3. Both complete saved-stack unwinds
+  reach HidUsb/HIDCLASS and PopIrpWorker. A third worker is idle; complete
+  worker-pool saturation and continuous 300-second residence are not proved.
 
-A GDB watchpoint directly caught csrss's main thread being scheduled on
-CPU 1. The virtual memory read at that stop failed; a physical-memory
-reader now walks the captured CR3 and validates the kernel PE before stack
-captures. It successfully captured the power workers and wininit's main
-thread. Wininit reaches a user-mode NtWaitForSingleObject; WerFault's
-command line is `-k -c`, so its presence alone is not proof of a crash.
-A paired shadow-copy breakpoint measured six required writes and a return
-with matching CPU/RSP. No speculative shadow-copy shortcut was added.
+Some drivers unloaded/reloaded within this boot. The final 199-entry module
+list places HidUsb at fffff80170fc0000, UsbHub3 at fffff8016a120000,
+HIDCLASS at fffff80170800000 and WDF at fffff80167030000. Do not reuse the
+early HidUsb/IntcOED bases for the final stacks. Matched PDB validation
+requires GUID equality, Info age >= image age, and nonzero DBI age equal
+to image age; Info-age inequality alone incorrectly rejected usable WDF
+symbols earlier. The detailed note cites Microsoft's implementation.
 
-**KeBugCheckEx, nt+0x4f90b0, remains armed** with automatic register/stack
-capture and detach. The current `gdb-wininit` tmux window owns port 1234;
-its output is `cache-local-borrow-gdb-wininit-main.txt`, and a hit/timeout
-writes `cache-local-borrow-gdb-bugcheck/index.json`. The forty-minute bound
-restarted after the 18:09:44 capture. Manual probe-transition interruptions
-are archived separately and are not guest failures. `local-borrow-logon`
-is the sole monitor reader. It now saves timestamped process/power replies
-under `cache-local-borrow-watch-captures`, including failures separately.
-All 27 rebuilt host tests and 228 Python tests pass after these reader
-changes; the hypervisor binary is unchanged.
+No watcher or GDB session remains running. The actual bugcheck artifacts
+are `cache-local-borrow-gdb-scm-child/index.json` and `stack.bin`, under
+`/tmp/zpp-20260911/`; the later redundant generic guard produced no index.
+Final driver images, power stacks, SCM records and RPC component images
+are preserved. Supported teardown completed: NVMe returned and 15,445 MB was free,
+without a host reboot. The final resident report, ELF and freshly mounted
+loader are archived; loader MD5 still matches. A same-binary two-CPU
+GDB startup run is now being launched to catch RpcEptMapper startup and
+SCM's 1070/1068 state transitions early. No new hypervisor fix is yet
+justified, and no Windows service/registry/boot configuration was changed.
 
 The preceding cache-slot boot ran from 16:55 to 17:25 UTC, stayed at three
 processes, and was stopped using the supported teardown. NVMe returned and
@@ -281,8 +278,7 @@ The tmux session is `zpp-rig-20260911`; the earlier `shadow-logon` observer is s
 `/tmp/logon-watch.txt` holds the latest observation. Temporary files and tmux
 sessions are evidence locations, not durable completion claims.
 
-Continue observing the current boot. A short early stall is not a terminal
-result: several previous boots changed substantially between ten and eighteen
+For the next boot, a short early stall is not a terminal result: several previous boots changed substantially between ten and eighteen
 minutes. Before cycling a guest, inspect both its current process list and a
 late counter window. Preserve a progressing guest and measure outstanding
 power requests. Prior runs have died to a power watchdog about 300 seconds

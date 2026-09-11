@@ -35,6 +35,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/storage-stall-worker-thread.md` (388 lines).
 - `.references/hyperv/clock-preemption-race.md` (195 lines).
 - `.references/hyperv/ntdll-to-smss.md` (256 lines).
+- `docs/bare-metal-windows.md` (319 lines).
+- `.references/hyperv/ntoskrnl.md` (492 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -42,6 +44,22 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The bare-metal guide's old VMX-hiding/Hyper-V-stand-down phase is not
+  the current nested-boot objective. Its old TinyCore/QEMU versions and
+  password-only/no-SCP account are historical; the current rig uses QEMU
+  11.0.3, working BatchMode SSH and legacy `scp -O` when copying files.
+- The ntoskrnl note retracts both its missing-binary claim and its claim
+  that no boot enlightenment can relax the DPC watchdog. Read its later
+  UseRelaxedTiming correction before relying on the early caller list.
+  This is not authorization to alter the current clock/CPUID manifest.
+- A PDB Info-stream age different from the image's CodeView age does not
+  by itself establish a mismatch. Microsoft's OpenValidate4 checks the
+  GUID, Info age >= image age, and matching nonzero DBI age. The services
+  PDB has Info age 3 and DBI age 1 for an image age of 1; the NT and WDF
+  PDBs inspected have Info ages 6/4 and DBI age 1. See the explicit
+  validation and source in
+  [the Winlogon/SCM note](2026-09-11-winlogon-scm-debug.md).
 
 - The GDB/watchdog passages in CLAUDE.md and BACKLOG.md were checked against
   KVM's nested debug-exit handling. Direct Windows hardware breakpoints on
