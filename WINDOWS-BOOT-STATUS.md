@@ -79,6 +79,17 @@ ELF checks also pass. Startup channels answered and Hyper-V entered L2.
 Recheck live state before drawing conclusions: early process-list reads were
 incomplete, and the shadow-clear counter was zero at about one minute.
 
+At 21 minutes this boot still has three processes and 76 loaded modules.
+The shadow-clear counter remains zero through 19 minutes. Live unwinds
+show two storage paths interrupted immediately after lowering IRQL:
+CPU 0 at `KzLowerIrql+0x22`, CPU 1 at `KiSwapThread+0x795` with a successful
+wait result ready to return. VBoxSup has not loaded and no kernel timer-
+resolution request is active. See
+[the storage-return evidence](docs/2026-09-11-live-storage-returns.md).
+Both CPUs made zero fresh VTL calls in a 32.197-second window around
+14 minutes. DPC counts continue to advance. This is a distinct stall
+location, without demonstrated benefit from the shadow fix.
+
 Current addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
 base `0xfffff801aa000000`, CR3 `0x1ae002`. The new counter's ELF offset is
 `0x50f7020` (physical `0x6beff020`). Use `.rig-deployed-hypervisor.elf`.

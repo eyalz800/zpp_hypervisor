@@ -80102,3 +80102,33 @@ The final process walk completed. Artifacts: `/tmp/zpp-20260911/`, especially
 `interrupt-shadow-build.txt`, `fixed-delta-45min.out` and
 `fixed-processes-final.txt`. The timer-arm ratio printed by the delta reader
 is not used: it mixes timer programming from different trust levels.
+
+## 2026-09-11: both storage threads are interrupted at their returns
+
+The interrupt-shadow-fix boot (14:22 UTC, loader MD5
+`afecb8bfd26426c201d6d4dd7fa857cf`) remains at three processes past 21 minutes.
+The new shadow-clear counter is zero through 19 minutes, so this is not an
+exercised fix or a demonstrated change in behavior. Complete module walks
+contain 76 images; VBoxSup has not loaded. Kernel resolution count is zero,
+requested time is `0xffffffff`, and the pseudo increment is 156,250.
+
+Live PE unwinds at about 11 and 15 minutes recover CPU 0's disk failure-
+prediction worker through storport's `RaidStartIoPacket`, interrupted at
+`KzLowerIrql+0x22`, immediately after `mov cr8,rbx` with RBX zero. CPU 1 is
+interrupted at `KiSwapThread+0x795`, after `mov cr8,r14` with R14 zero;
+RBX holds a successful wait result ready to return to `ClasspModeSense`.
+One live-register capture samples that exact CPU 1 RIP without needing an
+interrupt-frame unwind. Both current threads are Running. DPC counts move.
+
+The earlier VBoxSup call and these two storage paths differ, but all repeatedly
+meet interrupts immediately after lowering IRQL. A specific driver's waiting
+loop does not account for them. The new reads still do not separate service
+cost from a virtualization defect. The 32.197-second activity window shows
+zero new VTL calls on both CPUs, zpp handler shares 69.88%/74.18%, Hyper-V
+23.40%/19.06%, Windows 6.72%/6.76%. No release flags or timing knobs changed.
+
+The VINA gate is inactive in a separate 30.03-second window: both half-kind
+latches are 2, suppression counters are frozen. A few device vectors continue
+to be staged. `l2_entry_vector` is compiled out with census=0, so its zeroes
+are not a delivery result. Full chains, module identities, limitations and
+artifact paths: `docs/2026-09-11-live-storage-returns.md`.
