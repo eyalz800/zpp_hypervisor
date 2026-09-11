@@ -80489,3 +80489,27 @@ as `--base`; the changed fingerprint rejected it. It is retained under
 The valid rerun uses module base `0x66e08000` and the deployed ELF. The
 watcher has resumed as sole monitor reader. Artifacts are listed in the
 current status file.
+
+## 2026-09-11: reject the entire delta after identity or timing failure
+
+The mistakenly supplied singleton base exposed a second reader defect:
+`delta_report` rejected its fingerprint but `delta_main` continued printing
+global counter rates, phase reports and SynIC state from those same samples.
+The main path now stops after the rejection. It also stops later sections
+for a nonpositive measured span. Matching tuples with missing first-entry
+TSC values no longer count as verified identity. The diagnostic lists failed
+reads and an incorrect module base as possible causes instead of asserting
+that the guest reset.
+
+End-to-end synthetic reads reproduce three failures before the fix: changed
+module base, changed first-entry TSC and nonpositive time all printed later
+sections. All four cases pass after the fix, including the unchanged valid
+sample. Three missing/empty TSC-tuple cases also fail before and pass after.
+All 27 rebuilt host tests pass, including 228 Python tests. Artifacts use
+`/tmp/zpp-20260911/delta-rejection-` and `delta-missing-fingerprint-`.
+No hypervisor build or deployment is needed for this reader change.
+
+Meanwhile the live guest continues: at about twenty-one minutes, autochk
+is absent and a second smss.exe (PID 700, parent 540) is present. The complete
+power list has two IRP_MN_WAIT_WAKE entries, both disabled/unarmed. The
+elision-only boot and its watcher remain running; the slot build stays local.

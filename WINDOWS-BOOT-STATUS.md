@@ -110,6 +110,13 @@ which expects the module base. Its changed fingerprint rejected the sample;
 it is archived as `cache-write-elision-delta-wrong-base-rejected.out` and
 must not be used. The valid rerun uses module base `0x66e08000`.
 
+At about twenty-one minutes, autochk is absent and a second smss.exe (PID
+700, parent 540) is present. The complete power list has two wait-wake
+entries, both disabled/unarmed. `cache-write-elision-processes-21min.txt`
+and `cache-write-elision-power-21min.txt` preserve these reads. The watcher
+continues. The reader now suppresses all later delta sections when identity
+or timing fails; its previous rejection only stopped the main table.
+
 **Next build, not deployed:** `48bcfc9c` gives field width/type separate
 cache slots. The old mapping squeezed 156 fields into 26 slots; the new
 projection gives all 156 distinct slots. All 191 cache assertions and all

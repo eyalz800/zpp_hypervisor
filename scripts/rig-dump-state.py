@@ -6257,7 +6257,10 @@ def delta_fingerprint_lines(before, after):
                         after.get("base")),
                        (DELTA_FINGERPRINT, before.get("first_tsc"),
                         after.get("first_tsc"))):
-        if a is None or b is None:
+        if (a is None or b is None
+                or any(isinstance(value, tuple)
+                       and (not value or None in value)
+                       for value in (a, b))):
             lines.append(f"  fingerprint {what}: NOT READ - cannot say "
                          f"the two samples are the same boot")
             same = False
@@ -6269,12 +6272,9 @@ def delta_fingerprint_lines(before, after):
             continue
         lines.append(f"  fingerprint {what}: unchanged ({show(a)})")
     if not same:
-        lines.append("  *** the samples are NOT from the same boot. The "
-                     "guest reset, or the")
-        lines.append("      module was reloaded. Subtracting them gives "
-                     "two machines' counters")
-        lines.append("      differenced, which is not a measurement. "
-                     "Nothing is rated below.")
+        lines.append("  *** boot identity could not be verified. A reset, reload,")
+        lines.append("      incorrect module base or failed read can cause this.")
+        lines.append("      No rates or later state sections are printed.")
     return lines, same
 
 
@@ -7779,6 +7779,12 @@ def delta_main(args, base, instance, off, cpus, reason_capacity,
                              span, fingerprints, cpus, args.delta,
                              (a1 - a0, b1 - b0)):
         print(line)
+
+    # delta_report withholds its tables when identity or timing fails.
+    # The separately printed global/phase/state sections use the same
+    # samples and must obey that rejection too.
+    if not delta_fingerprint_lines(*fingerprints)[1] or seconds <= 0:
+        return
 
     # After the report rather than inside it, because it is a *global*
     # table and every histogram `delta_report` prints is per processor.

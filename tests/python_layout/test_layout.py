@@ -2303,6 +2303,12 @@ class DeltaModeCatchesAGuestThatResetBetweenSamples(unittest.TestCase):
         _lines, same = module.delta_fingerprint_lines(*self.fingerprints(
             None, (7,), None, (7,)))
         self.assertFalse(same)
+        for first_tsc in (None, (), (None,), (7, None)):
+            with self.subTest(first_tsc=first_tsc):
+                lines, same = module.delta_fingerprint_lines(*self.fingerprints(
+                    0x6720f000, first_tsc, 0x6720f000, first_tsc))
+                self.assertFalse(same)
+                self.assertIn("NOT READ", "\n".join(lines))
 
     def test_a_reset_stops_the_report_before_any_rate(self):
         module = load_dump_state()
@@ -2313,7 +2319,7 @@ class DeltaModeCatchesAGuestThatResetBetweenSamples(unittest.TestCase):
             ({}, {}, []), [], module.delta_span(0, 100, 1.0),
             self.fingerprints(0x6720f000, (7,), 0x67210000, (7,)),
             1, 1.0, (0.1, 0.1)))
-        self.assertIn("NOT from the same boot", text)
+        self.assertIn("boot identity could not be verified", text)
         self.assertNotIn("per second", text)
 
 
@@ -2653,6 +2659,48 @@ class DeltaModeHoldsNoMonitorConnectionAcrossTheWait(unittest.TestCase):
         self.assertLess(delta.connections, full.connections // 2)
 
 
+class DeltaModeEndToEndRejectsUnverifiedSamples(unittest.TestCase):
+    ARGV = ["--elf", "/dev/null", "--cpus", "2", "--delta", "20",
+            "--delta-phases"]
+    EXTRA_SECTIONS = ("exits by level:",
+                      "vmcs counters that are NOT singleton members",
+                      "the handler's time BY REASON:", "phase tree",
+                      "synthetic interrupt controller, per processor")
+
+    def assert_no_extra_sections(self, text):
+        for marker in self.EXTRA_SECTIONS:
+            self.assertNotIn(marker, text)
+
+    def test_a_changed_base_stops_all_later_sections(self):
+        rig = FakeRig()
+        text = run_reader(
+            rig, self.ARGV, clock=[0.0, 1.5, 20.9, 22.4],
+            on_sleep=lambda _: setattr(rig, "base", rig.base + 0x1000))
+        self.assertIn("fingerprint module base: CHANGED", text)
+        self.assert_no_extra_sections(text)
+
+    def test_a_changed_first_entry_stops_all_later_sections(self):
+        rig = FakeRig()
+        rig.put("handler_first_tsc", 1, 7)
+        text = run_reader(
+            rig, self.ARGV, clock=[0.0, 1.5, 20.9, 22.4],
+            on_sleep=lambda _: rig.put("handler_first_tsc", 1, 9))
+        self.assertIn("fingerprint handler_first_tsc: CHANGED", text)
+        self.assert_no_extra_sections(text)
+
+    def test_a_nonpositive_span_stops_all_later_sections(self):
+        text = run_reader(FakeRig(), self.ARGV,
+                          clock=[0.0, 1.5, 0.0, 1.5])
+        self.assertIn("measured span is not positive", text)
+        self.assert_no_extra_sections(text)
+
+    def test_a_verified_sample_keeps_the_later_sections(self):
+        text = run_reader(FakeRig(), self.ARGV,
+                          clock=[0.0, 1.5, 20.9, 22.4])
+        for marker in self.EXTRA_SECTIONS:
+            self.assertIn(marker, text)
+
+
 class DeltaModeEndToEndCatchesTheBackwardsCounter(unittest.TestCase):
     """The whole path, from the monitor to the verdict.
 
@@ -2704,7 +2752,7 @@ class DeltaModeEndToEndCatchesTheBackwardsCounter(unittest.TestCase):
             {"handler_first_tsc": 0x76adf1,
              "handler_last_tsc": int(1_992_000_000 * 20.9),
              "exit_total": 1_106_380})
-        self.assertIn("NOT from the same boot", text)
+        self.assertIn("boot identity could not be verified", text)
         self.assertNotIn("5,089.95", text)
 
 
