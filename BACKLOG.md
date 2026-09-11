@@ -79950,3 +79950,40 @@ breakthrough it is pointed at. This is the boot-338 problem re-appearing
 at the lowered gate rather than the raised one, and it is the argument
 for reading `armed` on a *subset* of polls rather than on all of them
 past a threshold.
+
+
+## 2026-09-11: retire watched EPT stores by decoded length
+
+Both the allowed-store and filtered-store paths in `on_ept_violation`
+preferred a nonzero VM-exit instruction-length field over the decoded
+length. SDM 30.2.5 (`.references/sdm.txt:204101-204136`, page 4275)
+leaves this field undefined for an ordinary EPT operand fault. Nonzero
+is not a validity indication. The old comments citing SDM 25.9.4 as
+making it authoritative were wrong; the historical 10-versus-2 comparison
+did not establish a decoder error. KVM v6.12 `handle_ept_violation`
+(`.references/kvm/vmx.c:5780`, MMIO through `kvm_mmu_page_fault`) does
+not use this field to retire an emulated memory instruction.
+
+Both paths now advance context RIP and VMCS RIP by the decoded length.
+A filtered store remains filtered and an allowed store executes once.
+The raw disagreement counter remains diagnostic; a mismatch neither
+halts the processor nor changes the resume address. Falling back only
+when the field is zero was rejected because undefined values need not
+be zero. Replaying an already-applied store was also rejected.
+
+Regression: decoded two-byte MOV with reported lengths 0, 2, 7, 10,
+and 0xffffffff, for both allowed and filtered writes. The new cases
+failed 12 RIP assertions before the fix and pass after it; the watched
+page harness now runs 1,715 checks. The complete rebuilt host suite
+passes all 26 tests. One independent pre-existing suite failure needed
+its EFER fixture initialized to the real long-mode state (0xd00 before
+testing the legal SCE change to 0xd01); no production EFER code changed.
+The debug hypervisor and all loaders build, and ELF invariants pass.
+
+This is not yet a demonstrated cause of the Windows boot failure. The
+unchanged baseline running on the rig has 156 emulated stores and zero
+length disagreements, read from the deployed ELF's offsets at module
+base 0x66e08000, singleton 0x682f3000. It remained at System, Secure
+System and Registry through 28 minutes; its empty PopIrpList was read
+with a complete structural check. The new hypervisor has not yet been
+deployed. Session artifacts are in `/tmp/zpp-20260911/`.

@@ -4782,6 +4782,11 @@ static void test_exit_and_entry_control_composition()
         shadow.write(field::host_ia32_pat, 0x0007040600070406ull);
         shadow.write(field::host_ia32_efer, 0xd01);
 
+        // The real exit into this 64-bit VMM has already set LME/LMA.
+        // An absent mock MSR reads as zero and asks the guarded WRMSR
+        // path to change LME while paging is active. Exercise a legal
+        // SCE change, with the same initial long-mode state as the rig.
+        g_msr[ia32_efer] = 0xd00;
         g_msr_writes.clear();
         hv().load_l1_host_state(cpu);
 

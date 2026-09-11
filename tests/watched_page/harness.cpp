@@ -1877,32 +1877,47 @@ static void test_filter_notify()
               "an unexpected monitor trap exit is refused");
     }
 
-    // The decoded length wins over the VMCS's, and a disagreement stops
-    // the processor rather than resuming at either address.
-    // hypervisor.cpp:3636-3657, SDM 30.2.5.
-    {
-        reset();
-        arm(notify_handler, nullptr);
-        mov_mem_reg32();
+    // SDM 30.2.5 leaves VM-exit instruction length undefined for an
+    // ordinary EPT operand fault. Nonzero is not a validity bit: it
+    // may describe an earlier exit. KVM's handle_ept_violation sends
+    // MMIO through the instruction emulator instead of using it.
+    for (auto reported : {0ull, 2ull, 7ull, 10ull, 0xffffffffull}) {
+        for (auto refuse : {false, true}) {
+            reset();
+            arm(notify_handler, refuse ? filter_handler : nullptr);
+            g_filter_refuses = refuse;
+            mov_mem_reg32();
+            put32(0x300, 0x12345678);
 
-        zpp::arch::x86_64::context registers{};
-        registers.rbx = base() + 0x300;
+            zpp::arch::x86_64::context registers{};
+            registers.rbx = base() + 0x300;
+            registers.rax = 0xabcdef01;
 
-        auto ours = fault(
-            {.qualification = linear_valid | operand_access | data_write,
-             .linear = 0x300,
-             .physical = base(),
-             .rip = 0x400000,
-             .reported_length = 7},
-            registers);
+            auto ours =
+                fault({.qualification =
+                           linear_valid | operand_access | data_write,
+                       .linear = 0x300,
+                       .physical = base(),
+                       .rip = 0x400000,
+                       .reported_length = reported},
+                      registers);
 
-        check(!ours, "a length disagreement stops the processor");
-        check(1 == hv().emulated_length_disagreement, "and is counted");
-        check(7 == hv().emulated_length_reported,
-              "with what was reported");
-        check(2 == hv().emulated_length_decoded, "and what was decoded");
-        check(0x400000 == hv().vmcs.guest_rip(),
-              "RIP is left where it was");
+            check(ours,
+                  "an undefined exit length cannot reject emulation");
+            check(
+                0x400002 == hv().vmcs.guest_rip(),
+                "RIP advances by the decoded store, despite stale length");
+            check(0x400002 == registers.rip,
+                  "context RIP agrees with the resumed instruction");
+            check((refuse ? 0x12345678u : 0xabcdef01u) == at32(0x300),
+                  "the filter still decides whether the store lands");
+            check((refuse ? 0u : 1u) == g_notified.size(),
+                  "only a completed store notifies, exactly once");
+            check((refuse ? 1u : 0u) == g_filtered.size(),
+                  "a refused store consults its filter exactly once");
+            check(1 == hv().emulated_writes,
+                  "the instruction is handled once instead of replayed");
+        }
     }
 
     {

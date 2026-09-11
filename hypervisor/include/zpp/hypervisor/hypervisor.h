@@ -11118,11 +11118,10 @@ private:
      *   hypervisor stack address into a device register and hand a
      *   protected module address to the guest.
      * - RIP advances by the length the decoder measured. The VMCS field
-     *   is undefined for this exit (SDM 30.2.5) and KVM never reads it.
-     *   Where the processor does report one and the two disagree, the
-     *   decoder has misread an instruction whose store is already applied
-     *   - that is recorded in `emulated_length_disagreement` and the
-     *   processor is stopped rather than resumed at either address.
+     *   is undefined for an ordinary EPT operand fault (SDM 30.2.5),
+     *   including when nonzero. KVM routes MMIO through its emulator.
+     *   `emulated_length_disagreement` records the raw comparison only;
+     *   it cannot prove a bad decode or decide where execution resumes.
      * - The exit qualification is consulted: only an access by the
      *   instruction's own operand is emulated, never the processor
      *   walking a paging structure. A store straddling the watched page's

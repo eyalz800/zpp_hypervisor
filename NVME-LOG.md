@@ -463,10 +463,11 @@ so the value has to come from the instruction. Exactly:
 
 each with an optional REX prefix. That is all `writel()` and
 `StorPortWriteRegisterUlong` ever emit. The effective address is **not**
-decoded - the VMCS supplies the guest physical address of the access - and
-the length is **not** computed - the VMCS supplies
-`vm_exit_instruction_length`. Instruction bytes come from guest RIP through
-the existing `os_page_table(guest_cr3, physical_to_virtual)`.
+decoded - the VMCS supplies the guest physical address of the access.
+The instruction length comes from the decoder: SDM 30.2.5 leaves
+`vm_exit_instruction_length` undefined for an ordinary EPT operand fault,
+including when the field is nonzero. Instruction bytes come from guest RIP
+through the current guest's page tables (`translate_guest_linear`).
 
 Anything else: fall back to single stepping, record a missed doorbell, and
 if it was a trigger, bring no channel up this epoch and say so loudly.

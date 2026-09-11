@@ -639,35 +639,14 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                             context.rip);
                     }
 
-                    // **The processor's length wins, and a disagreement
-                    // is not fatal.** SDM 25.9.4
-                    // (.references/sdm.txt:200400): the VM-exit
-                    // instruction length field "receives the length in
-                    // bytes of the instruction whose execution led to
-                    // the VM exit", so it is authoritative and our
-                    // decoder is the thing that can be wrong.
-                    //
-                    // This used to `return false` on a disagreement, and
-                    // that killed a boot. `false` means something quite
-                    // different to both callers - "the protection was put
-                    // there by something that is not going to handle the
-                    // fault" - so they stop the processor. Measured on
-                    // the rig: after 69,109 emulated writes and 9 refused
-                    // ones, a single 10-byte instruction that this
-                    // decoder read as 2 bytes halted cpu 0 inside
-                    // `on_unhandled_exit` with reason 0x30,
-                    // qualification 0x2b, on the local APIC page. The
-                    // other seven processors kept spinning, so it looked
-                    // exactly like a guest livelock and was investigated
-                    // as one for a long time.
-                    //
-                    // Nothing about the refusal needs the decode to be
-                    // right: the write is *not* performed, so the only
-                    // question left is how far to step RIP, and the
-                    // processor has already answered it. The counters
-                    // stay - a disagreement still means this decoder has
-                    // a gap worth closing - but they record rather than
-                    // decide.
+                    // SDM 30.2.5 (.references/sdm.txt:204101-204136)
+                    // leaves this field undefined for an ordinary EPT
+                    // operand fault. A nonzero value can be stale; it
+                    // does not prove that the decoder is wrong. KVM's
+                    // handle_ept_violation (vmx.c) uses instruction
+                    // emulation for MMIO, not this field. Keep the raw
+                    // comparison for diagnosis, but retire the decoded
+                    // instruction even when its write is filtered out.
                     auto reported =
                         this->vmcs.vm_exit_instruction_length();
                     if ((0 != reported) && (reported != store->length)) {
@@ -676,15 +655,14 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                         this->emulated_length_reported = reported;
                         this->emulated_length_decoded = store->length;
                         log("emulated write length disagreement: the "
-                            "processor reports {} bytes, this decoder "
-                            "read {}, at rip {} - trusting the processor",
+                            "undefined VMCS field {} decoded {} at rip "
+                            "{} - using decoded length",
                             reported,
                             store->length,
                             context.rip);
                     }
 
-                    auto length =
-                        (0 != reported) ? reported : store->length;
+                    auto length = store->length;
 
                     // Advanced from `context.rip` rather than from a
                     // read back, and **`context.rip` is advanced with
@@ -810,23 +788,12 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                         this->emulated_writes_by_cpu[cpu] + 1;
                 }
 
-                // The instruction has been carried out, so the guest
-                // resumes after it rather than on it - by the length the
-                // decoder measured, not the one the VMCS reports.
-                //
-                // SDM 30.2.5 leaves the VM-exit instruction length field
-                // *undefined* for an EPT violation that was not
-                // encountered during event delivery, and KVM agrees by
-                // construction: handle_ept_violation never reads it, and
-                // skip_emulated_instruction warns that it is not always
-                // set. Advancing by an undefined value resumes the guest
-                // somewhere inside its own instruction stream.
-                //
-                // Where the processor did supply a length and the two
-                // disagree, the decoder has misread the instruction, and
-                // the value already written to the device register makes
-                // that unsafe to paper over. Recorded and the processor
-                // stopped, rather than resumed at either address.
+                // Retire the instruction that was actually decoded and
+                // emulated. SDM 30.2.5 leaves VM-exit instruction length
+                // undefined here, even when it is nonzero. KVM's
+                // handle_ept_violation likewise routes MMIO through the
+                // instruction emulator. A stale field must neither
+                // skip following instructions nor replay this write.
                 auto reported = this->vmcs.vm_exit_instruction_length();
                 if ((0 != reported) && (reported != store->length)) {
                     this->emulated_length_disagreement =
@@ -834,14 +801,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     this->emulated_length_reported = reported;
                     this->emulated_length_decoded = store->length;
 
-                    // Said out loud on any processor but the first.
-                    // The emulation advances RIP by the decoded
-                    // length, and for an EPT violation the VMCS
-                    // reports the true one - so a disagreement puts
-                    // the guest's instruction pointer inside an
-                    // instruction, which is a triple fault a few
-                    // instructions later and looks nothing like its
-                    // cause.
+                    // A raw comparison, not proof of a bad decode.
                     if ((0 != cpu) && (cpu < max_cpus)) {
                         log("cpu {} emulated length disagreement at "
                             "offset {}: reported {} decoded {} rip {}",
@@ -853,45 +813,7 @@ bool hypervisor::on_ept_violation(std::size_t cpu,
                     }
                 }
 
-                // **The processor's length wins here too, and returning
-                // `false` was the worse of the two answers.**
-                //
-                // This is the second of the two sites that disagreed
-                // about a decoded length; the refusal fifty lines above
-                // was fixed for exactly this and records what it cost
-                // ("This used to `return false` on a disagreement, and
-                // that killed a boot"). The reasoning there was that
-                // SDM 25.9.4 makes the VM-exit instruction length
-                // authoritative and this decoder the thing that can be
-                // wrong, so the only open question is how far to step
-                // RIP - and the processor has already answered it.
-                //
-                // What differs here makes `false` worse rather than
-                // better: at the refusal the write is *not* performed,
-                // and at this site **it already has been** - the comment
-                // above says so, "the value already written to the
-                // device register". `false` means "the protection was
-                // put there by something that is not going to handle
-                // the fault", and the caller resumes without advancing
-                // RIP; the page is still write-protected, so the guest
-                // re-executes the same instruction, decodes it the same
-                // way, and the store is applied a *second* time. On the
-                // interrupt command register that is a duplicate IPI,
-                // once per iteration, for as long as it lasts.
-                //
-                // So the disagreement is recorded - it still says the
-                // decoder misread something - and the step uses the
-                // length the processor reported, falling back to the
-                // decoded one only where the processor supplied none
-                // (SDM 25.9.4 leaves it undefined for some reasons, and
-                // zero is how that shows up).
-                //
-                // Found by the KVM-comparison review
-                // (.references/kvm-nested-review.md 33). Cold today, and
-                // it should stay that way: nothing reaches it unless the
-                // decoder is wrong about a store to a watched page.
-                auto advance =
-                    (0 != reported) ? reported : store->length;
+                auto advance = store->length;
 
                 context.rip = context.rip + advance;
                 this->vmcs.guest_rip(context.rip);
