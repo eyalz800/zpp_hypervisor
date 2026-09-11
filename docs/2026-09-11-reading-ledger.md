@@ -46,6 +46,10 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/vpassist-coherency-contract.md` (176 lines).
 - `.references/hyperv/vpassist-coherency-zpp-side.md` (234 lines).
 - `.references/hyperv/vtl1-vpassist-perVP.md` (110 lines).
+- `.references/hyperv/ium-workitem-lost-wakeup.md` (259 lines).
+- `.references/hyperv/lazy-eoi-and-interrupt-window.md` (290 lines).
+- `.references/hyperv/vapic-reinjection-loop.md` (229 lines).
+- `.references/hyperv/crash-rendezvous-barrier.md` (246 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -53,6 +57,26 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The IUM work-item note's zero-list-link test does not establish a lost
+  wakeup: an item can be dequeued/executing, no work may be pending, or a
+  later producer may queue it. Establish pending work and the producer /
+  consumer ordering before claiming that nothing can call service d2.
+  Its wait-reason/queue fields likewise need the actual stopped stack;
+  the current SMSS capture separates the main subsystem wait from an
+  asynchronous PnP worker using full unwinds.
+- The lazy-EOI notes' zero TPR threshold does not imply an outstanding
+  interrupt-window request: their own clear routine clears both. Read the
+  actual primary controls and blocked condition. A nonempty ISR stack can
+  describe an interrupt currently in service; a cleared assist bit can be
+  a normal transient before reconciliation. Neither alone proves a lost
+  EOI, and a clear pending bit does not prove that an interrupt never
+  arrived. The old deadlock shapes remain hypotheses requiring a sequence.
+- The crash-rendezvous note describes an old Hyper-V reset path, not this
+  run's current state or the preceding directly captured Windows 0x9F.
+  Its target/arrived sets must be validated at the comparison, including
+  all words and headers; a later equality does not alone prove a broken
+  comparison, and a missing arrival does not identify a nonexistent CPU.
 
 - The bare-metal guide's old VMX-hiding/Hyper-V-stand-down phase is not
   the current nested-boot objective. Its old TinyCore/QEMU versions and

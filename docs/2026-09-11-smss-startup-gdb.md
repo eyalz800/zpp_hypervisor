@@ -56,11 +56,22 @@ preserved beside them. Hardware breakpoints, physical-memory reads and
 automatic detach were used; no single-step, inferior call or guest-memory
 patch was used.
 
-The startup watcher still exclusively owns the QEMU monitor. Its SCM
-coordinator now tracks guard PID 65454 in rpc-smss-images, after verifying
-the preceding coordinator and guard exited before each probe. The active
-coordinator is rpc-scm-coordinator-smss-images.py (PID 65544 when started).
-Its live status is rpc-scm-coordinator.json. Once services.exe validates
-and the startup watcher exits, it will hand GDB to the prepared SCM
-failure/state-transition capture and start the normal logon watcher.
-There is no new VMM fix or Windows configuration change from this evidence.
+At 20:47:27, a 192-ms capture of csrss PID 916 completed its three-thread
+and fourteen-module walks. The thread starting at csrss+1010 was Running;
+its saved stack was excluded. One other thread unwinds through a scheduler
+APC at PspUserThreadStartup (without a captured user stack); the last waits
+in NtWaitForAlertByThreadId. A 20:48:38 on_l2_exit probe failed its combined
+ETHREAD start-address/process identity check and detached. No live CSRSS
+frame or matched return was obtained, and neither pointer reuse nor a
+guest failure is proved by that assertion. Its artifacts are rpc-gdb-csrss
+and rpc-gdb-csrss-live. Wininit/winlogon appeared in that interval.
+
+The automatic SCM handoff completed at 20:49:27, superseding the earlier
+guard ownership. services.exe is PID 716, image 7ff681350000, CR3
+1b01b3002, EPROCESS ffffe6044ab610c0. GDB PID 69804 now runs the prepared
+SCM failure capture; its coordinator is rpc-scm-coordinator-csrss.py,
+PID 69732 when started. rpc-logon alone owns the QEMU monitor. The live
+status is rpc-scm-coordinator.json, with SCM output rpc-gdb-scm-startup.
+At 20:52:39, fourteen processes are present, no LogonUI/dwm and one armed
+USB power request. No SCM breakpoint event has yet been captured. There
+is no new VMM fix or Windows configuration change from this evidence.

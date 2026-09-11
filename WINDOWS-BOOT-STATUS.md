@@ -72,10 +72,11 @@ The same-binary GDB startup run began around **19:21 UTC** with two CPUs.
 Startup channels passed. Resident module base remains `0x66d47000`, but
 Windows now has base **`0xfffff80096a00000`**, system CR3 `0x1ae000`.
 The physical kernel PE and complete process walks validate those coordinates.
-At 20:38:59 the run has six processes, after autochk appeared and left
-and a second smss.exe PID 724 appeared. No LogonUI/dwm or armed power
-watchdog is observed. SCM has not appeared yet. Preserve this progressing
-guest.
+At 20:52:39 UTC the run has fourteen processes, including wininit PID 432,
+winlogon PID 592 and services PID 716. No LogonUI/dwm is observed. One
+USB power request has an armed watchdog; preserve its identity/start time
+when comparing ages. The service-failure GDB sequence is now active.
+Preserve this progressing guest.
 
 A 19:37:40 GDB stop walked all 109 System threads and identified Phase1
 by both start-address fields. It was Running (context switches 693), so
@@ -92,9 +93,8 @@ The 40-ms capture preserved registers and 1,560 kernel-stack bytes and
 detached. The later complete process lists show autochk appearing and
 leaving, without establishing its exit code or disk-check result.
 
-`rpc-smss-images` in tmux `zpp-rig-20260911` now runs the subsequent bounded
-KeBugCheckEx guard at **`0xfffff80096ef90b0`**; its artifact prefix is
-`rpc-gdb-after-smss-images-guard`. The process-creation capture is under
+The active GDB script retains a KeBugCheckEx guard at
+**`0xfffff80096ef90b0`**. The process-creation capture is under
 `rpc-gdb-process-create`. Prior guard interruptions were manual probe
 transitions, not timeout verdicts or guest failures despite the generic
 helper's wording. No two GDB clients run together.
@@ -107,23 +107,34 @@ workers are idle. Matched kernel/user unwinds reach their native entry
 points and null returns. This does not prove a permanent wait or identify
 an unfinished device. See [the SMSS GDB evidence](docs/2026-09-11-smss-startup-gdb.md).
 
-`rpc-startup-watch` is the sole monitor reader. It retains complete
-process and power replies under `/tmp/zpp-20260911/rpc-gdb-watch`, and its
-status log is `rpc-gdb-startup-watch.txt`. It exits when services.exe's
-EPROCESS, PEB, CR3 and PE base validate, writing
-`rpc-gdb-discovery/services-context.json`. The prepared
-`gdb-scm-startup.py` has not yet attached: it will catch CleanupStartFailure
-and AreDependenciesStarted's failed dependency, then watch RpcEptMapper's
+At 20:47:27, another 192-ms GDB capture found three csrss PID 916 threads.
+The thread whose Win32 start is csrss+1010 was Running, so its saved stack
+was excluded. A later on_l2_exit probe refused a changed ETHREAD identity
+and detached; it obtained no live CSRSS stack or matched return. Startup
+advanced to wininit/winlogon in that interval. Artifacts are
+`rpc-gdb-csrss` and `rpc-gdb-csrss-live` under `/tmp/zpp-20260911/`.
+
+`rpc-startup-watch` exited at 20:49:26 after validating services.exe and
+writing `rpc-gdb-discovery/services-context.json`: image base
+`7ff681350000`, CR3 `1b01b3002`, EPROCESS `ffffe6044ab610c0`.
+The coordinator verified old GDB guard PID 69543 had exited and started
+**GDB PID 69804** at 20:49:27. It runs `gdb-scm-startup.py` with output
+prefix **`rpc-gdb-scm-startup`**, catching CleanupStartFailure and
+AreDependenciesStarted's failed dependency, then watching RpcEptMapper's
 internal start-state writes. It captures RPCSS-host stacks at a 1070
-failure, with a bounded stop and current module list. The live
-`rpc-scm-coordinator` window (Python PID 65544 when started)
-now performs this handoff automatically after the startup watcher's
-process exits. It verifies QEMU is running, interrupts and waits for old
-GDB guard PID 65454 to exit, starts the SCM capture, and starts `rpc-logon`
-as the sole monitor owner. Its status is `rpc-scm-coordinator.json`.
-Do not replace guard PID 65454 without stopping/updating this coordinator.
-After SCM capture it starts another guard only if no bugcheck was captured.
-Current artifacts use the `rpc-gdb-` prefix.
+failure, with a bounded stop and current module list. The capture allows
+256 events within thirty minutes, avoiding an early 32-event cutoff.
+No target event has been captured as of 20:52:39.
+
+**`rpc-logon` is now the sole monitor owner.** Its status log is
+`rpc-gdb-logon-watch.txt`, with complete replies under
+`rpc-gdb-logon-captures/`. Check the LogonUI/dwm trigger before other reads.
+`rpc-scm-coordinator` (Python PID 69732, script
+`rpc-scm-coordinator-csrss.py`) owns the GDB lifecycle; its state is
+`rpc-scm-coordinator.json`. Do not replace GDB PID 69804 without first
+stopping/updating this coordinator. It starts another guard only if the
+SCM script exits without a captured bugcheck. The previous startup
+observer/guards have exited; no second monitor or GDB client is running.
 
 The completed preceding run is recorded below.
 
