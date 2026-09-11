@@ -80513,3 +80513,10 @@ Meanwhile the live guest continues: at about twenty-one minutes, autochk
 is absent and a second smss.exe (PID 700, parent 540) is present. The complete
 power list has two IRP_MN_WAIT_WAKE entries, both disabled/unarmed. The
 elision-only boot and its watcher remain running; the slot build stays local.
+
+At about twenty-five minutes, a complete six-process walk includes csrss.exe
+(PID 908, parent 700). A valid 32.182-second window has fresh VTL calls
++2,957/+1,761 and user-mode samples +1,178/+2,681 on CPUs 0/1. VMREAD and
+VMWRITE failures remain zero. The complete power list has two disabled
+wait-wake entries. Artifacts use `cache-write-elision-{delta,processes,power}
+-25min`. Preserve the guest; the watcher now checks power requests every poll.

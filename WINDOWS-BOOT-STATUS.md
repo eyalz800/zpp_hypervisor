@@ -117,6 +117,15 @@ and `cache-write-elision-power-21min.txt` preserve these reads. The watcher
 continues. The reader now suppresses all later delta sections when identity
 or timing fails; its previous rejection only stopped the main table.
 
+At about twenty-five minutes, csrss.exe (PID 908, parent 700) appears:
+six processes in a complete walk. A valid 32.182-second window has fresh
+VTL calls **+2,957/+1,761** and user-mode samples **+1,178/+2,681** on
+CPUs 0/1. VMREAD/VMWRITE failures remain zero. The complete power list has
+two disabled wait-wake entries. These are continuing boot stages, not
+login evidence or an isolated speedup measurement. Artifacts use
+`cache-write-elision-{delta,processes,power}-25min`; the watcher now checks
+power requests every poll because the process count reached six.
+
 **Next build, not deployed:** `48bcfc9c` gives field width/type separate
 cache slots. The old mapping squeezed 156 fields into 26 slots; the new
 projection gives all 156 distinct slots. All 191 cache assertions and all
