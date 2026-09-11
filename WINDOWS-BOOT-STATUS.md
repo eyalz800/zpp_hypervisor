@@ -68,6 +68,37 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
+The **direct-port USB experiment is running**, begun **21:12:41 UTC** on
+September 11. The launcher has only the added `p2=8` property. Its old
+interpreter exited before editing; a remote backup and exact readback are
+preserved. Supported teardown returned NVMe and over 15 GB free RAM.
+GPT, NTFS and ESP signatures matched; ESP remains at its recorded
+**33,423,360** sectors. A fresh read-only mount returned the unchanged
+loader MD5 **d564ca8f8057eabdb36a09db2c1e34d5**, byte-identical to the
+prior archived loader. Limine remains present and untouched.
+
+All startup channels answered; the real guest's USB topology is now five
+direct root ports, without an external hub. Module base **66d47000**;
+new Windows base **fffff801e1c00000**, system CR3 **1ae000**. Kernel PE
+identity and complete three-process walks validate these coordinates.
+No armed power request or LogonUI/dwm is observed at 21:15:43 UTC.
+**GDB PID 78231** guards KeBugCheckEx at **fffff801e20f90b0**. The sole
+monitor owner is `hub-startup-watch` (Python PID 78437); coordinator
+`hub-scm-coordinator` (PID 78438) will hand off to direct SCM breakpoints
+when services.exe validates. Artifacts/state are `hub-direct-*` under
+`/tmp/zpp-20260911/`; coordinator state is
+`hub-direct-scm-coordinator.json`. Do not replace the GDB client without
+first updating/stopping its coordinator.
+
+The first observer attempt mistook the brief GDB attach pause for a guest
+shutdown and exited. Its error is preserved separately. The replacement
+observer retries debugger/manual pauses and exits on paused (shutdown);
+its restarted process walks succeed. `rig-watch-logon.sh` now makes the
+same distinction, with shell syntax checked. This changes observation,
+not the guest binary or experiment configuration.
+
+The preceding same-binary crash is recorded below.
+
 The unchanged **6adda123** startup run, begun around **19:21 UTC** on
 September 11, crashed at **20:55:05 UTC**. Direct GDB caught KeBugCheckEx
 on CPU 0: **0x9F, parameter 1 = 3**, PDO `ffffe6044844a870`, triage
@@ -76,7 +107,7 @@ The bugcheck stack reaches PopIrpWatchdog and the idle timer/DPC path.
 The run reached fifteen processes, without LogonUI/dwm or a verified login.
 No SCM failure breakpoint fired before the bugcheck; no RpcEptMapper/LSM
 ordering was established. Both the GDB coordinator and monitor watcher
-have exited. The stopped guest is preserved pending supported teardown.
+have exited. That stopped guest has now been archived and torn down.
 
 The PDO's validated device node names
 `USB\VID_0409&PID_55AA\MSFT20314159-0000:00:05.0-4`, service USBHUB3.
@@ -96,15 +127,14 @@ exact deployed ELF and an 800-file SHA-256 manifest are preserved under
 `/tmp/zpp-20260911/rpc-gdb*`. CPUID census cross-check failures remain
 explicit and those census counts are not used.
 
-The next single-variable experiment changes the launcher's controller from
+The running single-variable experiment changes the launcher's controller from
 `qemu-xhci,id=xhci` to `qemu-xhci,id=xhci,p2=8`, retaining all five devices
 and input objects, two CPUs, full manifest and the same loader. An isolated
 128-MiB stopped TCG preflight with the rig's QEMU 11.0.3 confirmed five
 direct ports and no hub. It used generic devices and no Windows disk,
 VFIO or host input; it proves the configuration, not Windows success.
-Preserve evidence, tear down with rig-kill-qemu.sh, back up/change/validate
-the launcher only after its old interpreter exits, and verify the loader
-from a fresh mount before the supported next boot. See
+Evidence preservation, supported teardown, launcher backup/readback and
+fresh-mount loader verification completed before this next boot. See
 [the hub crash evidence](docs/2026-09-12-gdb-usb-hub-power.md).
 
 The prior startup probes remain documented in

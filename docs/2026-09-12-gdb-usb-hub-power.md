@@ -92,3 +92,27 @@ BIOS; the successful topology test still emitted a kvmvapic.bin warning.
 These are preflight limitations, not Windows results. Preserve the guest
 evidence before supported teardown, and do not edit the launcher while
 its old shell is still interpreting it.
+
+
+The supported next boot began **21:12:41 UTC September 11**. The previous
+QEMU exited normally, NVMe returned, no QEMU/launcher remained, and over
+15 GB RAM was free. The one-line launcher change was syntax-checked,
+backed up as `boot-zpp.sh.bak-before-direct-ports-20260912`, and read back
+byte-for-byte. GPT/NTFS/ESP signatures match; the ESP has its recorded
+33,423,360 sectors, not the unreserved partition size 33,554,432. An
+initial check assumed the latter and was corrected against the prior
+archive and rig procedure. Nothing changed the disk layout.
+
+The fresh read-only loader matches the preceding archive byte-for-byte;
+Limine MD5 is c4357a8d21ddb98046aa2f9fd13280b0. The real new guest's info
+usb shows Bluetooth on 1, tablet on 2, keyboards on 3/4/5, no external hub.
+Windows base is now fffff801e1c00000, kernel PE/system CR3 1ae000 validated,
+with complete three-process walks. No login is verified. GDB's hardware
+bugcheck guard and prepared SCM handoff are recorded in current STATUS.
+
+A startup-observer race became visible during GDB attach: bare `paused`
+was treated as shutdown. It now retries debugger/manual pauses and exits
+on `paused (shutdown)`. The continuing logon watcher has the same fix.
+The observer's rejected first attempt is preserved; later complete walks
+succeed. Shell syntax checks pass. No guest source/binary change or host
+suite rerun was needed for this launcher/observer experiment.

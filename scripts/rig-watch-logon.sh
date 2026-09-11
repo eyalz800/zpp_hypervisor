@@ -41,9 +41,15 @@ while :; do
     clear_nc
     STATUS=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 2>/dev/null \
              | grep -ai "VM status" || echo "VM status: UNREADABLE")
-    case "$STATUS" in *paused*)
+    case "$STATUS" in *'paused (shutdown)'*)
         echo "[$(date +%H:%M:%S)] $STATUS - guest stopped, exiting" | tee -a "$OUT"
         exit 0 ;;
+    *paused*)
+        # GDB briefly pauses the guest while attaching or capturing a
+        # breakpoint. Preserve this observer across those stops.
+        echo "[$(date +%H:%M:%S)] $STATUS - debugger/manual pause, retrying" | tee -a "$OUT"
+        sleep "$POLL"
+        continue ;;
     esac
 
     clear_nc

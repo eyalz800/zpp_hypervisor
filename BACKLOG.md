@@ -80842,3 +80842,17 @@ of the underlying VMM or QEMU fault, nor a Windows boot. Removing devices
 or changing Windows USB power settings would confound the comparison.
 Detailed identities, source links and lifecycle are in
 docs/2026-09-12-gdb-usb-hub-power.md and WINDOWS-BOOT-STATUS.md.
+
+
+The direct-port run began at 21:12:41 UTC September 11, with supported
+teardown, verified launcher backup/readback and a fresh-mount identical
+loader. The actual topology has Bluetooth/tablet/three keyboards directly
+on 1–5, no hub. Kernel fffff801e1c00000 and CR3 1ae000 validate; at 21:15
+three processes and no armed power requests are observed. GDB guards the
+new KeBugCheckEx and the SCM coordinator waits for services.exe.
+
+The observer originally exited during GDB's brief attach pause. Distinguish
+`paused (shutdown)` from bare/debugger/manual pauses: retry the latter.
+Applied to the temporary startup observer and rig-watch-logon.sh; shell
+syntax passes and the restarted startup reader completes its walks.
+This is an observation fix, not a guest reset, crash or binary change.
