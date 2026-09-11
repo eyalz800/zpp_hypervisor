@@ -80389,3 +80389,38 @@ its newer ELF for resident offsets. Current Windows base is
 `0xfffff800a5800000`, CR3 `0x1ae000`; module/singleton remain
 `0x66e08000`/`0x682f3000`. The previous boot's extension address is invalid
 here; this boot's extension is `0xffffb48a4ce861a0`.
+
+## 2026-09-11: the field cache used only 26 of its 128 slots
+
+The field cache indexed every read, write and invalidation with
+`(encoding >> 1) % 128`. All 156 declared VMCS fields collapse to 26 slots;
+153 fields share their slot with another field. Fifteen distinct fields
+have index zero, including VPID, guest and host selectors, guest and host
+CR0, and exit qualification. A valid tag prevented wrong values, but every
+one of these fields displaced the others. Increasing the old modulus alone
+would not retain the width/type bits.
+
+The cache now uses the existing `vmcs_use_slot` projection and 512 entries:
+five index bits, two type bits and two width bits. All 156 declared fields
+get distinct slots. SDM 27.11.2/Table 27-22 specifies those groups; KVM
+`get_vmcs12_field_offset` and `vmcs12_field_offsets` likewise preserve the
+type and width. High/full aliases still share a slot, and exact tags still
+reject collisions if future fields exceed the five-bit index range. The
+change applies to reads, write-through fills, suspended-write invalidation
+and the new write-elision lookup together.
+
+A rebuilt regression reads fifteen index-zero fields twice. Values remain
+correct before the change, but all fifteen second reads unnecessarily execute
+VMREAD. The negative control fails exactly those fifteen checks. With the
+projection, all 191 cache checks and all 27 host tests pass (33.91 seconds),
+including 224 Python tests. The debug loaders and ELF/bootability checks pass
+with unchanged switches. The cache symbol grows from `0x40c00` to `0x100c00`
+bytes: **786,432 bytes of additional BSS**, with no heap allocation. Row
+invalidation also clears four times as many tags; live net benefit is not
+measured yet. Artifacts use `/tmp/zpp-20260911/cache-slots-`.
+
+This build is not the next rig experiment. The previously verified
+write-elision loader/ELF were archived under `elision-ready/` before the
+slot change; loader MD5 `98542ddf33cdd78402529b4b6b72423c`. That artifact is
+being deployed first to isolate the elision's effect. Do not use the newer
+local slot-build ELF to read that guest.

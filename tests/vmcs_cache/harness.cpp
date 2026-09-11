@@ -262,6 +262,44 @@ void cached_read_only_fields_must_still_report_write_failure()
     check(hardware(encoding) == 0x12, "refused write preserves hardware");
     vx::g_vmwrite_readonly_allowed = true;
 }
+void different_field_types_and_widths_keep_independent_cache_slots()
+{
+    vx::vmcs vmcs;
+    select(0, 0x1000);
+    vx::vmcs_cache_forget_current(0);
+    // All have index zero (encoding bits 9:1), but different type/width.
+    // Invalidate first, then model existing hardware contents and read.
+    constexpr field fields[]{field::vpid,
+                             field::guest_es_selector,
+                             field::host_es_selector,
+                             field::io_bitmap_a,
+                             field::guest_physical_address,
+                             field::vmcs_link_pointer,
+                             field::host_ia32_pat,
+                             field::pin_based_vm_execution_controls,
+                             field::vm_instruction_error,
+                             field::guest_es_limit,
+                             field::host_ia32_sysenter_cs,
+                             field::cr0_guest_host_mask,
+                             field::exit_qualification,
+                             field::guest_cr0,
+                             field::host_cr0};
+    std::uint64_t reads[std::size(fields)]{};
+    for (std::size_t i{}; i < std::size(fields); ++i) {
+        hardware(fields[i]) = i + 1;
+        check(vmcs.read(fields[i]) == i + 1,
+              "observe distinct field value");
+        reads[i] =
+            vx::g_vmread_field_count[static_cast<unsigned>(fields[i])];
+    }
+    for (std::size_t i{}; i < std::size(fields); ++i) {
+        check(vmcs.read(fields[i]) == i + 1,
+              "retain distinct field value");
+        check(vx::g_vmread_field_count[static_cast<unsigned>(fields[i])] ==
+                  reads[i],
+              "another field type or width does not evict this field");
+    }
+}
 } // namespace
 
 int main()
@@ -275,6 +313,7 @@ int main()
     access_rights_reads_follow_the_processors_reserved_bit_behavior();
     repeated_writes_need_a_current_observation_of_the_same_field();
     cached_read_only_fields_must_still_report_write_failure();
+    different_field_types_and_widths_keep_independent_cache_slots();
     std::println("vmcs_cache: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

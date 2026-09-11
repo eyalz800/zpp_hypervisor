@@ -305,7 +305,13 @@ inline void vmcs_note_read_caller(std::uint64_t caller)
 inline constexpr bool vmcs_cache_enabled = (0 != ZPP_VMCS_CACHE);
 
 inline constexpr std::size_t vmcs_cache_processors = 32;
-inline constexpr std::size_t vmcs_cache_entries = 128;
+// SDM 27.11.2 / Table 27-22: index alone does not identify a field;
+// type and width distinguish, for example, guest CR0 from host CR0.
+// KVM's vmcs12_field_offsets likewise retains these encoding bits.
+// The old (encoding >> 1) % 128 put 156 fields into only 26 slots.
+// Reuse the census projection: 156 distinct slots for today's fields.
+// Exact tags still guard collisions if future indices exceed 31.
+inline constexpr std::size_t vmcs_cache_entries = vmcs_use_slots;
 
 /** Byte offset in the per-processor GS row holding the arming token. */
 inline constexpr std::uint64_t vmcs_cache_token_offset = 8;
@@ -975,8 +981,7 @@ public:
                     auto & current =
                         vmcs_cache[row][vmcs_cache_active[row]];
                     auto encoding = static_cast<std::uint64_t>(field);
-                    auto slot = static_cast<std::size_t>(
-                        (encoding >> 1) % vmcs_cache_entries);
+                    auto slot = vmcs_use_slot(encoding);
                     if (current.vmcs != 0 && current.evmcs == 0 &&
                         current.epoch == vmcs_cache_epoch &&
                         ((encoding >> 10) & 3) != 1 &&
@@ -1044,8 +1049,7 @@ public:
                 auto & current =
                     vmcs_cache[row][vmcs_cache_active[row]];
                 auto encoding = static_cast<std::uint64_t>(field);
-                auto slot = static_cast<std::size_t>((encoding >> 1) %
-                                                     vmcs_cache_entries);
+                auto slot = vmcs_use_slot(encoding);
 
                 if (0 !=
                     vmcs_cache_suspended.load(std::memory_order_relaxed)) {
@@ -1133,9 +1137,8 @@ public:
                            : vmcs_cache_processors;
 
             if (row < vmcs_cache_processors) {
-                auto slot = static_cast<std::size_t>(
-                    (static_cast<std::uint64_t>(field) >> 1) %
-                    vmcs_cache_entries);
+                auto slot =
+                    vmcs_use_slot(static_cast<std::uint64_t>(field));
                 auto tag = static_cast<std::uint64_t>(field) + 1;
 
                 auto & current =
