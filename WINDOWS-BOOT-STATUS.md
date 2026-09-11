@@ -107,12 +107,34 @@ CPU 1's current path. Continue with targeted GDB debugging; do not promote
 one returning call into proof that all boot paths progress. Details and
 artifacts are in [the GDB note](docs/2026-09-11-gdb-windows-returns.md).
 
-By 17:40 UTC the complete list has five processes, including two smss.exe
-instances. At 17:41 GDB was armed at **KeBugCheckEx, nt+0x4f90b0**, with an
-automatic stopped-register/stack capture and detach on hit. Its bounded
-continue expires after forty minutes. The `gdb-bugcheck` tmux window owns
-port 1234; `local-borrow-logon` alone owns the monitor. They use separate
-QEMU channels. The running guest has no observed bugcheck or login yet.
+By **18:11:31 UTC**, the watcher has **nineteen processes**, a running
+guest, no armed power watchdogs and no LogonUI/dwm. The audio request
+observed at ages 6.7/33 seconds left the list; subsequent USB batches also
+left before their deadlines. Some IRP addresses were reused for different
+requests. A stopped GDB capture found both previously busy HidUsb workers
+back at PopIrpWorker's wait for new work. This is continuing startup, not a
+verified login. The current driver images and detailed request history are
+preserved in [the continuing-run note](docs/2026-09-11-local-borrow-gdb-progress.md).
+
+A GDB watchpoint directly caught csrss's main thread being scheduled on
+CPU 1. The virtual memory read at that stop failed; a physical-memory
+reader now walks the captured CR3 and validates the kernel PE before stack
+captures. It successfully captured the power workers and wininit's main
+thread. Wininit reaches a user-mode NtWaitForSingleObject; WerFault's
+command line is `-k -c`, so its presence alone is not proof of a crash.
+A paired shadow-copy breakpoint measured six required writes and a return
+with matching CPU/RSP. No speculative shadow-copy shortcut was added.
+
+**KeBugCheckEx, nt+0x4f90b0, remains armed** with automatic register/stack
+capture and detach. The current `gdb-wininit` tmux window owns port 1234;
+its output is `cache-local-borrow-gdb-wininit-main.txt`, and a hit/timeout
+writes `cache-local-borrow-gdb-bugcheck/index.json`. The forty-minute bound
+restarted after the 18:09:44 capture. Manual probe-transition interruptions
+are archived separately and are not guest failures. `local-borrow-logon`
+is the sole monitor reader. It now saves timestamped process/power replies
+under `cache-local-borrow-watch-captures`, including failures separately.
+All 27 rebuilt host tests and 228 Python tests pass after these reader
+changes; the hypervisor binary is unchanged.
 
 The preceding cache-slot boot ran from 16:55 to 17:25 UTC, stayed at three
 processes, and was stopped using the supported teardown. NVMe returned and

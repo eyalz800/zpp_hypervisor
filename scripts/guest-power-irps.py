@@ -1,7 +1,8 @@
 r"""Walk the guest's `PopIrpList` and age every power IRP in flight.
 
-Answers the one question bugcheck 0x9F cannot: **is a stuck power IRP the
-cause of a wedge, or a consequence of it?**
+Records outstanding power requests, their devices and watchdog ages for
+comparison with debugger captures. This list alone does not identify the
+cause of a delay.
 
 WHY 0x9F CANNOT ANSWER IT
 -------------------------
@@ -26,19 +27,13 @@ Reading it as the culprit is a mis-accusation; the driver actually
 sitting on the IRP is `CurrentDevice` (+0x28). This script prints both,
 side by side, so they cannot be confused again.
 
-THE DISCRIMINATOR
------------------
-Sample across the wedge, ~15 s apart:
-
-  consequence  several entries age together, ages tracking wall time,
-               `PnpEnumerationInProgress == 1` and nothing completing.
-               Whichever is oldest wins the race to 600 s and gets named;
-               the name is arbitrary.
-  cause        exactly one entry ages while others are created and
-               removed normally.
-
-Cross-check against zpp's own counters: if `VslCompleteSecureDriverLoad`
-froze *before* an entry's `WatchdogStart`, that IRP cannot be the cause.
+COMPARING READS
+---------------
+Track IRP identities, devices, watchdog state, age and completions. Several
+aging requests can share a dependency; a single aging request can also be
+waiting on another component. Neither pattern establishes a culprit or
+proves that the delay is upstream. Correlate it with the affected thread's
+call path and the event it is waiting for.
 
 usage: guest-power-irps.py <kernel_base_hex> <cr3_hex>
 """
@@ -351,10 +346,6 @@ if cur != head or rq(head + 8) != previous:
     sys.exit('READ FAILED: incomplete or changing PopIrpList; no armed count is valid')
 
 print(f'\n{n} power IRP(s) in flight.')
-print('\nHOW TO READ THIS - sample again in ~15 s:')
-print('  several entries aging together, PnpEnumerationInProgress 1, '
-      'nothing completing  -> the wedge is upstream; whichever entry '
-      'wins the race to 600 s gets named, and the name is arbitrary '
-      '(CONSEQUENCE).')
-print('  exactly one entry aging while others come and go             '
-      '  -> that device is the blocker (CAUSE).')
+print('\nCompare IRP identities, watchdog states, ages and completions across reads.')
+print('Aging requests identify outstanding work, not its cause; use the affected '
+      "thread's call path and wait dependency to investigate the delay.")

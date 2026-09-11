@@ -80660,3 +80660,41 @@ By 17:40 the list has five processes, including two smss instances. At
 forty-minute running timeout. The guest remains running. The monitor
 watcher is separate and sole owner of port 4446. Neither the five-process
 list nor an armed debugger establishes the boot goal.
+
+## 2026-09-11: GDB confirms worker returns; power requests retire during startup
+
+The 6adda123 guest continues past csrss. A CPU-1 shadow-copy breakpoint
+found six changed fields and a matched return with exactly six writes,
+nine skips and one completed store; no empty-copy shortcut was justified.
+QEMU's physical-memory mode bypassed the failed nested virtual read. A
+small debugger-side CR3 walker now validates the Windows PE and captures
+stacks while the vCPUs are stopped, restoring virtual mode afterward.
+
+A write watchpoint on csrss main-thread ContextSwitches caught its actual
+scheduling increment at nt+6b4581 on CPU 1. Its subsequent virtual read
+failed, and a later thirty-second probe obtained no hit; neither result
+proves a permanent stall. Startup advanced afterward.
+
+At 18:04:17, two of three power workers were inside HidUsb, one idle. At
+18:05:02, a 34-ms GDB capture found both former HidUsb workers Waiting;
+matched unwind metadata reaches PopIrpWorker+112 waiting for new work.
+The earlier call did not remain active throughout that interval. The audio
+request and later USB batches left the outstanding list before deadlines.
+IRP storage was reused with new PDOs/start times, so pointer identity alone
+would have fabricated a long-lived request.
+
+The watcher now accepts capture/output paths, retains each process/power
+reply with a UTC poll-start timestamp, saves failures separately, and reads
+power state below six processes too. The power reader's unsupported
+CAUSE/CONSEQUENCE footer and its stale 600-second text are removed. Shell
+syntax and live capture files pass; all 27 rebuilt host tests and 228
+Python tests pass in 30.68 seconds. The deployed VMM is unchanged.
+
+Current WDF/IntcOED/HidUsb images and their explicit holes are preserved.
+Wininit's 20-ms stopped stack reaches a user-mode NtWaitForSingleObject.
+WerFault's validated command line is -k -c, which does not establish a
+parent-process crash. At 18:11:31 there are nineteen processes, no armed
+power watchdogs, no LogonUI/dwm and no observed bugcheck. GDB is armed at
+KeBugCheckEx in gdb-wininit; local-borrow-logon alone owns the monitor.
+The complete evidence and current artifact names are in
+docs/2026-09-11-local-borrow-gdb-progress.md. Goal remains unverified.

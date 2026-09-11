@@ -20,12 +20,16 @@
 # 41 minutes, boot 278 lasted three.
 #
 # Usage:  scripts/rig-watch-logon.sh <kernel base> <cr3> [poll secs]
+# Set ZPP_LOGON_CAPTURE_DIR to retain each process/power reply with a UTC
+# timestamp. ZPP_LOGON_OUT overrides the one-line status log.
 set -eu
 
 KB="$1"; CR3="$2"; POLL="${3:-60}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 RIG=tc@192.168.1.199
-OUT=/tmp/logon-watch.txt
+OUT=${ZPP_LOGON_OUT:-/tmp/logon-watch.txt}
+CAPTURE_DIR=${ZPP_LOGON_CAPTURE_DIR:-}
+[ -z "$CAPTURE_DIR" ] || mkdir -p "$CAPTURE_DIR"
 : > "$OUT"
 
 clear_nc() { ssh -o ConnectTimeout=8 "$RIG" 'pkill -x nc' 2>/dev/null || true; sleep 2; }
@@ -33,6 +37,7 @@ clear_nc() { ssh -o ConnectTimeout=8 "$RIG" 'pkill -x nc' 2>/dev/null || true; s
 echo "watching for LogonUI+dwm; base $KB cr3 $CR3, every ${POLL}s" | tee -a "$OUT"
 SHOUTED=0
 while :; do
+    STAMP=$(date -u +%Y%m%dT%H%M%SZ)
     clear_nc
     STATUS=$(printf 'info status\n' | nc -w 5 192.168.1.199 4446 2>/dev/null \
              | grep -ai "VM status" || echo "VM status: UNREADABLE")
@@ -45,8 +50,14 @@ while :; do
     if ! PS=$(timeout 300 python3 "$HERE/guest-processes.py" "$KB" "$CR3" 2>&1); then
         echo "[$(date +%H:%M:%S)] **READ FAILED** incomplete process walk; $STATUS" | tee -a "$OUT"
         printf '%s\n' "$PS" > /tmp/logon-process-read-failed.txt
+        if [ -n "$CAPTURE_DIR" ]; then
+            printf '%s\n' "$PS" > "$CAPTURE_DIR/processes-read-failed-$STAMP.txt"
+        fi
         sleep "$POLL"
         continue
+    fi
+    if [ -n "$CAPTURE_DIR" ]; then
+        printf '%s\n' "$PS" > "$CAPTURE_DIR/processes-$STAMP.txt"
     fi
     # `grep -c` prints 0 and EXITS NON-ZERO on no match, so `|| echo 0`
     # would append a second line and break every integer test after it -
@@ -59,17 +70,20 @@ while :; do
     # block the logon observation during its short window of visibility.
     # The old per-word sleeps made a power walk take minutes, requiring
     # one sample every four polls. Prompt-framed reads remove that cost.
-    # Read every poll from n>=6: boot 383 armed and died before n=12.
-    # Below that gate "-" means not sampled. Only a complete successful
+    # Read every poll: a process-count threshold is not evidence that
+    # power requests cannot already be armed. Only a complete successful
     # power-list walk can produce an armed count of zero.
-    ARMED="-"
-    if [ "$N" -ge 6 ]; then
-        clear_nc
-        if POWER=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" 2>&1); then
-            ARMED=$(printf '%s\n' "$POWER" | grep -c "ENABLED (armed" || true)
-        else
-            ARMED="UNREADABLE"
-            printf '%s\n' "$POWER" > /tmp/logon-power-read-failed.txt
+    clear_nc
+    if POWER=$(timeout 200 python3 "$HERE/guest-power-irps.py" "$KB" "$CR3" 2>&1); then
+        ARMED=$(printf '%s\n' "$POWER" | grep -c "ENABLED (armed" || true)
+        if [ -n "$CAPTURE_DIR" ]; then
+            printf '%s\n' "$POWER" > "$CAPTURE_DIR/power-$STAMP.txt"
+        fi
+    else
+        ARMED="UNREADABLE"
+        printf '%s\n' "$POWER" > /tmp/logon-power-read-failed.txt
+        if [ -n "$CAPTURE_DIR" ]; then
+            printf '%s\n' "$POWER" > "$CAPTURE_DIR/power-read-failed-$STAMP.txt"
         fi
     fi
     # **`n=0` is a FAILED READ, not an empty guest.** The walker always
