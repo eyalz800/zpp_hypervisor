@@ -87,6 +87,15 @@ are at offset `0x14eaec0`, physical `0x682f2ec0`. Use
 Artifacts include `cache-state-5min.out`, `cache-timer-6min.out`,
 `cache-delta-6min.out` and `cache-watcher-after-6min.txt`.
 
+By thirteen minutes this boot has reached VBoxSup's first timer-resolution
+request. Nine valid live unwinds recover the same unreturned call documented
+in [the timer-return evidence](docs/2026-09-11-live-timer-return.md), now with
+device extension `0xffffa30f8beaf1a0` and grant still zero. The ten-minute
+32.106-second window has no fresh CPU 0 VTL calls, 32 on CPU 1, and a 70.08%
+CPU 0 handler share. Global epoch bumps remain zero. The cache changes are
+exercised but have not removed this stall. The observer is resumed; keep
+measuring before deciding whether this boot has stopped progressing.
+
 The unchanged baseline loader had MD5 `cb729d76cb6adb055ccbe4776cea0a38`.
 It still had only System, Secure System and Registry at 43 minutes.
 Counter samples showed roughly two hypercalls per second and no new user-mode

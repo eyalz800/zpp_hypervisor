@@ -131,3 +131,44 @@ subset exceeded its superset by one (45,430 versus 45,429). The reads are
 not atomic; that alone does not prove a wrong stride or mixed binaries,
 despite the diagnostic's wording. That split was not used above. Its
 printed manifest is also truncated; compare the complete deploy manifest.
+
+## The cache boot reaches the same unreturned request
+
+The boot started around 15:19 UTC with `c054545` and `5ac7cac`, loader MD5
+`2ac8432cd5f20272a6eeef00564a2844`, reaches this same chain. Its kernel base
+is `0xfffff8017fc00000`, CR3 `0x1ae000`. The kernel timestamp and image size
+were checked again. A complete module walk with all backlinks validated
+contains 105 images and locates VBoxSup at `0xfffff801149c0000`, size
+`0x12b000`. The same 18 trailing pages are absent and excluded from unwinding.
+
+Of 12 live CPU 0 captures around eleven minutes, nine unwind through
+`ExpUpdateTimerConfigurationWorker+0x1c5`, `ExSetTimerResolution+0xbc`,
+VBoxSup `+0x25d66` and `+0xc051`, then the driver-load/Phase1 chain above.
+Three capture that worker RIP directly. The worker's RSP is
+`0xfffff58e70a07220`; the two VBoxSup frames have RSP
+`0xfffff58e70a07620` and `0xfffff58e70a07650`. Three inconsistent captures
+were discarded. Capture durations were 5–13 ms; they are not atomic.
+
+The reconstructed nonvolatile RBX in the caller names device extension
+`0xffffa30f8beaf1a0`. The resident bytes again load 976,563 ns at `+0xc047`,
+call the granularity routine, and store the result at extension `+0xa8`
+only after return. The live import at VBoxSup `+0x108188` is exactly this
+boot's `nt+0x416570`. Three validated reads around thirteen minutes find
+the grant still zero, resolution count 1, requested/pseudo interval 9,765,
+and clock owner 0. CPU 0 runs Phase1 thread `0xffffa30f894a4040`; CPU 1's
+current thread equals its idle thread. DPC counts advance and queues are
+empty at those instants.
+
+At six minutes no request was active and fresh VTL calls were advancing.
+In the 32.106-second window around ten minutes, CPU 0 has zero fresh VTL
+calls and CPU 1 has 32. CPU 0 spends 70.08% in zpp's handler, 22.85% in
+Hyper-V and 7.07% in Windows. Global epoch bumps remain zero and private
+clears run at 9,669.1/s, so the cache change is exercised. It has not removed
+this timer-return stall. This still does not isolate service cost from
+incorrect virtualization; the guest remains running for later observation.
+
+New artifacts: `cache-live-stack-11min/`, `cache-vbox/`,
+`cache-vbox-unwind-11min.out`, `cache-vbox-return-13min.out`,
+`cache-delta-10min.out`, and `cache-timer-10min.out` in the session directory.
+The resident reader's module-base overwrite and truncated manifest were
+fixed separately in `57fd2ef`; the new delta report reads the full manifest.

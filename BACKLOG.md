@@ -80265,3 +80265,23 @@ L2 7.56%/3.89%. This is active work, not an isolated speedup measurement
 against the old stalled boot. CPU 0 changed threads in the separate validated
 timer sample; DPC counts advance, and no timer-resolution request is active.
 The guest remains running with the watcher resumed. Windows login is unproven.
+
+## 2026-09-11: the cache boot also reaches VBoxSup's unreturned timer request
+
+The six-minute progress did not become a user-mode boot. By ten minutes,
+CPU 0 has zero fresh VTL calls in 32.106 seconds and CPU 1 has 32. The kernel
+resolution count changed from zero to one, with requested/pseudo interval
+9,765. Nine valid live unwinds around eleven minutes recover VBoxSup's first
+`ExSetTimerResolution` call through the worker at `nt+0x30d475`; three
+captures sample that RIP directly. The reconstructed extension is
+`0xffffa30f8beaf1a0`, and three validated reads at thirteen minutes still
+find its grant field zero. CPU 1 is idle, CPU 0 is the Phase1 thread, and
+DPC counts advance. The complete 105-module walk identifies VBoxSup and the
+live call target matches this boot's `ExSetTimerResolution`.
+
+CPU 0's handler share is 70.08% in the ten-minute window, despite zero global
+epoch bumps and 9,669.1 private clears/s. The cache work is exercised but
+does not remove this stall. The guest remains running; the observer has
+resumed. Full addresses, discarded captures and artifacts are appended to
+`docs/2026-09-11-live-timer-return.md` rather than reusing the old boot's
+extension address or treating a repeated sampled RIP alone as proof.
