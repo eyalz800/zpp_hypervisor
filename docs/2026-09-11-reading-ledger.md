@@ -43,6 +43,9 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/scheduler-runnable-predicate.md` (227 lines).
 - `.references/hyperv/scheduler-idle-decision.md` (218 lines).
 - `.references/hyperv/idle-halt-wake-path.md` (278 lines).
+- `.references/hyperv/vpassist-coherency-contract.md` (176 lines).
+- `.references/hyperv/vpassist-coherency-zpp-side.md` (234 lines).
+- `.references/hyperv/vtl1-vpassist-perVP.md` (110 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -98,6 +101,15 @@ Corrections that matter when continuing:
   A halted CPU or old event-queue entries do not establish global system
   idleness or healthy delivery of every source. Revalidate these old
   private Hyper-V layouts and mode-specific paths before a new live read.
+- The VP-assist coherency notes disagree in their headline confidence:
+  one proposes a private-page alias, the later zpp-side note rejects that
+  mechanism against its old code/map. Equal bytes alone do not prove
+  identical physical backing; different bytes from separate live reads
+  can be an intervening update. Validate the complete translations and
+  memory types at one stopped state before calling a coherency defect.
+  Likewise, per-VP allocation and registration code does not exhaust all
+  causes of a later securekernel fault. The notes' rankings and claimed
+  exclusions are not current rig evidence.
 - The AP post-handshake note is an old eight-CPU investigation map, not
   evidence that current per-CPU VMCS/AP startup is broken. The present
   two-CPU stack reaches both Hyper-V and Windows; no change is selected

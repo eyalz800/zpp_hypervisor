@@ -80794,3 +80794,24 @@ monitor and checks process/power state until SCM discovery. See current
 WINDOWS-BOOT-STATUS.md for exact artifact names and remaining breakpoint
 handoff. The hypervisor, full manifest and Windows configuration remain
 unchanged.
+
+## 2026-09-11: SMSS GDB unwinds separate subsystem and PnP waits
+
+The unchanged 19:21 boot continues: smss PID 568 requested autochk,
+second smss PID 724 appeared by 20:33:16, and the complete process count
+reached six at 20:38:59. Services and a verified login remain absent.
+The 20:32:50 GDB capture stopped for 209 ms through detach and walked all
+four smss threads, all Waiting. Its main thread unwinds through
+RtlSleepConditionVariableSRW and SmpWaitForSubSysStartup. The separate
+SmpAsyncMemoryConfiguration worker waits through PnpSerializeBoot on
+PnpSystemDeviceEnumerationComplete; two thread-pool workers are idle.
+Do not conflate that asynchronous PnP wait with the main thread's wait.
+
+Current PE headers, captured code and matched Microsoft executables/PDBs
+validate the complete kernel/user unwinds. A second image capture took
+132 ms through detach; paged-out exception metadata came from the matched
+server images, with current runtime thunk bytes or explicit holes. No
+continuous stall duration, unfinished device or VMM fix is proved.
+The guest remains running with a hardware bugcheck guard and the SCM
+coordinator ready for services.exe. Exact evidence/ownership is in
+docs/2026-09-11-smss-startup-gdb.md and WINDOWS-BOOT-STATUS.md.
