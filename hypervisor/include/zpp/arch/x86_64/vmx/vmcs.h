@@ -442,6 +442,9 @@ inline constinit std::uint64_t vmcs_cache_unarmed{};
 inline constinit std::atomic<std::uint64_t>
     vmcs_cache_bypass_invalidations{};
 
+/** Clears using invalidation of a processor's private VMCS cache row. */
+inline constinit std::atomic<std::uint64_t> vmcs_cache_owned_clears{};
+
 /** Completed emulations that ended STI/MOV-SS blocking; rig evidence. */
 inline constinit std::atomic<std::uint64_t>
     vmcs_interrupt_shadows_cleared{};
@@ -807,6 +810,46 @@ inline void vmcs_cache_forget_current(std::size_t cpu)
 inline int vmclear(void * region)
 {
     vmcs_cache_forget();
+    return vmclear_raw(region);
+}
+
+/**
+ * Clear a VMCS private to the named processor; it must never migrate.
+ *
+ * The per-processor shadow regions satisfy that contract. VMCLEAR changes
+ * the named VMCS, not the ordinary VMCS that was temporarily set aside
+ * while copying the shadow (SDM 27.11.1 and VMCLEAR operation). Discard
+ * that region's row without ending every processor's cache window.
+ * KVM's copy_shadow_to_vmcs12/copy_vmcs12_to_shadow likewise clear the
+ * private shadow and reload the saved ordinary VMCS.
+ *
+ * Generic clears and migration keep using vmclear's global invalidation.
+ * No GS read here: startup callers may not have installed our GS base.
+ */
+inline int vmclear_owned(void * region, std::size_t cpu)
+{
+    if constexpr (vmcs_cache_enabled) {
+        if (cpu >= vmcs_cache_processors) {
+            return vmclear(region);
+        }
+
+        auto physical = *static_cast<const std::uint64_t *>(region);
+        if (0 == physical) {
+            // Zero also identifies rows bound to enlightened pages.
+            return vmclear(region);
+        }
+        for (auto & row : vmcs_cache[cpu]) {
+            if (row.vmcs != physical) {
+                continue;
+            }
+            for (auto & tag : row.tag) {
+                tag = 0;
+            }
+            row.vmcs = 0;
+            row.evmcs = 0;
+        }
+        vmcs_cache_owned_clears.fetch_add(1, std::memory_order_relaxed);
+    }
     return vmclear_raw(region);
 }
 /**

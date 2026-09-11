@@ -801,7 +801,8 @@ void hypervisor::copy_vmcs12_to_shadow(std::size_t cpu)
 
         stamp(42);
 
-        arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
+        arch::x86_64::vmx::vmclear_owned(&this->shadow_vmcs_physical[cpu],
+                                         cpu);
 
         stamp(43);
 
@@ -1015,7 +1016,8 @@ void hypervisor::copy_shadow_to_vmcs12(std::size_t cpu)
 
         stamp(47);
 
-        arch::x86_64::vmx::vmclear(&this->shadow_vmcs_physical[cpu]);
+        arch::x86_64::vmx::vmclear_owned(&this->shadow_vmcs_physical[cpu],
+                                         cpu);
 
         stamp(48);
 

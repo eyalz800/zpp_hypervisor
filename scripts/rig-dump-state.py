@@ -758,6 +758,8 @@ VMCS_GLOBAL_COUNTERS = [
      "rows revalidated after a borrow"),
     (VMX_NS + "vmcs_cache_bypass_invalidations",
      "cached fields discarded by writes during a VMCS borrow"),
+    (VMX_NS + "vmcs_cache_owned_clears",
+     "VMCS clears using processor-local cache invalidation"),
     # Monotonic: the only writer is `fetch_add(1)` in
     # `vmcs_cache_forget`.  It starts at 1, not 0, so a cumulative
     # reading is one high and a *difference* is exact - another reason

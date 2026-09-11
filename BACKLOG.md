@@ -80177,3 +80177,48 @@ not describe this boot: both shadow copies clear their borrowed VMCS on every
 nested round trip. No invalidation policy or optimization flag changed in
 this fix. A more precise policy would have to preserve coherence during
 borrowed-pointer windows as well as obey VMCS ownership.
+
+## 2026-09-11: clearing a private shadow preserves unrelated VMCS rows
+
+The shadow copies now use `vmclear_owned` for their per-CPU shadow region.
+It discards rows naming that region on its owning processor, then executes
+the same hardware VMCLEAR. Both VMPTRLD operations remain. Generic clears,
+initialization and possible migration retain global invalidation. The helper
+requires a region private to the named processor that never migrates; only
+the two shadow-copy sites use it. An out-of-range CPU or physical page zero
+falls back to generic invalidation; zero is also the hardware identity stored
+in enlightened rows, so it must not erase their current-page selection.
+
+This follows SDM 27.11.1's active-VMCS ownership rule and VMCLEAR's operation:
+only the operand's VMCS is cleared, and the current pointer changes only if
+that VMCS was current. KVM `copy_shadow_to_vmcs12` and
+`copy_vmcs12_to_shadow` clear their private shadow and restore the ordinary
+VMCS; `__loaded_vmcs_clear` performs migration cleanup on the owning CPU.
+References were read at `.references/sdm.txt:200441-200488,207802-207824`,
+`.references/kvm/nested.c:1593-1654`, and `vmx.c:779-805`. zpp's shadows are
+separate `shadow_vmcs[cpu]` regions initialized from each element's physical
+address in `setup_vmcs`; this does not generalize to guest VMCS regions.
+
+The preceding borrow-write coherence fix is required: unrelated CPUs can
+write while caching is suspended, and a completed shadow copy no longer
+guarantees a global epoch change. The new atomic `vmcs_cache_owned_clears`
+counter counts calls taking the local invalidation path, not hardware success.
+It is included in the resident delta reader.
+
+Negative control: routing the new helper through the old generic clear
+failed 2 of 60 assertions: the ordinary VMCS and another CPU's VMCS required
+extra VMREADs. Their values remained correct. The implementation preserves
+both caches while forcing a cleared shadow to be read fresh. A final case
+also checks that clearing page zero preserves enlightened-page selection.
+All 63 cache assertions and all 27 rebuilt host checks pass (34.02 s),
+including 219 Python tests. The debug hypervisor and all loaders build;
+ELF invariants and EFI bootability pass. Build switches are unchanged.
+Artifacts: `/tmp/zpp-20260911/owned-clear-{before-tests,after-tests,final-tests,
+debug-build,invariants,bootable}.txt`.
+
+The old interrupt-shadow boot still had three processes after about 54
+minutes. Its final 32.118-second window had zero fresh VTL calls, handler
+shares 69.81%/74.18%, L2 shares 6.72%/6.76%, and 13,239.7 global epoch
+bumps/s. Its interrupt-shadow-clear counter did not move. This is measured
+unnecessary invalidation work, not proof of the stall's cause. Both cache
+changes are ready for deployment; no result from that next boot exists yet.

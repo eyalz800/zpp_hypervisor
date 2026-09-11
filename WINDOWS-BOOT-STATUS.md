@@ -40,6 +40,12 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   reads after another CPU's borrow ends without an epoch change. Three
   assertions fail before the fix and pass after it. This fix is built and
   **not yet deployed**; its counter is `vmcs_cache_bypass_invalidations`.
+- Private shadow clears now invalidate only their owning CPU's rows for
+  that region, preserving unrelated cached fields. Hardware VMCLEAR and
+  pointer restoration remain. The helper is limited to the two shadow-copy
+  sites; generic clears still invalidate globally. This depends on the
+  preceding borrow-write fix and is also **not yet deployed**. All 63 cache
+  assertions pass; `vmcs_cache_owned_clears` measures use on the rig.
 
 All 27 rebuilt host tests passed after these code changes. All 219 Python
 tests, including fragmented replies and incomplete list cases, passed.
@@ -111,6 +117,14 @@ minutes. Before cycling a guest, inspect both its current process list and a
 late counter window. Preserve a progressing guest and measure outstanding
 power requests. Prior runs have died to a power watchdog about 300 seconds
 after arming; a zero count predicts neither a visible login nor survival.
+
+Update before the cache deployment: the interrupt-shadow boot still has
+three processes after about 54 minutes. Its final 32.118-second sample has
+zero fresh VTL calls, handler shares 69.81%/74.18%, and 13,239.7 global
+epoch bumps/s. The process watcher is stopped and the final process walk
+completed. Both cache changes above are validated and ready for the next
+boot. Final evidence is `shadow-processes-final.txt`, `shadow-delta-final.out`
+and `interrupt-shadow-final-watch.txt` under the session artifact directory.
 
 The screen belongs to the passed-through GPU, so QEMU cannot capture it.
 If LogonUI and dwm appear, obtain a contemporaneous screen observation and
