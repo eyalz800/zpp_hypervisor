@@ -150,6 +150,44 @@ void zero_physical_clear_preserves_enlightened_selection()
     check(vx::vmcs_cache_current_enlightened() == 0x4000,
           "clearing physical page zero does not select a hardware VMCS");
 }
+
+void access_rights_reads_follow_the_processors_reserved_bit_behavior()
+{
+    vx::vmcs vmcs;
+    for (auto mask : {0xffffffffu, 0x1f0ffu}) {
+        vx::g_vmwrite_access_rights_mask = mask;
+        for (auto encoding : {field::guest_es_access_rights,
+                              field::guest_cs_access_rights,
+                              field::guest_tr_access_rights}) {
+            select(0, 0x1000);
+            vmcs.write(encoding, 0xffffffffu);
+            check(hardware(encoding) == mask,
+                  "modeled processor applied its access-rights mask");
+            check(
+                vmcs.read(encoding) == hardware(encoding),
+                "cached access rights match the processor after VMWRITE");
+            auto observed_reads =
+                vx::g_vmread_field_count[static_cast<unsigned>(encoding)];
+            check(vmcs.read(encoding) == mask,
+                  "repeated access-rights read keeps the observed value");
+            check(vx::g_vmread_field_count[static_cast<unsigned>(
+                      encoding)] == observed_reads,
+                  "the processor's access-rights value can be cached");
+            vmcs.write(encoding, 0x10000);
+            auto before =
+                vx::g_vmread_field_count[static_cast<unsigned>(encoding)];
+            check(vmcs.read(encoding) == 0x10000,
+                  "defined unusable-segment bit is retained");
+            check(vx::g_vmread_field_count[static_cast<unsigned>(
+                      encoding)] == before,
+                  "writes without reserved bits still fill the cache");
+        }
+        vmcs.write(field::guest_gdtr_limit, 0xffffffffu);
+        check(vmcs.read(field::guest_gdtr_limit) == 0xffffffffu,
+              "other 32-bit fields retain their full width");
+    }
+    vx::g_vmwrite_access_rights_mask = 0xffffffffu;
+}
 } // namespace
 
 int main()
@@ -160,6 +198,7 @@ int main()
     exit_invalidates_only_the_current_vmcs();
     clearing_a_private_shadow_preserves_unrelated_rows();
     zero_physical_clear_preserves_enlightened_selection();
+    access_rights_reads_follow_the_processors_reserved_bit_behavior();
     std::println("vmcs_cache: {} checks, {} failures", checks, failures);
     return failures == 0 ? 0 : 1;
 }

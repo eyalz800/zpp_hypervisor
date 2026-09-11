@@ -769,6 +769,8 @@ VMCS_GLOBAL_COUNTERS = [
      "cached fields discarded by writes during a VMCS borrow"),
     (VMX_NS + "vmcs_cache_owned_clears",
      "VMCS clears using processor-local cache invalidation"),
+    (VMX_NS + "vmcs_cache_reserved_bit_writes",
+     "cache fills withheld for writes with processor-dependent reserved bits"),
     # Monotonic: the only writer is `fetch_add(1)` in
     # `vmcs_cache_forget`.  It starts at 1, not 0, so a cumulative
     # reading is one high and a *difference* is exact - another reason

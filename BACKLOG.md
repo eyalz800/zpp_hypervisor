@@ -80285,3 +80285,42 @@ does not remove this stall. The guest remains running; the observer has
 resumed. Full addresses, discarded captures and artifacts are appended to
 `docs/2026-09-11-live-timer-return.md` rather than reusing the old boot's
 extension address or treating a repeated sampled RIP alone as proof.
+
+## 2026-09-11: do not cache an assumed result of reserved access-rights writes
+
+The VMCS cache's write-through path normalized only field width. Intel SDM
+27.4.1 and Table 27-2 explicitly permit processors to ignore nonzero access-
+rights bits 11:8 and 31:17. KVM `handle_vmwrite` masks ES through TR access
+rights with `0x1f0ff`. A write of `0xffffffff` therefore left that value in
+our cache while KVM stored `0x1f0ff`. Some processors retain those bits, so
+unconditionally masking our input would change their behavior too.
+
+Successful writes with these reserved bits set now discard their cache slot
+instead of filling it from the requested operand. The next read obtains the
+processor's value and can cache that value normally. The hardware write
+operand is unchanged. Ordinary access-rights writes still fill the cache;
+GDTR/IDTR limits are separate 32-bit fields and retain their full width.
+`vmcs_cache_reserved_bit_writes` counts withheld fills, not hardware bit
+clearings or incorrect values consumed. It is in the resident delta report.
+
+The shim now models either processor behavior. The negative control rebuilt
+95 cache checks and failed exactly the three ES/CS/TR comparisons under the
+clearing model. With the fix and additional repeated-read checks, all 107
+cache assertions and all 27 rebuilt host tests pass (34.54 seconds), including
+224 Python tests. The debug loaders, ELF invariants and bootability check
+pass with unchanged switches. Artifacts are
+`/tmp/zpp-20260911/access-rights-cache-{before-tests,after-tests,debug-build,invariants,bootable}.txt`.
+This is a reproduced cache defect, not yet a demonstrated cause of the live
+Windows stall. No general VMWRITE elision has been introduced.
+
+The current cache boot's 18-minute phase sample accounts for the shadow
+collection cost: CPU 0 `copy_shadow_to_vmcs12` is 18.2% of its handler cycles,
+with field reads 13.4%; the two private VMCLEAR operations are about 1.5%
+each. CROSS rows overlap their parent and must not be added again. The
+20-minute vector sample stages D1 at 1,021.5/s on CPU 0 and 574.5/s on CPU 1.
+CPU 0 has no VINA activity; CPU 1 has 15 dropped/flag-cleared events over
+30.020 seconds. Staging counts do not prove ISR arrival. The entry-vector
+census is compiled out, so its zeros cannot settle delivery. These results
+repeat prior stalled-boot observations rather than identifying a new cause.
+Artifacts: `cache-delta-phases-18min.out`, `cache-vector-samples.json` and
+`cache-vectors-20min.out` under the session directory.

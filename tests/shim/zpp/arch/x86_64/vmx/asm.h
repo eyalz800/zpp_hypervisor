@@ -86,12 +86,19 @@ inline int vmread(std::uint64_t field, void * out)
  */
 inline std::uint64_t g_vmwrite_field_count[0x8000]{};
 
+// SDM 27.4.1 permits processors to clear reserved segment-access bits.
+// KVM handle_vmwrite uses 0x1f0ff. Fixtures can select either behavior.
+inline std::uint32_t g_vmwrite_access_rights_mask{0xffffffffu};
+
 inline int vmwrite(std::uint64_t field, std::uint64_t value)
 {
     if (!g_vmcs_valid || (field >= 0x8000)) {
         return 1;
     }
     g_vmwrite_field_count[field] = g_vmwrite_field_count[field] + 1;
+    if (field >= 0x4814 && field <= 0x4822 && (field & 1) == 0) {
+        value &= g_vmwrite_access_rights_mask;
+    }
     g_vmcs_loaded[field] = value;
     return 0;
 }

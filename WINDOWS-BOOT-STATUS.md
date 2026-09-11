@@ -52,6 +52,13 @@ KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
   The manifest reader now requires the full terminated string; its old
   256-byte prefix omitted `vcache` and other later switches. Six regression
   assertions failed before these reader fixes and pass after them.
+- The VMCS cache now withholds fills for access-rights writes whose reserved
+  bits the processor may discard (SDM 27.4.1; KVM `handle_vmwrite`). The
+  next read gets the processor's actual value, preserving both permitted
+  processor behaviors. Three regression comparisons failed before the fix;
+  all 107 cache checks now pass. The new counter is
+  `vmcs_cache_reserved_bit_writes`, also available in delta reports.
+  This change has not been deployed yet and is not a demonstrated stall cause.
 
 All 27 rebuilt host tests passed after these code changes. All 224 Python
 tests, including fragmented replies and incomplete list cases, passed.

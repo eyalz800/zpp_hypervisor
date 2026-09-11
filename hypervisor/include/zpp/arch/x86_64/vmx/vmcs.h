@@ -445,6 +445,10 @@ inline constinit std::atomic<std::uint64_t>
 /** Clears using invalidation of a processor's private VMCS cache row. */
 inline constinit std::atomic<std::uint64_t> vmcs_cache_owned_clears{};
 
+/** Cache fills withheld because VMWRITE may discard reserved AR bits. */
+inline constinit std::atomic<std::uint64_t>
+    vmcs_cache_reserved_bit_writes{};
+
 /** Completed emulations that ended STI/MOV-SS blocking; rig evidence. */
 inline constinit std::atomic<std::uint64_t>
     vmcs_interrupt_shadows_cleared{};
@@ -1039,6 +1043,23 @@ public:
                             : ((0 == width)   ? (value & 0xffffull)
                                : (2 == width) ? (value & 0xffffffffull)
                                               : value);
+
+                    // SDM 27.4.1 / Table 27-2 permits processors to
+                    // discard AR bits 11:8 and 31:17 on VMWRITE. KVM's
+                    // handle_vmwrite masks these fields with 0x1f0ff.
+                    // Other processors may retain them: preserve the
+                    // write operand, but ask hardware on the next read.
+                    if (encoding >= static_cast<std::uint64_t>(
+                                        field::guest_es_access_rights) &&
+                        encoding <= static_cast<std::uint64_t>(
+                                        field::guest_tr_access_rights) &&
+                        (encoding & 1) == 0 &&
+                        (stored & ~0x1f0ffull) != 0) {
+                        current.tag[slot] = 0;
+                        vmcs_cache_reserved_bit_writes.fetch_add(
+                            1, std::memory_order_relaxed);
+                        return;
+                    }
 
                     current.tag[slot] =
                         static_cast<std::uint64_t>(field) + 1;
