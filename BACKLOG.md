@@ -81498,3 +81498,27 @@ improvement. GDB ownership36038/36039 →38977/38978 →38977/39876 is serialize
 The audio probe starts12:18:51 with current PE-validated Intel/WDF bases;
 its future bugcheck capture also includes both CPUs and any running power
 worker's actual stack. Current addresses and artifacts are in status.
+
+## 2026-09-12: separate RIP profiling from entry event handling
+
+`ZPP_CENSUS_ENTRY_RIP` defaults ON and gates only the interrupted/quiet/user
+RIP census block. OFF reports `entryrip=0 userip=0` in the manifest. Gating
+the whole entry recorder or disabling VTL tracing was rejected: both also
+control interrupt/VTL behavior. Enabled profiling keeps actual VMCS reads;
+using remembered writes would conceal state-maintenance errors. No runtime
+reader consumes the gated tables to control the guest.
+
+Two new native assertions fail before the gate and pass after it: disabled
+censuses take no samples and issue no RIP/CR3 VMREADs. Staged interrupt data
+and its delivery counter survive. All27 rebuilt host tests pass. An isolated
+29-unit `-g -O2` candidate passes ELF/bootability checks; its loader embeds
+the exact ELF once at7000. Manifest changes are limited to the new gate and
+effective user census. Candidate loader SHA256
+1378d7654ccbc157ae60c5d93cd40188fa86dd041447568745be967f17878494.
+It is not deployed; cost and boot outcome remain unmeasured. Logs and full
+configuration remain outside Git in `/tmp/zpp-20260912-audio-sync/census-off/`.
+
+Meanwhile the unchanged repeat completes84 startup audio calls, then a
+serialized GDB handoff limits full capture to power workers. Eleven such
+calls, their waits and outer returns complete successfully, with no abandoned
+pairs. Current ownership, timestamps and measurement limits are in status.

@@ -146,6 +146,9 @@ extern "C" [[gnu::used, gnu::retain]] constinit const char
         // report their absence by looking odd.
         ' ', 'c', 'l', 'o', 's', 'e', 'd', '=',
         digit(nested_vmx::census_closed),
+        // A disabled entry census also disables its dependent user census.
+        ' ', 'e', 'n', 't', 'r', 'y', 'r', 'i', 'p', '=',
+        digit(nested_vmx::census_entry_rip),
         // The user-mode (CR3, instruction pointer) census. On by
         // default, and the field is here in the first commit that has
         // the switch - which is the whole lesson of `windowtpr=`, which

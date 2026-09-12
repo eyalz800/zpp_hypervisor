@@ -9839,8 +9839,8 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     // processor beyond `max_cpus` is absent from every census in this
     // function alike, which is at least self-consistent.
     //
-    // **The `guest_rip` read below is deliberate and stays. Do not
-    // replace it with `hot_state_saved[cpu][0]`** - the value is
+    // When the RIP census is enabled, read the actual field. Do not
+    // replace it with `hot_state_saved[cpu][0]` - the value is
     // available there, it is one VMREAD per second-level entry, and it
     // was examined for exactly that and refused. Three reasons, any one
     // sufficient:
@@ -9864,7 +9864,7 @@ void hypervisor::record_l2_entry_event(std::size_t cpu)
     //   the current investigation, not a closed one - they are what
     //   named the wedge's hot addresses. A saving that costs accuracy
     //   here is a bad trade at any price.
-    if (cpu < max_cpus) {
+    if constexpr (nested_vmx::census_entry_rip) {
         // One read, used three times. It was two reads of the same field
         // in two arms before, so hoisting it changes no behaviour and
         // costs no VMREAD - and the comment above still holds: this is

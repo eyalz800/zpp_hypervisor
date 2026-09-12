@@ -986,6 +986,23 @@ inline constexpr bool census_exits = (0 != ZPP_CENSUS_EXITS);
 inline constexpr bool census_closed = (0 != ZPP_CENSUS_CLOSED);
 
 /**
+ * Record instruction pointers on second-level entries. This controls only
+ * the interrupted/quiet RIP tables and their dependent user address-space
+ * census. Interrupt injection, VTL tracking and delivery counters remain
+ * outside the gate. Keep actual VMCS reads when profiling is enabled;
+ * remembered write values would hide errors in VMCS state maintenance.
+ *
+ * Default on preserves existing diagnostics. Disable for an experiment
+ * using debugger captures instead of RIP sampling. The manifest reports
+ * entryrip=0 and the effective userip=0; zero tables then mean unobserved.
+ */
+#ifndef ZPP_CENSUS_ENTRY_RIP
+#define ZPP_CENSUS_ENTRY_RIP 1
+#endif
+
+inline constexpr bool census_entry_rip = (0 != ZPP_CENSUS_ENTRY_RIP);
+
+/**
  * Whether the user-mode (CR3, instruction pointer) census runs. **On by
  * default**, which is unusual here and argued rather than assumed.
  *
@@ -1039,7 +1056,8 @@ inline constexpr bool census_closed = (0 != ZPP_CENSUS_CLOSED);
 #define ZPP_CENSUS_USER_RIP 1
 #endif
 
-inline constexpr bool census_user_rip = (0 != ZPP_CENSUS_USER_RIP);
+inline constexpr bool census_user_rip =
+    census_entry_rip && (0 != ZPP_CENSUS_USER_RIP);
 
 /**
  * Count how often the guest hypervisor writes each entry of

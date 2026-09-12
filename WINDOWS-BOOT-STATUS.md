@@ -75,16 +75,32 @@ two CPUs, and the launcher are unchanged. Current NT base is
 `fffff801b3e00000`, System CR3 `1ae000`, zpp module `66d61000`, singleton
 `682f3000`; kernel PE and deployed ELF fingerprints validate. Sole monitor
 watcher36036 began12:05:17 in `zpp-rig-20260911:audio-watch`. GDB
-manager38977/client39876 now owns the audio probe in `audio-gdb-v2`, started
-12:18:51 after its startup guard38978 exited. Current audio module
+manager42485/client42491 now owns the audio probe in `audio-gdb-v3`, started
+12:26:22 after manager38977/client39876 exited. Current audio module
 `fffff8014b200000` (IntcAudioBus, timestamp5ce754c1,size46000) and WDF
 `fffff80146390000` (timestamp468042e6,sizef0000) validate. Read current
-ownership from `/tmp/zpp-20260912-audio-sync/gdb-v2/manager.json`. Audio
-call/wait/return coverage is armed; no audio call has hit yet. A future
+ownership from `/tmp/zpp-20260912-audio-sync/gdb-v3/manager.json`. The initial
+probe completed84 non-power-worker calls before its15s capture budget.
+The replacement filters for power workers:11 calls and their waits/returns
+completed12:37:53–12:38:20, all status0, no abandoned pairs. Wait arguments
+were900ms for nine calls and100ms for two; observed host wait intervals
+were65ms–1.576s, including debugger time, not guest execution durations.
+Winlogon1116/services1128 are present by12:39:10. No armed power timer remains
+at12:40:11. Audio call/wait/return coverage remains armed. A future
 bugcheck capture includes power-worker states/stacks and both CPUs' actual
 registers, including any running power worker's current stack. The probe bounds cumulative
 capture time and retains the crash breakpoint if audio capture is exhausted.
 No physical sign-in has been verified on this repeat.
+
+An optional RIP-census gate is prepared locally, **not deployed**. Default
+ON preserves diagnostics; OFF removes the interrupted/quiet/user profiling
+reads and table updates. VTL/interrupt behavior remains outside the gate.
+All27 rebuilt host tests pass; the regression previously failed its two
+census/VMREAD assertions while entry-event delivery passed. The isolated
+optimized candidate passes ELF and bootability checks, embeds its exact ELF
+once, and differs in manifest only by new `entryrip=0` and effective
+`userip=0`. Build/capture artifacts stay in `/tmp/zpp-20260912-audio-sync/`.
+No execution-cost improvement or stable boot has yet been measured.
 
 At12:15:45–46, a one-shot hardware probe catches the actual timer-worker
 epilogue, RET and caller (nt+30d475 → 30d487 → 30e265), all on thread
@@ -104,8 +120,8 @@ was free. A fresh read-only ESP mount verified the same optimized loader
 and Limine; GPT/ESP/NTFS anchors passed. No Windows settings changed.
 
 **Previous boot: the optimized debug comparison began at 10:50:25 UTC,
-reached sign-in, and crashed at 11:48:42 UTC.** The guest is
-paused (shutdown); watcher12724 and manager27043/client27045 have exited.
+reached sign-in, and crashed at 11:48:42 UTC.** The guest was preserved
+paused (shutdown) before teardown; watcher12724 and manager27043/client27045 exited.
 The actual bugcheck names PDO `ffff9e8129116dd0` and blocked IRP
 `ffff9e8129d65bc0`. Postmortem IRP layout and device-chain checks identify
 `IntcAudioBus` as the enumerator, `IntcAzAudAddService` as the current holder,

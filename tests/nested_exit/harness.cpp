@@ -8632,6 +8632,45 @@ static void test_the_exit_information_fields_the_sdm_leaves_undefined()
     hv().running_l2[cpu] = false;
 }
 
+static void test_entry_events_without_rip_census()
+{
+    std::println(
+        "\n-- disabling the RIP census preserves entry events --");
+    zpp::arch::x86_64::context registers{};
+    asked_controls asked;
+    check(compose(asked, registers).has_value(), "compose census fixture");
+
+    constexpr std::uint64_t event = (1ull << 31) | 0xe1;
+    hv().vtl_half_mark_kind[cpu] = 0;
+    hv().vmcs.write(field::vm_entry_interruption_information_field, event);
+    hv().vmcs.write(field::guest_rip, 0x7ff6'0000'1000ull);
+    hv().vmcs.write(field::guest_cr3, 0x1234'5000ull);
+    hv().interrupted_samples[cpu] = 0;
+    hv().quiet_samples[cpu] = 0;
+    hv().user_rip_samples[cpu] = 0;
+
+    auto & reads = zpp::arch::x86_64::vmx::g_vmread_field_count;
+    auto rip_reads = reads[static_cast<std::uint64_t>(field::guest_rip)];
+    auto cr3_reads = reads[static_cast<std::uint64_t>(field::guest_cr3)];
+    auto deliveries = hv().l2_given_vector[cpu][0xe1];
+    hv().record_l2_entry_event(cpu);
+
+    check(hv().vmcs.read(field::vm_entry_interruption_information_field) ==
+                  event &&
+              hv().l2_given_vector[cpu][0xe1] == deliveries + 1,
+          "entry event and its delivery count survive without RIP "
+          "profiling");
+    check(hv().interrupted_samples[cpu] == 0 &&
+              hv().quiet_samples[cpu] == 0 &&
+              hv().user_rip_samples[cpu] == 0,
+          "disabled RIP censuses do not record kernel or user samples");
+    check(reads[static_cast<std::uint64_t>(field::guest_rip)] ==
+                  rip_reads &&
+              reads[static_cast<std::uint64_t>(field::guest_cr3)] ==
+                  cr3_reads,
+          "disabled RIP censuses issue no RIP or CR3 VMREADs");
+}
+
 int main()
 {
     // The real host page table, filled with an identity mapping over the
@@ -8678,6 +8717,7 @@ int main()
     test_cr8_encoding_four();
     test_emulated_cr8_retires_before_reflecting();
     test_the_exit_information_fields_the_sdm_leaves_undefined();
+    test_entry_events_without_rip_census();
 
     // Last, because it resets the shim's region table. See its comment.
     test_the_control_cache_owns_the_ept_pointer();
