@@ -76,8 +76,27 @@ Avoiding the external hub did not eliminate the power failure. The user
 now confirms **“driver power state failure”** on the physical screen.
 No sign-in screen or desktop has been verified.
 
-QEMU remains **paused (shutdown)**; preserve this guest until its remaining
-evidence is archived. Kernel **fffff801e1c00000**, system CR3 **1ae000**,
+That stopped guest was archived (1,774 files, SHA-256 manifest) and torn
+down normally. NVMe returned and 15,476 MB RAM was free. The unchanged
+loader/launcher and disk anchors passed a fresh read-only mount check.
+
+A fresh same-configuration **GDB timer-stop run began 07:22:39 UTC
+September 12**. QEMU is running, all startup channels answered, and the
+actual five-device direct USB topology is unchanged. Module 66d47000,
+singleton 682f3000, **new Windows base fffff804c5800000**, size 1450000.
+The kernel PE maps through CR3 1ae000; first process/module list attempts
+were too early (null list heads), explicitly rejected, and will be retried.
+The sole monitor owner is `timer-probe-watch` in tmux session
+`zpp-rig-20260911`. `timer-probe-gdb` owns the manager and exactly one GDB
+child. It initially guards KeBugCheckEx, then hands off once matching
+USB/WDF images validate to the timer-stop/flush entry-return probes plus
+the bugcheck guard. Both observe until real terminal state or explicit
+handoff; neither has the preceding two/three-hour expiry. All new state,
+PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`.
+No C++ change, build, deployment or Windows configuration change was made.
+
+Prior crashed-run coordinates follow; do not use them for the live probe.
+Kernel **fffff801e1c00000**, system CR3 **1ae000**,
 module **66d47000**, singleton **682f3000** are validated for this run.
 Final complete walks contain 34 processes, including LogonUI PID 1440 and
 dwm PID 1452, and 177 System threads. All raw System stacks are saved.

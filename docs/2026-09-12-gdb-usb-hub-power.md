@@ -244,3 +244,24 @@ replacement `hub-direct-final-resident-validated-selector.txt` uses CPU 1.
 Generic resident stack scans remain heuristic and are not the checked
 unwind above. Its broad region-path warning and compiled-out census
 zeros do not establish defects.
+
+
+The direct-port crash's manifest now hashes **1,774 files** (18,729,063
+bytes): `hub-direct-evidence-sha256.json`. Supported teardown returned
+NVMe and 15,476 MB free RAM. The first preflight assumed the ESP was
+mounted after teardown; it was already unmounted, so the unmount command
+refused. After checking actual mounts, the fresh read-only mount succeeded.
+The loader/launcher are identical, Limine matches, and GPT/NTFS/ESP anchors
+validate. The mount was unmounted before the next boot.
+
+The next same-configuration run began **07:22:39 UTC September 12**, with
+hardware timer-stop/flush entry-return probes prepared and observers that
+stay alive until a terminal state or explicit handoff. All three startup
+channels and actual direct USB topology validate. Kernel base is now
+**fffff804c5800000**. Its PE maps via 1ae000; the first process/module list
+heads were not initialized and those attempts were rejected. New artifacts
+and ownership are in `/tmp/zpp-20260912/timer-probe-*` and current STATUS.
+The new temporary probe scripts passed syntax checks; actual breakpoint
+hits remain to be demonstrated. A concurrent unrelated return abandons a
+pair explicitly. Positive guard timeouts remain supported, but this run
+uses timeout zero for an indefinite guard. No source/binary/Windows change.
