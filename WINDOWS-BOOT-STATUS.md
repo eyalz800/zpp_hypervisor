@@ -74,22 +74,32 @@ ESP verification again matched the loader, Limine, launcher and disk anchors.
 New serial/DWARF resolve module `66d61000`, singleton `682f3000`; NT is now
 `fffff800ab200000`, PE-validated through System CR3 `1ae000`.
 
-Sole monitor watcher 7302 and GDB manager 7304/client 7308 started at 16:03:42.
-At 16:04 the complete process walk includes SMSS and autochk. The crash guard
-is armed. Sources and captures are under `/tmp/zpp-20260912-power-dispatch-run/`;
-consult `gdb/manager.json` for current GDB ownership.
+LogonUI 1496 and dwm 1504 appear at 16:14:53 (15m56s). This repeat has no
+new physical screen confirmation. At 16:23:44 it remains running with 34
+processes and no armed power request. WerFault 824's checked command line
+is `WerFault.exe -k -c`, with no target PID; its presence does not identify
+a new process crash.
 
-The manager can attach to an already-aged power request of any device type,
+Sole monitor watcher 7302 remains active. At 16:23:50 persistent GDB manager
+12957/client 12960 replace the earlier manager/client after their verified
+exit. Consult `gdb-persistent/manager.json` for current ownership. Sources
+and captures remain under `/tmp/zpp-20260912-power-dispatch-run/`.
+
+The manager can observe an already-aged power request of any device type,
 rechecking its IRP/watchdog-start identity and unique worker. Hardware State
 and worker-IRP write watchpoints remain beside the crash guard. USB/other
 requests trace the dispatcher epilogue and actual caller repeatedly; audio
 requests watch the WDF wait return. Thread/RSP pairing and unrelated hits
 remain explicit. State and return captures are bounded, and the manager
 admits further requests while accumulated worker captures remain below 10 s.
-Crash captures now retain up to 12 KiB of each CPU's actual address-space
-stack, with missing pages explicit. These probes are prepared but no aged
-worker has been observed yet; Windows settings and the deployed binary are
-unchanged.
+Crash captures retain up to 12 KiB of each CPU's actual address-space stack,
+with missing pages explicit. Initial audio and USB candidates were already
+absent at worker attachment (16:10:08 and 16:20:41), so neither armed a State
+watchpoint or captured completion. The persistent client now receives a
+request and arms probes at its first stop, eliminating detach/resume/reattach
+between guard and worker observation. It also returns to guard mode in place.
+Current PE and probe bytes validate; no request has exercised this new path
+yet. Windows settings and the deployed binary are unchanged.
 
 **The unchanged 14:56:17 UTC repeat crashed at 15:36:16 with 0x9F/3.**
 GDB captured bugcheck entry in 131.2 ms. This request belongs to the virtual

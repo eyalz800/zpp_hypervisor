@@ -81645,3 +81645,17 @@ With that correction, 26 frames reach null against current code/metadata.
 The next GDB experiment follows the shared flush/dispatcher path and actual
 worker transitions. Neither those post-crash stacks nor a sibling CPU stopped
 in a VMREAD identify the delay's cause. All raw evidence stays outside Git.
+
+The unchanged 15:58:57 repeat reaches LogonUI/dwm at 16:14:53. Its first
+aged audio and USB requests are absent at the atomic worker-attachment
+snapshots, so no completion or State transition is observed. The serial
+handoff included a detach/resume/reattach gap; attributing their disappearance
+to GDB was rejected because the completion itself was not captured.
+
+At 16:23:50 a persistent GDB client replaces that handoff mechanism. The
+manager delivers an exact IRP/start identity, interrupts the existing client,
+and that same stop revalidates the request and arms hardware State/IRP/return
+probes. Request release returns to the crash guard without detaching. Current
+PE and probe bytes validate; the probe awaits its first aged request. This
+closes a capture gap without changing the guest or assuming that debugger
+interrupts are unobservable. All sources and captures remain outside Git.
