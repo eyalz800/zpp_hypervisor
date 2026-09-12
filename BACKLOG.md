@@ -81338,3 +81338,29 @@ Artifacts `/tmp/zpp-20260912-repeat-dispatch/{smss-676,
 smss-unwind-validation,gdb-after-smss}/` and associated source scripts.
 The unchanged6adda123 hypervisor remains deployed; the optimized debug
 candidate remains prepared. No Windows settings, source code or build change.
+
+## 2026-09-12: PnP resumes; repeated USB dispatcher returns captured
+
+The09:29:15 unchanged boot's10:34:41 GDB capture identifies active
+PnpDeviceActionThreadffffdb0a8fb85040 on CPU1 and both SMSS threads waiting
+on the same enumeration event. No Running thread is unwound from saved KSP.
+At10:40:30 the event is signaled; GDB10:40:31 pairs a hypercall-page RET with
+HvlSwitchToVsmVtl1+ab in SMSS676. Its checked kernel prefix is secure image
+fixups/system-image loading, stopping at win32k.sys without its metadata.
+CSRSS928 appears10:40:55. No verified login or desktop.
+
+Two complete USB timer-stop cycles10:40:41–43 each contain six actual
+matched dispatcher returns, including affinity calls on both CPUs as the
+same worker migrates. Both outer calls return. Earlier v6 records one
+complete and one explicitly abandoned cycle; no cross-thread return claim.
+All79 requested code/unwind/pdata ranges match. The new instrument closes
+the previous first-dispatch-only coverage gap; the prior boot's later
+311-second outstanding flush still needs explanation.
+
+Current manager9429/GDB9431, state gdb-with-vtl-ret/manager.json; watcher89509.
+The325-file completed archive and detailed evidence are documented in
+`docs/2026-09-12-gdb-usb-hub-power.md`. A42.2-second baseline cost window is
+recorded in the optimized candidate note; the candidate remains undeployed.
+All85 direct hyperv reference Markdown files have been read, with later
+corrections retained in the reading ledger. The entire recursive corpus
+and full80,000-line backlog are not claimed read. No C++/Windows change.

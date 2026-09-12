@@ -87,13 +87,12 @@ and122 modules through10:14. USB/WDF are discovered10:15:18 in a complete
 matching current PE sizes/stamps. V5 starts10:15:20. No verified
 sign-in/desktop.
 
-Exactly one monitor watcher **89509** and current GDB manager **1329**
-run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-smss`.
-Current v5 GDB is **2398**; confirm later owners from
-`gdb-after-smss/manager.json`. Its initial guard1331 exited before USB tracing.
-Earlier94597/94598 exited before the SMSS capture and restoration. Earlier89511/89512 and93523/93524 exited
-before their replacements; the clock/lock capture clients also exited. The manager has handed off to v5, which follows repeated dispatchers
-inside each flush. It adds
+Exactly one monitor watcher **89509** and current GDB manager **9429**
+run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-vtl-ret`.
+Current v7 GDB is **9431**; confirm later owners from
+`gdb-with-vtl-ret/manager.json`. Earlier1329/2398,7786/7788 and8502/8504
+exited before replacement. v7 retains repeated dispatcher tracing and has
+completed its one-shot hypercall RET/caller observation. The manager adds
 SCM tracing after current services.exe discovery when no paired call is
 recorded active. Handoff races remain explicitly unpaired; never infer a
 return across a gap. New artifacts: `/tmp/zpp-20260912-repeat-dispatch/`.
@@ -134,6 +133,26 @@ DWARF. Both artifact checks pass and all27 rebuilt host tests pass with
 4,887,040 bytes; exact embedded ELF verified. Details and reproduction:
 [optimized candidate](docs/2026-09-12-optimized-debug-candidate.md).
 The current unchanged repeated-dispatch boot remains the observation run.
+
+At10:34:41 a57.996-ms GDB capture identifies active PnpDeviceActionThread
+**ffffdb0a8fb85040**, current on CPU1. Its Running stack is excluded because
+CPU1's captured registers are in zpp. Both SMSS552/676 wait on the same
+unsignaled enumeration-complete event. By10:40:30 that event is signaled1
+with an empty waiter list. At10:40:31 GDB follows an actual hypercall-page
+RET into **HvlSwitchToVsmVtl1+ab**, same SMSS676 thread and RSP+8,
+10.893-ms continue-to-stop. Its checked kernel prefix runs through secure
+image fixups and system-image loading, then stops at win32k.sys where
+current unwind metadata has not been captured. CSRSS928 appears10:40:55;
+six processes through10:43, no verified login.
+
+Repeated-dispatch coverage now has actual hardware hits: two complete USB
+timer-stop calls10:40:41–43, each with six matched dispatcher RET/caller
+pairs, including both affinity calls and CPU0-to-CPU1 migration of the same
+worker. Both outer flushes and USB calls return. v6 earlier has one complete
+call and one explicitly abandoned cycle after another thread hits the
+shared breakpoint. These successes do not explain the preceding boot's
+later311-second outstanding flush. See the USB investigation note's latest
+entry for intervals, validation and the325-file completed-evidence archive.
 
 
 The **direct-port USB experiment crashed with 0x9F/3**. It began at

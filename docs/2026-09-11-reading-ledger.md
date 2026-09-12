@@ -96,6 +96,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/zpp-force-infrastructure.md` (410 lines).
 - `.references/hyperv/nested-advertisement-levers.md` (960 lines).
 - `.references/hyperv/securekernel-image-copy-and-handles.md` (831 lines).
+- `.references/hyperv/symbols.md` (all 2,142 lines).
+- `.references/hyperv/msix-enable-gate.md` (all 2,108 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -449,7 +451,23 @@ Corrections that matter when continuing:
   RIP is benign or that every pending interrupt is delivered there. MOV CR8
   and POPFQ must not be assumed to create STI's one-instruction shadow.
 
-Partial current reads: `.references/hyperv/symbols.md` lines1–475.
+All 85 Markdown files directly under `.references/hyperv/` have now been
+read. This does not cover the entire recursive reference corpus or every
+repository Markdown file.
+
+- The symbol map retains contradicted earlier layouts and RVAs beside later
+  corrections. Matching a PDB GUID does not validate every live code byte.
+  A last recorded VMX instruction does not distinguish failed entry from
+  successful entry followed by an exit and teardown.
+- The MSI-X gate note's nonnull thunks and feature flags do not prove that a
+  particular device completed interrupt mapping. Global last-error records
+  can describe another operation. Multiple pending vectors, non-atomic
+  bitmap mismatches and aggregate EOI counts do not establish duplicate
+  injection; the clock-double-injection note retracts its original claim.
+- An interrupt-unmasking address or a plausible return address above RSP
+  does not measure continuous residence or validate a call chain. Lazy-EOI
+  grant state does not measure aggregate cost or establish a visible login.
+  Historical guest writes and feature-disable recipes remain unapplied.
 
 Known incomplete large reads include `BACKLOG.md` (over 80,000 lines;
 selected relevant ranges and the current tail have been read). Many other

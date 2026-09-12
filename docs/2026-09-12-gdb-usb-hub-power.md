@@ -779,3 +779,78 @@ Artifacts `/tmp/zpp-20260912-repeat-dispatch/{smss-676,
 smss-unwind-validation,gdb-after-smss}/` and associated source scripts.
 The unchanged6adda123 hypervisor remains deployed; the optimized debug
 candidate remains prepared. No Windows settings, source code or build change.
+
+## September12 10:34–10:43: PnP progress and repeated dispatcher returns
+
+The unchanged09:29:15 boot remains running. At10:34:41 a scripted GDB
+capture takes56.58ms,57.996ms through detach. PnpDeviceActionThread is
+**ffffdb0a8fb85040**, System, State2, current on CPU1. Current action-worker
+code contains the RIP-relative XCHG to the same global atnt+e66360.
+CPU1 registers are in zpp, so the worker's saved Running KSP is excluded.
+The two event waiters are SMSS552/threadffffdb0a8fc36080 and
+SMSS676/threadffffdb0a8fc56080, both Waiting with ContextSwitches2.
+Their active wait blocks name PnpSystemDeviceEnumerationComplete, Signal0.
+Both checked kernel stacks run through PnpSerializeBoot/NtSerializeBoot to
+their user transitions; their user stacks are not part of this capture.
+
+A v6 probe adds a one-shot clock entry while retaining USB/crash probes,
+never exceeding three hardware breakpoints. The clock entry has no hit
+before10:40:30; it is temporarily disarmed during USB calls, so this is not
+continuous clock coverage or proof of clock absence. At10:39:38 an unrelated
+thread's dispatcher hit drops the inner probe, then another thread's flush
+return abandons the whole cycle. No return is inferred for that call.
+A10:39:39 call completes despite an inner different-thread hit: outer flush
+continue-to-stop interval sum85.717ms, whole timer-stop host interval410.911ms
+including debugger work. Raw events preserve every abandoned pairing.
+
+A30.13-ms non-atomic resident read locates cached/previously flushed VTL
+states in the hypercall page atfffff8036e7f0000. Offsets and widths are
+resolved from the deployed ELF, and serial validates this boot's base.
+Retired initial regions contain invalid/reused bytes and supply no state
+claim. A later stack read at a cached RSP is only a location lead, not an
+unwind or actual execution context. The current page bytes show RET at+1c.
+
+v7 replaces the unused clock probe with a one-shot RET/caller pair. At its
+10:40:30 initialization the enumeration event is Signal1 and its wait list
+is empty. GDB actually stops10:40:31 atfffff8036e7f001c and then
+**nt+6a774b HvlSwitchToVsmVtl1+ab**, same SMSS676 thread, RSP+8.
+Continue-to-stop10.893ms; captures26.262/22.955ms. This is a new call after
+SMSS resumed, not an observation of the original PnpSerializeBoot return.
+Its checked kernel prefix is:
+
+    HvlSwitchToVsmVtl1 -> VslpEnterIumSecureMode
+    -> VslApplySecureImageFixups -> MiWalkEntireImage
+    -> MiApplyImportOptimizationToRuntimeDriver
+    -> MmLoadSystemImageEx -> MmLoadSystemImage
+    -> win32k.sys (stop: current driver unwind metadata not captured)
+
+At10:40:41–43, two complete timer-stop cycles on worker
+**ffffdb0a90811340** each contain six matched dispatcher RET/caller pairs.
+Both affinity-call returns atnt+30e82e are captured, one on CPU0 and one
+on CPU1 after the same worker migrates. Later priority-change, affinity-
+revert and callback returns are captured too, followed by actual outer
+flush and USB returns. Flush continue-to-stop interval sums198.478/219.633ms;
+whole timer-stop host intervals862.887/901.200ms include debugger captures.
+These are not instruction latencies or uninstrumented call runtimes.
+Representative checked kernel stacks connect the affinity/revert/callback
+sites through KeGenericProcessorCallback and KeFlushQueuedDpcs to the WDF
+return. All79 requested current code/unwind/selected-pdata ranges match;
+validation takes100.75ms while the sole watcher is briefly suspended idle.
+The GDB probe stays attached. This verifies the repeated-dispatch instrument;
+it does not settle why a later affinity-path flush failed on the prior boot.
+
+CSRSS928 first appears10:40:55; six processes through10:43, no login evidence.
+Current manager9429/GDB9431, tmuxrepeat-dispatch-vtl-ret, state
+`gdb-with-vtl-ret/manager.json`; monitor watcher89509 remains sole owner.
+Each prior manager/client exits before replacement. v7 source SHA256
+**e11354b865405424561255c63c2dd904ad3b52b2c468bc0a2ef1d1e34cf647b8**.
+It retains all USB pairing and SCM discovery behavior; a pending diagnostic
+pair is also deferred during SCM handoff. No software breakpoint, stepping,
+guest-memory change, Windows workaround or deployment change.
+
+Artifacts under `/tmp/zpp-20260912-repeat-dispatch/`: pnp-workers,
+gdb-after-pnp, gdb-with-clock, gdb-with-vtl-ret, vmcs-location,
+vtl-call-location, return-analysis, return-validation and execution-cost.
+`returns-completed-evidence/sha256.json` covers325 files/1,115,666 bytes,
+including exact sources, ended probes, validation and an immutable copy of
+v7's first46 events. Ongoing watcher/probe files are not claimed immutable.

@@ -65,3 +65,16 @@ and rediscover every guest address. Compare measured progress and actual
 entry/return intervals; a different outcome alone does not prove a fix or
 exclude instrumentation/timing effects. No Windows power-policy workaround
 is part of this candidate.
+
+The unchanged baseline now has a short, defined comparison window:
+10:31:23.839–10:32:06.041 UTC,42.2025 host seconds. Two prompt-framed,
+non-atomic reads take13.16/13.95ms; first-TSC fingerprints and deployed-ELF
+layouts agree. CPU1 closes336,985 handler spans and makes168,493 L2 entries.
+RDTSC deltas attributed to handler/L1/L2 are74.740%/18.514%/6.747%; average
+handler span186,452 cycles. These are instrumented spans, including time
+descheduled underneath the rig, not exclusive instruction execution. CPU0
+has only309 closed spans and99.913% in its L1-attributed interval, which can
+include halt time. The observed TSC rate is about1.992GHz on both CPUs.
+This is a PnP-stage baseline, not a measurement of the earlier USB stall or
+an optimized-build result. Raw replies, serial, offline GDB layout and
+calculation are in `/tmp/zpp-20260912-repeat-dispatch/execution-cost/`.
