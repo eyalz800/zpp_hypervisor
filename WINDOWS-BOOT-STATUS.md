@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-werfault` owns manager PID **69070** and exactly one GDB
-child (current v3 timer probe PID **69081**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-scm` owns manager PID **70399** and exactly one GDB
+child (current v4 combined probe PID **70404**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-werfault/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-v4/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -198,6 +198,22 @@ tmux timer-probe-werfault, after manager 68304/GDB 68319 exited. Current
 artifacts are `timer-probe-gdb-werfault/`; both prior owner handoffs were
 explicit and no live timer cycle was discarded. The sole monitor watcher
 remains PID 49122. No guest configuration or binary change.
+
+At **08:36:47**, the PnP return probe caught svchost PID 1156/thread
+ffff9d8779d14040 at nt+5a0d76 with EAX=0 in 30.2 ms. This is explicitly
+not the old SMSS wait (thread/RSP mismatch). The old PnP probe is now
+replaced by a services.exe startup-cleanup probe. **V4 began 08:41:23**,
+manager **70399**, GDB **70404**, tmux **timer-probe-scm**, with current
+services PE timestamp/size and cleanup bytes validated. It captures the
+service record/name/requested error, then advances to a different hardware
+breakpoint after the first instruction before rearming. USB work defers
+SCM probing to keep at most three hardware breakpoints; a preempted SCM
+continuation is recorded unpaired. There is no lifetime cap. The old
+69070/69081 owner/child exited before attach; no active USB cycle was lost.
+V4 source SHA-256:
+`6dbafd6f841dcb4fc827a6898d8d1527c4a6b67a6f55c2b627dd4603e307e5a3`.
+Artifacts are `timer-probe-gdb-v4/`. Sixteen processes/no armed power IRP
+through 08:40:45; no login verified. No binary or guest configuration change.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
 Kernel **fffff801e1c00000**, system CR3 **1ae000**,

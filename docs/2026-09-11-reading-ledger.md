@@ -82,6 +82,9 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/l0-viommu-lever.md` (198 lines).
 - `.references/hyperv/loader-dmar-strip-design.md` (199 lines).
 - `.references/hyperv/ap-lp-launch-state.md` (306 lines).
+- `.references/hyperv/ap-trampoline-cr0-exit-arithmetic.md` (466 lines).
+- `.references/hyperv/degrade-downstream-check.md` (270 lines).
+- `.references/hyperv/force-nosecuredma-patch.md` (554 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -89,6 +92,20 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- CR0 interception depends on the mask/read-shadow predicate; an instruction
+  hardware breakpoint precedes execution and does not prove retirement.
+  The arithmetic note's exact counter totals cannot identify a particular
+  instruction without same-boot context and attribution; later AP progress
+  supersedes its proposed causes. Do not infer no EPT violation merely from
+  eventually reaching a later address.
+- The downstream secure-DMA skip and force patch are historical guest-policy
+  modifications, outside the current full-nesting boot comparison. A scan of
+  direct references and twelve following instructions does not prove a bit
+  has no reader through aliases/data flow. The patch's last-EPTP cache also
+  does not imply at most two scans if unsuccessful roots alternate. Neither
+  a cleared policy gate nor an export-name prefix validates all downstream
+  behavior or the RVAs of an arbitrary secure-kernel build.
 
 - The launch-state note corrects its initial entry RVA and unconditional
   success claim: reaching the entry only writes state 2; state 3/status 0

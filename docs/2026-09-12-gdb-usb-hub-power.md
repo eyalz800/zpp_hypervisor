@@ -434,3 +434,22 @@ tmux timer-probe-werfault, after manager 68304/GDB 68319 exited. Current
 artifacts are `timer-probe-gdb-werfault/`; both prior owner handoffs were
 explicit and no live timer cycle was discarded. The sole monitor watcher
 remains PID 49122. No guest configuration or binary change.
+
+
+V4 began at **08:41:23** in tmux timer-probe-scm, manager 70399/GDB 70404,
+root /tmp/zpp-20260912/timer-probe-gdb-v4/. The preceding indefinite v3
+owner 69070/69081 exited before attach; no USB cycle was active. V4 keeps
+the corrected USB return probes and bugcheck guard, replacing the obsolete
+PnP breakpoint with services.exe startup cleanup at image+823f8. Current
+services PE timestamp a4571758, size dd000 and instruction bytes validate.
+Cleanup captures the service record/name and requested error, followed by
+a distinct adjacent hardware instruction stop before rearming. USB cycles
+defer SCM probing to retain a maximum of three breakpoints; a continuation
+interrupted by USB is recorded unpaired. No lifetime limit or guest writes.
+Exact source SHA-256:
+6dbafd6f841dcb4fc827a6898d8d1527c4a6b67a6f55c2b627dd4603e307e5a3.
+
+The final v3 PnP hit was 08:36:47, svchost PID1156/thread ffff9d8779d14040,
+EAX0, 30.2-ms stop. It explicitly does not match the captured SMSS wait.
+Sixteen processes/no armed power requests through 08:40:45; no verified
+login. The unchanged Windows boot and sole monitor reader continue.
