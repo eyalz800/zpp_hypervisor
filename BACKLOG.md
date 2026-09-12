@@ -81304,3 +81304,37 @@ activation target is established. RPCRT4/rpcss/sechost PDB GUIDs match their
 header-identified PEs; Info ages2/3/2 and DBI ages1/1/1 match image age1 by
 Microsoft's actual validation rule. Analysis and server metadata are in
 `/tmp/zpp-20260912/timer-probe-rpc-analysis/`; raw08:46 stacks stay separate.
+
+
+## 2026-09-12: current SMSS PnP wait and USB probe armed
+
+At10:12:22 the current09:29:15 boot's SMSS676 has one Waiting thread,
+**ffffdb0a8fc56080**, in PnpSerializeBoot. Its active wait block points to
+**PnpSystemDeviceEnumerationComplete fffff803e258c3a0**, NotificationEvent,
+SignalState0. Thread/Object and event-tail links match; current code passes
+that same address in RCX to KeWaitForSingleObject. The checked saved stack
+runs KiSwapContext → KiSwapThread → KiCommitThreadWait → KeWaitForSingleObject
+→ PnpSerializeBoot → NtSerializeBoot → KiSystemCall64 → captured user context.
+No actual wait return or continuous residence duration was measured.
+
+The scripted GDB capture took116.71ms,118.42ms through detach. Later monitor
+code/metadata validation took97.40ms: all48 readable requested ranges match;
+eight user metadata ranges are unmapped (not differing bytes). Both user
+module headers match the stopped capture. The checked unwind stops at the
+first missing SMSS function-table entry; a separate candidate user chain
+reaches null using matching older/server metadata. This does not turn the
+candidate tail into current-byte evidence.
+
+Old manager94597/GDB94598 exited before capture; manager1329/guard1331
+restored afterward. At10:15:18 a complete147-module walk discovers current
+USB/WDF and at10:15:20 guard1331 exits before v5 GDB2398 starts. Current
+manager state is `gdb-after-smss/manager.json`; tmuxrepeat-dispatch-smss.
+Monitor watcher89509 remains the sole monitor reader. The brief validation
+suspends it only after checking an idle ownership window; GDB stays attached.
+The10:15:18 armed IntcOED power request is no longer armed on the10:15:40
+poll; no corresponding GDB return was captured. No verified login/desktop.
+
+Artifacts `/tmp/zpp-20260912-repeat-dispatch/{smss-676,
+smss-unwind-validation,gdb-after-smss}/` and associated source scripts.
+The unchanged6adda123 hypervisor remains deployed; the optimized debug
+candidate remains prepared. No Windows settings, source code or build change.

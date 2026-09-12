@@ -82,15 +82,18 @@ root-port devices (tablet currently port2), with xHCI p2=8.
 SMSS552 first appeared at **09:50:22** (21m07s after launch). Autochk572
 appeared09:53:53, was last present09:54:35 and absent09:54:56; its exit
 result was not captured. SMSS676 first appears09:56:21. Five processes
-and122 modules through09:59; USB/WDF discovery still pending. No verified
+and122 modules through10:14. USB/WDF are discovered10:15:18 in a complete
+147-module walk: USBHUB3 **fffff803790d0000**, WDF **fffff80373c30000**,
+matching current PE sizes/stamps. V5 starts10:15:20. No verified
 sign-in/desktop.
 
-Exactly one monitor watcher **89509** and current GDB manager **94597**
-run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-lock`.
-The restored indefinite crash guard is GDB **94598**; confirm later owners
-from `gdb-after-lock/manager.json`. Earlier89511/89512 and93523/93524 exited
-before their replacements; the clock/lock capture clients also exited. On current USB/WDF discovery, the manager hands
-off to v5, which follows repeated dispatchers inside each flush. It adds
+Exactly one monitor watcher **89509** and current GDB manager **1329**
+run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-smss`.
+Current v5 GDB is **2398**; confirm later owners from
+`gdb-after-smss/manager.json`. Its initial guard1331 exited before USB tracing.
+Earlier94597/94598 exited before the SMSS capture and restoration. Earlier89511/89512 and93523/93524 exited
+before their replacements; the clock/lock capture clients also exited. The manager has handed off to v5, which follows repeated dispatchers
+inside each flush. It adds
 SCM tracing after current services.exe discovery when no paired call is
 recorded active. Handoff races remain explicitly unpaired; never infer a
 return across a gap. New artifacts: `/tmp/zpp-20260912-repeat-dispatch/`.
@@ -111,6 +114,17 @@ problem. Checked current-byte stacks unwind through DPC interruption of
 MiReleasePtes, driver-image validation/loading, PnP and ExpWorkerThread.
 All117 requested code/unwind/pdata ranges are readable;115 match the PE,
 and both differing code ranges use their actual captured bytes.
+
+At10:12:22, a118.42-ms stopped GDB capture identifies SMSS676's sole
+Waiting thread **ffffdb0a8fc56080** in **PnpSerializeBoot**, waiting on
+**PnpSystemDeviceEnumerationComplete fffff803e258c3a0** (NotificationEvent,
+SignalState0). The active wait block's thread/object and event-tail links
+match. The code's RCX argument and checked saved stack agree on this event.
+The checked kernel stack reaches the user transition through NtSerializeBoot.
+A later97.4-ms non-atomic monitor read validates48 requested ranges; eight
+user metadata ranges are unmapped, so the complete user unwind remains a
+candidate. No actual wait return or continuous wait duration was captured.
+Artifacts: `smss-676/`, `smss-unwind-validation/` under the current boot root.
 
 An **optimized debug candidate is prepared, not deployed**. Same source as
 6adda123 and byte-identical full switch manifest, with only hypervisor

@@ -92,6 +92,10 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/vina.md` (263 lines).
 - `.references/hyperv/vp1-doorbell-wait.md` (241 lines).
 - `.references/hyperv/vp1-vtl1-start-failure.md` (278 lines).
+- `.references/hyperv/vp-start-sequence.md` (419 lines).
+- `.references/hyperv/zpp-force-infrastructure.md` (410 lines).
+- `.references/hyperv/nested-advertisement-levers.md` (960 lines).
+- `.references/hyperv/securekernel-image-copy-and-handles.md` (831 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -419,6 +423,33 @@ Corrections that matter when continuing:
   coexist and it names an extra force-true flag. Its binary gate diagnostic
   is too strong without observing the actual assertion path. Current novina
   configuration is unchanged by reading this historical note.
+
+- The VP-start note's original trampoline address, worker RVA and hypercall
+  naming are corrected by the later arrival/VTL-start notes. A last recorded
+  0x76 call plus a static failure path does not prove the particular reset's
+  bugcheck or return status. The current two-CPU boot passes that old stage.
+- The force-infrastructure note is anchored to2d93273 and its DMA-attach
+  diagnosis is superseded by the later secure-DMA/page-protection correction.
+  Its proposal to learn VTL1 EPTP at the VTL0 VtlCall exit risks recording the
+  outgoing VTL0 root; a marker and a value learned from that same assumption
+  are not independent validation. No guest memory forcing or new switch is
+  authorized by reading this historical design.
+
+- The nested-advertisement note corrects its own detection account in round2,
+  and its eVMCS/announcement proposals describe an older source configuration.
+  Absence of direct VMWRITE literals alone does not exclude indirect fields;
+  a stale BSS snapshot does not identify every later gate. Its watchdog byte
+  is specifically the DPC watchdog, not evidence about the current USB power
+  watchdog. The proposed CPUID changes remain unapplied here.
+- The image-copy note's appendix corrects two substantive layout claims:
+  the per-virtual-page and per-physical-frame arrays are distinct tables,
+  and the secure service table has26 entries compacted in place from qwords
+  to dwords. Snapshot BSS is not current rig state. The STI boundary explains
+  a possible interrupt landing site; it does not by itself prove every hot
+  RIP is benign or that every pending interrupt is delivered there. MOV CR8
+  and POPFQ must not be assumed to create STI's one-instruction shadow.
+
+Partial current reads: `.references/hyperv/symbols.md` lines1–475.
 
 Known incomplete large reads include `BACKLOG.md` (over 80,000 lines;
 selected relevant ranges and the current tail have been read). Many other
