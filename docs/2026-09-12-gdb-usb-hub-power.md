@@ -653,3 +653,38 @@ power-evidence, final-interrupt-state/object, final-winlogon-validation,
 and the GDB probe roots, each prefixed `timer-probe-`. The exact source
 scripts and raw snapshots are retained. The frozen guest has not yet been
 torn down.
+
+
+## 2026-09-12: unchanged reboot with repeated-dispatch GDB probe
+
+The09:15:18 crashed guest is archived in `timer-probe-evidence-sha256.json`
+(2,694 files;18,332,708 bytes). Supported teardown succeeded; NVMe returned
+and15,474 MB RAM was free. A fresh read-only ESP mount and sector checks
+validated the loader MD5d564ca8f8057eabdb36a09db2c1e34d5/4,326,912 bytes,
+Limine MD5c4357a8d21ddb98046aa2f9fd13280b0, unchanged full launcher, GPT,
+ESP BPB and NTFS signature. No Windows configuration or deployment change.
+
+The next run started **09:29:15 UTC** with two CPUs/full manifest/xHCIp2=8.
+Current zpp base66d47000, singleton682f3000; independently PE-validated
+Windows base**fffff803e1600000**, CR3**1ae000**. The09:36:33 complete list
+has System/Secure System/Registry, no SMSS yet. Current USB topology has
+five direct devices with tablet port2. No verified sign-in/desktop.
+
+Monitor watcher89509 and manager89511 began09:36:46; initial GDB guard89512.
+The manager discovers current USB/WDF before switching to v5 and can add
+current SCM tracing on services discovery. v5 SHA256 is
+**7af5c7eccbff3cede1f88ea0376ea520e67a8339a4d13493806546cf0ab70e0c**.
+It rearms the dispatcher entry after each matched dispatcher RET/caller
+while keeping the enclosing flush return and crash guard. This addresses
+the prior v4 coverage gap: the first priority-change call returned, but
+the crash stack contained a later affinity-path call. New behavior still
+awaits a hardware hit. Maximum three hardware breakpoints; no stepping.
+Both prepared scripts pass py_compile. Every GDB source is copied and
+hashed before execution, and manager handoffs wait for the old child exit.
+A call racing SCM handoff is preserved as unpaired, with no cross-gap claim.
+
+Artifacts `/tmp/zpp-20260912-repeat-dispatch/`; manager state `gdb/manager.json`.
+The initial resident state read completed its state sections; its slow log
+walk was interrupted before the watcher acquired sole monitor ownership.
+The new kernel base was separately PE/list validated. The predecessor's
+addresses/PIDs are historical. No C++ edit, build, deployment or host tests.

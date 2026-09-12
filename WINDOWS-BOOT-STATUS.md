@@ -68,13 +68,33 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Latest state: the September12 07:22:39 boot crashed at09:15:18 UTC.**
-GDB caught KeBugCheckEx **9f/3** directly with tablet PDO
-**ffff9d877a11caa0**, triage **fffff804582449f0**, IRP
-**ffff9d8779b047f0**. The guest is now **paused (shutdown)**; monitor49122,
-manager78053 and GDB78064 all exited. Do not attach a new live-run probe
-or use any older PID as an owner. The frozen guest is preserved for
-read-only investigation. No verified sign-in/desktop, no new deployment.
+**Latest state: an unchanged new boot began September12 09:29:15 UTC.**
+The previous 07:22:39 guest crashed at09:15:18 with a GDB-captured tablet
+power timeout, was archived, then torn down through the supported script.
+NVMe returned, 15,474 MB RAM was free, and a fresh read-only mount validated
+the unchanged loader, Limine, launcher and disk anchors before restarting.
+
+The new Windows kernel is **fffff803e1600000**, PE timestamp51a135d9,
+size1450000, validated through CR3 **1ae000**. Current serial/ELF resolve
+zpp module66d47000 and singleton682f3000; the complete resident manifest
+matches the unchanged **6adda123** deployment. Five USB devices are direct
+root-port devices (tablet currently port2), with xHCI p2=8.
+At09:36:33 the complete list contains System, Secure System and Registry;
+**SMSS has not appeared yet**. No verified sign-in/desktop.
+
+Exactly one monitor watcher **89509** and GDB manager **89511** run in
+`zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-gdb`.
+The initial indefinite crash guard is GDB **89512**; confirm later owners
+from `gdb/manager.json`. On current USB/WDF discovery, the manager hands
+off to v5, which follows repeated dispatchers inside each flush. It adds
+SCM tracing after current services.exe discovery when no paired call is
+recorded active. Handoff races remain explicitly unpaired; never infer a
+return across a gap. New artifacts: `/tmp/zpp-20260912-repeat-dispatch/`.
+
+The initial resident report completed its state sections; its slow log
+walk was interrupted before the sole monitor ownership passed to the
+watcher. The kernel PE and complete process walk independently validate
+the new base. No stopped guest or old address/PID is current.
 
 
 The **direct-port USB experiment crashed with 0x9F/3**. It began at
@@ -89,9 +109,10 @@ That stopped guest was archived (1,774 files, SHA-256 manifest) and torn
 down normally. NVMe returned and 15,476 MB RAM was free. The unchanged
 loader/launcher and disk anchors passed a fresh read-only mount check.
 
-A fresh same-configuration **GDB timer-stop run began 07:22:39 UTC
-September 12**. QEMU is running, all startup channels answered, and the
-actual five-device direct USB topology is unchanged. Module 66d47000,
+The preceding same-configuration **GDB timer-stop run began 07:22:39 UTC
+September 12** and ended at09:15:18. At startup all channels answered and the
+actual five-device direct USB topology was unchanged. The following is its
+historical timeline; the addresses and client PIDs below are not current. Module 66d47000,
 singleton 682f3000, **new Windows base fffff804c5800000**, size 1450000.
 The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks

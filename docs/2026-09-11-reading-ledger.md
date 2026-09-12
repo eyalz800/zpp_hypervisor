@@ -87,6 +87,7 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/force-nosecuredma-patch.md` (554 lines).
 - `.references/hyperv/hvix64-lp-trampoline-emit-decompiled.md` (717 lines).
 - `.references/hyperv/lp-trampoline-location.md` (all 1,178 lines).
+- `.references/hyperv/hvix64-add-logical-processor-decompiled.md` (593 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -385,6 +386,13 @@ Corrections that matter when continuing:
 - The first CMake implementation report used C++17 and host SDK headers;
   later implementation and current project instructions use C++26 and
   freestanding configuration. Do not restore the report's old workaround.
+
+- The AddLogicalProcessor decompilation is historical. A state word still
+  equal to1 does not exclude AP instructions before the first reporting
+  store. Its separate busy check and exchange do not establish an atomic
+  mutex without external serialization. Nominal delay-loop totals do not
+  measure wall time. Revalidate the startup selector on each boot before
+  inferring INIT/SIPI versus doorbell delivery.
 
 Known incomplete large reads include `BACKLOG.md` (over 80,000 lines;
 selected relevant ranges and the current tail have been read). Many other
