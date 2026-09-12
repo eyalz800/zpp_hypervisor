@@ -81445,3 +81445,18 @@ snapshot across the gap. Watcher12724 stays sole monitor reader. The brief
 armed USB request seen11:34:21 is absent at11:34:42; the then-armed request
 is audio, not the same USB request. Physical screen verification is pending.
 Full details and artifact paths are in the optimized candidate note.
+
+## 2026-09-12: sign-in verified, then audio power BSOD; keep captures out of Git
+
+The user confirmed sign-in followed by DRIVER_POWER_STATE_FAILURE. GDB
+caught 0x9F/3 at11:48:42; postmortem checks identify the blocked request
+in IntcAzAudAddService on an IntcAudioBus/Realtek codec device. Five v10 USB
+calls completed, with none outstanding at this crash. Investigate the audio
+wait dependency; sign-in does not establish stable boot. Current ownership
+and exact addresses are in WINDOWS-BOOT-STATUS.md.
+
+At the user's request, removed75 generated root text captures and two CTest
+result files (10,746,855 bytes), archived with hashes in
+/tmp/zpp-repo-cleanup-20260912/. Narrow ignore rules cover these generated
+paths; CMake, Bochs and CI text inputs remain tracked. Keep future raw
+captures outside the repository. Cleanup commit399cab70.

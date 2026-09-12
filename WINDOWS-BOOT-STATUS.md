@@ -1,9 +1,9 @@
 # Nested Windows boot investigation
 
-Updated 2026-09-12. The goal remains a verified Windows login or desktop
-with Hyper-V running above zpp. This has **not** been achieved by this session.
-Earlier appearances of `LogonUI.exe` and `dwm.exe` did not prove a login screen:
-the user observed "Please wait" on one long-lived run. Keep that distinction.
+Updated 2026-09-12. The user confirmed that the optimized nested boot reached
+the Windows sign-in screen, then showed DRIVER_POWER_STATE_FAILURE. GDB
+captured bugcheck 0x9F/3 at 11:48:42 UTC. Sign-in is verified; stable boot
+remains unresolved. Earlier process-only observations were not screen proof.
 
 ## Current setup
 
@@ -68,8 +68,23 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Latest state: the optimized debug comparison began September12 10:50:25
-UTC and is running.** Only hypervisor C++ optimization changes to-g -O2;
+**Latest state: the optimized debug comparison began September 12 at
+10:50:25 UTC, reached sign-in, and crashed at 11:48:42 UTC.** The guest is
+paused (shutdown); watcher12724 and manager27043/client27045 have exited.
+The actual bugcheck names PDO `ffff9e8129116dd0` and blocked IRP
+`ffff9e8129d65bc0`. Postmortem IRP layout and device-chain checks identify
+`IntcAudioBus` as the enumerator, `IntcAzAudAddService` as the current holder,
+and the Intel audio/Realtek codec instance `VEN_10EC&DEV_0294`. This is an
+audio power request; the earlier USB watchdog failure is a separate run.
+The waiting dependency and root cause remain unproven. V10 completed five
+USB calls with no outstanding captured call at the crash. Its external-stack
+dispatcher case was exercised while preserving the outer flush return.
+The WluiAbort return probe did not hit, and prepared v11 was never started.
+Raw evidence remains in `/tmp/zpp-20260912-optimized-run/`, including
+`gdb-v10/timer-stop/` and `final-power/`. Next: inspect the stopped audio
+request and its power-worker dependencies before another boot.
+
+The following timeline records the investigation before the crash. Only hypervisor C++ optimization changes to-g -O2;
 source and the full nesting manifest match6adda123. Loader MD5
 **53fc99e459abfc6885b2f9c3aa448ae8**,4,887,040 bytes, was verified through
 a fresh ESP mount. The exact candidate ELF is now
@@ -87,7 +102,7 @@ completed boot or isolate optimization from run-to-run variation. Two CPUs
 and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
 
 Sole monitor watcher **12724** began10:52:01 in tmux
-`zpp-rig-20260911:optimized-watch`. Current GDB manager **27043** and v10
+`zpp-rig-20260911:optimized-watch`. The final GDB manager **27043** and v10
 probe **27045** began11:34:37 in `optimized-gdb-v10`; confirm subsequent
 ownership from `/tmp/zpp-20260912-optimized-run/gdb-v10/manager.json`.
 Current USBHUB3 **fffff80177c00000** and WDF **fffff80171430000** were
@@ -105,7 +120,7 @@ V9 arms the hardware breakpoint after validating the current service PE,
 deferring instruction validation until the actual hit. Both preceding
 manager15442 and GDB16859 exited before the v9 attachment. The outside-stack
 case still awaits a hit. The prior boot's one-shot hypercall-page address is
-not reused. No successful boot is claimed yet.
+not reused. At that stage, a visible screen was still unverified.
 
 Autochk668 appears10:55:10, is last present10:55:52, and is absent10:56:13;
 its exit status is uncaptured. SMSS752 appears10:56:35. CSRSS932 appears
@@ -113,8 +128,8 @@ its exit status is uncaptured. SMSS752 appears10:56:35. CSRSS932 appears
 Winlogon704 at11:05:42, services516 at11:06:23, and LSASS556 at11:06:43.
 The PnP event is Signal1 with an empty waiter list at v8/v9 initialization.
 At **11:18:15**, complete process walks first show **LogonUI1556 and dwm1568**
-(27m50s after launch), 23 processes total. A physical screen check has been
-requested; this is not yet a verified sign-in screen.
+(27m50s after launch), 23 processes total. The user subsequently confirmed a sign-in screen followed by the BSOD;
+its first visible time was not measured.
 
 At11:16:51, v9 captures an actual SCM cleanup entry for **LSM, error1070**,
 CPU0, services516/TID460, followed by the next instruction on the same

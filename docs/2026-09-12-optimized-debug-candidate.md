@@ -230,3 +230,24 @@ The watcher reaches69 processes by11:34:42. USB power requestffff9e812ba0e910
 is armed, age13.3s, at11:34:21 and absent at11:34:42; that next armed request
 is an audio request with a different IRP/PDO. No new USB timeout or visible
 sign-in has been verified. Artifacts remain under the optimized run.
+
+## Confirmed sign-in followed by audio power failure
+
+The user physically observed the sign-in screen followed by
+DRIVER_POWER_STATE_FAILURE. V10 caught KeBugCheckEx at 11:48:42 UTC with
+code0x9F, parameter1=3, PDOffff9e8129116dd0, and IRPffff9e8129d65bc0.
+The stopped guest preserves the exact IRP: type6, ten stack locations,
+current location8, pending power/set request in IntcAzAudAddService. The
+verified device chain is IntcAudioBus → IntcAzAudAddService → ksthunk;
+the PDO instance is INTELAUDIO/Realtek VEN_10EC&DEV_0294. This identifies
+the stalled audio path, not its cause. Dwm was interrupted by the bugcheck
+DPC; its process name does not assign responsibility. The last watch read
+reports age126.4s against its historical300s estimate, so that reader's
+percentage must not be treated as this request's validated deadline.
+
+V10 completed five USB calls with no abandoned or outstanding captured
+cycle. The external dispatcher-stack branch was exercised (event103),
+followed by actual flush/timer returns. WluiAbort RET never hit. All GDB
+and watcher owners exited; prepared v11 was not started. Raw captures
+and postmortem IRP/devnode/module data stay outside Git in the optimized
+run's gdb-v10/timer-stop/ and final-power/. Stable boot remains unresolved.
