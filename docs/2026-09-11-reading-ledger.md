@@ -88,6 +88,10 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/hvix64-lp-trampoline-emit-decompiled.md` (717 lines).
 - `.references/hyperv/lp-trampoline-location.md` (all 1,178 lines).
 - `.references/hyperv/hvix64-add-logical-processor-decompiled.md` (593 lines).
+- `.references/hyperv/hvix64-ap-arrival-and-doorbell-decompiled.md` (942 lines).
+- `.references/hyperv/vina.md` (263 lines).
+- `.references/hyperv/vp1-doorbell-wait.md` (241 lines).
+- `.references/hyperv/vp1-vtl1-start-failure.md` (278 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -393,6 +397,28 @@ Corrections that matter when continuing:
   mutex without external serialization. Nominal delay-loop totals do not
   measure wall time. Revalidate the startup selector on each boot before
   inferring INIT/SIPI versus doorbell delivery.
+
+- The arrival/doorbell companion corrects its predecessors: boot-LP startup
+  can send INIT/SIPI first, park the AP, then release it with the later
+  doorbell. A shared trampoline progress word cannot identify a particular
+  AP. Its C layout overlaps a purported pointer at+18 with a dword at+1c;
+  those fields need fresh byte/type validation before reuse. Reaching a
+  later address alone does not prove every preceding state reconstruction
+  was correct, and a zero arrival count alone does not prove all APs died.
+
+- The VP1 doorbell headline is explicitly retracted by the later VTL-start
+  note. Low exit frequency cannot locate a unique wait, and equal linear
+  addresses alone do not establish equal translations/coherent mappings.
+  Its unguarded interpretation of the mailbox-only arrival barrier also
+  conflicts with the later arrival/doorbell decompilation. Do not apply its
+  suggested guest-word/register edits. The successor's transport-state
+  diagnosis remains an inference requiring actual status and state reads;
+  VMX instructions alone do not prove successful guest entry or global idle.
+- The VINA gate note is a static code map. A later latch value does not
+  identify which branch asserted an earlier interrupt; its two gates can
+  coexist and it names an extra force-true flag. Its binary gate diagnostic
+  is too strong without observing the actual assertion path. Current novina
+  configuration is unchanged by reading this historical note.
 
 Known incomplete large reads include `BACKLOG.md` (over 80,000 lines;
 selected relevant ranges and the current tail have been read). Many other

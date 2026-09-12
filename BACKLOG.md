@@ -81247,3 +81247,60 @@ The initial resident state read completed its state sections; its slow log
 walk was interrupted before the watcher acquired sole monitor ownership.
 The new kernel base was separately PE/list validated. The predecessor's
 addresses/PIDs are historical. No C++ edit, build, deployment or host tests.
+
+
+## 2026-09-12: current scheduler lock pair and prepared optimized build
+
+The09:29:15 unchanged boot reaches SMSS552 at09:50:22. Autochk572 appears
+09:53:53, remains through09:54:35 and is absent09:54:56 (result uncaptured).
+SMSS676 appears09:56:21. Through09:59 there are five processes and122 modules,
+without USB/WDF probe configuration or verified login.
+
+A ten-second HalpTimerClockInterrupt entry guard (nt+30fe30) at09:49:38
+has no hit. Its timeout snapshot is CPU1 atKiQuantumEnd+538, reading the
+CPU0 PRCB lock. No clock absence, continuous residence or deadlock follows
+from that negative interval. It detaches and restores the crash guard.
+
+The next probe obtains **two actual hardware stops09:53:37**, nt+299958
+and nt+299963: CPU0/thread**ffffdb0a8fb85040**, same RSP and target CPU1
+PRCB **ffff808147714180**. Continue-to-stop9.214ms; stopped captures
+107.8/99.7ms. Target lock is0 at the read and1 after acquisition. PRCB0
+**fffff8036e5c7180** and PRCB1 both have matching Number fields. This is a
+new CPU0 invocation, not a pairing with the earlier CPU1 timeout snapshot.
+Both captured threads have ExpWorkerThread start addresses.
+
+Full checked stacks pass through KiDispatchInterrupt/DPC bypass and an
+interrupt frame to MiReleasePtes, MiValidateImagePfn/MiWalkEntireImage,
+section/driver loading, PnP and ExpWorkerThread, reaching null. Same-boot
+monitor validation reads all117 consumed code/unwind/selected-pdata ranges;
+115 match the PE, two code ranges differ. Actual bytes are used for the
+final unwind. Two large nearest-public-symbol offsets are replaced by
+explicit unnamed RVAs, not assigned to unrelated named functions. These
+monitor reads briefly suspend the idle sole watcher; the GDB guard stays
+attached throughout. No live Running thread is unwound from saved KSP.
+
+Current monitor89509; manager**94597**, GDB**94598**, restored from
+`gdb-after-lock/manager.json`, tmuxrepeat-dispatch-lock. Old89511/89512,
+93523/93524 and the two short capture clients exited before handoff.
+Artifacts: `/tmp/zpp-20260912-repeat-dispatch/{clock-entry,lock-pair,
+lock-unwind-validation,lock-unwind-validation-v2}/` plus exact sources.
+
+An optimized debug candidate is built and verified but **not deployed**:
+same6adda123 source/full manifest, only hypervisor C++ flags changed to
+-g -O2. Full27 rebuilt host tests (including228 Python tests) and candidate
+ELF/bootability checks pass; DWARF offsets resolve. Loader MD5
+53fc99e459abfc6885b2f9c3aa448ae8, size4,887,040; exact embedded ELF verified.
+See `docs/2026-09-12-optimized-debug-candidate.md` for hashes, build commands,
+test limits and comparison plan. The running baseline remains unchanged.
+
+Offline analysis of the preceding08:46:15 RPCSS-host capture now produces
+all eight candidate user/kernel unwinds to null. Matching public symbols
+show the main service dispatcher waiting, one RPC activation waiting in
+CServerTableEntry::WaitForService, one Ready RPC reply, the RpcSs exporter
+worker in a timed wait and four worker-factory pool stacks. These are
+**candidate chains**: current code pages from that old host were not all
+captured, and the guest is already torn down. Neither duration nor a specific
+activation target is established. RPCRT4/rpcss/sechost PDB GUIDs match their
+header-identified PEs; Info ages2/3/2 and DBI ages1/1/1 match image age1 by
+Microsoft's actual validation rule. Analysis and server metadata are in
+`/tmp/zpp-20260912/timer-probe-rpc-analysis/`; raw08:46 stacks stay separate.

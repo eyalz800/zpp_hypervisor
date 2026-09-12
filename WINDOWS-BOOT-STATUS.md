@@ -79,13 +79,17 @@ size1450000, validated through CR3 **1ae000**. Current serial/ELF resolve
 zpp module66d47000 and singleton682f3000; the complete resident manifest
 matches the unchanged **6adda123** deployment. Five USB devices are direct
 root-port devices (tablet currently port2), with xHCI p2=8.
-At09:36:33 the complete list contains System, Secure System and Registry;
-**SMSS has not appeared yet**. No verified sign-in/desktop.
+SMSS552 first appeared at **09:50:22** (21m07s after launch). Autochk572
+appeared09:53:53, was last present09:54:35 and absent09:54:56; its exit
+result was not captured. SMSS676 first appears09:56:21. Five processes
+and122 modules through09:59; USB/WDF discovery still pending. No verified
+sign-in/desktop.
 
-Exactly one monitor watcher **89509** and GDB manager **89511** run in
-`zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-gdb`.
-The initial indefinite crash guard is GDB **89512**; confirm later owners
-from `gdb/manager.json`. On current USB/WDF discovery, the manager hands
+Exactly one monitor watcher **89509** and current GDB manager **94597**
+run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-lock`.
+The restored indefinite crash guard is GDB **94598**; confirm later owners
+from `gdb-after-lock/manager.json`. Earlier89511/89512 and93523/93524 exited
+before their replacements; the clock/lock capture clients also exited. On current USB/WDF discovery, the manager hands
 off to v5, which follows repeated dispatchers inside each flush. It adds
 SCM tracing after current services.exe discovery when no paired call is
 recorded active. Handoff races remain explicitly unpaired; never infer a
@@ -95,6 +99,27 @@ The initial resident report completed its state sections; its slow log
 walk was interrupted before the sole monitor ownership passed to the
 watcher. The kernel PE and complete process walk independently validate
 the new base. No stopped guest or old address/PID is current.
+
+
+At09:53:37, hardware stops at **KiQuantumEnd nt+299958 → nt+299963**
+record one matched lock acquisition on CPU0, threadffffdb0a8fb85040.
+RSP and target PRCB match; continue-to-stop interval9.214ms, captures
+107.8/99.7ms. The read sees the target CPU1 PRCB lock0; after acquisition
+it is1. Both PRCB.Number values validate. This does not pair with the
+preceding CPU1 timeout snapshot or establish a permanent scheduler lock
+problem. Checked current-byte stacks unwind through DPC interruption of
+MiReleasePtes, driver-image validation/loading, PnP and ExpWorkerThread.
+All117 requested code/unwind/pdata ranges are readable;115 match the PE,
+and both differing code ranges use their actual captured bytes.
+
+An **optimized debug candidate is prepared, not deployed**. Same source as
+6adda123 and byte-identical full switch manifest, with only hypervisor
+C++ compilation changed from default-O0 to **-g -O2**. It preserves usable
+DWARF. Both artifact checks pass and all27 rebuilt host tests pass with
+-O2 (including228 Python checks). Loader MD5**53fc99e459abfc6885b2f9c3aa448ae8**,
+4,887,040 bytes; exact embedded ELF verified. Details and reproduction:
+[optimized candidate](docs/2026-09-12-optimized-debug-candidate.md).
+The current unchanged repeated-dispatch boot remains the observation run.
 
 
 The **direct-port USB experiment crashed with 0x9F/3**. It began at
