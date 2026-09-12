@@ -81606,3 +81606,17 @@ split also stops claiming that counts per build call are a subset of counts
 per handler exit: the denominators differ. Three new Python tests expose five
 failing report paths before the fix; all 233 Python tests pass afterward.
 Hypervisor changes are comments only; the live repeat's binary is unchanged.
+
+The unchanged repeat reaches LogonUI/dwm at 15:26:59 after three SCM
+first-response call/callee pairs without a captured failure. A late-call
+filter alone could miss a call entered before the request ages past its
+threshold. The supplemental observer therefore attaches to an already-aged
+audio IRP, checks its watchdog-start identity and unique worker again, and
+watches worker State, IRP release and the WDF wait return. Initial saved-stack
+pairing remains necessary to identify the same wait. The observer is waiting;
+no worker result is claimed yet. All sources and captures remain in `/tmp`.
+
+Host scheduling during a 46.0967 s interval supplies both vCPUs essentially
+the entire interval, with less than 0.42 ms run-queue delay each. This rejects
+host CPU unavailability for that interval, not guest-side idle spinning or
+expensive nesting. No launcher or binary change follows from that check.

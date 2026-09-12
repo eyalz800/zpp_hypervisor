@@ -77,13 +77,40 @@ the same loader, Limine and launcher; disk anchors pass. No source, Windows
 settings, nesting, CPU count or device configuration changed.
 Fresh serial/DWARF again resolve module `66d61000`, singleton `682f3000`;
 the new NT base is `fffff800d3a00000`, PE-validated through CR3 `1ae000`.
-Monitor watcher 86896 owns the new process/power polling. The initial
-manager stopped after treating an incomplete early process walk as an
-error; its GDB client detached. The replacement in `gdb-v2/` waits for a
-complete walk while keeping the crash guard armed. Consult its
-`manager.json` for the current sole GDB PID.
-Replacement manager 87114/client 87119 is healthy with the crash guard armed
-at 15:06; the complete process walk still contains the three initial processes.
+Monitor watcher 86896 owns the process/power polling. The initial manager
+stopped on an incomplete early process walk; its replacement waits for a
+complete walk. A serialized handoff at 15:13:22 adds the previously checked
+timer-worker epilogue/RET/caller probe. No timer hit is observed before SMSS
+appears at 15:13:42. This does not establish when that operation returned.
+Manager 91535 in `gdb-v3/` switches to SCM client 93724 at 15:21:14, after
+discovering services 576. PlugPlay, RpcEptMapper and LSM reach their actual
+first-response calls/callees at 15:24:50, 15:25:26 and 15:25:57. All request
+45,000 ms; no failure hit is captured before the UI handoff. Their wait
+returns remain unobserved. The three early USBHUB3 requests are absent by
+15:24:57; completion was not traced.
+
+**LogonUI 1432 and dwm 1440 appear at 15:26:59**, 30m42s after launch.
+This is process evidence, not a new physical screen confirmation. Audio
+client 95312 attaches at 15:27:00. Consult `gdb-v3/manager.json` for current
+ownership. At 15:32:05 a new USBHUB3 request is armed at age 49.1 s; the
+audio call breakpoint has not fired yet.
+
+The late-call filter has a coverage gap: an audio call entered before the
+60 s threshold could remain blocked without another entry. A supplemental
+probe is prepared under the same external root to attach to an already-aged
+request, revalidate its IRP/start identity and unique worker, and watch the
+worker's State and IRP fields plus the WDF wait return. Observer 95968 in
+`aged-audio-observer-v2/` waits for an armed audio request aged at least
+60 s and detaches the existing owner before attaching. It owns no target
+connection while waiting. The worker probe is not yet run.
+Any return must be paired against the captured initial stack before calling
+it the same wait; unrelated returns and capture limits remain explicit.
+Raw clock globals and shared ready-queue heads accompany its snapshots.
+
+A 46.0967 s host scheduling interval gives each vCPU about 46.096 s runtime,
+with run-queue delays of 0.0967/0.4194 ms. Host CPU availability does not
+explain this interval's slow progress; runtime does not prove useful guest
+work. The read is non-atomic and preserved under `host-scheduling/`.
 
 **The 13:37:30 UTC census-off boot crashed at 14:43:09 with 0x9F/3.**
 GDB captured the actual bugcheck entry in 125.7 ms. All monitor and GDB
