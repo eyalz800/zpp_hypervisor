@@ -60,6 +60,17 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/vtl-block-deadlock.md` (265 lines).
 - `.references/hyperv/multi-cpu-vbs-vtl1.md` (115 lines).
 - `.references/hyperv/vtl1-first-ap-resource.md` (103 lines).
+- `.references/hyperv/README.md` (239 lines).
+- `.references/hyperv/copy-protected-page-pfn-source.md` (190 lines).
+- `.references/hyperv/hvcall_modify_vtl_protection.md` (151 lines).
+- `.references/hyperv/skhalpci-real-source.md` (134 lines).
+- `.references/hyperv/ap-lp-entry-addrspace.md` (123 lines).
+- `.references/hyperv/ap-entry-longmode.md` (108 lines).
+- `.references/hyperv/vp1-tsc-calibration.md` (180 lines).
+- `.references/hyperv/vp1-platform-timer-address.md` (241 lines).
+- `.references/hyperv/vp1-hpet-vs-pm.md` (201 lines).
+- `.references/hyperv/ap-lp-init-loop.md` (74 lines).
+- `.references/hyperv/ap-lp-post-entry.md` (154 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -67,6 +78,44 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The three VP1 timer notes successively replace a rendezvous diagnosis
+  with TSC calibration, then correct LAPIC-thunk names and HPET selection
+  to a PM-timer hypothesis. Their final claim that a spinning calibration
+  necessarily means raw input is frozen is stronger than the shown evidence;
+  software extension, scaling and actual control flow also need validation.
+  A historical snapshot or absent direct bit writer is not current source
+  selection. The later PM convergence note was already read. No clock or
+  I/O change follows from these old rankings.
+- The old low-address AP loop was explicitly left without the wrapper's
+  caller or wait predicate. Its short exit ring does not prove an infinite
+  loop. The post-entry checklist is a map of possible failure branches;
+  state 2 alone is an in-progress state, and CPU identity fields are not
+  expected to be identical merely because capabilities should agree.
+
+
+- The reference README inventory repeats diagnoses withdrawn inside the
+  linked notes, including double clock injection and the old secure-lock
+  address. Its captured Hyper-V BSS belongs to a historical one-CPU boot.
+  The inventory is a navigation aid, not a current finding list.
+- The protected-copy note identifies caller-provided PFNs, but the minimum
+  of one instrumented population does not establish the entire allocator's
+  policy. Equal counts and a non-round count do not prove a common failure
+  or exclude a resource limit. The current run has no such PFN diagnosis.
+- The VTL-protection note limits its call-graph search and explicitly cannot
+  prove all runtime feature dependencies. Its incremental invalidation
+  suggestion requires complete relevant write coverage; one handler's
+  leaf writes alone are not proof that every change before a flush was seen.
+- The SkhalPci note proposes RAM bit-poking and SDEV stripping on an older
+  secure-DMA diagnosis later withdrawn in the broader secure-DMA notes.
+  Missing direct references do not exhaust indirect writers. No such guest
+  patch/table change is selected for the current USB power-worker failure.
+- The LP address-space and long-mode notes propose incompatible historical
+  direct-start shortcuts. Their chosen entry prerequisites and assumed
+  descriptor contents require actual validation; reaching an entry is not
+  proof its handshake completed. Current AP startup already progresses to
+  Windows and these notes are not instructions to replace it.
+
 
 - The VTL block note retracts its original lock address and causal ranking;
   some embedded assembly comments still contain the old address. An
