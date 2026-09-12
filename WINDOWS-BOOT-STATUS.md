@@ -88,13 +88,13 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-gdb-dispatch` owns manager PID **57249** and exactly one GDB
-child (current initial guard PID **57283**; confirm from manager.json). It initially guards KeBugCheckEx, then hands off once matching
-USB/WDF images validate to the timer-stop/flush entry-return probes plus
-the bugcheck guard. Both observe until real terminal state or explicit
+`zpp-rig-20260911`. `timer-probe-v2` owns manager PID **58201** and exactly one GDB
+child (current timer probe PID **58202**; confirm from manager.json). The
+USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-dispatch/`.
+the current GDB manager/captures are specifically `timer-probe-gdb-v2/` (earlier dispatcher capture remains
+in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
 bounded early KeFlushQueuedDpcs probe from about 07:42:17 to 07:44:17
@@ -110,7 +110,15 @@ continue-to-stop intervals totaled 18.2 ms host time; captures took
 ExpWorkerThread and system-thread startup to null. This is a completed
 CMC-worker invocation, not a USB timer-stop or DPC-flush return. The old
 manager/guard exited before replacement; the indefinite guard is restored.
-Latest complete module walk has 127 entries, with USBHUB3 still absent.
+At 07:55:54 the complete 147-module walk found **USBHUB3 fffff8045f5e0000**
+and **Wdf01000 fffff80457d80000**, with matching PE timestamps/sizes and
+probe instruction bytes. The first USB probe started at 07:55:57 and had
+no hits before an explicit handoff. V2 started **07:57:25**: it also tracks
+repeat flushes within a timer-stop and captures the timer owner/flags at
+both flush boundaries. The manager snapshots/hashes the exact probe source.
+As of 07:58:21 it has no hit. Second SMSS PID 816 is present (first seen
+07:54:51); no LogonUI/dwm. The module list is no longer refreshed after
+probe configuration, so 147 is the discovery count, not a later census.
 No C++ change, build, deployment or Windows configuration change was made.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.

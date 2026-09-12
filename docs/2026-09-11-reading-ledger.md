@@ -57,6 +57,9 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/live-read-unblock.md` (105 lines).
 - `.references/hyperv/ept-kvm-faithful.md` (154 lines).
 - `.references/hyperv/hvix64-nvme-passthrough.md` (129 lines).
+- `.references/hyperv/vtl-block-deadlock.md` (265 lines).
+- `.references/hyperv/multi-cpu-vbs-vtl1.md` (115 lines).
+- `.references/hyperv/vtl1-first-ap-resource.md` (103 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -64,6 +67,19 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The VTL block note retracts its original lock address and causal ranking;
+  some embedded assembly comments still contain the old address. An
+  unchanged nonzero lock word need not mean a holder (the note itself
+  describes marker 1), and a stable unused register is not proof of a
+  deliberate protocol field. Validate state and ABI at the actual boundary.
+- The multi-CPU VTL1 notes are historical ranked hypotheses. An absent
+  VM-entry failure does not prove that a particular VTL1 entry executed;
+  a sampled VTL-call return site does not locate the failure by itself.
+  Their APIC/SynIC changes are not selected fixes for this two-CPU boot.
+  Inner VTL resources are served by Hyper-V; do not infer zpp owns those
+  resources merely because their MSR numbers also exist at another layer.
+
 
 - The old EPT-parity note anchors 2d93273 and correctly asks for the full
   deployed manifest. Two eager switches being off does not exonerate all

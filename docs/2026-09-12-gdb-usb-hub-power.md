@@ -304,3 +304,29 @@ three raw stacks/register captures, transcript and checked kernel unwind
 are under `/tmp/zpp-20260912/timer-probe-gdb-dispatch/`. The prepared USB
 probe still takes over when matching USB/WDF images validate. No guest
 binary, configuration, register or code-byte changes were made.
+
+
+USBHUB3 loaded by the **07:55:54** complete module read (147 entries).
+The current USB base is **fffff8045f5e0000**, WDF **fffff80457d80000**;
+timestamps, sizes and expected probe bytes match. The discovery watcher
+stops module reads after producing the validated config, so this is a
+point-in-time module count. Second SMSS PID 816 appeared at 07:54:51.
+
+The initial USB probe ran from 07:55:57 without any hit before a supported
+GDB-owner handoff. At 07:57:25 the v2 probe started under manager 58201,
+GDB 58202, tmux `timer-probe-v2`. It re-arms the flush-call breakpoint
+after a paired flush return, because the captured WDF routine can branch
+back from +43461 to +433f6 before returning from WdfTimerStop. It captures
+the timer's stop-owner word +150 and state bytes +158/+159 at both flush
+boundaries. An unrelated thread's flush call preserves the selected outer
+timer return without claiming observation of its inner flush. Per-flush
+host running intervals restart at each actual flush call.
+
+Current source snapshot and SHA-256 are in `timer-probe-gdb-v2/`, with
+manager state, transcripts and captures. The hash is
+`f047090757afc61146a94dcd9215c23311fbb6f14d53cfb348f716a6bde10e89`.
+The initial script file was edited after GDB had already loaded it;
+those edits did not affect its running code. V2 uses a new filename and
+an archived source snapshot, and the old owner/child exited before it
+attached. As of 07:58:21 v2 has no timer-stop hit. The sole monitor watcher
+and Windows run remain continuous across these debugger handoffs.
