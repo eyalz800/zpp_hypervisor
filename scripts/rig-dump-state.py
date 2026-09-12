@@ -1,0 +1,12582 @@
+#!/usr/bin/env python3
+"""Dump the resident hypervisor's per-processor state through the emulator's
+monitor, reading *physical* memory.
+
+Why this exists rather than a gdb session: the module clears every
+extended-page-table permission on its own pages, so from guest context those
+addresses read as `Cannot access memory`, and a settled guest has no
+processor in root operation to read them from.  `xp` reads physical memory,
+which bypasses both the extended page tables and guest paging, and the module
+base printed on serial *is* a physical address.
+
+Why it asks the ELF for every offset rather than carrying a table: member
+offsets move whenever a member is added, and stale offsets do not fail - they
+return plausible zeroes.  That happened twice, and each time the zeroes were
+read as "the processor did nothing" when they were "you read the wrong
+address".
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+
+SSH = ["ssh", "-o", "StrictHostKeyChecking=no",
+       "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15"]
+
+# Only the reasons this guest actually produces are named.  An unnamed one
+# prints as its number, which is better than a wrong name.
+EXIT_REASON = {
+    0: "exception", 1: "ext-int", 2: "triple-fault", 3: "init", 4: "sipi",
+    7: "int-window", 8: "nmi-window", 9: "task-switch", 10: "cpuid",
+    12: "hlt", 13: "invd", 14: "invlpg", 18: "vmcall", 19: "vmclear",
+    20: "vmlaunch", 21: "vmptrld", 22: "vmptrst", 23: "vmread",
+    24: "vmresume", 25: "vmwrite", 26: "vmoff", 27: "vmon",
+    28: "cr-access", 29: "dr-access", 30: "io", 31: "rdmsr", 32: "wrmsr",
+    33: "entry-fail-state", 34: "entry-fail-msr", 36: "mwait",
+    37: "monitor-trap", 39: "monitor", 40: "pause", 41: "entry-fail-mce",
+    43: "tpr-below", 44: "apic-access", 45: "virt-eoi", 46: "gdtr-idtr",
+    47: "ldtr-tr", 48: "ept-violation", 49: "ept-misconfig",
+    50: "invept", 51: "rdtscp", 52: "preempt-timer", 53: "invvpid",
+    54: "wbinvd", 55: "xsetbv", 56: "apic-write", 57: "rdrand",
+    58: "invpcid", 59: "vmfunc", 60: "encls", 61: "rdseed",
+    62: "pml-full", 63: "xsaves", 64: "xrstors",
+}
+
+ACTIVITY = {0: "active", 1: "hlt", 2: "shutdown", 3: "wait-sipi"}
+
+# The order the hypervisor writes them in - phase_cycles is indexed by
+# position, not by name, so this list is the only thing that says which
+# is which. Keep it beside the indices in the sources that fill them.
+#
+# The indentation used to be in the *name*, which is how the table came
+# to be summed: a reader looking at a flat column of "cycles/call" has
+# nothing telling it that `save_l2_state` is inside `reflect_l2_exit`
+# and that `copy_shadow_to_vmcs12` is called four times a round trip
+# where `build_vmcs02` is called once. The nesting is now data, in
+# PHASE_PARENT below, and the printer derives the indentation from it.
+PHASE_NAMES = ["save_l2_state", "reflect_l2_exit", "build_vmcs02",
+               "shadow_ept_pointer_for", "copy_vmcs12_to_shadow",
+               "copy_shadow_to_vmcs12", "vmptrld->vmcs02",
+               "vmptrld->vmcs01", "merge_nested_bitmaps",
+               "on_l2_ept_fault", "merge: guest page read",
+               "guest read: map_window", "load_l1_host_state",
+               "exit information", "build: before vmptrld",
+               "build: after vmptrld",
+               "vmptrld: read region", "vmptrld: flush old",
+               "vmptrld: assign", "vmptrld: shadow publish",
+               "vmptrld: whole call",
+               "materialise: vmptrld in", "materialise: field loop",
+               "materialise: vmptrld out", "materialise: whole",
+               "exit: prologue", "exit: dispatch", "resume: events",
+               "resume: diag and rip", "resume: record_exit",
+               "resume: entry census", "reflect: exit ring",
+               "reflect: msr store", "reflect: msr load + invvpid",
+               "reflect: evmcs store", "enter_or_park_l2",
+               "on_guest_vmlaunch", "guest write: map_window",
+               "guest read: whole call", "guest write: whole call",
+               "copy out: vmptrst", "copy out: vmptrld shadow",
+               "copy out: field writes", "copy out: vmclear",
+               "copy out: vmptrld back",
+               "copy in: vmptrst", "copy in: vmptrld shadow",
+               "copy in: field reads", "copy in: vmclear",
+               "copy in: vmptrld back",
+               "(spare 50)", "(spare 51)"]
+
+# Which slot each one is nested inside. TOP is a top-level interval of
+# the adjacent split over a whole exit; CROSS is a phase with more than
+# one caller, so it belongs to no single parent and is excluded from the
+# residue arithmetic rather than being charged to whichever caller was
+# guessed at.
+#
+# **This table is what makes the phase table readable, and its absence
+# is what made it misleading.** Slots 0 to 24 were each added where
+# somebody suspected a cost, so several of them nest two and three deep,
+# and a naive sum of their cycles/call column came to about half the
+# round trip - which was then reported as "the other half is
+# unattributed". Some of that half was double counting.
+PHASE_TOP = -1
+PHASE_CROSS = -2
+
+PHASE_PARENT = [
+    1,            # 0  save_l2_state
+    26,           # 1  reflect_l2_exit
+    36,           # 2  build_vmcs02
+    PHASE_CROSS,  # 3  shadow_ept_pointer_for - build, ept fault, vmfunc
+    1,            # 4  copy_vmcs12_to_shadow
+    PHASE_CROSS,  # 5  copy_shadow_to_vmcs12 - vmlaunch and the flush
+    2,            # 6  vmptrld->vmcs02
+    1,            # 7  vmptrld->vmcs01
+    14,           # 8  merge_nested_bitmaps
+    26,           # 9  on_l2_ept_fault
+    8,            # 10 merge: guest page read
+    38,           # 11 guest read: map_window
+    1,            # 12 load_l1_host_state
+    1,            # 13 exit information
+    2,            # 14 build: before vmptrld
+    2,            # 15 build: after vmptrld
+    20,           # 16 vmptrld: read region
+    20,           # 17 vmptrld: flush old
+    20,           # 18 vmptrld: assign
+    20,           # 19 vmptrld: shadow publish
+    26,           # 20 vmptrld: whole call
+    24,           # 21 materialise: vmptrld in
+    24,           # 22 materialise: field loop
+    24,           # 23 materialise: vmptrld out
+    17,           # 24 materialise: whole
+    PHASE_TOP,    # 25 exit: prologue
+    PHASE_TOP,    # 26 exit: dispatch
+    PHASE_TOP,    # 27 resume: events
+    PHASE_TOP,    # 28 resume: diag and rip
+    PHASE_TOP,    # 29 resume: record_exit
+    PHASE_TOP,    # 30 resume: entry census
+    1,            # 31 reflect: exit ring
+    1,            # 32 reflect: msr store
+    1,            # 33 reflect: msr load + invvpid
+    1,            # 34 reflect: evmcs store
+    36,           # 35 enter_or_park_l2
+    26,           # 36 on_guest_vmlaunch
+    39,           # 37 guest write: map_window
+    PHASE_CROSS,  # 38 guest read: whole call
+    PHASE_CROSS,  # 39 guest write: whole call
+    4,            # 40 copy out: vmptrst
+    4,            # 41 copy out: vmptrld shadow
+    4,            # 42 copy out: field writes
+    4,            # 43 copy out: vmclear
+    4,            # 44 copy out: vmptrld back
+    5,            # 45 copy in: vmptrst
+    5,            # 46 copy in: vmptrld shadow
+    5,            # 47 copy in: field reads
+    5,            # 48 copy in: vmclear
+    5,            # 49 copy in: vmptrld back
+    PHASE_CROSS,  # 50 spare
+    PHASE_CROSS,  # 51 spare
+]
+
+# Whose instruction pointer a record holds - see exit_trace_entry's
+# rip_owner. An address attributed to the wrong guest reads as a
+# perfectly ordinary address, so it is marked rather than left implicit,
+# and the unmarked case is the ordinary one.
+RIP_OWNER = {0: "", 1: " [l2-rip]", 2: " [l1-rip]"}
+
+# The slot order `capture_vtl_switch` writes, and the two hypercalls it
+# is armed for.  Slot 4 is the VMCS's guest RSP, not the exit context's.
+VTL_SLOTS = ["rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi",
+             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+             "rip", "cr3", "rflags", "eptp"]
+VTL_KINDS = ["HvCallVtlCall 0x11", "HvCallVtlReturn 0x12",
+             "STIMER0 periodic arm"]
+
+# `vtl1_duration_buckets` in hypervisor.h.  Was 24, transcribed at two
+# sites, and 24 saturates at 2^23 ticks - 4.2 ms - so a one-second
+# trust-level round trip landed in the top column and read as "4.2 ms or
+# more".  Kept as one name here because the stride and the loop bound
+# have to move together: they did not, once, and that is `ecc4b70`.
+VTL1_DURATION_BUCKETS = 34
+
+# `zpp switches: ...`, as read off the running module near the top of
+# `main`.  Kept here so the sections further down can ask what was
+# compiled in before they name a cause for a member reading zero.
+#
+# **This exists because a section named the wrong cause and it cost an
+# investigation cycle.**  The interrupt-window block below used to say of
+# an empty `int_window_vtpr` that "the sampling site is not running, or
+# is storing elsewhere ... do not read this as evidence against a
+# TPR-threshold fix", when the site is simply compiled out: its only
+# increment is inside `if (nested_vmx::census_exits)` and `census=0` is
+# the shipping build.  A member that cannot be written is not a member
+# that was written and lost, and only the manifest distinguishes them.
+#
+# `None` means the manifest was never read - a failed monitor read, a
+# wrong base, or a code path that runs before `main` gets to it - which
+# is a third answer and is not the same as `census=0`.
+BUILD_MANIFEST = None
+
+
+def manifest_field(name):
+    """The value of one `name=value` field of the build manifest.
+
+    `None` when the manifest was not read, or carries no such field -
+    which is what a binary predating the field looks like.  Split on
+    whitespace and matched whole: CLAUDE.md records a `grep -oE` over
+    this string matching a prefix, declaring `novina=` missing and
+    getting a duplicate switch added on that premise.
+    """
+    if BUILD_MANIFEST is None:
+        return None
+    for field in BUILD_MANIFEST.split():
+        key, sep, value = field.partition("=")
+        if sep and key == name:
+            return value
+    return None
+
+
+def read_build_manifest(args, base):
+    """Read `zpp_build_switches` off the running module.
+
+    Returns `(address, raw_bytes)` and sets `BUILD_MANIFEST` when the
+    bytes really are the manifest.  **One read path with two callers**,
+    which is the point: the cumulative dump reads it as its base proof
+    and prints a long diagnosis of what came back, and `--delta` returns
+    long before ever reaching that block - so before this existed,
+    `manifest_field` answered None for the whole of delta mode and every
+    switch-dependent caveat printed as "unknown".  That is the wrong
+    answer in the mode this file most wants trusted.
+
+    The diagnosis stays at the cumulative caller, which is why this
+    returns the raw bytes rather than a verdict: distinguishing an
+    all-`0xff` failed read from a wrong base needs the bytes, and that
+    guard has already cried wolf once.
+    """
+    global BUILD_MANIFEST
+    BUILD_MANIFEST = None
+    manifest_va = base + gdb_symbol(args.elf, "zpp_build_switches")
+    mon = Monitor(args.rig, args.port)
+    # The manifest exceeds the old 256-byte read: vcache and uevmcs are
+    # near its end. Require its terminator, and never invent one for a
+    # missing word. Bound a malformed string to one page of bytes.
+    raw = b""
+    for offset in range(0, 4096, 256):
+        address = manifest_va + offset
+        mon.queue(address, 32)
+        got = mon.run()
+        wanted = [address + 8 * i for i in range(32)]
+        if not all(at in got for at in wanted):
+            raise RuntimeError("build manifest read is incomplete")
+        raw += b"".join(got[at].to_bytes(8, "little") for at in wanted)
+        if not raw.startswith(b"zpp switches:"):
+            return manifest_va, raw
+        if b"\0" in raw:
+            BUILD_MANIFEST = raw.split(b"\0")[0].decode("ascii", "replace")
+            return manifest_va, raw
+    raise RuntimeError("build manifest has no terminator within 4096 bytes")
+
+
+def census_caveat(what):
+    """One line saying whether `census=` explains an empty instrument.
+
+    `what` names the members, so the caller reads as a sentence.  Three
+    answers, and the third is the point: unknown is not zero.
+    """
+    census = manifest_field("census")
+    if census == "0":
+        return (f"  *** census=0 in the build manifest, so nothing "
+                f"writes {what}: COMPILED OUT. The only increment site "
+                f"is inside `if (nested_vmx::census_exits)`. Zero here "
+                f"is a fact about this build and says NOTHING about the "
+                f"guest. Rebuild with -DZPP_CENSUS_EXITS=ON to ask. ***")
+    if census is None:
+        return ("  (the build manifest was not read, so whether "
+                "`census=` compiled these out is unknown - which is not "
+                "the same as knowing they were sampled)")
+    return None
+
+
+def gdb_offsets(elf, members, optional=False, quiet=False):
+    """Ask the ELF where each member lives inside the singleton."""
+    args = []
+    for m in members:
+        args += ["-ex", f"print/x (long)&(('zpp::hypervisor::hypervisor' *)0)->{m}"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (0x[0-9a-f]+)$", out, re.M)
+    if len(values) != len(members):
+        if optional:
+            # One member per call, so a miss can be attributed. Used for
+            # members a *deployed* binary may predate: the reader is
+            # pointed at whichever ELF is running, and a dump of an older
+            # one must lose that section rather than the whole dump.
+            found = {}
+            for m in members:
+                one = gdb_offsets(elf, [m], optional=False, quiet=True)
+                if one:
+                    found.update(one)
+            return found
+        if quiet:
+            return {}
+        sys.exit(f"could not read all offsets from {elf}: got {values}")
+    return dict(zip(members, (int(v, 16) for v in values)))
+
+
+def gdb_lengths(elf, members):
+    """Ask the ELF how long each per-processor row is, in entries.
+
+    The same argument as `gdb_offsets`, for the same reason and after the
+    same failure: a capacity carried here is a second copy of a constant
+    that lives in the header, and when the header moved this did not.
+    `exit_reason_capacity` went to 96 while this said 64, and the effect
+    was invisible for cpu 0 - whose row starts at offset zero, so a wrong
+    stride cancels - and wrong for every other processor.  It did not
+    fail; it reported `rdrand`, `encls` and `xsaves` exits for a guest
+    that executes none of them, which reads as a bizarre finding rather
+    than as a bug in the reader.
+
+    `sizeof(row) / sizeof(row[0])` cannot drift the same way, because
+    both halves come from the type being read.
+    """
+    args = []
+    for m in members:
+        args += ["-ex",
+                 f"print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0] / sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0][0])"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(members):
+        sys.exit(f"could not read all lengths from {elf}: got {values}")
+    return dict(zip(members, (int(v) for v in values)))
+
+
+def gdb_flat_lengths(elf, members):
+    """The same question as `gdb_lengths`, for a **flat** array.
+
+    `gdb_lengths` asks `sizeof(m[0]) / sizeof(m[0][0])`.  That is the
+    right question for `x[max_cpus][n]` and is not a question at all for
+    a flat `x[n]` - gdb answers, on stderr,
+
+        cannot subscript something of type `unsigned long'
+
+    prints no `$1 = ...`, and `gdb_lengths` then `sys.exit`s.  Every
+    caller here wraps that in `except SystemExit` and prints a note
+    saying the member is *absent from this ELF*, so a flat array that is
+    present reports itself missing and the section needing it is skipped
+    in silence.
+
+    **Measured, on this machine, against a stand-in object with
+    `unsigned long handler_reason_exits[64]` and `unsigned long
+    phase_cycles[8][52]`:** the nested form answers `cannot subscript`
+    for the first and `52` for the second; the flat form below answers
+    `64` and `8`.  So `--delta` has never printed its exits-by-level
+    split on the rig, and the note in its place named the wrong cause -
+    which is the failure this whole reader is written against, one level
+    up: an instrument reporting its own absence for a reason that is not
+    true.
+
+    Deliberately a *second* function rather than a fallback inside the
+    first.  On `x[max_cpus][n]` this expression answers `max_cpus` - a
+    plausible small number that would be read as the row length, and
+    read wrong in the direction that still prints a table.  The caller
+    has to say which shape it is asking about.
+    """
+    args = []
+    for m in members:
+        args += ["-ex",
+                 f"print (int)(sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m} / sizeof(('zpp::hypervisor::hypervisor' *)0)"
+                 f"->{m}[0])"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(members):
+        sys.exit(f"could not read all lengths from {elf}: got {values}")
+    return dict(zip(members, (int(v) for v in values)))
+
+
+def gdb_values(elf, expressions):
+    """Evaluate integer expressions against the ELF's own types.
+
+    Same argument as `gdb_lengths`, one step more general: the trust-level
+    capture is a three-dimensional array and its inner two bounds are not
+    `sizeof(row)/sizeof(row[0])`.  Deriving them here rather than copying
+    the constants keeps the failure mode at "gdb could not answer" instead
+    of "the reader walked the array at the wrong stride".
+    """
+    args = []
+    for expression in expressions:
+        args += ["-ex", f"print (int)({expression})"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+    values = re.findall(r"^\$\d+ = (\d+)$", out, re.M)
+    if len(values) != len(expressions):
+        sys.exit(f"could not evaluate against {elf}: got {values}")
+    return [int(v) for v in values]
+
+
+def gdb_symbol(elf, symbol):
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf,
+                          "-ex", f"print/x &'{symbol}'"],
+                         capture_output=True, text=True).stdout
+    m = re.search(r"(0x[0-9a-f]+)", out)
+    if not m:
+        sys.exit(f"could not find {symbol} in {elf}")
+    return int(m.group(1), 16)
+
+
+def gdb_symbols(elf, symbols):
+    """Link-time addresses for many symbols, in one gdb run, non-fatally.
+
+    Returns `{symbol: address or None}` - **None for absent, never a
+    `sys.exit`**, which is the whole difference from `gdb_symbol` above.
+    That one is right for the singleton and the manifest: if those are
+    missing the dump is worthless and dying is the honest answer. It is
+    wrong for a counter, because a counter can be absent for two ordinary
+    reasons that must not take the dump down - the deployed binary
+    predates it, or a build switch compiled it out and `--gc-sections`
+    removed the storage.  Both are *findings*, and the caller can only
+    report them if it is still running.
+
+    One invocation for the lot: gdb spends its time opening the ELF, so
+    fifteen separate runs cost fifteen times as much as one.  The marker
+    is needed because a failed `print` emits no `$N` at all, so the
+    values cannot be matched to the requests by position - the third
+    symbol's address would be read as the fourth's, which is exactly the
+    class of plausible-and-wrong this file exists to refuse.  gdb's
+    "No symbol ..." goes to stderr and is deliberately not captured;
+    absence is signalled by finding no address between two markers.
+
+    The name is passed to gdb in its **demangled** spelling, quoted -
+    `&'zpp::arch::x86_64::vmx::vmcs_reads_taken'`.  That is what gdb's
+    own parser wants, and it means the caller never has to spell an
+    Itanium-ABI mangling like `_ZN3zpp4arch6x86_643vmx16vmcs_reads_takenE`
+    that would silently rot the first time a namespace is renamed.
+    """
+    marker = "@@zpp@@"
+    args = []
+    for symbol in symbols:
+        args += ["-ex", f"echo {marker}\\n",
+                 "-ex", f"print/x &'{symbol}'"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf] + args,
+                         capture_output=True, text=True).stdout
+
+    # `split` on the marker gives one chunk per request, in order, with
+    # the text before the first marker discarded.  A chunk carrying an
+    # address is a hit; an empty chunk is an absent symbol.
+    chunks = out.split(marker)[1:]
+    found = {}
+    for i, symbol in enumerate(symbols):
+        chunk = chunks[i] if i < len(chunks) else ""
+        m = re.search(r"=\s*(0x[0-9a-f]+)", chunk)
+        found[symbol] = int(m.group(1), 16) if m else None
+    return found
+
+
+class Monitor:
+    """Batched physical-memory reads over the QEMU monitor.
+
+    One round trip per word is far too slow for a ring of hundreds of
+    entries, so every read wanted is queued and issued in one connection.
+    """
+
+    def __init__(self, rig, port):
+        self.rig, self.port = rig, port
+        self.pending = []
+        # Reads that never came back after retries. Non-empty means some
+        # number printed above is a zero that was never read.
+        self.unanswered = []
+
+    def queue(self, address, words):
+        self.pending.append((address, words))
+
+    # Batch size, and it is not a performance knob.
+    #
+    # The monitor echoes each character of a command back with redraws,
+    # and with many commands in flight that echo interleaves with the
+    # output *within a line*. A corrupted line still matches the address
+    # pattern, so it parses - into the **wrong key**. The reader then
+    # returns the right *number* of words, none of them at an address
+    # anyone asked for, and `words.get(addr, 0)` turns every one of those
+    # misses into a plausible zero.
+    #
+    # Measured: 26 reads in one session returned 78 words, all zero,
+    # while the same three-word read alone returned the right values.
+    # That is what made the log ring print 37 empty lines.
+    CHUNK = 6
+
+    def _issue(self, batch):
+        script = "".join(f"xp/{n}gx 0x{a:x}\n" for a, n in batch)
+        proc = subprocess.run(
+            SSH + [self.rig, f"cat | nc -w 30 127.0.0.1 {self.port}"],
+            input=script, capture_output=True, text=True, errors="replace")
+        words = {}
+        for line in proc.stdout.replace("\r", "").split("\n"):
+            line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line)
+            m = re.match(r"^([0-9a-f]{8,16}):((?:\s+0x[0-9a-f]+)+)\s*$", line)
+            if not m:
+                continue
+            address = int(m.group(1), 16)
+            for i, word in enumerate(m.group(2).split()):
+                words[address + 8 * i] = int(word, 16)
+        return words
+
+    def run(self):
+        pending, self.pending = self.pending, []
+        words = {}
+
+        # Chunked, and then *checked*: a read whose address did not come
+        # back is retried alone rather than left to read as zero. Without
+        # the check this is the same failure shape as `reader proven` -
+        # an answer that looks like data and is not.
+        for start in range(0, len(pending), self.CHUNK):
+            batch = pending[start:start + self.CHUNK]
+            words.update(self._issue(batch))
+
+            for address, count in batch:
+                wanted = [address + 8 * i for i in range(count)]
+                if all(w in words for w in wanted):
+                    continue
+                for _ in range(2):
+                    words.update(self._issue([(address, count)]))
+                    if all(w in words for w in wanted):
+                        break
+                else:
+                    self.unanswered.append((address, count))
+
+        return words
+
+
+def dump_log(monitor, elf, base, limit):
+    """The hypervisor's own log, oldest line first.
+
+    The counters say what the state *is*; this says what happened, in
+    order, which is usually the question. Walked by hand for the same
+    reason `scripts/zpp.gdb` walks it by hand - the hypervisor is built
+    against libc++ headers only, so there are no pretty printers and a
+    list of strings is raw nodes and unions.
+
+    Read over the monitor rather than gdb deliberately. gdb resolves
+    through the *current* processor's page tables, and once the guest is
+    running our module is not mapped in its CR3 - so every read answers
+    "Cannot access memory" unless a processor happens to be inside our
+    code. `xp` reads physical memory and ignores paging, and since the
+    module is identity mapped the pointers stored in it are already
+    physical addresses.
+
+    Layout, matching zpp.gdb: a node is {__prev_, __next_, value} so the
+    string starts sixteen bytes in, and libc++'s string keeps its
+    long/short flag in the low bit of the first byte - long keeps a
+    pointer sixteen bytes in, short keeps the characters one byte in.
+    """
+    head = gdb_symbol(elf, "zpp::hypervisor::log_storage::m_lines") + base
+
+    # Walk the node chain first, one round trip per batch rather than
+    # per node: the list is singly followed here, so each step needs the
+    # previous answer, but the string bodies can all be fetched together.
+    nodes, seen, node = [], set(), None
+    monitor.queue(head + 8, 1)
+    node = monitor.run().get(head + 8, 0)
+    while node and node != head and len(nodes) < limit and node not in seen:
+        seen.add(node)
+        nodes.append(node)
+        monitor.queue(node + 8, 1)
+        node = monitor.run().get(node + 8, 0)
+
+    if not nodes:
+        print("\nlog ring: empty")
+        return
+
+    # The string headers, all at once.
+    for n in nodes:
+        monitor.queue(n + 16, 3)
+    words = monitor.run()
+
+    long_ones = []
+    lines = []
+    for i, n in enumerate(nodes):
+        first = words.get(n + 16, 0)
+        if first & 1:
+            long_ones.append((i, words.get(n + 32, 0), first))
+            lines.append(None)
+        else:
+            # Short: length in the top bits of the first byte's slot,
+            # characters immediately after it.
+            length = (first >> 1) & 0x7f
+            raw = b""
+            for w in (words.get(n + 16, 0), words.get(n + 24, 0),
+                      words.get(n + 32, 0)):
+                raw += w.to_bytes(8, "little")
+            lines.append(raw[1:1 + length].decode("ascii", "replace"))
+
+    # And the bodies of the long ones, also all at once.
+    if long_ones:
+        for _, pointer, _ in long_ones:
+            if pointer:
+                monitor.queue(pointer, 24)
+        body = monitor.run()
+        for index, pointer, _ in long_ones:
+            raw = b""
+            for k in range(24):
+                raw += body.get(pointer + 8 * k, 0).to_bytes(8, "little")
+            lines[index] = raw.split(b"\0")[0].decode("ascii", "replace")
+
+    print(f"\nlog ring ({len(lines)} lines, oldest first)")
+    for i, text in enumerate(lines):
+        print(f"  [{i:4}] {text}")
+
+    # An empty line is either an empty line or a read that never came
+    # back, and those must not look alike - that is exactly what made
+    # this ring print 37 blanks and read as "the log is empty".
+    if monitor.unanswered:
+        print(f"  WARNING: {len(monitor.unanswered)} reads never answered "
+              f"after retries - blank lines above may be unread rather "
+              f"than empty")
+
+
+def name_reason(value):
+    reason = value & 0xffff
+    tag = EXIT_REASON.get(reason, str(reason))
+    if value & (1 << 31):
+        tag += "!ENTRY-FAIL"
+    return tag
+
+
+def monitor_vector_counts(monitor, instance, off, cpu, member):
+    """Which interrupt vectors were acknowledged, per processor.
+
+    The totals beside this cannot answer the question it exists for: a
+    guest parked with its clock ticking is either not being handed a
+    device's interrupt or never asked the device for anything, and
+    `external_interrupts_taken` counts a timer tick and a completion the
+    same.  One or two vectors here means only the clock is arriving.
+
+    Read as one block of 1024 bytes rather than 256 words, because the
+    counters are 32 bit - two per quadword, low half first.
+    """
+    # A member the ELF does not carry is not an error and must not be a
+    # crash: an older or differently-configured build simply lacks it,
+    # and the callers already treat an empty result as "nothing to
+    # print". Reporting absence is the instrument saying it failed,
+    # which is always better than a traceback halfway through a dump.
+    if member not in off:
+        return {}
+
+    base = instance + off[member] + cpu * 1024
+    monitor.queue(base, 128)
+    words = monitor.run()
+    counts = {}
+    for i in range(128):
+        word = words.get(base + 8 * i, 0)
+        for half in range(2):
+            value = (word >> (32 * half)) & 0xffffffff
+            if value:
+                counts[2 * i + half] = value
+    return counts
+
+
+def monitor_reasons(monitor, instance, off, args, cpu, capacity):
+    """The whole-run histogram, which the 32-entry ring cannot give.
+
+    The ring answers "what was it doing when it stopped"; this answers
+    "where does the time go", and those turned out to be different
+    questions - the ring showed a plausible cycle while the histogram
+    showed most exits were somewhere the ring never sampled.
+    """
+    base = instance + off["exit_reason_counts"] + cpu * capacity * 8
+    monitor.queue(base, capacity)
+    words = monitor.run()
+    return {i: words.get(base + 8 * i, 0)
+            for i in range(capacity) if words.get(base + 8 * i, 0)}
+
+
+def dump_field_use(args, instance, off, capacity=128):
+    """The VMCS fields the guest hypervisor reads and writes.
+
+    This is what decides which fields VMCS shadowing should cover: a
+    shadowed field costs a copy in each direction at every second-level
+    exit, so a list longer than what the guest hypervisor touches makes
+    the fix slower than the problem.
+    """
+    monitor = Monitor(args.rig, args.port)
+    for name in ("vmcs_field_read_encoding", "vmcs_field_read_count",
+                 "vmcs_field_write_encoding", "vmcs_field_write_count"):
+        monitor.queue(instance + off[name], capacity)
+    monitor.queue(instance + off["vmcs_field_use_overflow"], 1)
+    words = monitor.run()
+
+    def table(kind):
+        rows = []
+        for i in range(capacity):
+            count = words.get(
+                instance + off[f"vmcs_field_{kind}_count"] + 8 * i, 0)
+            if not count:
+                continue
+            rows.append((count, words.get(
+                instance + off[f"vmcs_field_{kind}_encoding"] + 8 * i, 0)))
+        rows.sort(reverse=True)
+        return rows
+
+    for kind in ("read", "write"):
+        rows = table(kind)
+        total = sum(count for count, _ in rows) or 1
+        print(f"  --- vm{kind} ({total} total, {len(rows)} distinct) ---")
+        for count, encoding in rows:
+            print(f"    0x{encoding:04x} {VMCS_FIELD.get(encoding, ''):<44} "
+                  f"{count:>10}  {100.0 * count / total:5.1f}%")
+
+    overflow = words.get(instance + off["vmcs_field_use_overflow"], 0)
+    if overflow:
+        print(f"  table full, {overflow} uses not recorded")
+
+
+# ---------------------------------------------------------------------
+# Counters that are NOT members of the singleton.
+#
+# **Why this block exists at all.**  Every other number this reader
+# prints is resolved as an offset into
+# `zpp::hypervisor::hypervisor::instance()::instance` - `gdb_offsets`
+# asks the ELF where a member sits, and `instance + off[name]` is read
+# over the monitor.  That mechanism can only ever see members.  The
+# counters below are namespace-scope `constinit` globals in
+# `hypervisor/include/zpp/arch/x86_64/vmx/vmcs.h`, so they have no
+# offset into anything and this reader had **no reference to any of
+# them**.  They had been incrementing since the first boot of the
+# project and nothing had ever printed one.
+#
+# That is a distinct failure from the ones this file catalogues
+# elsewhere.  The usual one is an instrument that cannot report its own
+# *failure*; this is an instrument that cannot report its own
+# *existence* - there is no zero, no blank column, nothing at all to
+# notice.  `8fce1c9` got the first reading out of two of them by hand,
+# with `llvm-nm` on the deployed ELF and the QEMU monitor, and `843690a`
+# then lost a before/after comparison because the other two were "three
+# lines away and I did not take them".
+#
+# **Addressing is simpler here, not harder.**  A global's runtime
+# address is `module base + its link-time symbol value`, full stop -
+# no member offset, no per-processor stride.  These are all `[1]`
+# scalars, shared across processors and deliberately non-atomic: the
+# header argues at length that a counter occasionally short by a racing
+# increment answers "about how many per exit" exactly as well as an
+# exact one, and that a `lock` prefix on the hot path to measure the hot
+# path is a real cost added for nothing.  So there is no per-cpu column
+# to print and none is missing.
+#
+# **Everything here is monotonic and therefore belongs in `--delta`.**
+# Cumulative, the hit rate reads 52.8% where the same two counters
+# differenced over 45 s read 36.2% - it averages phases with completely
+# different access patterns.  A cumulative-only presentation of these
+# would overstate the cache by half again, which is the exact failure
+# this whole file is written against.  The one non-monotonic value in
+# vmcs.h, `vmcs_cache_suspended`, is a *depth* and is in the state list
+# below rather than this one for that reason.
+VMX_NS = "zpp::arch::x86_64::vmx::"
+
+VMCS_GLOBAL_COUNTERS = [
+    (VMX_NS + "vmcs_reads_taken",
+     "VMCS field reads this VMM executed"),
+    (VMX_NS + "vmcs_writes_taken",
+     "VMCS field writes this VMM executed"),
+    (VMX_NS + "vmcs_cache_hits",
+     "reads answered from the per-processor cache"),
+    (VMX_NS + "vmcs_cache_write_hits",
+     "hardware VMWRITEs skipped with a matching current cache value"),
+    (VMX_NS + "vmcs_cache_misses",
+     "reads that went to the processor (a real VMREAD)"),
+    (VMX_NS + "vmcs_cache_unarmed",
+     "cache lookups with no armed GS row (see the note below)"),
+    (VMX_NS + "vmcs_cache_revalidations",
+     "rows revalidated after a borrow"),
+    (VMX_NS + "vmcs_cache_bypass_invalidations",
+     "cached fields discarded by writes during a VMCS borrow"),
+    (VMX_NS + "vmcs_cache_owned_clears",
+     "VMCS clears using processor-local cache invalidation"),
+    (VMX_NS + "vmcs_cache_reserved_bit_writes",
+     "cache fills withheld for writes with processor-dependent reserved bits"),
+    # Monotonic: the only writer is `fetch_add(1)` in
+    # `vmcs_cache_forget`.  It starts at 1, not 0, so a cumulative
+    # reading is one high and a *difference* is exact - another reason
+    # to prefer the windowed number.
+    (VMX_NS + "vmcs_cache_epoch",
+     "cache windows ended (epoch bumps)"),
+    (VMX_NS + "vmcs_interrupt_shadows_cleared",
+     "emulated instructions that ended STI/MOV-SS blocking"),
+    # "A non-zero count here is never normal" - the header says so in
+    # terms.  These used to be `__builtin_trap()`.
+    (VMX_NS + "vmcs_read_failures",
+     "VMREADs the layer below REFUSED (MUST be 0)"),
+    (VMX_NS + "vmcs_write_failures",
+     "VMWRITEs the layer below REFUSED (MUST be 0)"),
+    # The census tables' own honesty counters.  Absent from a `censv=0`
+    # binary along with the tables they guard, which the printer says.
+    (VMX_NS + "vmcs_read_overflow",
+     "census read-table slot collisions (MUST be 0)"),
+    (VMX_NS + "vmcs_write_overflow",
+     "census write-table slot collisions (MUST be 0)"),
+    (VMX_NS + "vmcs_read_caller_overflow",
+     "census caller-table overflows (48 slots, linear probe)"),
+]
+
+# Read and printed, never differenced.  Three different kinds of thing,
+# and none of them is a count of events:
+#
+#  - a *field encoding*, which is an identity;
+#  - a *depth*, which goes up and down and whose difference is
+#    meaningless (`delta_rows` would report a legitimate decrease as
+#    IMPOSSIBLE, which would be a false alarm - the second entry in
+#    DELTA_REFUSALS);
+#  - launch-path failure state, which is written once and then stands.
+VMCS_GLOBAL_STATE = [
+    (VMX_NS + "vmcs_read_failed_field",
+     "first field encoding a VMREAD was refused for"),
+    (VMX_NS + "vmcs_write_failed_field",
+     "first field encoding a VMWRITE was refused for"),
+    (VMX_NS + "vmcs_cache_suspended",
+     "aggregate borrow depth AT THIS INSTANT (0 at rest; a gauge, not a count)"),
+    (VMX_NS + "vmcs_cache_unknown_borrows",
+     "global fallback borrow depth for unidentified owners (gauge)"),
+    # Not in vmcs.h but in the same class exactly: `extern "C"` globals
+    # in `vmx/asm.h`, written by the naked `vmlaunch`/`vmresume` stubs
+    # and readable nowhere else.  Non-zero means a VM entry failed on
+    # the launch path, which no member of the singleton records.
+    ("zpp_launch_failed",
+     "a VM entry failed on the launch path (MUST be 0)"),
+    ("zpp_launch_instruction_error",
+     "...and the VM-instruction error it reported (SDM 31.4)"),
+]
+
+
+def vmcs_globals_resolve(elf, base):
+    """Runtime addresses for the globals above, and the absentees.
+
+    Returns `(addresses, missing)`.  `addresses` maps the **short** name
+    to `base + symbol`; `missing` is the list of short names the ELF has
+    no symbol for, which the printers name out loud rather than leaving
+    as a silent gap.
+    """
+    wanted = [s for s, _ in VMCS_GLOBAL_COUNTERS + VMCS_GLOBAL_STATE]
+    found = gdb_symbols(elf, wanted)
+    addresses, missing = {}, []
+    for symbol in wanted:
+        short = symbol.rsplit("::", 1)[-1]
+        if found[symbol] is None:
+            missing.append(short)
+        else:
+            addresses[short] = base + found[symbol]
+    return addresses, missing
+
+
+def vmcs_globals_missing_lines(missing):
+    """Name every absent symbol, and say what would explain it.
+
+    A symbol that is not in the ELF is not a counter reading zero, and
+    the two must not print the same.  Two ordinary causes, both of which
+    the manifest can distinguish from a real problem.
+    """
+    if not missing:
+        return []
+    lines = ["  symbols ABSENT from this ELF (NOT zero - unmeasurable "
+             "in this build):"]
+    for name in missing:
+        lines.append(f"    {name}")
+    censv = manifest_field("censv")
+    census_names = [n for n in missing
+                    if "overflow" in n or "caller" in n or "_field" in n]
+    if census_names and censv == "0":
+        lines.append("  censv=0 in the build manifest, so the VMCS "
+                     "census tables are compiled out and")
+        lines.append("  `--gc-sections` removed their storage - which is "
+                     "why the overflow and caller")
+        lines.append("  counters have no symbol. Build with "
+                     "-DZPP_VMCS_CENSUS=1 to ask.")
+    elif censv is None:
+        lines.append("  (the build manifest was not read, so whether a "
+                     "switch compiled these out is")
+        lines.append("  unknown - which is not the same as knowing the "
+                     "binary predates them)")
+    else:
+        lines.append("  the deployed binary predates these names. Check "
+                     "--elf points at the binary")
+        lines.append("  that is running: `.rig-deployed-hypervisor.elf`, "
+                     "not out/.")
+    return lines
+
+
+def vmcs_global_value_lines(values, missing, unread, what):
+    """The raw counters, with unread and zero told apart.
+
+    `values` maps short name to an integer or None.  None means the
+    monitor never answered for that address - which is **not** zero, and
+    the single habit this file records as most expensive.  All-ones is
+    the monitor's own failed-read signature (the manifest guard learned
+    that the hard way), so it is called out rather than printed as
+    18 quintillion.
+    """
+    lines = ["", f"vmcs counters that are NOT singleton members "
+                 f"({what})"]
+    for symbol, label in VMCS_GLOBAL_COUNTERS + VMCS_GLOBAL_STATE:
+        short = symbol.rsplit("::", 1)[-1]
+        if short in missing:
+            continue
+        value = values.get(short)
+        if value is None:
+            lines.append(f"  {short:<28} NOT READ - the monitor did not "
+                         f"answer. Not zero.")
+        elif value == 0xffffffffffffffff:
+            lines.append(f"  {short:<28} 0xffff...ffff - this is a FAILED "
+                         f"READ, not a value")
+        else:
+            lines.append(f"  {short:<28} {value:>18,}  {label}")
+    if unread:
+        lines.append(f"  ({len(unread)} address(es) went unanswered after "
+                     f"retries; see above)")
+    lines += vmcs_globals_missing_lines(missing)
+    return lines
+
+
+def vmcs_global_ratio_lines(values, exits, what, seconds=None):
+    """The three ratios these counters exist for, arithmetic shown.
+
+    `values` carries **deltas** in `--delta` mode and totals in the
+    cumulative dump; `what` says which, because the two must never be
+    read as the same quantity.  `exits` is the matching `exit_total`
+    figure summed over the processors sampled, or None.
+
+    Every line prints its own numerator and denominator.  A percentage
+    with its population hidden is the second entry in this file's list of
+    thirty misreadings, and 52.8% versus 36.2% for this very pair is the
+    worked example.
+    """
+    def value(name):
+        got = values.get(name)
+        return got if isinstance(got, int) else None
+
+    reads = value("vmcs_reads_taken")
+    writes = value("vmcs_writes_taken")
+    hits = value("vmcs_cache_hits")
+    misses = value("vmcs_cache_misses")
+    unarmed = value("vmcs_cache_unarmed")
+    epochs = value("vmcs_cache_epoch")
+
+    lines = ["", f"  derived ({what}):"]
+
+    # **The manifest field first, because the hit rate is meaningless
+    # without it.**  `vcache=0` and a 0% hit rate is a compiled-out
+    # cache; `vcache=1` and a 0% hit rate is a cache that never hits.
+    # Those are opposite findings and the counters alone cannot tell
+    # them apart.  The tree default is OFF and the debug build has been
+    # carrying ON - see 7905347, which is the commit that had to point
+    # this out after the fact.
+    vcache = manifest_field("vcache")
+    if vcache == "1":
+        lines.append("    vcache=1: the per-processor field cache IS "
+                     "compiled in, so hits/misses")
+        lines.append("      are populated and the rate below is a "
+                     "measurement.")
+    elif vcache == "0":
+        lines.append("    *** vcache=0: the field cache is COMPILED OUT. "
+                     "`hits` and `misses` cannot")
+        lines.append("      be anything but zero, EVERY read is a real "
+                     "VMREAD, and a hit rate of")
+        lines.append("      0% here is a fact about this build and says "
+                     "nothing about the guest. ***")
+    else:
+        lines.append("    vcache=? - the build manifest was not read, so "
+                     "whether the field cache is")
+        lines.append("      compiled in is UNKNOWN. A hit rate below "
+                     "cannot be interpreted until it is.")
+
+    # **Three different reasons this cannot be computed, and they print
+    # differently.**  A denominator that was never read, a denominator
+    # that really is zero (no exit was taken in this window - a reading,
+    # not an absence) and a numerator that was never read are three
+    # facts, and collapsing them into one "NOT COMPUTED" is the habit
+    # this file is written against.
+    def per_exit(what, value):
+        if value is None:
+            return f"    {what:<22} NOT COMPUTED: the counter was not read"
+        if exits is None:
+            return (f"    {what:<22} NOT COMPUTED: exit_total was not "
+                    f"read - unknown, not zero")
+        if 0 == exits:
+            return (f"    {what:<22} NOT COMPUTED: exit_total moved by 0, "
+                    f"so there is no denominator")
+        return (f"    {what:<22} {value:,} / {exits:,} "
+                f"= {value / exits:.2f}")
+
+    lines.append(per_exit("VMCS reads per exit", reads))
+    lines.append(per_exit("VMCS writes per exit", writes))
+    if 0 == exits:
+        lines.append("      An exit count of zero over a measured window "
+                     "is a reading about the")
+        lines.append("      guest - the processor took no exit - and is "
+                     "not a failed read.")
+
+    if hits is not None and misses is not None and (hits + misses):
+        total = hits + misses
+        lines.append(f"    cache hit rate         {hits:,} / ({hits:,} + "
+                     f"{misses:,}) = {100.0 * hits / total:.1f}%")
+        lines.append(f"      -> {100.0 * misses / total:.1f}% of "
+                     f"accounted reads were REAL VMREADs ({misses:,})")
+        if seconds:
+            lines.append(f"      -> {misses / seconds:,.0f} real VMREADs "
+                         f"per second over {seconds:.1f} s")
+    elif hits is not None and misses is not None:
+        lines.append("    cache hit rate         UNDEFINED: hits + misses "
+                     "= 0 (see vcache= above)")
+    else:
+        lines.append("    cache hit rate         NOT COMPUTED: hits or "
+                     "misses was not read")
+
+    # ------------------------------------------------------------------
+    # The gap, and what is known about it.
+    #
+    # Measured on boot 189: 296,407 reads/s against 246,023 hits+misses/s
+    # - a real 17% of reads that are neither.  It is not a lost count and
+    # not a torn read; it is four routes out of `vmcs::read` that return
+    # before the hit/miss accounting.  Reading the function settles it
+    # (vmcs.h, `std::uint64_t read(field) const`):
+    #
+    #  1. `vmcs_reads_taken` is incremented on the FIRST line, so it
+    #     counts every call unconditionally. Everything below is a
+    #     subset of it by construction.
+    #  2. An ENLIGHTENED row: `vmcs_cache_current_enlightened()` returns
+    #     non-zero and the function `return evmcs_load(...)` - a plain
+    #     load out of the page shared with the layer below, ahead of the
+    #     cache, counted by neither. `uevmcs=` in the manifest says
+    #     whether this route exists in this build at all.
+    #  3. The cache SUSPENDED: inside a `vmcs_cache_borrow` (the two
+    #     shadow-VMCS copies) `row` is forced to `vmcs_cache_processors`,
+    #     so the whole cache block is skipped and control falls through
+    #     to the bare `vmread` at the bottom. That IS a real VMREAD and
+    #     **there is no counter for it** - which is why the gap can be
+    #     attributed but not decomposed exactly.
+    #  4. The cache UNARMED: `vmcs_cache_row_index()` found no
+    #     `vmcs_cache_token_magic` in the GS row and returned
+    #     `vmcs_cache_processors`. Same fall-through, also a real
+    #     VMREAD. `vmcs_cache_unarmed` counts these - but it is an upper
+    #     bound rather than a measurement, because an unarmed READ bumps
+    #     it TWICE (once inside `vmcs_cache_current_enlightened()`, once
+    #     from the direct call in `read`) and an unarmed WRITE and every
+    #     `vmcs_cache_revalidate()` bump it as well.
+    #  5. `vcache=0` removes the whole `if constexpr` block, so the gap
+    #     is 100% of reads and that is not an anomaly.
+    #
+    # So: the gap is REAL and its mechanism is known; its split between
+    # routes 2, 3 and 4 is NOT measured, and closing that would take one
+    # more counter on the fall-through path. Stated rather than glossed,
+    # because "17% unexplained" and "17% explained but not apportioned"
+    # are different claims and only the second one is true.
+    # ------------------------------------------------------------------
+    if reads is not None and hits is not None and misses is not None:
+        accounted = hits + misses
+        gap = reads - accounted
+        share = (100.0 * gap / reads) if reads else 0.0
+        lines.append(f"    reads NOT accounted    {reads:,} - {accounted:,}"
+                     f" = {gap:,}  ({share:.1f}% of reads)")
+        if gap < 0:
+            lines.append("      *** NEGATIVE: hits+misses exceeds the "
+                         "read count, which is impossible. ***")
+            lines.append("      Suspect a torn sample or an --elf that is "
+                         "not the running binary.")
+        elif gap and vcache == "0":
+            # Not an anomaly and not worth apportioning: with the cache
+            # compiled out the whole `if constexpr` block is gone, so
+            # every read misses the accounting by construction and the
+            # gap is 100% of reads by definition.
+            lines.append("      EXPECTED: vcache=0 removes the accounting "
+                         "entirely, so this gap is")
+            lines.append("      every read there is and carries no "
+                         "information.")
+        elif gap:
+            lines.append("      Reads that return before the hit/miss "
+                         "accounting, all three routes known:")
+            lines.append("      enlightened-VMCS loads (uevmcs="
+                         f"{manifest_field('uevmcs')}), reads taken while "
+                         "the cache was")
+            lines.append("      SUSPENDED by a shadow-VMCS borrow, and "
+                         "reads with the GS row UNARMED.")
+            if unarmed is not None:
+                lines.append(f"      vmcs_cache_unarmed = {unarmed:,}, but "
+                             f"it is an UPPER BOUND on the last of")
+                lines.append("      those: an unarmed read bumps it twice "
+                             "and writes bump it too. The")
+                lines.append("      suspended route has NO counter, so the "
+                             "split is not measured.")
+
+    if epochs is not None and exits:
+        lines.append(per_exit("cache windows per exit", epochs))
+        lines.append("      Every one ends a window and throws rows away; "
+                     "only one of them is the")
+        lines.append("      exit itself. See `vmcs_cache_suspended` in "
+                     "vmcs.h.")
+
+    return lines
+
+
+def dump_vmcs_globals(args, elf, base, exits):
+    """The non-singleton VMCS counters, cumulatively.
+
+    **Cumulative, and it says so on every line.**  Kept because the
+    default dump is often the only thing taken from a wedged guest and a
+    total is better than nothing, but `--delta` is where these belong -
+    the printer points at it rather than leaving the reader to remember.
+    """
+    try:
+        addresses, missing = vmcs_globals_resolve(elf, base)
+    except Exception as failure:
+        print(f"\n[vmcs non-singleton counters: {failure}]")
+        return
+
+    monitor = Monitor(args.rig, args.port)
+    for address in addresses.values():
+        monitor.queue(address, 1)
+    words = monitor.run()
+    values = {name: words.get(address)
+              for name, address in addresses.items()}
+
+    for line in vmcs_global_value_lines(values, missing, monitor.unanswered,
+                                        "CUMULATIVE since boot"):
+        print(line)
+    for line in vmcs_global_ratio_lines(values, exits,
+                                        "CUMULATIVE - see the warning"):
+        print(line)
+    print("  *** These are boot-cumulative and average every phase the "
+          "guest has been through. ***")
+    print("  The same hits/misses pair reads 52.8% cumulative and 36.2% "
+          "differenced over 45 s")
+    print("  on one boot (8fce1c9). Use `--delta N` before quoting any "
+          "rate or percentage.")
+
+
+def dump_vmcs_caller_use(args, elf, base):
+    """Which *code* reads the VMCS, by return address.
+
+    The one instrument in `vmcs.h` that has never had a reader of any
+    kind.  Its own declaration describes the recipe this implements -
+    "return addresses rather than field encodings, resolved offline
+    against the ELF with `info symbol`; the module base moves per run, so
+    what is stored is the raw address and the reader subtracts".
+
+    Why it is worth the read: the field table beside it says `guest_rip`
+    is read 4.6 times an exit and cannot say by whom, so it cannot
+    distinguish one caller in a loop from six callers asking once - and
+    those want opposite fixes.  48 slots and a linear probe, so this is
+    97 words, about the same as one exit-ring row.
+
+    Absent from a `censv=0` binary, which is the shipping default; the
+    caller is expected to say so rather than print nothing.
+    """
+    names = [VMX_NS + n for n in ("vmcs_read_caller",
+                                  "vmcs_read_caller_hits")]
+    found = gdb_symbols(elf, names)
+    if any(found[n] is None for n in names):
+        print("\nvmcs read callers: NOT PRESENT in this ELF "
+              f"(censv={manifest_field('censv')}).")
+        print("  The caller census is compiled out, so this is "
+              "unmeasurable in this build -")
+        print("  not zero. Build with -DZPP_VMCS_CENSUS=1 to ask.")
+        return
+
+    slots = 48
+    callers = base + found[names[0]]
+    hits = base + found[names[1]]
+    monitor = Monitor(args.rig, args.port)
+    monitor.queue(callers, slots)
+    monitor.queue(hits, slots)
+    words = monitor.run()
+
+    rows = []
+    for i in range(slots):
+        count = words.get(hits + 8 * i)
+        caller = words.get(callers + 8 * i)
+        if count and caller:
+            rows.append((count, caller))
+    if not rows:
+        print("\nvmcs read callers: the table is present and EMPTY. With "
+              "censv=1 that means no")
+        print("  read has been taken through `vmcs::read` since boot, "
+              "which for a running guest")
+        print("  would itself be the finding.")
+        return
+
+    # **Sorted BEFORE the symbols are asked for**, so that `chunks[i]`
+    # and `rows[i]` stay the same row.  Sorting afterwards and indexing
+    # the answers by the new order attributes every count to somebody
+    # else's function name - plausible output, entirely wrong, and
+    # exactly the class of mistake the rest of this file is about.
+    rows.sort(reverse=True)
+
+    # `info symbol` wants the LINK-TIME address, so the base comes back
+    # off before asking. Batched, one gdb run, same marker trick as
+    # `gdb_symbols` - and an address that resolves to nothing prints as
+    # a bare offset rather than being dropped.
+    #
+    # **An address BELOW the module base is not asked about at all.**
+    # `caller - base` would be negative, `f"0x{n:x}"` formats that as
+    # `0x-...`, and gdb answers a malformed address with an error that
+    # lands in the chunk and prints as though it were a function name.
+    # A caller outside the module is also a finding in its own right -
+    # nothing but this VMM's own code calls `vmcs::read` - so it is
+    # named as such rather than silently mis-symbolized.
+    marker = "@@zpp@@"
+    inside = [i for i, (_c, caller) in enumerate(rows) if caller >= base]
+    gdb_args = []
+    for i in inside:
+        gdb_args += ["-ex", f"echo {marker}\\n",
+                     "-ex", f"info symbol 0x{rows[i][1] - base:x}"]
+    out = subprocess.run(["x86_64-elf-gdb", "-q", "-batch", elf]
+                         + gdb_args, capture_output=True,
+                         text=True).stdout
+    chunks = out.split(marker)[1:]
+    named = {}
+    for position, i in enumerate(inside):
+        chunk = chunks[position].strip() if position < len(chunks) else ""
+        name = chunk.split(" in section")[0].strip() if chunk else ""
+        if name and not name.startswith("No symbol"):
+            named[i] = name
+
+    total = sum(count for count, _ in rows) or 1
+    print(f"\nvmcs reads by CALLER ({total:,} recorded, {len(rows)} "
+          f"distinct sites)")
+    print("  every row, however cold - a top-N cut on a census hides "
+          "exactly what it exists to find")
+    for rank, (count, caller) in enumerate(rows):
+        name = named.get(rank)
+        if name is None:
+            name = (f"(unresolved) +0x{caller - base:x}" if caller >= base
+                    else f"*** 0x{caller:x} is BELOW the module base "
+                         f"0x{base:x} - not our code ***")
+        print(f"  {rank + 1:2d}. {count:>12,}  "
+              f"{100.0 * count / total:5.1f}%  {name}")
+
+
+def dump_own_field_use(args, elf, base):
+    """The VMCS fields **this VMM** reads and writes, by name.
+
+    Different question from `dump_field_use` above, and the two are worth
+    keeping apart: that one counts what the *guest hypervisor* asks for
+    through VMREAD and VMWRITE exits, which is what a shadowing list
+    would have to cover.  This one counts the accesses this VMM executes
+    itself, which is what has to be *removed* - on a host without VMCS
+    shadowing every one of them is an exit to the layer below at 1.4-1.8
+    microseconds, and the round trip spends about half its time here.
+
+    Namespace-scope globals rather than members of the singleton, so they
+    resolve against the module base and not against `instance`.
+
+    These tables had no reader at all for the whole of their existence -
+    they were added, and then the number they answer was estimated twice
+    from cycles divided by a price, and both estimates informed a wrong
+    decision.  That is what this function is for.
+    """
+    slots = 512
+    tables = {}
+    for kind in ("read", "write"):
+        try:
+            tables[kind] = (
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_field"),
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_hits"),
+                base + gdb_symbol(
+                    elf, f"zpp::arch::x86_64::vmx::vmcs_{kind}_overflow"))
+        except SystemExit as failure:
+            print(f"\n[our own vmcs accesses: {failure}]")
+            return
+
+    monitor = Monitor(args.rig, args.port)
+    for fields, hits, overflow in tables.values():
+        monitor.queue(fields, slots)
+        monitor.queue(hits, slots)
+        monitor.queue(overflow, 1)
+    words = monitor.run()
+
+    print("\nvmcs fields this vmm accesses itself")
+    for kind, (fields, hits, overflow) in tables.items():
+        rows = []
+        for i in range(slots):
+            count = words.get(hits + 8 * i, 0)
+            if count:
+                rows.append((count, words.get(fields + 8 * i, 0)))
+        rows.sort(reverse=True)
+        total = sum(count for count, _ in rows) or 1
+        print(f"  --- our {kind}s ({total:,} total, {len(rows)} distinct) ---")
+        for count, encoding in rows[:32]:
+            print(f"    0x{encoding:04x} "
+                  f"{VMCS_FIELD.get(encoding, ''):<44} {count:>12,}  "
+                  f"{100.0 * count / total:5.1f}%")
+        lost = words.get(overflow, 0)
+        if lost:
+            # Only reachable if an encoding with an index above 31 turns
+            # up - see `vmcs_use_slot`.  Measured zero over every
+            # encoding in vmcs_fields.h, so a non-zero here means the
+            # table's assumption has stopped holding and the counts above
+            # may be two fields added together.
+            print(f"    SLOT COLLISION: {lost:,} {kind}s not recorded - the "
+                  f"counts above are not trustworthy")
+
+
+def load_field_names():
+    """Field encoding to name, straight out of the header.
+
+    Read rather than duplicated, because a name table that drifts from the
+    enum is worse than no names: it labels the wrong field confidently.
+    """
+    path = "hypervisor/include/zpp/arch/x86_64/vmx/vmcs_fields.h"
+    names = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                m = re.match(r"\s*(\w+)\s*=\s*(0x[0-9a-fA-F]+),", line)
+                if m:
+                    names.setdefault(int(m.group(2), 16), m.group(1))
+    except OSError:
+        pass
+    return names
+
+
+VMCS_FIELD = load_field_names()
+
+
+def dump_entry_rips(args, elf, instance):
+    """The distinct instruction pointers the guest is entered at.
+
+    Two of them, alternating, with the counts equal, is a guest that
+    never executes anything: it is being resumed at the VMCALL it exited
+    on.  Many of them is a guest that is executing and looping in its own
+    software.  Nothing else distinguishes those.
+    """
+    off = gdb_offsets(elf, ["l2_entry_rip", "l2_entry_rip_count",
+                            "l2_entry_rip_other"])
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_rip[0] "
+        "/ sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_rip[0][0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("l2_entry_rip", "l2_entry_rip_count"):
+        reader.queue(instance + off[member], args.cpus * slots)
+    reader.queue(instance + off["l2_entry_rip_other"], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        rows = [(word("l2_entry_rip_count", cpu * slots + i),
+                 word("l2_entry_rip", cpu * slots + i))
+                for i in range(slots)]
+        rows = [r for r in rows if r[0]]
+        if not rows:
+            continue
+        total = sum(c for c, _ in rows) or 1
+        print(f"\ncpu {cpu} second-level entry rips "
+              f"({total:,} entries, {len(rows)} distinct, "
+              f"{word('l2_entry_rip_other', cpu):,} beyond the table)")
+        for count, rip in sorted(rows, reverse=True):
+            print(f"  0x{rip:016x}  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%")
+
+    dump_entry_rip_agreement(args, elf, instance)
+
+
+def dump_entry_rip_agreement(args, elf, instance):
+    """Whether the guest was entered where vmcs12 asked it to be.
+
+    The table above cannot answer this: an address composed here reads
+    exactly like an address the level above chose.  `differed` reading
+    zero beside a large `agreed` is the statement "this never happens",
+    and it is meant to be as readable as the alternative - so this
+    prints on every dump, including the one where nothing is wrong.
+
+    `lowest_seen` is what makes a zero `lowest` mean something.  Without
+    it, "entered at address zero" and "never entered at all" are the
+    same word in zero-initialised storage.
+    """
+    members = ["l2_entry_rip_agreed", "l2_entry_rip_differed",
+               "l2_entry_rip_lowest", "l2_entry_rip_lowest_seen",
+               "l2_entry_rip_mismatch"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates the census.  Lose the section,
+        # not the dump.
+        return
+
+    fields = ["occurred", "entries", "rip02", "rip12", "activity12",
+              "cs_selector", "cs_base", "hot_state_rip",
+              "hot_state_valid_then", "vmcs12_address"]
+    stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_rip_mismatch[0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in members[:4]:
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["l2_entry_rip_mismatch"],
+                 args.cpus * stride // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    ACTIVITY_NAME = {0: "active", 1: "hlt", 2: "shutdown",
+                     3: "wait-for-sipi"}
+
+    for cpu in range(args.cpus):
+        agreed = word("l2_entry_rip_agreed", cpu)
+        differed = word("l2_entry_rip_differed", cpu)
+        if not word("l2_entry_rip_lowest_seen", cpu):
+            print(f"\ncpu {cpu} entered-at census: no second-level entry "
+                  f"was ever made")
+            continue
+
+        lowest = word("l2_entry_rip_lowest", cpu)
+        verdict = ("NEVER entered anywhere vmcs12 did not ask for"
+                   if 0 == differed else
+                   f"*** {differed:,} entries at an address vmcs12 did "
+                   f"NOT ask for ***")
+        print(f"\ncpu {cpu} entered-at census: agreed {agreed:,}, "
+              f"differed {differed:,}, lowest 0x{lowest:x}")
+        print(f"  {verdict}")
+
+        base = (instance + off["l2_entry_rip_mismatch"] + cpu * stride)
+        record = {name: got.get(base + 8 * i, 0)
+                  for i, name in enumerate(fields)}
+        if not record["occurred"]:
+            continue
+
+        activity = record["activity12"]
+        print(f"  first mismatch at entry {record['entries']:,}: "
+              f"vmcs02 rip 0x{record['rip02']:x}, "
+              f"vmcs12 asked 0x{record['rip12']:x}")
+        print(f"    vmcs12 activity {activity} "
+              f"({ACTIVITY_NAME.get(activity, '?')}), "
+              f"cs 0x{record['cs_selector']:04x} "
+              f"base 0x{record['cs_base']:x}")
+        print(f"    hot-state rip 0x{record['hot_state_rip']:x} "
+              f"valid {record['hot_state_valid_then']}, "
+              f"vmcs12 0x{record['vmcs12_address']:x}")
+
+    dump_entry_lowest_segment(args, elf, instance)
+
+
+def dump_entry_lowest_segment(args, elf, instance):
+    """The segment the lowest entry address is an offset into.
+
+    `lowest 0x0` above reads as a fault and is not one on its own: a
+    processor started by a start-up IPI begins at RIP 0 with CS base
+    `vector << 12`, so the linear address is the base and the RIP says
+    nothing without it.  This prints the pair, from vmcs02 and from
+    vmcs12, and lets them disagree - equal is the whole of "nothing is
+    wrong here", and it is meant to read as plainly as the alternative.
+
+    Note which rule is being checked.  SDM 29.3.1.2 requires
+    `base == selector << 4` only when RFLAGS.VM is 1, not when CR0.PE is
+    0, so a real-mode unrestricted guest whose base is anything else is
+    legal.  The interesting shape is narrower: a non-zero selector with
+    a base of zero, which puts the guest at linear `RIP` instead of
+    `vector << 12 | RIP`.
+    """
+    off = gdb_offsets(elf, ["l2_entry_lowest"], optional=True)
+    if "l2_entry_lowest" not in off:
+        # A deployed binary that predates this record.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "rip", "cs_selector", "cs_base",
+              "cs_limit", "cs_access_rights", "cr0", "efer", "rflags",
+              "cs_selector12", "cs_base12", "cr0_12",
+              "base_is_selector_times_16"]
+    stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_entry_lowest[0]"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["l2_entry_lowest"],
+                 args.cpus * stride // 8)
+    got = reader.run()
+
+    for cpu in range(args.cpus):
+        base = instance + off["l2_entry_lowest"] + cpu * stride
+        r = {name: got.get(base + 8 * i, 0)
+             for i, name in enumerate(fields)}
+        if not r["occurred"]:
+            continue
+
+        pe = r["cr0"] & 1
+        lma = (r["efer"] >> 10) & 1
+        vm = (r["rflags"] >> 17) & 1
+        mode = ("real" if not pe else
+                "long" if lma else
+                "virtual-8086" if vm else "protected")
+
+        print(f"\ncpu {cpu} lowest-rip entry, at entry "
+              f"{r['entries']:,}: rip 0x{r['rip']:x}, {mode} mode")
+        print(f"    vmcs02 cs 0x{r['cs_selector']:04x} "
+              f"base 0x{r['cs_base']:x} limit 0x{r['cs_limit']:x} "
+              f"ar 0x{r['cs_access_rights']:x}")
+        print(f"    vmcs02 cr0 0x{r['cr0']:x} (PE={pe}), "
+              f"efer 0x{r['efer']:x} (LMA={lma}), "
+              f"rflags 0x{r['rflags']:x} (VM={vm})")
+        print(f"    vmcs12 cs 0x{r['cs_selector12']:04x} "
+              f"base 0x{r['cs_base12']:x} cr0 0x{r['cr0_12']:x}")
+
+        # The instrument proper: two sources for the same three fields.
+        copied = (r["cs_selector"] == r["cs_selector12"] and
+                  r["cs_base"] == r["cs_base12"] and
+                  r["cr0"] == r["cr0_12"])
+        print("    vmcs02 CARRIES EXACTLY what vmcs12 asked for"
+              if copied else
+              "    *** vmcs02 DIFFERS from vmcs12 - composed, not "
+              "copied ***")
+
+        # And the architectural shape, reported only where it means
+        # something.  `base == selector << 4` is required of a
+        # virtual-8086 guest and of nothing else.
+        shifted = r["base_is_selector_times_16"]
+        if vm:
+            if shifted:
+                print("    base == selector<<4: yes")
+            else:
+                print("    *** base != selector<<4, which SDM 29.3.1.2 "
+                      "requires of a virtual-8086 guest ***")
+        elif not pe:
+            if shifted:
+                print("    base == selector<<4: yes - an ordinary "
+                      "real-mode start-up state")
+            elif r["cs_base"] == 0 and r["cs_selector"] != 0:
+                print("    *** base 0 with a non-zero selector: the "
+                      "guest runs at linear 0x"
+                      f"{r['rip']:x}, not 0x"
+                      f"{(r['cs_selector'] << 4) + r['rip']:x} ***")
+            else:
+                print("    base != selector<<4, which is legal in real "
+                      "mode - only virtual-8086 requires it")
+        else:
+            print(f"    linear entry address 0x{r['cs_base'] + r['rip']:x}"
+                  " (base + rip)")
+
+    dump_low_rip_sources(args, elf, instance)
+
+
+LOW_RIP_SOURCE_NAME = {
+    0: "save_l2_state          vmcs02 -> vmcs12",
+    1: "copy_shadow_to_vmcs12  region -> vmcs12",
+    2: "on_guest_vmwrite       guest  -> vmcs12",
+    3: "on_guest_vmptrld       memory -> vmcs12",
+    4: "resume_guest           advanced vmcs02",
+    5: "on_nested_cr8_access   advanced vmcs02",
+    6: "watched-page emulation advanced vmcs02",
+}
+
+
+def dump_low_rip_sources(args, elf, instance):
+    """Who wrote a second-level instruction pointer below one page.
+
+    The section above says a processor was entered at 0x2 and cannot say
+    who put the 2 there.  This can: vmcs12's RIP field has four writers
+    and vmcs02's has three more that *move* one, and each is counted
+    separately.  Sources 4, 5 and 6 are the arithmetic ones - they add a
+    VM-exit instruction length to an address - so a record with
+    `previous + length == written` is this VMM producing the address,
+    and `save_l2_state` alone with all three at zero is the processor
+    having saved it, which puts the corruption above this VMM.
+
+    Every counter zero is the negative and prints as plainly as any
+    positive.  A low address is not by itself a fault: an application
+    processor started by a start-up IPI legitimately begins at RIP 0.
+    """
+    members = ["low_rip_writes", "low_rip_first", "low_rip_last"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates the census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "source", "entries", "previous", "written",
+              "length", "reason", "detail"]
+    counter_stride, record_stride = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->low_rip_writes[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->low_rip_first[0]"])
+    sources = counter_stride // 8
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["low_rip_writes"],
+                 args.cpus * counter_stride // 8)
+    for member in ("low_rip_first", "low_rip_last"):
+        reader.queue(instance + off[member],
+                     args.cpus * record_stride // 8)
+    got = reader.run()
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * record_stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        name = LOW_RIP_SOURCE_NAME.get(r["source"], f"? {r['source']}")
+        print(f"    {label}: {name}")
+        print(f"      wrote 0x{r['written']:x} over 0x{r['previous']:x}"
+              f", length {r['length']}, reason 0x{r['reason']:x}, "
+              f"detail 0x{r['detail']:x}, at l2 entry {r['entries']:,}")
+        if r["length"] and (r["previous"] + r["length"] == r["written"]):
+            print(f"      *** ARITHMETIC: 0x{r['previous']:x} + "
+                  f"{r['length']} = 0x{r['written']:x} - this VMM "
+                  f"produced the address ***")
+
+    for cpu in range(args.cpus):
+        counts = [got.get(instance + off["low_rip_writes"] +
+                          cpu * counter_stride + 8 * i, 0)
+                  for i in range(sources)]
+
+        print(f"\ncpu {cpu} low second-level rip census "
+              f"(below 0x{0x1000:x}):")
+        if not any(counts):
+            print("    NOTHING wrote a second-level rip below one page - "
+                  "every source zero")
+            continue
+
+        for index, count in enumerate(counts):
+            if not count:
+                continue
+            name = LOW_RIP_SOURCE_NAME.get(index, f"? {index}")
+            print(f"    {count:>12,}  {name}")
+
+        arithmetic = sum(counts[4:])
+        if not arithmetic:
+            print("    no advance ever landed below one page: every low "
+                  "address was COPIED, not computed here")
+
+        first = record("low_rip_first", cpu)
+        if first["occurred"]:
+            show("first", first)
+        last = record("low_rip_last", cpu)
+        if last["occurred"]:
+            show("last ", last)
+
+    dump_served_rip(args, elf, instance)
+
+
+def dump_served_rip(args, elf, instance):
+    """What this VMM SERVED for the second-level rip, not what it stored.
+
+    The census above watches stores and established that the guest
+    hypervisor VMWROTE `2` itself.  It cannot say what the guest
+    hypervisor READ to arrive at `2`, and `0 + 2` is a two-byte
+    instruction length added to a zero rip.  This is the read side.
+
+    Two numbers, because one cannot tell you it is aimed at the wrong
+    field.  The value served is `guest_vmcs12[cpu]` by construction -
+    `on_guest_vmread` has one source and `on_guest_vmwrite` writes the
+    same slot - so "served == cached" is a tautology.  The field that
+    can disagree is the hardware shadow region, which
+    `copy_shadow_to_vmcs12` copies over the cache on every second-level
+    entry, `guest_rip` included.
+
+    The verdict lines are written so that a negative reads as plainly
+    as a positive.
+    """
+    members = ["vmread_rip_served", "vmread_rip_low", "vmread_rip_zero",
+               "vmread_rip_from_region", "shadow_rip_collects",
+               "shadow_rip_changed", "shadow_rip_rewound",
+               "vmread_rip_first", "vmread_rip_last",
+               "vmread_rip_low_first", "shadow_rip_first",
+               "shadow_rip_last"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates this census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "served", "cached", "region",
+              "shadowing"]
+    (record_stride,) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmread_rip_first[0]"])
+
+    counters = ["vmread_rip_served", "vmread_rip_low",
+                "vmread_rip_zero", "vmread_rip_from_region",
+                "shadow_rip_collects", "shadow_rip_changed",
+                "shadow_rip_rewound"]
+    records = ["vmread_rip_first", "vmread_rip_last",
+               "vmread_rip_low_first", "shadow_rip_first",
+               "shadow_rip_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member],
+                     args.cpus * record_stride // 8)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * record_stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        print(f"    {label}: served 0x{r['served']:x}, cache held "
+              f"0x{r['cached']:x}, region last imposed "
+              f"0x{r['region']:x}")
+        print(f"      shadowing {'on' if r['shadowing'] else 'off'}, "
+              f"at l2 entry {r['entries']:,}")
+
+    for cpu in range(args.cpus):
+        served = count("vmread_rip_served", cpu)
+        low = count("vmread_rip_low", cpu)
+        zero = count("vmread_rip_zero", cpu)
+        from_region = count("vmread_rip_from_region", cpu)
+        collects = count("shadow_rip_collects", cpu)
+        changed = count("shadow_rip_changed", cpu)
+        rewound = count("shadow_rip_rewound", cpu)
+
+        print(f"\ncpu {cpu} second-level rip SERVED to guest vmread:")
+
+        if not served:
+            print("    the guest hypervisor never VMREAD the rip field "
+                  "here - nothing was served, so nothing served can "
+                  "explain the 2")
+        else:
+            print(f"    {served:>12,}  vmread of guest_rip answered")
+            print(f"    {low:>12,}  answered below 0x1000")
+            print(f"    {zero:>12,}  answered EXACTLY ZERO")
+
+            if not low:
+                print("    *** THIS NEVER HAPPENED: this VMM never "
+                      "served a second-level rip below one page. The "
+                      "'we served a zero' hypothesis is dead. ***")
+            else:
+                print(f"    {from_region:>12,}  of the low ones equal "
+                      "the value the shadow region imposed")
+                if from_region:
+                    print("    *** the low rip this VMM served is the "
+                          "one copy_shadow_to_vmcs12 put in the cache - "
+                          "the defect is the OVERWRITE, not the read "
+                          "***")
+                else:
+                    print("    *** the low rip this VMM served was NOT "
+                          "imposed by the region - one of the "
+                          "low_rip_source writers put it in the cache "
+                          "***")
+
+            first = record("vmread_rip_first", cpu)
+            if first["occurred"]:
+                show("first", first)
+            low_first = record("vmread_rip_low_first", cpu)
+            if low_first["occurred"]:
+                show("low  ", low_first)
+            last = record("vmread_rip_last", cpu)
+            if last["occurred"]:
+                show("last ", last)
+
+        print(f"\ncpu {cpu} shadow region imposing rip on the cache:")
+        if not collects:
+            print("    copy_shadow_to_vmcs12 never collected the rip "
+                  "field here - shadowing was off or stood down before "
+                  "any entry")
+            continue
+
+        print(f"    {collects:>12,}  collected guest_rip from the "
+              "region")
+        print(f"    {changed:>12,}  CHANGED the cached value")
+        print(f"    {rewound:>12,}  moved it BACKWARDS")
+
+        if not changed:
+            print("    *** THIS NEVER HAPPENED: the region never "
+                  "disagreed with the cache, so no guest VMWRITE of rip "
+                  "was ever discarded ***")
+        else:
+            # **`changed` is not a defect on its own, and this banner
+            # used to say it was.** It was written for the world where
+            # SECONDARY_EXEC_SHADOW_VMCS was advertised and stripped
+            # underneath: there the guest hypervisor's VMWRITE *exited*
+            # and reached the cache, the region held only what
+            # `copy_vmcs12_to_shadow` last published, and an overwrite
+            # from it destroyed a real write.
+            #
+            # With shadowing genuinely in force the same counter means
+            # the opposite. `guest_rip` is in `shadow_read_write_fields`
+            # (`nested_vmx.h:2154`) with its bit clear in both bitmaps,
+            # so the guest hypervisor's VMWRITE lands in the region
+            # without exiting and `copy_shadow_to_vmcs12` is the ONLY
+            # path by which it can ever reach the cache. `changed` is
+            # then the delivery, not the loss - and KVM does exactly
+            # this, `copy_shadow_to_vmcs12` at the top of
+            # `nested_vmx_run` (`.references/kvm/nested.c:3703`) with
+            # GUEST_RIP tagged SHADOW_FIELD_RW
+            # (`.references/kvm/vmcs_shadow_fields.h:62`).
+            #
+            # `served` discriminates the two without ambiguity: a VMREAD
+            # of a shadowed field cannot exit, so any served count at
+            # all proves the control was not in force.
+            if served:
+                print("    *** the guest hypervisor's own VMWRITE of "
+                      "rip is being discarded on the entry that follows "
+                      "it: shadowing is NOT in force (it served "
+                      f"{served:,} VMREADs of a field the bitmap "
+                      "permits), so its VMWRITE exited into the cache "
+                      "and the region overwrote it ***")
+            elif rewound:
+                print(f"    *** {rewound:,} of these moved the rip "
+                      "BACKWARDS. Shadowing looks in force, so the "
+                      "region should be the fresher source and never "
+                      "is here - this is the subset worth reading ***")
+            else:
+                print("    NORMAL under shadowing: with the control in "
+                      "force this is how the guest hypervisor's silent "
+                      "VMWRITE reaches the cache at all, and nothing "
+                      "moved backwards. Not a discarded write.")
+            first = record("shadow_rip_first", cpu)
+            if first["occurred"]:
+                show("first", first)
+            last = record("shadow_rip_last", cpu)
+            if last["occurred"]:
+                show("last ", last)
+            # These records are a six-word struct copied whole on a path
+            # that runs millions of times, with no sequence number, and
+            # the monitor reads the words one at a time. On the collect
+            # path `served` is ASSIGNED the region value
+            # (`hypervisor.h:6512`), so `served != region` in a record
+            # is impossible in one sample and proves the read was torn.
+            if last["occurred"] and last["served"] != last["region"]:
+                print("    *** TORN READ: `served` and `region` are the "
+                      "same assignment on this path, so a record where "
+                      "they differ was sampled across two events. Do "
+                      "not reason from the values above. ***")
+
+    dump_reflect_info(args, elf, instance)
+    dump_vmcs12_regions(args, elf, instance)
+
+
+def dump_reflect_info(args, elf, instance):
+    """The exit information a reflection hands the guest hypervisor.
+
+    Two questions in one census, because either alone confirms itself.
+    A low RIP in vmcs12 at the moment of reflection is an entry at that
+    address a moment later.  An instruction length reported for an exit
+    SDM 30.2.5 leaves it undefined for is the one number a hypervisor is
+    entitled to add to a RIP - `0 + 2` being exactly what the failure
+    looks like.
+
+    Every counter zero is the negative and prints as plainly as any
+    positive.
+    """
+    members = ["reflect_infos", "reflect_rip_low",
+               "reflect_length_undefined",
+               "reflect_length_undefined_nonzero",
+               "reflect_rip_low_first", "reflect_length_first",
+               "reflect_info_last", "vmcs_shadowing_armed",
+               "vmcs_shadowing_stranded"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        # A deployed binary that predates this census.  Lose the
+        # section, not the dump.
+        return
+
+    fields = ["occurred", "entries", "reason", "length", "rip", "saved"]
+    (stride,) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->reflect_info_last[0]"])
+
+    counters = ["reflect_infos", "reflect_rip_low",
+                "reflect_length_undefined",
+                "reflect_length_undefined_nonzero",
+                "vmcs_shadowing_armed"]
+    records = ["reflect_rip_low_first", "reflect_length_first",
+               "reflect_info_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member], args.cpus * stride // 8)
+    reader.queue(instance + off["vmcs_shadowing_stranded"], 1)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        print(f"    {label}: reason 0x{r['reason']:x}, length "
+              f"{r['length']}, vmcs12 rip 0x{r['rip']:x}, "
+              f"save_l2_state {'ran' if r['saved'] else 'SKIPPED'}, "
+              f"at l2 entry {r['entries']:,}")
+
+    stranded = got.get(instance + off["vmcs_shadowing_stranded"], 0)
+
+    for cpu in range(args.cpus):
+        total = count("reflect_infos", cpu)
+        low = count("reflect_rip_low", cpu)
+        undefined = count("reflect_length_undefined", cpu)
+        nonzero = count("reflect_length_undefined_nonzero", cpu)
+
+        print(f"\ncpu {cpu} exit information REFLECTED to the guest "
+              "hypervisor:")
+
+        if not total:
+            print("    nothing was ever reflected on this processor")
+            continue
+
+        print(f"    {total:>12,}  reflections")
+        print(f"    {low:>12,}  with a vmcs12 rip below 0x1000")
+        print(f"    {undefined:>12,}  for a reason sdm 30.2.5 leaves the "
+              "length undefined")
+        print(f"    {nonzero:>12,}  of those with a NON-ZERO length "
+              "reported")
+
+        if not low and not nonzero:
+            print("    *** THIS NEVER HAPPENED: no reflection on this "
+                  "processor carried a rip below one page, and none "
+                  "reported a non-zero instruction length for an exit "
+                  "the architecture leaves it undefined for. Both "
+                  "arithmetic routes to a low entry rip are dead here. "
+                  "***")
+        else:
+            if low:
+                print("    *** vmcs12 already held a low rip when the "
+                      "reflection wrote the exit information around it - "
+                      "the guest hypervisor was handed it, not asked to "
+                      "compute it ***")
+                first = record("reflect_rip_low_first", cpu)
+                if first["occurred"]:
+                    show("first low ", first)
+            if nonzero:
+                print("    *** this VMM reported an instruction length "
+                      "for an exit that was not caused by an "
+                      "instruction - a guest hypervisor adding it to the "
+                      "rip produces exactly rip + length ***")
+                first = record("reflect_length_first", cpu)
+                if first["occurred"]:
+                    show("first undef", first)
+
+        last = record("reflect_info_last", cpu)
+        if last["occurred"]:
+            show("last      ", last)
+
+        armed = count("vmcs_shadowing_armed", cpu)
+        print(f"    vmcs shadowing currently armed on this processor: "
+              f"{'yes' if armed else 'no'}")
+
+    if stranded:
+        print(f"\n*** {stranded} processor(s) still had vmcs shadowing "
+              "armed when it was stood down. The control is per "
+              "processor and the flag is not, so those processors keep "
+              "answering the guest hypervisor's reads out of a region "
+              "this VMM has stopped maintaining. ***")
+    else:
+        print("\nvmcs shadowing stand-down: THIS NEVER HAPPENED - no "
+              "processor was left holding the control when it was stood "
+              "down, so the frozen-region hazard is unreachable here")
+
+
+def dump_vmcs12_regions(args, elf, instance):
+    """The region a vmcs12 lives in between one processor and the next.
+
+    `guest_vmcs12` is indexed by processor and a VMCS is identified by
+    its physical address, so a vmcs12 that migrates - VMCLEAR here,
+    VMPTRLD there - exists only as whatever `flush_guest_vmcs12` last
+    wrote into the region.  That write's failure is discarded by name at
+    the call site, so a region that was never written and one whose RIP
+    really is zero read identically from every later reader.
+
+    This censuses both ends: what each flush persisted and whether it
+    landed, and what each VMPTRLD found against it.  Two fields, so
+    "the region held zero" can be told apart from "this VMM never wrote
+    the region".
+    """
+    members = ["vmcs12_flushes", "vmcs12_flush_failures",
+               "vmcs12_flush_rip_low", "vmcs12_loads",
+               "vmcs12_load_rip_low", "vmcs12_load_foreign",
+               "vmcs12_load_unflushed", "vmcs12_load_disagreed",
+               "vmcs12_flush_low_first", "vmcs12_flush_failed_first",
+               "vmcs12_load_low_first", "vmcs12_load_last",
+               "vmcs12_regions", "vmcs12_region_overflow"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        return
+
+    fields = ["occurred", "entries", "pointer", "rip", "previous",
+              "flushed_by", "flushed_ever"]
+    slot_fields = ["pointer", "flushed_by", "loaded_by", "flushes",
+                   "flush_failures", "loads", "flushed_rip",
+                   "flushed_ever"]
+
+    (stride, slot_stride, slots) = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmcs12_load_last[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->vmcs12_regions[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vmcs12_regions / "
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vmcs12_regions[0]"])
+
+    counters = ["vmcs12_flushes", "vmcs12_flush_failures",
+                "vmcs12_flush_rip_low", "vmcs12_loads",
+                "vmcs12_load_rip_low", "vmcs12_load_foreign",
+                "vmcs12_load_unflushed", "vmcs12_load_disagreed"]
+    records = ["vmcs12_flush_low_first", "vmcs12_flush_failed_first",
+               "vmcs12_load_low_first", "vmcs12_load_last"]
+
+    reader = Monitor(args.rig, args.port)
+    for member in counters:
+        reader.queue(instance + off[member], args.cpus)
+    for member in records:
+        reader.queue(instance + off[member], args.cpus * stride // 8)
+    reader.queue(instance + off["vmcs12_regions"],
+                 slots * slot_stride // 8)
+    reader.queue(instance + off["vmcs12_region_overflow"], 1)
+    got = reader.run()
+
+    def count(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def record(member, cpu):
+        base = instance + off[member] + cpu * stride
+        return {name: got.get(base + 8 * i, 0)
+                for i, name in enumerate(fields)}
+
+    def show(label, r):
+        owner = ("never flushed" if not r["flushed_by"]
+                 else f"cpu {r['flushed_by'] - 1}")
+        print(f"    {label}: region 0x{r['pointer']:x}, rip 0x{r['rip']:x}"
+              f", previous 0x{r['previous']:x}")
+        print(f"      last flushed by {owner}, ever flushed "
+              f"{'yes' if r['flushed_ever'] else 'NO'}, at l2 entry "
+              f"{r['entries']:,}")
+
+    total_bad = 0
+
+    for cpu in range(args.cpus):
+        flushes = count("vmcs12_flushes", cpu)
+        failures = count("vmcs12_flush_failures", cpu)
+        flush_low = count("vmcs12_flush_rip_low", cpu)
+        loads = count("vmcs12_loads", cpu)
+        load_low = count("vmcs12_load_rip_low", cpu)
+        foreign = count("vmcs12_load_foreign", cpu)
+        unflushed = count("vmcs12_load_unflushed", cpu)
+        disagreed = count("vmcs12_load_disagreed", cpu)
+
+        print(f"\ncpu {cpu} vmcs12 region traffic:")
+
+        if not flushes and not loads:
+            print("    this processor never flushed or loaded a vmcs12 "
+                  "region")
+            continue
+
+        print(f"    {flushes:>12,}  flushes attempted")
+        print(f"    {failures:>12,}  flushes that FAILED to write the "
+              "region")
+        print(f"    {flush_low:>12,}  flushes that persisted a rip below "
+              "0x1000")
+        print(f"    {loads:>12,}  vmptrld region loads")
+        print(f"    {load_low:>12,}  that loaded a rip below 0x1000")
+        print(f"    {foreign:>12,}  of a region another processor "
+              "flushed last")
+        print(f"    {unflushed:>12,}  of a region NO flush ever succeeded "
+              "on")
+        print(f"    {disagreed:>12,}  where the region disagreed with the "
+              "last flush of it")
+
+        total_bad += failures + load_low + unflushed + disagreed
+
+        if failures:
+            r = record("vmcs12_flush_failed_first", cpu)
+            if r["occurred"]:
+                show("first failed flush", r)
+        if flush_low:
+            r = record("vmcs12_flush_low_first", cpu)
+            if r["occurred"]:
+                show("first low flush  ", r)
+        if load_low:
+            r = record("vmcs12_load_low_first", cpu)
+            if r["occurred"]:
+                show("first low load   ", r)
+        r = record("vmcs12_load_last", cpu)
+        if r["occurred"]:
+            show("last load        ", r)
+
+    print("\nvmcs12 regions seen, by physical address:")
+    overflow = got.get(instance + off["vmcs12_region_overflow"], 0)
+    for i in range(slots):
+        base = instance + off["vmcs12_regions"] + i * slot_stride
+        slot = {name: got.get(base + 8 * j, 0)
+                for j, name in enumerate(slot_fields)}
+        if not slot["pointer"]:
+            continue
+        owner = ("never" if not slot["flushed_by"]
+                 else f"cpu {slot['flushed_by'] - 1}")
+        holder = ("never" if not slot["loaded_by"]
+                  else f"cpu {slot['loaded_by'] - 1}")
+        print(f"    0x{slot['pointer']:x}: {slot['flushes']:,} flushes "
+              f"({slot['flush_failures']:,} failed), {slot['loads']:,} "
+              f"loads, last flushed by {owner}, last loaded by {holder}")
+        print(f"      last persisted rip 0x{slot['flushed_rip']:x}, ever "
+              f"flushed {'yes' if slot['flushed_ever'] else 'NO'}")
+    if overflow:
+        print(f"    ({overflow:,} regions did not fit the table)")
+
+    if not total_bad:
+        print("\n*** THIS NEVER HAPPENED: every vmcs12 flush wrote its "
+              "region, no vmptrld loaded a rip below one page, no region "
+              "was made current that this VMM had never written, and no "
+              "region ever disagreed with the last flush of it. The "
+              "migration route to an entry at rip 0 is dead. ***")
+    else:
+        print("\n*** the region path is implicated - read the counters "
+              "above: `unflushed` non-zero is a vmcs12 whose contents "
+              "this VMM never wrote, `disagreed` non-zero is memory "
+              "losing what was written, and `flushes that FAILED` is the "
+              "write that was discarded at the call site ***")
+
+
+# The vector `clock_gap_buckets` counts, transcribed from
+# `hypervisor.h`'s `clock_gap_vector`.  A test in
+# `tests/python_layout` fails if the two ever disagree, for the reason
+# that file exists: a constant copied here is a constant that does not
+# move when the header does.
+CLOCK_GAP_VECTOR = 0xd1
+
+
+def clock_gap_coverage_lines(gaps, hz, span_ticks):
+    """How much of the run the gap histogram actually accounts for.
+
+    **A histogram of intervals between events cannot record the interval
+    it is currently inside.** `clock_gap_buckets` gains a count only when
+    vector `0xd1` is staged (`nested_entry.cpp:3251`), and
+    `clock_gap_last` is only written there too - so a clock that stops
+    leaves the histogram frozen with whatever distribution it had when it
+    stopped, and a reader gets the same "96.3% at the 1.74 ms period" for
+    ever.  A stall that *ends* contributes exactly **one** count in one
+    high bucket, which is 0.0004% of 241,551 and rounds away in every
+    column printed beside it.
+
+    So the histogram is checked against its own integral.  Each count in
+    bucket `i` stands for an interval in `[2^i, 2^(i+1))` ticks; summing
+    the geometric midpoint over every bucket gives the wall-clock time
+    the `0xd1` stream spans.  If that is much less than the run, the
+    percentages describe a *phase* and not the guest now.
+
+    This is free - it needs no extra read, only the two `handler_*_tsc`
+    values the dump already has - and it is the negative control the
+    percentage has never had.  `--delta` is the positive one.
+
+    `gaps` is `[(bucket_index, count), ...]`, `hz` the time-stamp counter
+    frequency, `span_ticks` the run length from `handler_first_tsc` to
+    `handler_last_tsc`.  Returns lines; an empty list when there is
+    nothing to check against.
+    """
+    if not gaps or not hz or not span_ticks or span_ticks <= 0:
+        return []
+    # The geometric midpoint of [2^i, 2^(i+1)) rather than the arithmetic
+    # one: the bucket is a log-scale bin and its counts are not uniform
+    # inside it.  Either choice is within 6% and neither changes the
+    # verdict, but saying which is used stops the next reader deriving a
+    # third.
+    covered = sum(count * (2 ** i) * 1.5 for i, count in gaps)
+    fraction = covered / float(span_ticks)
+    lines = [
+        f"    these gaps span {covered / hz:,.1f} s of the "
+        f"{span_ticks / hz:,.1f} s this boot has been handling exits "
+        f"({100.0 * fraction:.1f}%)"]
+    if fraction > 1.15:
+        # Impossible, not merely large: intervals between successive
+        # events cannot sum to more than the span containing them.  This
+        # file's rule is that an impossible reading is an error naming
+        # what produced it, never a number - `delta_impossible_lines`
+        # exists for the same reason one array over.
+        lines.append(
+            "    *** IMPOSSIBLE: gaps between successive events cannot "
+            "sum to more than the run")
+        lines.append(
+            "        that contains them. Either the span is not this "
+            "boot's or the histogram is")
+        lines.append(
+            "        not this binary's. Check the module base and "
+            "`--elf` before reading any of it. ***")
+    elif fraction < 0.9:
+        lines.append(
+            "    *** CUMULATIVE, AND IT DOES NOT COVER THE RUN. The "
+            "percentages above are of a")
+        lines.append(
+            "        phase, not of now: a histogram of intervals cannot "
+            "record the interval it")
+        lines.append(
+            "        is inside, so a clock that stopped leaves this "
+            "frozen and still reading")
+        lines.append(
+            "        96%. Difference two dumps - `--delta N` reports "
+            "these buckets per window. ***")
+    else:
+        lines.append(
+            "    <- accounts for the run, so the distribution is of the "
+            "whole of it")
+    return lines
+
+
+def vtl_round_trip_verdict(halves, hz, epoch_delta, epoch_span_ticks):
+    """The trust-level halves as a rate, checked against the epoch.
+
+    `vtl_half_cycles`/`_exits`/`_count` are accumulated from the first
+    switch of the boot and never reset (`mark_vtl_half`,
+    `nested_entry.cpp:8543`), so dividing by the count gives a mean over
+    the **whole boot** - which the member's own comment says
+    (`hypervisor.h:7756`) and which the reader printed without saying.
+
+    That is the difference between "a round trip costs 11 ms" and "a
+    round trip cost 11 ms on average, mostly during a phase that ended".
+    Measured on the 0392123 dump: the halves imply 77.6 round trips a
+    second while `l2_hypercall_epoch_delta` for `HvCallVtlCall` in the
+    same dump says 5.45/s. Fourteen times apart, printed four screens
+    apart, and neither number carried a unit that made the other look
+    wrong.
+
+    So the two are divided here and made to disagree out loud. This is
+    the "census two fields and let them disagree" rule from CLAUDE.md
+    applied to a quantity that had only ever been read one way: a
+    single-field instrument cannot tell you it is aimed at the wrong
+    phase, because it has nothing to disagree with.
+
+    Pure so it can be tested without a rig. Returns the lines to print.
+    """
+    lines = []
+    period = 0.0
+    for count, cycles, _exits in halves:
+        if count:
+            period += cycles / count / hz
+    if not period:
+        return lines
+
+    implied = 1.0 / period
+    span = sum(cycles for _c, cycles, _e in halves) / hz
+    counted = min((c for c, _y, _e in halves if c), default=0)
+
+    lines.append(
+        f"    BOOT-WIDE MEANS, not the current state: {counted:,} round "
+        f"trips")
+    lines.append(
+        f"    spanning {span:,.1f} s of wall clock = {implied:,.2f} "
+        f"round trips/s")
+
+    if not (epoch_span_ticks and epoch_delta):
+        lines.append(
+            "    (no HvCallVtlCall epoch to check against - cannot say "
+            "whether")
+        lines.append(
+            "     this mean still describes the guest)")
+        return lines
+
+    secs = epoch_span_ticks / hz
+    if not secs:
+        return lines
+    now = epoch_delta / secs
+    lines.append(
+        f"    most recent epoch says {now:,.2f}/s "
+        f"(+{epoch_delta:,} over {secs:,.1f} s)")
+
+    if not now:
+        return lines
+    ratio = implied / now
+    if 0.5 <= ratio <= 2.0:
+        lines.append(
+            "    <- AGREE: the mean above still describes the guest.")
+    else:
+        lines.append(
+            f"    <- DISAGREE by {ratio:,.1f}x. The means above are "
+            f"dominated by a")
+        lines.append(
+            "       different, faster phase and do NOT describe the "
+            "guest now.")
+        lines.append(
+            "       Difference two dumps to get the current cost.")
+    return lines
+
+
+def dump_priority(args, elf, instance):
+    """What priority the guest runs at, and what it is told to run at.
+
+    The whole boot turns on this pair.  A software interrupt is
+    delivered only when its class exceeds the virtual task priority's,
+    so a guest that never drops below `0x20` never runs a deferred
+    procedure call however often one is requested - and deferred
+    procedure calls are where the boot's remaining work is.
+
+    `l2_entry_vtpr` is sampled on the page the entry is about to use,
+    which is the only page that is the right one; the threshold
+    histogram is what the guest hypervisor armed beside it.
+    """
+    members = ["l2_entry_vtpr", "l2_tpr_threshold_seen", "l2_cpl_seen",
+               "l2_tpr_would_fire", "l2_tpr_armed_above",
+               "clock_gap_buckets", "l2_entry_ppr", "l2_given_vector",
+               "l2_low_priority_no_event", "interrupt_request_vtpr_seen",
+               "interrupt_request_vector", "vtl_half_cycles",
+               "vtl_half_exits", "vtl_half_count",
+               "l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_span",
+               # Not printed here - they are the denominator the gap
+               # histogram below is checked against. See
+               # `clock_gap_coverage_lines`.
+               "handler_first_tsc", "handler_last_tsc"]
+    off = gdb_offsets(elf, members)
+
+    # The six the TPR-shadow block at the end of this function reads.
+    # Nothing in `scripts/` has ever printed one of them, which is part
+    # of how `on_nested_cr8_access` carried a register-table defect
+    # unnoticed. Optional, so a dump of a deployed binary that predates
+    # any of them loses that block and not the whole section - the
+    # reason `gdb_offsets` grew the flag in the first place.
+    cr8_members = ["tpr_shadow_honoured", "tpr_shadow_refused",
+                   "tpr_shadow_absent", "nested_cr8_reads",
+                   "nested_cr8_writes", "nested_cr8_below_threshold"]
+    off.update(gdb_offsets(elf, cr8_members, optional=True))
+    cr8_members = [m for m in cr8_members if m in off]
+
+    vtpr_slots, threshold_slots, cpl_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_entry_vtpr[0] / 4",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_tpr_threshold_seen[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l2_cpl_seen[0] / 8"])
+
+    reader = Monitor(args.rig, args.port)
+    # 32 bit counters, so two to a quadword and the reader unpacks.
+    reader.queue(instance + off["l2_entry_vtpr"],
+                 args.cpus * vtpr_slots // 2)
+    reader.queue(instance + off["l2_tpr_threshold_seen"],
+                 args.cpus * threshold_slots)
+    reader.queue(instance + off["l2_cpl_seen"], args.cpus * cpl_slots)
+    for member in ("l2_tpr_would_fire", "l2_tpr_armed_above"):
+        reader.queue(instance + off[member], args.cpus)
+    gap_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->clock_gap_buckets[0] / 8"])[0]
+    reader.queue(instance + off["clock_gap_buckets"],
+                 args.cpus * gap_slots)
+    # 32 bit counters, two to a quadword, same as l2_entry_vtpr.
+    for member in ("l2_entry_ppr", "l2_given_vector"):
+        reader.queue(instance + off[member], args.cpus * 256 // 2)
+    for member in ("interrupt_request_vtpr_seen",
+                   "interrupt_request_vector"):
+        reader.queue(instance + off[member], args.cpus * 256)
+    reader.queue(instance + off["l2_low_priority_no_event"], args.cpus)
+    for member in ("vtl_half_cycles", "vtl_half_exits", "vtl_half_count"):
+        reader.queue(instance + off[member], args.cpus * 2)
+    # The epoch census, to check the halves against. See
+    # `vtl_round_trip_verdict`: the halves are a whole-boot mean and
+    # this is the only counter in the dump that says what the rate is
+    # *now*, so reading one without the other is how a mean over a
+    # finished phase got quoted as the current cost.
+    for member in ("l2_hypercall_cpu_codes", "l2_hypercall_epoch_delta"):
+        reader.queue(instance + off[member], args.cpus * 32)
+    reader.queue(instance + off["l2_hypercall_epoch_span"], args.cpus)
+    for member in ["handler_first_tsc", "handler_last_tsc"] + cr8_members:
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        rows = []
+        for i in range(vtpr_slots):
+            pair = word("l2_entry_vtpr", (cpu * vtpr_slots + i) // 2)
+            count = (pair >> (32 * (i % 2))) & 0xffffffff
+            if count:
+                rows.append((count, i))
+        if not rows:
+            continue
+
+        total = sum(c for c, _ in rows) or 1
+        print(f"\ncpu {cpu} virtual task priority at second-level entry "
+              f"({total:,} entries)")
+        for count, vtpr in sorted(rows, reverse=True):
+            print(f"  0x{vtpr:02x}  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%")
+
+        would_fire = word("l2_tpr_would_fire", cpu)
+        armed_above = word("l2_tpr_armed_above", cpu)
+        print(f"  owed by SDM 27.6.7 {would_fire:,}, "
+              f"armed while already at or above {armed_above:,}")
+
+        # Both are written only inside `save_l2_state`'s
+        # `if constexpr (nested_vmx::census_exits)`, so on the shipping
+        # build they are zero however the guest behaves.  "Never true
+        # means the guest hypervisor only arms the threshold while its
+        # guest is already above it" is their declared reading, and it
+        # is exactly the wrong conclusion to draw from a counter that
+        # was compiled out.  Same defect as the interrupt-window block
+        # below, said here because this is where these two are read.
+        if not (would_fire or armed_above):
+            caveat = census_caveat("`l2_tpr_would_fire` and "
+                                   "`l2_tpr_armed_above`")
+            if caveat:
+                print(caveat)
+
+        cpl = [word("l2_cpl_seen", cpu * cpl_slots + i)
+               for i in range(cpl_slots)]
+        print("  cpl seen: " + ", ".join(f"{i}={v:,}"
+                                         for i, v in enumerate(cpl) if v))
+
+        # How long the guest gets between clock interrupts. The period
+        # it programmed is 1.74 ms; a distribution far below that is a
+        # backlog of expirations being drained rather than a timer.
+        gaps = [(i, word("clock_gap_buckets", cpu * gap_slots + i))
+                for i in range(gap_slots)]
+        gaps = [(i, v) for i, v in gaps if v]
+        if gaps:
+            total = sum(v for _, v in gaps)
+            # 1.992 GHz, measured rather than assumed: BACKLOG.md
+            # records the TSC advancing 179,446,096,055 counts over a
+            # 90.08 second wall-clock window, and the fitted
+            # reference_scale agreeing to four significant figures. The
+            # part's marketed 1.80 GHz base frequency is *not* its TSC
+            # frequency, and this label previously used 2.6 GHz, which
+            # understated every period by 31%.
+            # **What this counts, spelled out, because the label was
+            # read as something else for a week.** The counter is
+            # incremented in `build_vmcs02` when the event copied out of
+            # *vmcs12* carries `clock_gap_vector`
+            # (`nested_entry.cpp:3251`), so it is the interval between
+            # successive **stagings** of that vector into vmcs02 by the
+            # level above - not between interrupts the guest took, and
+            # not between synthetic timer messages. `l2_entry_vector`
+            # exists precisely because those disagree; see its
+            # declaration in `hypervisor.h`.
+            print(f"  time-stamp counter between stagings of vector "
+                  f"0x{CLOCK_GAP_VECTOR:02x} into vmcs02 "
+                  f"({total:,} gaps, TSC 1.992 GHz measured)")
+            for i, v in gaps:
+                low = 1 << i
+                # Counts divided by MHz are MICROSECONDS. This
+                # printed "ms" while dividing by 1992, which is the
+                # third unit slip in this reader in one session - after
+                # the 2.6 GHz constant and the unlabelled dead field.
+                # 2^21 counts is 1.05 ms, and the label said 1052 ms.
+                print(f"    2^{i:<2} ({low / 1992000.0:8.2f} - "
+                      f"{2.0 * low / 1992000.0:.2f} ms)  {v:>10}  "
+                      f"{100.0 * v / total:5.1f}%")
+            # And whether the whole run is in there at all. See
+            # `clock_gap_coverage_lines`: this histogram is the only one
+            # in the dump that stays confident after the thing it
+            # measures has stopped.
+            span = (word("handler_last_tsc", cpu)
+                    - word("handler_first_tsc", cpu))
+            for line in clock_gap_coverage_lines(gaps, TSC_HZ, span):
+                print(line)
+
+        # PPR, not TPR, is what an arriving interrupt's class must
+        # exceed - SDM 13.8.3.1 - so this is the reading that says
+        # whether the DISPATCH_LEVEL request could ever be granted.
+        def packed(member, index):
+            pair = word(member, (cpu * 256 + index) // 2)
+            return (pair >> (32 * (index % 2))) & 0xffffffff
+
+        # The PPR heading says what it is, because it has already been
+        # misread twice in one session. SDM 32.1.1: the processor
+        # maintains VPPR only under "virtual-interrupt delivery", which
+        # is not offered here and which the layer below does not permit
+        # this VMM either - so a constant 0x00 is the field being dead,
+        # not the guest being at PASSIVE, and reported the other way it
+        # says the exact opposite of what VTPR beside it says.
+        for member, what in (("l2_entry_ppr",
+                              "processor priority at entry "
+                              "[NOT MAINTAINED - expect 0x00, see "
+                              "SDM 32.1.1; use the task priority above]"),
+                             ("l2_given_vector",
+                              "vectors vmcs02 actually carried")):
+            rows = [(packed(member, i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows) or 1
+            print(f"\n  {what} ({total:,})")
+            for count, value in sorted(rows, reverse=True)[:8]:
+                print(f"    0x{value:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%")
+
+        # Cumulative, and measured to be almost entirely early-boot
+        # residue: over a steady-state window this does not move at
+        # Read it as a delta between two dumps or not at all.
+        #
+        # **This used to say "the settled guest never goes below
+        # DISPATCH, so this is early-boot residue". That was wrong, and
+        # wrong in the direction that hides a live fault.** Measured on a
+        # settled guest: 81,895 -> 83,747 across sixty seconds, **30.9 a
+        # second and climbing**. The guest does go below DISPATCH, tens
+        # of times a second, and on every one of those entries the level
+        # above staged no event while the deferred-call vector it had
+        # asked for was outstanding.
+        #
+        # **The counter OVER-counts by construction, and this note used
+        # to say it undercounts.** The site tests the task priority, and
+        # PPR = max(TPR class, ISRV class) (SDM 13.8.3.1,
+        # `.references/sdm.txt:171709`), so PPR >= TPR and `{TPR < X}`
+        # contains `{PPR < X}`. A lower threshold blocks less and
+        # therefore counts more: every entry where an unacknowledged
+        # in-service vector held PPR at or above the dispatch class
+        # while TPR was below it is counted here and was **not** a
+        # moment the interrupt could have been delivered. Read the
+        # number as a ceiling, never as a population.
+        #
+        # **This is NOT evidence of a fault, and it used to say it was.**
+        # Read the site before believing the label: `on_l2_entry_event`
+        # increments this whenever an entry carries no event and the task
+        # priority is below the dispatch class. It does **not** check that
+        # a deferred call was outstanding. So a guest with nothing pending
+        # at a low priority - an ordinary, healthy moment - counts here,
+        # and the growth rate this used to call "a live fault" is
+        # indistinguishable from a machine with nothing to do.
+        #
+        # Left in because the quantity is still worth watching; the claim
+        # attached to it was not.
+        print(f"\n  entries carrying no event while the task priority was "
+              f"below the dispatch class [UPPER BOUND]: "
+              f"{word('l2_low_priority_no_event', cpu):,} "
+              f"(cumulative - read as a delta. NOT a fault by itself: the "
+              f"site does not check that anything was pending, and it "
+              f"keys on VTPR while the processor inhibits on "
+              f"PPR = max(TPR, ISRV), SDM 13.8.3.1 - so it over-counts)")
+
+        for member, what in (
+                ("interrupt_request_vector",
+                 "vectors the guest asked for"),
+                ("interrupt_request_vtpr_seen",
+                 "task priority when it asked")):
+            rows = [(word(member, cpu * 256 + i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows) or 1
+            print(f"\n  {what} ({total:,})")
+            for count, value in sorted(rows, reverse=True)[:8]:
+                print(f"    0x{value:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%")
+
+        # And what a round trip costs, split into its two halves.
+        halves = ["HvCallVtlCall -> HvCallVtlReturn (secure kernel)",
+                  "HvCallVtlReturn -> HvCallVtlCall (ordinary kernel)"]
+        if any(word("vtl_half_count", cpu * 2 + h) for h in range(2)):
+            print("\n  what one trust-level round trip costs")
+            rows = []
+            for h in range(2):
+                n = word("vtl_half_count", cpu * 2 + h)
+                cycles = word("vtl_half_cycles", cpu * 2 + h)
+                exits = word("vtl_half_exits", cpu * 2 + h)
+                rows.append((n, cycles, exits))
+                if not n:
+                    continue
+                print(f"    {halves[h]}")
+                print(f"      {n:,} halves, {cycles // n:,} cycles "
+                      f"({cycles / n / 1992.0:.1f} us at 1.992 GHz), "
+                      f"{exits / n:.1f} exits")
+
+            # And whether that mean still describes the guest. The
+            # `HvCallVtlCall` slot of the epoch census is the second
+            # field; see `vtl_round_trip_verdict`.
+            delta = 0
+            for i in range(32):
+                if word("l2_hypercall_cpu_codes", cpu * 32 + i) == 0x11:
+                    delta = word("l2_hypercall_epoch_delta", cpu * 32 + i)
+                    break
+            for line in vtl_round_trip_verdict(
+                    rows, 1992000000.0, delta,
+                    word("l2_hypercall_epoch_span", cpu)):
+                print(line)
+
+    # What `build_vmcs02` decided about the TPR shadow, and what the CR8
+    # emulator behind it did.  **Six counters written by the hypervisor
+    # and read by nothing until now**, which is the trap CLAUDE.md's
+    # "check existing instruments first" note is about from the other
+    # side: an instrument nobody prints is an instrument nobody checks,
+    # and `on_nested_cr8_access` carried a register-table defect for as
+    # long as it did partly because no dump would have shown it running.
+    #
+    # Outside the per-processor loop above on purpose: that loop skips a
+    # processor whose `l2_entry_vtpr` histogram is empty, and a
+    # processor with no second-level entries is exactly the one whose
+    # disposition is worth reading.
+    if len(cr8_members) != 6:
+        print("\nthe TPR shadow, per processor: SKIPPED, the deployed "
+              "binary is missing " + ", ".join(
+                  m for m in ("tpr_shadow_honoured", "tpr_shadow_refused",
+                              "tpr_shadow_absent", "nested_cr8_reads",
+                              "nested_cr8_writes",
+                              "nested_cr8_below_threshold")
+                  if m not in off))
+        return
+
+    print("\nthe TPR shadow, per processor, and the CR8 exits behind it")
+    print("  honoured: handed to the processor.  refused: asked for, "
+          "page rejected, CR8")
+    print("  exiting forced in its place.  absent: the level above "
+          "never asked.")
+    print("  cpu   honoured    refused     absent | "
+          "cr8 reads   writes  below-threshold")
+    for cpu in range(args.cpus):
+        print(f"  {cpu:3d} {word('tpr_shadow_honoured', cpu):>10,} "
+              f"{word('tpr_shadow_refused', cpu):>10,} "
+              f"{word('tpr_shadow_absent', cpu):>10,} | "
+              f"{word('nested_cr8_reads', cpu):>9,} "
+              f"{word('nested_cr8_writes', cpu):>8,} "
+              f"{word('nested_cr8_below_threshold', cpu):>16,}")
+
+    # **A zero in the three CR8 columns is a fact about the build, not
+    # about the guest**, and every one of them will read zero on the
+    # shipping binary.  `on_nested_cr8_access` is reached only from
+    # `exit_dispatch.cpp`'s control-register case, which only sees a CR8
+    # exit where `build_vmcs02` forced CR8 load/store exiting in place of
+    # a TPR shadow it would not hand to the processor - and with
+    # `tpr=1` the shadow is honoured, so `mov cr8` never exits at all.
+    # Said here so nobody reads "0 CR8 exits" as "the guest does not
+    # touch CR8": it touches it constantly, and the processor answers
+    # every one against the virtual-APIC page without telling us.
+    tpr = manifest_field("tpr")
+    if tpr == "1":
+        print("  NOTE tpr=1 in the build manifest: the TPR shadow is "
+              "honoured, so `mov cr8` never exits and the three CR8 "
+              "columns are zero BY CONSTRUCTION. They say nothing "
+              "about how often the guest writes CR8 - only "
+              "-DZPP_NESTED_TPR_SHADOW=OFF makes them measurable.")
+    elif tpr == "0":
+        print("  NOTE tpr=0 in the build manifest: no TPR shadow is "
+              "handed to the processor, CR8 exiting is forced in its "
+              "place, and the three CR8 columns are then the real "
+              "count of the guest's own `mov cr8`.")
+    else:
+        print("  (the build manifest was not read, so whether the CR8 "
+              "columns CAN be non-zero is unknown - they are reachable "
+              "only with tpr=0)")
+
+
+def dump_interrupt_window(args, elf, instance):
+    """Every interrupt-window exit, and the priority it fired at.
+
+    **The counters were already in the binary and nothing printed them.**
+    `l1_wants_l2_exit` has incremented `int_window_asked`,
+    `int_window_stale` and `int_window_vtpr` unconditionally since the
+    window reflection was written, so this section reads a guest that is
+    already running - no rebuild, no reboot, no perturbation.
+
+    What it separates, which the exit-reason histogram alone cannot:
+
+    - `stale` climbing means vmcs02 kept an interrupt-window control
+      that vmcs12 had cleared.  Then the exit storm is **ours** - we are
+      asking the processor a question nobody is waiting for an answer
+      to - and the fix is in `build_vmcs02`.
+    - `reflected` climbing with the priority at or above class 2 means
+      the opposite: the requests are real, and the level above is being
+      woken at a moment it can deliver nothing.  A software interrupt is
+      delivered only when its class exceeds the processor priority's
+      (SDM 13.8.3.1), so a window taken at `0x20` cannot carry the
+      `0x2f` deferred-procedure-call vector, and the level above will
+      re-arm the window on the very next entry.  `int_window_vtpr` is
+      VTPR, and this direction is the sound one: PPR >= TPR, so a VTPR
+      of `0x20` guarantees a PPR class of at least 2 and the refusal is
+      certain rather than probable.  That is a livelock with
+      one instruction retired per round trip, and it is what
+      `ZPP_WINDOW_ON_TPR` exists to break.
+
+    The `KiDpcInterruptBypass` disassembly is why the second reading has
+    a name.  In the guest's own `ntoskrnl.exe` the function is straight
+    line, no branch:
+
+        mov  ecx, 2
+        mov  cr8, rcx      ; task priority := 0x20, DISPATCH_LEVEL
+        sti                ; +0x0d
+        mov  rcx, [rbp-0x57]
+        lea  rdx, [rbp-0x80]   ; +0x12
+        call <retire the deferred calls>
+
+    Blocking-by-STI expires after the one instruction following `sti`,
+    so `+0x12` is the **first architecturally interruptible address** in
+    that function - which makes it exactly where an interrupt-window
+    exit must fire, and it cannot be a guest loop because there is no
+    branch to loop on.
+    """
+    members = ["int_window_asked", "int_window_stale", "int_window_vtpr",
+               "l2_given_vector", "l2_entries",
+               "nested_virtual_apic_address"]
+    off = gdb_offsets(elf, members)
+    classes = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->int_window_vtpr[0] / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("int_window_asked", "int_window_stale", "l2_entries",
+                   "nested_virtual_apic_address"):
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["int_window_vtpr"], args.cpus * classes)
+    # 32 bit counters, two to a quadword - the same packing
+    # `dump_dropped_requests` unpacks.  Read to answer the one question
+    # the class histogram cannot: what the windows actually carried.
+    reader.queue(instance + off["l2_given_vector"], args.cpus * 256 // 2)
+    got = reader.run()
+
+    def given(cpu, vector):
+        pair = got.get(instance + off["l2_given_vector"]
+                       + 8 * ((cpu * 256 + vector) // 2), 0)
+        return (pair >> (32 * (vector % 2))) & 0xffffffff
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    # The class a deferred-procedure-call vector belongs to.  0x2f >> 4
+    # is 2, and delivery needs the priority's class to be strictly
+    # below it - so any window taken at class 2 or above carries
+    # nothing.
+    dispatch_class = 0x2f >> 4
+
+    print("\ninterrupt-window exits, and the priority they fired at")
+
+    if not any(word("int_window_asked", cpu) or
+               word("int_window_stale", cpu)
+               for cpu in range(args.cpus)):
+        print("  *** THIS NEVER HAPPENED: not one interrupt-window exit "
+              "was taken on any processor. The level above never asked "
+              "for a window, so nothing here is being lost in one - "
+              "look somewhere else entirely. ***")
+        return
+
+    for cpu in range(args.cpus):
+        asked = word("int_window_asked", cpu)
+        stale = word("int_window_stale", cpu)
+        if not (asked or stale):
+            continue
+
+        print(f"\ncpu {cpu}  reflected {asked:,}  stale {stale:,}")
+        if stale:
+            print(f"  *** {stale:,} STALE: vmcs02 carried an "
+                  f"interrupt-window control vmcs12 had cleared. That "
+                  f"exit storm is this VMM's own - see build_vmcs02. ***")
+
+        rows = [(word("int_window_vtpr", cpu * classes + i), i)
+                for i in range(classes)]
+        rows = [r for r in rows if r[0]]
+        if not rows:
+            # Report the empty histogram, then READ the members that
+            # would explain it.  This branch used to assert "because
+            # nested_virtual_apic_address is zero" without ever
+            # looking, and on 2026-09-02 that was false - the member
+            # read 0x117a3c000 while this printed "no TPR shadow".
+            # The false cause vetoes ZPP_DELIVER_ON_DROP, whose whole
+            # precondition is that the level above DID set the shadow
+            # and left the threshold at zero.  An instrument may name
+            # a cause only from a value it has read.
+            #
+            # **And then it named the wrong one anyway.**  The
+            # replacement text said "the sampling site is not running,
+            # or is storing elsewhere", which is a claim about the
+            # running machine; the site is compiled out.
+            # `nested_entry.cpp`'s interrupt-window case guards the only
+            # `int_window_vtpr` increment with `nested_vmx::census_exits
+            # && 0 != page`, and `ZPP_CENSUS_EXITS` defaults to 0 - so
+            # the histogram is empty by construction in the shipping
+            # build, with the page present and the site perfectly
+            # healthy.  That reading cost an investigation cycle, and it
+            # is the manifest, not any member, that settles it.  Check
+            # `census=` before naming a cause: the same file already
+            # does at the base proof and at the injection census.
+            census = census_caveat("`int_window_vtpr`")
+            page = word("nested_virtual_apic_address", cpu)
+            print(f"  the priority was never sampled: the class "
+                  f"histogram is empty on {asked:,} window exits.")
+            print(f"  nested_virtual_apic_address 0x{page:x} - the "
+                  f"page the sample would have come from")
+            if census:
+                print(census)
+            elif page:
+                print(f"  *** census is ON and "
+                      f"nested_virtual_apic_address is NOT zero - the "
+                      f"level above DID set a TPR shadow, so neither "
+                      f"'compiled out' nor 'no page to read from' is "
+                      f"the reason. The sampling site really is not "
+                      f"running, or is storing elsewhere. ***")
+            else:
+                print("  *** nested_virtual_apic_address is zero on "
+                      "this processor - the level above set no TPR "
+                      "shadow, so there is no page to read the "
+                      "priority from. ***")
+            continue
+
+        total = sum(c for c, _ in rows) or 1
+        print(f"  task priority when the window fired ({total:,})")
+        for count, klass in sorted(rows, reverse=True):
+            mark = ("  <- blocks the 0x2f dispatch vector"
+                    if klass >= dispatch_class else "")
+            print(f"    class {klass} (0x{klass << 4:02x}-"
+                  f"0x{(klass << 4) | 0xf:02x})  {count:>10}  "
+                  f"{100.0 * count / total:5.1f}%{mark}")
+
+        blocked = sum(c for c, k in rows if k >= dispatch_class)
+        share = 100.0 * blocked / total
+        print(f"  {blocked:,} of {total:,} ({share:.1f}%) fired at a "
+              f"priority that blocks 0x2f")
+
+        # **A window firing at class 2 is not evidence of anything, and
+        # this banner used to say it was.** SDM 27.2
+        # (`.references/sdm.txt:200976`) makes the interrupt-window exit
+        # condition "RFLAGS.IF = 1 and no blocking by STI or MOV SS" -
+        # the task priority is not consulted at all.  So the priority
+        # class the window fired at is not a property of the window; it
+        # is a property of where the guest happened to open its
+        # interrupt flag, and `KiDpcInterruptBypass` above opens it two
+        # instructions after `mov cr8, 2` on purpose.
+        #
+        # The window is not "for" 0x2f.  A window taken at class 2 still
+        # admits every vector of class 3 and above, the clock at 0xd1
+        # among them (class 13), which is exactly what Windows wants
+        # during a deferred-call drain.  So the question the old share
+        # test could not ask is the only one that matters: **did these
+        # windows carry anything?**
+        clock = given(cpu, 0xd1)
+        dispatch = given(cpu, 0x2f)
+        carried = sum(given(cpu, v) for v in range(256))
+        entries = word("l2_entries", cpu)
+
+        print(f"  what vmcs02 carried over the same run: {carried:,} "
+              f"vectors (0xd1 {clock:,}, 0x2f {dispatch:,})")
+        if entries:
+            print(f"  windows are {100.0 * total / entries:.1f}% of "
+                  f"{entries:,} second-level entries")
+
+        # 0xd1 is Windows' clock and its rate is the guest's own
+        # hardcoded 574.7 Hz (CLAUDE.md, settled by disassembly), so the
+        # clock count is a wall-clock estimate and the only one a single
+        # cumulative dump has.  A livelock is a rate claim; without this
+        # the banner was making one from counts that never touched time.
+        if clock:
+            seconds = clock / 574.7
+            print(f"  ~{seconds:,.0f}s of guest time by the 574.7 Hz "
+                  f"clock, so ~{total / seconds:,.0f} windows/s")
+
+        if carried and (0.8 <= total / max(carried, 1) <= 1.25):
+            print("  NOT a livelock: the windows and the vectors "
+                  "actually delivered are within 25% of each other, so "
+                  "very nearly every window carried something. The "
+                  "priority class above is where the guest opened "
+                  "RFLAGS.IF, not a delivery failure.")
+        elif clock and total > 4 * carried:
+            print("  *** LIVELOCK SHAPE: windows are running far ahead "
+                  "of everything vmcs02 carried, so the level above is "
+                  "being woken and delivering nothing. ZPP_WINDOW_ON_TPR "
+                  "is the switch aimed at this; check `windowtpr=` in "
+                  "the build manifest before reading this as evidence it "
+                  "is off. NOTE it withholds the window, which is "
+                  "measured twice as harmful - see "
+                  "`nested_vmx::deliver_on_drop`. ***")
+        else:
+            print("  Inconclusive: compare the window count against the "
+                  "carried count above rather than against the priority "
+                  "histogram, which cannot distinguish the two.")
+
+        # The priority sampled is VTPR, and the architecture inhibits on
+        # PPR = max(TPR, ISRV) (SDM 13.8.3.1,
+        # `.references/sdm.txt:171709`).  While the guest is in service
+        # on the clock its PPR class is 13 whatever VTPR reads, so this
+        # histogram understates the inhibiting priority and must not be
+        # read as "the guest could have taken 0x2f here".
+        print("  (priority above is VTPR only; the processor inhibits "
+              "on PPR = max(TPR, ISRV), SDM 13.8.3.1)")
+
+
+def dump_dropped_requests(args, elf, instance):
+    """The low-priority vector's whole life: asked, pending, delivered,
+    DROPPED.
+
+    Needs `-DZPP_COUNT_DROPS=ON`; the counters do not exist otherwise and
+    every one of them reads zero, which is why the first thing printed is
+    whether the instrument ran at all.  This project has taken all-zero
+    counters as evidence about the machine three times when they were
+    evidence about the build.
+
+    What the five numbers separate, which "9,627 delivered against
+    411,669 asked" cannot:
+
+    - `coalesced` is expected to be most of `asked`.  A local APIC's
+      request register is a bitmap, so a second request for a vector
+      already in it is architecturally the same request (SDM 13.8.4).
+      The gap between asked and delivered is therefore not loss by
+      itself, and reading it as loss is how this ratio got its
+      reputation.
+    - `blocked` is correct behaviour: the guest was at a priority that
+      refuses the vector, or had interrupts off.  Nothing is owed.  It
+      is a **lower bound and sound**: the test is `!admitted` against
+      VTPR, and `!admitted` on VTPR implies `!admitted` on PPR.
+    - `DROPPED` is the fault, and it is the only one of the five that
+      is.  The guest could have taken it, nothing was staged, and
+      nothing in vmcs02 could produce an exit at which the level above
+      might stage it - no interrupt window, no TPR threshold.  The
+      request is not deferred; it is lost until something unrelated
+      happens to exit.
+
+      **It is an UPPER BOUND.** The admissibility test is against VTPR
+      and the processor inhibits on PPR = max(TPR class, ISRV class)
+      (SDM 13.8.3.1), so PPR >= TPR and this counts every genuine drop
+      plus every moment an unacknowledged in-service vector was still
+      holding the priority up.  zpp cannot narrow it: SDM 32.1.1
+      maintains VISR only under "virtual-interrupt delivery", which is
+      not available here.  Zero is proof; a figure is a ceiling.
+
+    `dropped` counts requests and `drop_moments` counts entries, and the
+    pair is the point: one request abandoned for a million entries and a
+    million requests each abandoned once are different faults, and a
+    single counter cannot tell them apart.
+    """
+    members = ["pending_vector_asked", "pending_vector_coalesced",
+               "pending_vector_entries_pending",
+               "pending_vector_delivered", "pending_vector_dropped",
+               "pending_vector_drop_moments", "pending_vector_blocked",
+               "pending_vector_unreadable",
+               "pending_vector_instrument_entries",
+               "window_deferred_count", "window_granted_on_drop",
+               "window_armed_at_drop", "window_already_armed_at_drop",
+               "window_threshold_arm_entries",
+               "window_threshold_refused", "l2_given_vector",
+               # window_on_tpr's OWN arming account. Resolved elsewhere
+               # in this reader and printed nowhere until now, which is
+               # the same as reading zero - see the note at the print.
+               "window_threshold_withheld", "window_threshold_disarmed",
+               "l2_tpr_threshold_seen"]
+    off = gdb_offsets(elf, members)
+
+    threshold_slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->l2_tpr_threshold_seen[0] / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        if member in ("l2_given_vector", "l2_tpr_threshold_seen"):
+            continue
+        reader.queue(instance + off[member], args.cpus)
+    # 32 bit counters, two to a quadword; `l2_given_vector` is the
+    # delivered-vector histogram this section reports the total of.
+    reader.queue(instance + off["l2_given_vector"], args.cpus * 256 // 2)
+    reader.queue(instance + off["l2_tpr_threshold_seen"],
+                 args.cpus * threshold_slots)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    def given(cpu, vector):
+        pair = got.get(instance + off["l2_given_vector"]
+                       + 8 * ((cpu * 256 + vector) // 2), 0)
+        return (pair >> (32 * (vector % 2))) & 0xffffffff
+
+    print("\nthe dispatch vector, from the ask to the delivery")
+
+    live = sum(word("pending_vector_instrument_entries", cpu)
+               for cpu in range(args.cpus))
+
+    if not live:
+        print("  *** THIS NEVER HAPPENED: the instrument did not look "
+              "at one second-level entry on any processor. That is a "
+              "statement about the BUILD, not about the guest - check "
+              "`dropcnt=` in `strings <hypervisor> | grep 'zpp "
+              "switches'`, and if it reads 0 nothing below was ever "
+              "counted. Do not read a zero here as 'nothing was "
+              "dropped'. ***")
+        return
+
+    for cpu in range(args.cpus):
+        entries = word("pending_vector_instrument_entries", cpu)
+        if not entries:
+            continue
+
+        asked = word("pending_vector_asked", cpu)
+        coalesced = word("pending_vector_coalesced", cpu)
+        pending = word("pending_vector_entries_pending", cpu)
+        delivered = word("pending_vector_delivered", cpu)
+        dropped = word("pending_vector_dropped", cpu)
+        moments = word("pending_vector_drop_moments", cpu)
+        blocked = word("pending_vector_blocked", cpu)
+        unreadable = word("pending_vector_unreadable", cpu)
+
+        print(f"\ncpu {cpu}  {entries:,} second-level entries looked at")
+
+        if not asked:
+            print("  *** THIS NEVER HAPPENED: the guest did not ask "
+                  "this processor for one self-directed vector below "
+                  "the dispatch class. Either it is not the processor "
+                  "running Windows, or the synthetic interrupt command "
+                  "register is not how it asks - and every number "
+                  "below is then vacuously zero. ***")
+            continue
+
+        distinct = asked - coalesced
+        print(f"  asked      {asked:>12,}   "
+              f"({coalesced:,} coalesced into one already outstanding, "
+              f"so {distinct:,} distinct requests)")
+        print(f"  pending    {pending:>12,}   "
+              f"entries made with one outstanding")
+        print(f"  delivered  {delivered:>12,}   "
+              f"entries whose entry-interruption field carried it")
+        print(f"  blocked    {blocked:>12,}   "
+              f"entries the priority or RFLAGS.IF correctly refused "
+              f"[lower bound - sound]")
+        if unreadable:
+            print(f"  unreadable {unreadable:>12,}   "
+                  f"*** the virtual-APIC page could not be read, so "
+                  f"these entries have no verdict either way - not a "
+                  f"drop and not a block ***")
+
+        # UPPER BOUND. The `admitted` test in `note_pending_vector`
+        # is against VTPR, and the processor inhibits on
+        # PPR = max(TPR class, ISRV class) (SDM 13.8.3.1). PPR >= TPR,
+        # so a request the guest was still in service against lands
+        # here as a drop when the architecture would have refused it
+        # anyway. Zero is proof; a figure is a ceiling. `blocked` is
+        # the complement and is a sound lower bound, because
+        # `!admitted` on VTPR implies `!admitted` on PPR.
+        print(f"  DROPPED    {dropped:>12,}   "
+              f"requests abandoned with nothing armed "
+              f"({moments:,} entry-moments) [UPPER BOUND: keyed on "
+              f"VTPR, not PPR]")
+
+        if not dropped:
+            print("  *** THIS NEVER HAPPENED: not one request was "
+                  "abandoned. Every moment the guest could have taken "
+                  "the vector, something in vmcs02 was armed that "
+                  "could produce the exit to deliver it. This is the "
+                  "number the fix exists to reach and it is reached. "
+                  "***")
+        else:
+            share = 100.0 * dropped / distinct if distinct else 0.0
+            print(f"  *** AT MOST {dropped:,} of {distinct:,} distinct "
+                  f"requests ({share:.1f}%) reached a moment the guest "
+                  f"could have taken the vector with NOTHING armed to "
+                  f"deliver it. Each averages {moments / dropped:.0f} "
+                  f"entries abandoned. A CEILING, not a count: the "
+                  f"admissibility test keys on VTPR and the processor "
+                  f"inhibits on PPR = max(TPR, ISRV), SDM 13.8.3.1. "
+                  f"This is the defect ZPP_DELIVER_ON_DROP exists to "
+                  f"remove - check `drop=` in the build manifest "
+                  f"before reading it as evidence the fix failed. ***")
+
+        # **The cost line, and it is read before the benefit line.**
+        # Two interventions have now taken the dispatch vector from
+        # 9,627 to 11 while taking the CLOCK from 388,241 to 5,550, and
+        # both times the harm was invisible in any counter aimed at
+        # 0x2f. A total that has fallen means delivery of everything
+        # has fallen and the guest is doing less work, whatever the
+        # vector under investigation did.
+        carried = sum(given(cpu, v) for v in range(256))
+        dispatch = given(cpu, 0x2f)
+        clock = given(cpu, 0xd1)
+
+        print(f"\n  vectors vmcs02 actually carried {carried:,} "
+              f"(0x2f {dispatch:,}, 0xd1 {clock:,})")
+        print("  baseline for comparison, both switches off, one "
+              "processor: 404,029 carried, 0x2f 9,627, 0xd1 388,241")
+
+        # **That baseline predates VMCS shadowing being in force and is
+        # not a control for any run that has it.** It was recorded in
+        # 88235f5, 38 commits before -DZPP_EVMCS_TO_KVM=OFF first let
+        # SECONDARY_EXEC_SHADOW_VMCS survive into vmcs02, which took
+        # exits per second-level entry from ~13.3 to ~3.15. It also
+        # carries no entry count and no duration, so the raw counts are
+        # only comparable through a rate.
+        #
+        # 0xd1 is the guest's own 574.7 Hz clock, hardcoded in
+        # `ntoskrnl.exe` (CLAUDE.md, settled by disassembly), so it is
+        # the wall clock a single cumulative dump otherwise lacks.
+        if clock:
+            seconds = clock / 574.7
+            base_seconds = 388241 / 574.7
+            print(f"  ~{seconds:,.0f}s here against ~{base_seconds:,.0f}s "
+                  f"in that baseline, by the clock count")
+            print(f"  per second: 0x2f {dispatch / seconds:,.2f} "
+                  f"(baseline 14.25), all vectors "
+                  f"{carried / seconds:,.1f} (baseline 598.1)")
+            print("  NOTE the baseline was taken with shadowing OFF. "
+                  "Against a shadowing-ON run it is not a "
+                  "single-variable control - rebuild with the same "
+                  "manifest and only the switch under test moved.")
+
+        # Judge the RATE, never the total.  This test used to read
+        # `carried < 100000` against a baseline accumulated over ~676 s,
+        # so a healthy run eleven seconds in tripped it: on 2026-09-02 it
+        # printed "delivery of EVERYTHING has collapsed" for a guest
+        # carrying 575.4 vectors/s against a 598.1/s baseline, three
+        # lines under its own correct per-second figure.  That is the
+        # "a total is not a rate" trap from CLAUDE.md, committed by the
+        # instrument written to catch it.  A short run must say it is
+        # short, not call the difference a collapse.
+        baseline_rate = 598.1
+        if carried and clock:
+            rate = carried / (clock / 574.7)
+            if (clock / 574.7) < 30.0:
+                print(f"  cannot judge cost yet: {clock / 574.7:,.1f}s "
+                      f"of guest clock is too short a span. The rate so "
+                      f"far is {rate:,.1f}/s against {baseline_rate}/s "
+                      f"- let it run and re-read.")
+            elif rate < 0.5 * baseline_rate:
+                print(f"  *** COST, READ THIS FIRST: {rate:,.1f} vectors "
+                      f"per second against a {baseline_rate}/s baseline. "
+                      f"Delivery of EVERYTHING has collapsed, not just "
+                      f"the vector under test, and a low ask count below "
+                      f"is then an effect of that and not a measurement "
+                      f"of the guest. This is what withholding the "
+                      f"interrupt window does. Check `window withheld` "
+                      f"on the next line: it must be 0. ***")
+        elif carried and not clock:
+            print("  cannot judge cost: no 0xd1 clock count, so there "
+                  "is no wall clock to turn the total into a rate.")
+
+        # The mechanism's own account, which says whether the fix is
+        # even running rather than whether it worked.
+        deferred = word("window_deferred_count", cpu)
+        granted = word("window_granted_on_drop", cpu)
+        arm_entries = word("window_threshold_arm_entries", cpu)
+        armed = word("window_armed_at_drop", cpu)
+        already = word("window_already_armed_at_drop", cpu)
+        threshold_refused = word("window_threshold_refused", cpu)
+
+        print(f"  window withheld {deferred:,} (MUST be 0), threshold "
+              f"armed on {arm_entries:,} entries, priority drops "
+              f"reported {granted:,}")
+
+        # **`arm_entries` above is a ZPP_DELIVER_ON_DROP counter and
+        # reads zero in any `windowtpr=1` build**, because a static
+        # assertion refuses the two switches together. It is therefore
+        # NOT an answer to "did window_on_tpr arm its threshold", and
+        # reading it as one cost a wrong conclusion about boot 139.
+        #
+        # window_on_tpr has its own arming: it sets
+        # `window_threshold_armed` when it withholds
+        # (`nested_entry.cpp:2056`) and consumes it at `:2228`, where the
+        # write into vmcs02 is gated on the virtual task priority having
+        # been READ. If that read fails the threshold is never written,
+        # the withheld window is never re-opened, and the processor
+        # starves with nothing recorded anywhere visible. These two
+        # counters are that gate's account, and until now the reader
+        # resolved both members and printed neither - which is
+        # indistinguishable from their reading zero.
+        w_withheld = word("window_threshold_withheld", cpu)
+        w_disarmed = word("window_threshold_disarmed", cpu)
+
+        if (deferred or w_withheld or w_disarmed):
+            print(f"    window_on_tpr's OWN arming: threshold not written "
+                  f"{w_withheld:,}, taken back down {w_disarmed:,}")
+            if deferred and not w_withheld:
+                print("      <- every withheld window did get a threshold "
+                      "written; the withholding is not what starves it")
+            elif w_withheld:
+                print("      *** THE WITHHOLDING HAS NO WAKE-UP on "
+                      f"{w_withheld:,} entries: the virtual task priority "
+                      "could not be read, so no threshold was written and "
+                      "nothing re-opens the window. This starves the "
+                      "processor. ***")
+        # **"written by this VMM" is scoped to the drop exit only.** It
+        # is `window_armed_at_drop` (`nested_entry.cpp:9840`), which
+        # counts only the tpr-below-threshold exits under
+        # ZPP_DELIVER_ON_DROP where the window was not already live. A
+        # zero here says nothing about who arms the window in general -
+        # `build_vmcs02` masks this VMM's own bit out and takes the
+        # control from vmcs12 alone (`nested_entry.cpp:1829`), so on
+        # every ordinary entry the answer is always "the level above".
+        print(f"  at the drop: window already live {already:,}, window "
+              f"written by this VMM at that exit {armed:,} "
+              f"(drop-exit scope only; ordinary entries inherit the "
+              f"control from vmcs12)")
+
+        if deferred:
+            print(f"  *** {deferred:,} WINDOWS WITHHELD. Under "
+                  f"ZPP_DELIVER_ON_DROP this must be zero - it takes "
+                  f"nothing away. A non-zero reading means "
+                  f"ZPP_WINDOW_ON_TPR is on instead or as well; check "
+                  f"`windowtpr=` in the build manifest. Withholding is "
+                  f"the move measured twice as harmful. ***")
+        if arm_entries and not granted:
+            print("  *** the threshold was armed and the processor "
+                  "NEVER reported a drop. TPR virtualization is not "
+                  "happening: SDM 32.1.2 gives MOV to CR8 as the only "
+                  "trigger available here, so either the guest lowers "
+                  "its priority some other way or vmcs02 carries "
+                  "CR8-load exiting and the MOV exits instead of "
+                  "virtualizing (SDM 32.3). ***")
+        if threshold_refused:
+            print(f"  {threshold_refused:,} entries where the level "
+                  f"above was holding a blocked vector and no threshold "
+                  f"could be armed - it had set its own, or no TPR "
+                  f"shadow. Nothing was taken away in those; the "
+                  f"mechanism is simply inapplicable there.")
+
+        # **Why its own threshold never fires**, which is a separate
+        # defect from anything above and is settled by one histogram.
+        # SDM 32.1.2: `IF VTPR[7:4] < TPR threshold THEN cause VM exit`.
+        # Nothing is less than zero, so a threshold of 0 is a
+        # notification that cannot arrive - and the level above writes
+        # tpr_threshold on 11% of its VMWRITEs while the exit fires 33
+        # times in 3.6 million. This histogram was read by this script
+        # and printed by nothing for the whole investigation.
+        rows = [(got.get(instance + off["l2_tpr_threshold_seen"]
+                         + 8 * (cpu * threshold_slots + i), 0), i)
+                for i in range(threshold_slots)]
+        rows = [r for r in rows if r[0]]
+
+        if rows:
+            total = sum(c for c, _ in rows)
+            zero = next((c for c, i in rows if i == 0), 0)
+            print(f"\n  TPR threshold the level above armed, per entry "
+                  f"({total:,})")
+            for count, value in sorted(rows, reverse=True):
+                mark = ("  <- CANNOT EVER FIRE, SDM 32.1.2"
+                        if value == 0 else "")
+                print(f"    threshold {value:>2}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%{mark}")
+            if zero == total:
+                print("  *** SETTLED: the level above left the TPR "
+                      "threshold at ZERO on every entry. `VTPR[7:4] < "
+                      "0` is false for every value, so its own "
+                      "TPR-below-threshold notification could never "
+                      "have arrived, on any processor, ever. That is "
+                      "why it arms one and holds an interrupt it never "
+                      "delivers - and it is a fact about the level "
+                      "above, not a bug in this VMM. ***")
+
+
+def dump_synthetic_msrs(args, elf, instance):
+    """Which synthetic MSRs the second-level guest writes, and how often.
+
+    This is the question the exit budget turns on and it had never been
+    asked. 2.69 synthetic-MSR writes per clock tick is a lot for a tick,
+    and "the MSR bitmap cannot filter them" - which is true, they lie
+    outside both ranges SDM 26.6.9 allows - says nothing about whether
+    there should be 2.69 of them.
+    """
+    members = ["l2_synthetic_msr_writes", "l2_synthetic_msr_reads",
+               "l2_int_window_armed", "l2_int_window_clear"]
+    off = gdb_offsets(elf, members)
+
+    reader = Monitor(args.rig, args.port)
+    # **32 bit counters, two to a quadword.** Read as 64 bit they come
+    # back as `0x3_00000002` - two adjacent slots welded together, which
+    # printed as 12,884,901,890 writes of one MSR and looked like a
+    # finding rather than a unit error. Same shape as `l2_entry_vtpr`
+    # above, which is why that one already unpacks.
+    for member in ("l2_synthetic_msr_writes", "l2_synthetic_msr_reads"):
+        reader.queue(instance + off[member], args.cpus * 256 // 2)
+    for member in ("l2_int_window_armed", "l2_int_window_clear"):
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    # Named where the name is established; the rest print as addresses.
+    known = {0x70: "EOI", 0x71: "ICR", 0x72: "TPR",
+             0x73: "VP_ASSIST_PAGE", 0x84: "EOM",
+             0x20: "TIME_REF_COUNT", 0x21: "REFERENCE_TSC",
+             0xb0: "STIMER0_CONFIG", 0xb1: "STIMER0_COUNT"}
+
+    for cpu in range(args.cpus):
+        def packed(member, index):
+            pair = word(member, (cpu * 256 + index) // 2)
+            return (pair >> (32 * (index % 2))) & 0xffffffff
+
+        for member, what in (("l2_synthetic_msr_writes", "written"),
+                             ("l2_synthetic_msr_reads", "read")):
+            rows = [(packed(member, i), i) for i in range(256)]
+            rows = [r for r in rows if r[0]]
+            if not rows:
+                continue
+            total = sum(c for c, _ in rows)
+            print(f"\ncpu {cpu} synthetic MSRs {what} ({total:,})")
+            for count, slot in sorted(rows, reverse=True):
+                name = known.get(slot, "")
+                print(f"  0x400000{slot:02x}  {count:>10}  "
+                      f"{100.0 * count / total:5.1f}%  {name}")
+
+        vp = gdb_offsets(elf, [
+            "vp_assist_l2_physical", "vp_assist_via_ept12",
+            "vp_assist_via_identity", "vp_assist_paths_agree",
+            "vp_assist_watch_armed", "vp_assist_writes",
+            "vp_assist_write_page"])
+        vr = Monitor(args.rig, args.port)
+        for m in vp:
+            vr.queue(instance + vp[m], 1)
+        vg = vr.run()
+
+        def v(m):
+            return vg.get(instance + vp[m], 0)
+
+        # **Not per processor, and the heading used to say it was.**
+        # `vp_assist_l2_physical` and its siblings are plain scalars in
+        # the header - one machine-wide probe, written by whichever
+        # processor last ran it. Printed once per cpu they read as eight
+        # processors agreeing on one page, which is a different and much
+        # more alarming statement than "one probe, printed once".
+        if v("vp_assist_l2_physical") and 0 == cpu:
+            print(f"\nVP assist page probe (machine-wide, NOT per cpu)")
+            print(f"  L2 physical (what Windows wrote) "
+                  f"0x{v('vp_assist_l2_physical'):x}")
+            print(f"  via the guest hypervisor's own EPT "
+                  f"0x{v('vp_assist_via_ept12'):x}")
+            print(f"  via this VMM's identity map        "
+                  f"0x{v('vp_assist_via_identity'):x}")
+            print(f"  the two paths agree: "
+                  f"{'YES' if v('vp_assist_paths_agree') else 'NO'}")
+            print(f"  write-watch armed: "
+                  f"0x{v('vp_assist_watch_armed'):x}")
+            # An unarmed watch reports "no writes" exactly like a watch
+            # that saw none. Never print the conclusion without the
+            # premise - the first run of this said "nothing writes it,
+            # on the watch's word" when no watch had been armed.
+            if 1 != v("vp_assist_watch_armed"):
+                print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
+                      f"   <- MEANINGLESS, no watch is armed")
+            else:
+                print(f"  WRITES SEEN: {v('vp_assist_writes'):,}"
+                      + ("   <- the guest hypervisor does write it"
+                         if v("vp_assist_writes")
+                         else "   <- nothing writes it, and a watch was "
+                              "armed the whole time"))
+
+        armed = word("l2_int_window_armed", cpu)
+        clear = word("l2_int_window_clear", cpu)
+        if armed or clear:
+            total = armed + clear
+            print(f"\ncpu {cpu} interrupt-window exiting, as vmcs12 asked "
+                  f"for it at entry")
+            print(f"  armed {armed:,} of {total:,} entries "
+                  f"({100.0 * armed / max(total, 1):.1f}%)")
+
+
+def dump_phase_tree(cpu, phase_count, cell, round_trips, handler):
+    """The phase table as the tree it is, with a column that sums.
+
+    Three things this prints that the flat table could not, and each of
+    them is a wrong conclusion this file has already recorded:
+
+    - **cycles per round trip**, so siblings are additive. The old table
+      printed cycles per *call*, and the denominators differ by more
+      than an order of magnitude across the rows - so the sum of that
+      column is not a quantity.
+    - **the nesting**, from PHASE_PARENT, so a container and its
+      children are never added to each other.
+    - **the residue**, twice: `handler_cycles` minus the top-level
+      intervals, which says whether the split covers the handler at all,
+      and each container minus its own children, which is where the cost
+      is when everything named inside a large phase is small.
+
+    Slots 25 to 30 are adjacent intervals over the whole of an exit and
+    sum to `handler_cycles` by construction. Everything older nests
+    inside one of them, so a top-level residue much above the round-off
+    means an exit is leaving the handler somewhere this does not know
+    about - a halt, or a path that never reaches `resume_guest`.
+    """
+    calls = [cell("phase_calls", i) for i in range(phase_count)]
+    cycles = [cell("phase_cycles", i) for i in range(phase_count)]
+
+    if not any(calls):
+        return
+
+    # A phase's own cycles, less everything charged to a child of it.
+    # Cross-cutting slots are not anybody's child, so they never subtract
+    # from a container - which is deliberate: charging
+    # `copy_shadow_to_vmcs12` to whichever caller happened to be guessed
+    # at is exactly the error this column exists to avoid.
+    children = [[] for _ in range(phase_count)]
+    for index in range(phase_count):
+        parent = PHASE_PARENT[index] if index < len(PHASE_PARENT) \
+            else PHASE_CROSS
+        if 0 <= parent < phase_count:
+            children[parent].append(index)
+
+    rt = round_trips or 1
+    total = handler or 1
+
+    print(f"\ncpu {cpu} phase tree "
+          f"({round_trips:,} round trips, "
+          f"{handler // max(round_trips, 1):,} handler cycles a round "
+          f"trip)")
+    print("     phase                                     calls  calls/RT"
+          "     cyc/call      cyc/RT   self/RT   %vmm")
+
+    def row(index, depth):
+        if not calls[index]:
+            return
+        name = (("  " * depth) + PHASE_NAMES[index])[:36]
+        own = cycles[index] - sum(cycles[c] for c in children[index])
+        print(f"  {index:3d}  {name:<36} {calls[index]:>12,} "
+              f"{calls[index] / rt:>8.2f} "
+              f"{cycles[index] // calls[index]:>12,} "
+              f"{cycles[index] / rt:>11,.0f} "
+              f"{own / rt:>9,.0f} "
+              f"{100.0 * cycles[index] / total:>6.1f}")
+        for child in children[index]:
+            row(child, depth + 1)
+
+    top = [i for i in range(phase_count)
+           if (i < len(PHASE_PARENT)) and (PHASE_PARENT[i] == PHASE_TOP)]
+
+    for index in top:
+        row(index, 0)
+
+    covered = sum(cycles[i] for i in top)
+    for label, value in (
+            ("--- the six adjacent intervals", covered),
+            ("--- handler_cycles", handler),
+            ("--- outside the split", handler - covered)):
+        print(f"       {label:<36} {'':>12} {'':>8} {'':>12} "
+              f"{value / rt:>11,.0f} {'':>9} "
+              f"{100.0 * value / total:>6.1f}")
+
+    cross = [i for i in range(phase_count)
+             if (i < len(PHASE_PARENT))
+             and (PHASE_PARENT[i] == PHASE_CROSS) and calls[i]]
+    if cross:
+        # Named, because the alternative is that somebody reads a `self`
+        # column as smaller than it is. A cross-cutting phase is inside
+        # one of the rows above - `copy_shadow_to_vmcs12` is inside
+        # `on_guest_vmlaunch` on one call and inside `vmptrld: flush
+        # old` on another - and because it is not anybody's child it is
+        # never subtracted from either. So those two `self` figures are
+        # upper bounds by exactly this much, and adding these rows to
+        # the tree above double counts them.
+        print("       cross-cutting - each of these is already inside one "
+              "of the rows above,\n       and is NOT subtracted from that "
+              "row's self, because it has more than\n       one caller. "
+              "Do not add them to the tree.")
+        for index in cross:
+            row(index, 1)
+
+
+def dump_regions(args, elf, instance):
+    """Where an exit's cycles are, by region rather than by counting.
+
+    `handler_cycles` over `handler_exits` is the time from the first
+    instruction this VMM controls on an exit to the last before it
+    resumes. Subtracting that from the wall clock between successive
+    exits gives everything else - the transition, the level above, and
+    its guest.
+
+    Both counters have been running since they were written and nothing
+    has ever printed them, which is the fourth in this file found that
+    way. The cost model they can settle - a VMCS read priced at ~2,984
+    cycles against a phase of 198,309 for 60 of them that did not move
+    when 44 were removed - is refuted without them.
+    """
+    members = ["handler_cycles", "handler_exits", "handler_first_tsc",
+               "handler_last_tsc", "guest_state_reads_skipped",
+               "guest_state_reads_done", "dilation_hidden",
+               "dilation_charged", "dilation_offset"]
+    off = gdb_offsets(elf, members)
+
+    # Added later than the rest, so a dump of a binary that predates them
+    # loses these two lines and nothing else.
+    later = gdb_offsets(elf, ["window_entry_fast", "window_entry_slow"],
+                        optional=True)
+    off.update(later)
+
+    reader = Monitor(args.rig, args.port)
+    for member in off:
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    for cpu in range(args.cpus):
+        exits = word("handler_exits", cpu)
+        if not exits:
+            continue
+
+        inside = word("handler_cycles", cpu)
+        span = word("handler_last_tsc", cpu) - word("handler_first_tsc", cpu)
+
+        print(f"\ncpu {cpu} where an exit's cycles are")
+        print(f"  exits handled            {exits:,}")
+        print(f"  inside this VMM          {inside // exits:,} cycles/exit")
+        if span > 0:
+            print(f"  wall clock per exit      {span // exits:,} cycles/exit")
+            share = 100.0 * inside / span
+            print(f"  share inside this VMM    {share:.1f}%")
+            print(f"  everything else          {(span - inside) // exits:,} "
+                  f"cycles/exit  (transition, the level above, its guest)")
+
+        skipped = word("guest_state_reads_skipped", cpu)
+        done = word("guest_state_reads_done", cpu)
+        if skipped or done:
+            print(f"  guest-state reads: {done:,} done, {skipped:,} skipped"
+                  f"  ({skipped / max(exits, 1):.1f} skipped per exit)")
+
+        # What the guest's own clock was told about all of that. Both
+        # halves, because the dilation actually achieved is not the one
+        # asked for - the guest's own execution is never scaled, so the
+        # ratio depends on how much of the machine the guest was getting,
+        # and the asked-for figure alone would say nothing about that.
+        # Which path the mapping window took. Printed for cpu 0 only,
+        # since the counters are not per processor - a cache nobody has
+        # watched hit is one that may not be hitting, which is the whole
+        # reason these exist.
+        if (0 == cpu) and ("window_entry_fast" in off):
+            fast = got.get(instance + off["window_entry_fast"], 0)
+            slow = got.get(instance + off["window_entry_slow"], 0)
+            if fast or slow:
+                total = fast + slow
+                print(f"  mapping window: {fast:,} repoints through the "
+                      f"cached leaf, {slow:,} through the full walk "
+                      f"({100.0 * fast / max(total, 1):.2f}% fast, "
+                      f"{total / max(exits, 1):.1f} per exit)")
+
+        hidden = word("dilation_hidden", cpu)
+        charged = word("dilation_charged", cpu)
+        if hidden or charged:
+            offset = word("dilation_offset", cpu)
+            print(f"  time dilation: {hidden:,} cycles hidden, "
+                  f"{charged:,} charged, offset -0x{(-offset) & (2**64-1):x}")
+            if span > 0:
+                print(f"    the guest's clock runs at "
+                      f"{100.0 * (span - hidden) / span:.1f}% of the wall")
+                print(f"    so its {17400} unit tick is "
+                      f"{1.74 * span / max(span - hidden, 1):.2f} ms of it")
+
+
+VMCS_ACCESS_ACCOUNTING_NOTE = (
+    "  Access columns are deltas of shared counters: reads include cache hits;\n"
+    "  writes exclude elided writes and can include eVMCS stores. CPU handlers\n"
+    "  can overlap, counting another CPU's activity in the same interval.\n"
+    "  These columns do not measure VMREAD/VMWRITE latency or attribute\n"
+    "  hardware time to a reason or phase."
+)
+
+
+def dump_handler_by_reason(args, elf, instance):
+    """Where the handler's time goes, by the reason that caused the exit.
+
+    The phase table covers the reflection path and only about a third of
+    exits take it, so roughly sixty per cent of the handler has never
+    been attributed to anything.  Four optimisations aimed at the phases
+    have each removed real work and left the total where it was; this is
+    the split that says whether they were aimed at the wrong third.
+
+    The sum of this must equal `handler_cycles`, and the line at the end
+    says so - a split that does not add up is measuring a different span
+    from the one it is being compared against.
+    """
+    members = ["handler_reason_cycles", "handler_reason_exits",
+               "handler_cycles", "handler_exits", "handler_reason_from_l2",
+               "handler_reason_reads", "handler_reason_writes"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[handler by reason: not in this binary]")
+        return
+
+    # From the ELF, not a literal. `handler_reason_slots` is 64 today,
+    # and a copy of it here would not move when the header does - which
+    # is the whole reason `gdb_lengths` exists. The flat query is the
+    # right one: these are one-dimensional, and asking the nested
+    # question about a flat member returns nothing at all.
+    slots = gdb_flat_lengths(elf, ["handler_reason_exits"]).get(
+        "handler_reason_exits")
+    if not slots:
+        print("\n[handler by reason: cannot size handler_reason_exits "
+              "from this ELF - not printed rather than guessed at 64]")
+        return
+    reader = Monitor(args.rig, args.port)
+    for member in ("handler_reason_cycles", "handler_reason_exits",
+                   "handler_reason_from_l2", "handler_reason_reads",
+                   "handler_reason_writes"):
+        reader.queue(instance + off[member], slots)
+    # **The denominator must have the same population as the
+    # numerator, and it did not.** `handler_reason_*` is written from
+    # `resume.cpp:1535` with no `[cpu]` - the tree calls that deliberate
+    # at `resume.cpp:1530` ("one processor runs the guest being
+    # chased"), which stopped being true when this tree started booting
+    # a two-processor guest. `handler_cycles` and `handler_exits`, the
+    # denominators, ARE `[max_cpus]` and were read at index 0 alone. So
+    # every percentage below was an all-processor numerator over one
+    # processor's denominator, and the coverage line - the check the
+    # header calls "a split that does not add up is not a result" -
+    # reads above 100% on two processors and near 100% only by
+    # coincidence.
+    #
+    # Summing the denominator is the honest fix that needs no change to
+    # the hypervisor: it makes both sides machine-wide, and the heading
+    # says machine-wide instead of "cpu 0". Giving the split a
+    # `[max_cpus]` dimension would be better and is not done here - it
+    # reverses a decision the source states deliberately, which is a
+    # design call rather than a reader bug.
+    reader.queue(instance + off["handler_cycles"], args.cpus)
+    reader.queue(instance + off["handler_exits"], args.cpus)
+    got = reader.run()
+
+    def row(member, i):
+        return got.get(instance + off[member] + 8 * i, 0)
+
+    total_cycles = sum(got.get(instance + off["handler_cycles"] + 8 * c, 0)
+                       for c in range(args.cpus))
+    total_exits = sum(got.get(instance + off["handler_exits"] + 8 * c, 0)
+                      for c in range(args.cpus)) or 1
+
+    rows = []
+    split_cycles = 0
+    split_exits = 0
+    for i in range(slots):
+        cycles = row("handler_reason_cycles", i)
+        exits = row("handler_reason_exits", i)
+        if not exits:
+            continue
+        split_cycles += cycles
+        split_exits += exits
+        rows.append((cycles, exits, i))
+
+    print(f"\nall {args.cpus} processors: where the handler's time "
+          f"goes, by exit reason "
+          f"({total_cycles / total_exits:,.0f} cycles/exit overall)")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
+    print("  reason          exits    cyc/exit   %cyc  "
+          "read_ctr/ex write_ctr/ex  whose")
+    for cycles, exits, i in sorted(rows, reverse=True):
+        # Whose exit it was. A second-level exit is reflected and comes
+        # back as the guest hypervisor's VMRESUME, so the two are one
+        # round trip rather than two costs.
+        l2 = row("handler_reason_from_l2", i)
+        whose = "L2" if l2 == exits else ("L1" if l2 == 0 else f"{l2}/{exits}")
+
+        # Preserve the raw counter deltas without deriving instruction
+        # prices from logical reads and overlapping processor intervals.
+        rd = row("handler_reason_reads", i)
+        wr = row("handler_reason_writes", i)
+        print(f"  {EXIT_REASON.get(i, i):<14} {exits:>9,} "
+              f"{cycles // max(exits, 1):>9,}cyc "
+              f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% "
+              f"{rd / max(exits, 1):>11.1f} {wr / max(exits, 1):>12.1f}  "
+              f"{whose}")
+
+    print(f"  --- split covers {100.0 * split_cycles / max(total_cycles, 1):.1f}% "
+          f"of the cycles and {100.0 * split_exits / total_exits:.1f}% "
+          f"of the exits")
+
+
+VMCS02_SPLIT = ["controls read and validated",
+                "the three MSR areas checked",
+                "ept pointer and TPR shadow decided",
+                "bitmaps merged, own controls in hand",
+                "the VMPTRLD itself",
+                "host state once, then every control",
+                "every guest-state field",
+                "the event to inject, transition flush"]
+
+
+def dump_vmcs02_split(args, elf, instance):
+    """`build_vmcs02` split into adjacent intervals, with its coverage.
+
+    Adjacent rather than nested, so the slots sum to the span between the
+    first mark and the last by construction - a cost cannot fall between
+    two of them.  What they can miss is a call that returned early, and
+    the coverage line against `phase_cycles[2]` is what says so.
+    """
+    members = ["vmcs02_split_cycles", "vmcs02_split_calls",
+               "vmcs02_split_reads", "vmcs02_split_writes",
+               "phase_cycles", "phase_calls"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[build_vmcs02 split: not in this binary]")
+        return
+
+    slots = len(VMCS02_SPLIT)
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["vmcs02_split_cycles"], slots)
+    reader.queue(instance + off["vmcs02_split_reads"], slots)
+    reader.queue(instance + off["vmcs02_split_writes"], slots)
+    reader.queue(instance + off["vmcs02_split_calls"], 1)
+    # Phase 2 - build_vmcs02's own bracket - on **every** processor.
+    #
+    # It was processor 0's alone, and `vmcs02_split_*` above has no
+    # `[max_cpus]` at all (nested_entry.cpp:1266), so every per-call
+    # figure below divided an all-processor numerator by one
+    # processor's call count and read about 2x high on a two-processor
+    # guest. The coverage line - which the header calls the check that
+    # makes this a result rather than a list - was wrong the same way.
+    # Row length from the ELF, never a literal: `phase_cycles` is
+    # `[max_cpus][n]` and a stale `n` reads cpu 0 right and everyone
+    # else wrong, which is what `exit_reason_counts` already cost.
+    phase_row = gdb_lengths(elf, ["phase_cycles"])["phase_cycles"]
+    for _c in range(args.cpus):
+        reader.queue(instance + off["phase_cycles"]
+                     + 8 * (_c * phase_row + 2), 1)
+        reader.queue(instance + off["phase_calls"]
+                     + 8 * (_c * phase_row + 2), 1)
+    got = reader.run()
+
+    split = [got.get(instance + off["vmcs02_split_cycles"] + 8 * i, 0)
+             for i in range(slots)]
+    reads = [got.get(instance + off["vmcs02_split_reads"] + 8 * i, 0)
+             for i in range(slots)]
+    writes = [got.get(instance + off["vmcs02_split_writes"] + 8 * i, 0)
+              for i in range(slots)]
+    calls = got.get(instance + off["vmcs02_split_calls"], 0)
+    whole = sum(got.get(instance + off["phase_cycles"]
+                        + 8 * (c * phase_row + 2), 0)
+                for c in range(args.cpus))
+    whole_calls = sum(got.get(instance + off["phase_calls"]
+                              + 8 * (c * phase_row + 2), 0)
+                      for c in range(args.cpus)) or 1
+
+    total = sum(split) or 1
+    print(f"\nall {args.cpus} processors: build_vmcs02, split "
+          f"({whole // whole_calls:,} cycles a "
+          f"call over {whole_calls:,} calls)")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
+    print(f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
+          f"{'read_ctr/call':>13} {'write_ctr/call':>14}")
+    for i, cycles in sorted(enumerate(split), key=lambda kv: -kv[1]):
+        print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>9,} "
+              f"{100.0 * cycles / total:>5.1f}% "
+              f"{reads[i] / whole_calls:>13.2f} "
+              f"{writes[i] / whole_calls:>14.2f}")
+
+    print(f"  --- coverage {100.0 * total / max(whole, 1):.1f}% of the "
+          f"phase's cycles, {100.0 * calls / whole_calls:.1f}% of its calls "
+          f"reached the end")
+
+
+REFLECT_SLOTS = ["save_l2_state", "reflect_l2_exit", "exit information"]
+
+
+def dump_reflect_buckets(args, elf, instance):
+    """Compare recorded reflection phases; shared access deltas can overlap."""
+    members = ["bucket_phase_cycles", "bucket_phase_reads",
+               "bucket_phase_writes", "bucket_calls",
+               "handler_reason_cycles", "handler_reason_reads",
+               "handler_reason_writes", "handler_reason_exits"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[reflection buckets: not in this binary]")
+        return
+
+    slots = len(REFLECT_SLOTS)
+    reader = Monitor(args.rig, args.port)
+    for member in ("bucket_phase_cycles", "bucket_phase_reads",
+                   "bucket_phase_writes"):
+        reader.queue(instance + off[member], 2 * slots)
+    reader.queue(instance + off["bucket_calls"], 2)
+    for member in ("handler_reason_cycles", "handler_reason_reads",
+                   "handler_reason_writes", "handler_reason_exits"):
+        reader.queue(instance + off[member], 64)
+    got = reader.run()
+
+    def cell(member, bucket, slot):
+        return got.get(instance + off[member] + 8 * (bucket * slots + slot), 0)
+
+    def whole(member, reason):
+        for i, name in EXIT_REASON.items():
+            if name == reason:
+                return got.get(instance + off[member] + 8 * i, 0)
+        return 0
+
+    print(f"\nall {args.cpus} processors: a vmcall reflection against "
+          "a wrmsr one, by phase")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
+    for bucket, reason in ((0, "vmcall"), (1, "wrmsr")):
+        exits = whole("handler_reason_exits", reason) or 1
+        wc = whole("handler_reason_cycles", reason)
+        wr = whole("handler_reason_reads", reason)
+        ww = whole("handler_reason_writes", reason)
+        print(f"  {reason} ({exits:,} exits, {wc // exits:,} cyc, "
+              f"{wr / exits:.1f} read_ctr/ex, "
+              f"{ww / exits:.1f} write_ctr/ex)")
+        sc = sr = sw = 0
+        for slot in range(slots):
+            c = cell("bucket_phase_cycles", bucket, slot)
+            r = cell("bucket_phase_reads", bucket, slot)
+            w = cell("bucket_phase_writes", bucket, slot)
+            sc += c
+            sr += r
+            sw += w
+            print(f"    {REFLECT_SLOTS[slot]:<18} {c / exits:>10,.0f} cyc "
+                  f"{r / exits:>7.1f} read_ctr/ex "
+                  f"{w / exits:>7.1f} write_ctr/ex")
+        print(f"    {'residue':<18} {(wc - sc) / exits:>10,.0f} cyc "
+              f"{(wr - sr) / exits:>7.1f} read_ctr/ex "
+              f"{(ww - sw) / exits:>7.1f} write_ctr/ex")
+        print(f"    --- the three phases hold "
+              f"{100.0 * sc / max(wc, 1):.1f}% of the cycles and "
+              f"{100.0 * (sr + sw) / max(wr + ww, 1):.1f}% "
+              "of the access-counter deltas")
+
+
+def dump_profile(args, elf, instance):
+    """Where the second-level guest is, sampled on a clock it cannot see.
+
+    The *distribution* is the reading, not the top entries.  A table that
+    fills and overflows with a low maximum is a guest executing widely; a
+    table with a few slots holding most of the samples is a spin, and the
+    addresses name it.  So `profile_overflow` and the maximum are printed
+    before the list rather than after it.
+    """
+    members = ["profile_rip", "profile_hits", "profile_samples",
+               "profile_overflow"]
+    off = gdb_offsets(elf, members, optional=True)
+    if len(off) != len(members):
+        print("\n[l2 profile: not in this binary]")
+        return
+
+    # Sized from the ELF for the same reason as the by-reason table
+    # above: a literal here is a constant that does not move when the
+    # array does, and this one indexes a ring whose stride a wrong
+    # value would silently shift.
+    slots = gdb_flat_lengths(elf, ["profile_rip"]).get("profile_rip")
+    if not slots:
+        print("\n[l2 profile: cannot size profile_rip from this ELF - "
+              "not printed rather than guessed at 64]")
+        return
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["profile_rip"], slots)
+    reader.queue(instance + off["profile_hits"], slots)
+    reader.queue(instance + off["profile_samples"], 1)
+    reader.queue(instance + off["profile_overflow"], 1)
+    got = reader.run()
+
+    rows = []
+    for i in range(slots):
+        rip = got.get(instance + off["profile_rip"] + 8 * i, 0)
+        hits = got.get(instance + off["profile_hits"] + 8 * i, 0)
+        if hits:
+            rows.append((hits, rip))
+
+    samples = got.get(instance + off["profile_samples"], 0)
+    overflow = got.get(instance + off["profile_overflow"], 0)
+
+    if not samples:
+        print("\n[l2 profile: no samples - is ZPP_PROFILE_L2 on?]")
+        return
+
+    rows.sort(reverse=True)
+    top = rows[0][0] if rows else 0
+    covered = sum(h for h, _ in rows)
+
+    # `profile_overflow` counts *flushes*, not rejected samples:
+    # `record_profile_sample` empties the whole table when it fills, so
+    # the hits below are only those since the last flush. Reporting them
+    # as a share of all samples would divide a partial fill by the whole
+    # run and read as "the table holds 1.4%", which says nothing.
+    print(f"\ncpu 0 second-level profile: {samples:,} samples, "
+          f"{len(rows)} slots filled since the last flush, "
+          f"{overflow:,} flushes")
+    print(f"  the shape: {overflow:,} flushes means the table filled with "
+          f"{slots} distinct addresses that many times - about "
+          f"{overflow * slots:,} distinct-address fills over {samples:,} "
+          f"samples")
+    print(f"  top slot {top:,} hits of the {covered:,} since the last flush")
+    print("  many flushes with a low maximum is a guest executing widely; "
+          "a spin fills the table once and then never flushes again")
+    for hits, rip in rows[:24]:
+        print(f"    0x{rip:016x}  {hits:>8,}  "
+              f"{100.0 * hits / max(samples, 1):5.1f}%")
+
+
+def dump_guest_state_shadow(args, elf, instance):
+    """Where the deferred guest-state copy's model differs from vmcs02.
+
+    Shadow mode computes what the deferral would leave in vmcs02 and
+    compares it against what the eager path is about to write. A
+    divergence is a field the deferral would have got wrong - which is
+    the failure three boots could only report as a reset.
+    """
+    members = ["shadow_divergences", "shadow_divergence_by_field",
+               "shadow_divergence_field", "shadow_divergence_in_vmcs02",
+               "shadow_divergence_in_vmcs12", "shadow_divergence_owner",
+               "shadow_divergence_dirty", "shadow_divergence_entries",
+               "guest_state_defers"]
+    off = gdb_offsets(elf, members)
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)"
+        "->shadow_divergence_field / 8"])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("shadow_divergences", "guest_state_defers"):
+        reader.queue(instance + off[member], args.cpus)
+    reader.queue(instance + off["shadow_divergence_by_field"], 48)
+    for member in ("shadow_divergence_field", "shadow_divergence_in_vmcs02",
+                   "shadow_divergence_in_vmcs12", "shadow_divergence_owner",
+                   "shadow_divergence_dirty", "shadow_divergence_entries"):
+        reader.queue(instance + off[member], slots)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    total = sum(word("shadow_divergences", c) for c in range(args.cpus))
+    defers = sum(word("guest_state_defers", c) for c in range(args.cpus))
+
+    print(f"\nguest-state shadow: {total:,} divergences over "
+          f"{defers:,} deferrable exits")
+
+    if not total:
+        print("  none - the deferral's model matched vmcs02 every time, "
+              "so the fourth condition is not a stale field value")
+        return
+
+    rows = [(word("shadow_divergence_by_field", i), i) for i in range(48)]
+    rows = [r for r in rows if r[0]]
+    print("  by field index into guest_state_fields:")
+    for count, index in sorted(rows, reverse=True):
+        print(f"    slot {index:>2}  {count:>10}")
+
+    print("  first few, in full:")
+    for i in range(min(slots, total)):
+        if not word("shadow_divergence_field", i):
+            continue
+        print(f"    field 0x{word('shadow_divergence_field', i):04x}  "
+              f"vmcs02 0x{word('shadow_divergence_in_vmcs02', i):x}  "
+              f"vmcs12 0x{word('shadow_divergence_in_vmcs12', i):x}  "
+              f"owner 0x{word('shadow_divergence_owner', i):x}  "
+              f"dirty 0x{word('shadow_divergence_dirty', i):x}  "
+              f"at entry {word('shadow_divergence_entries', i):,}")
+
+
+def dump_l1_host_audit(args, elf, instance):
+    """Which of `load_l1_host_state`'s writes the processor undoes.
+
+    The audit has been running since it was written and **nothing has
+    ever read it**, which is its own lesson: a counter nobody prints is
+    a measurement nobody has.
+
+    It exists because the obvious optimisation here is unsound. Those
+    writes go into vmcs01's *guest* fields, and SDM 30.3.2 has every VM
+    exit save the guest hypervisor's own state over them - so a cache of
+    what this VMM last wrote describes something the processor has since
+    overwritten, and eliding against it would skip a write that is owed.
+    That is what killed `ZPP_LAZY_GUEST_STATE`.
+
+    What *is* sound is dropping a write the processor demonstrably never
+    undoes, and that is a measurement. A slot at zero across a whole
+    boot is one whose write can go; a slot that is not is one that never
+    could have.
+    """
+    members = ["l1_host_field", "l1_host_changed", "l1_host_count",
+               "l1_host_audits", "l1_host_samples", "l1_host_elided",
+               "l1_host_diverged"]
+    off = gdb_offsets(elf, members)
+    slots = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->l1_host_field[0] / 8"
+    ])[0]
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("l1_host_field", "l1_host_changed"):
+        reader.queue(instance + off[member], args.cpus * slots)
+    reader.queue(instance + off["l1_host_samples"], args.cpus * slots)
+    for member in ("l1_host_count", "l1_host_audits", "l1_host_elided",
+                   "l1_host_diverged"):
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    for cpu in range(args.cpus):
+        used = word("l1_host_count", cpu)
+        if not used:
+            continue
+
+        audits = word("l1_host_audits", cpu)
+        rows = [(i, word("l1_host_field", cpu * slots + i),
+                 word("l1_host_changed", cpu * slots + i))
+                for i in range(min(used, slots))]
+        stable = [r for r in rows if 0 == r[2]]
+
+        elided = word("l1_host_elided", cpu)
+        diverged = word("l1_host_diverged", cpu)
+
+        print(f"\ncpu {cpu} load_l1_host_state audit "
+              f"({used} fields written, {audits:,} samples)")
+        print(f"  {len(stable)} of {len(rows)} slots never observed "
+              f"changed - those writes are the elidable set")
+        print(f"  writes elided: {elided:,}")
+        print(f"  DIVERGED AFTER ELISION: {diverged:,}"
+              + ("   <- the safety property failed, read the log"
+                 if diverged else "   (the safety property holds)"))
+        for index, encoding, changed in rows:
+            if changed:
+                print(f"    slot {index:>2}  field 0x{encoding:04x}  "
+                      f"changed {changed:>8}  <- the processor undoes "
+                      f"this one")
+
+
+def dump_reference_tsc(args, elf, instance):
+    """What clock the guest was handed, in hertz.
+
+    **This is the reading that would have caught a wrong scale, and there
+    was no way to take it.**  The reference TSC page carries a fixed
+    point multiplier and the guest computes
+    `((rdtsc * scale) >> 64) + offset`; nothing about a scale of
+    `0x0148f2db8d6da21a` says whether it is right, and three sessions
+    quoted one at each other without anybody being able to say.
+
+    Reference time is counted in 100-nanosecond units, so the counter
+    advances at exactly 10,000,000 ticks a second - by the Hyper-V
+    specification, not by observation.  `implied` below is one second of
+    time-stamp counter pushed through the page's own arithmetic, so it
+    **must read about 10,000,000**.  Anything else and the guest is
+    living in a different second from the one it is being told about,
+    which sets the rate of every timer it programs.
+
+    Two columns, not one, because a single-field instrument cannot tell
+    you it is aimed at the wrong field: `computed` is the scale derived
+    from the counter frequency, `fitted` is the slope through the guest
+    hypervisor's own answers for the counter MSR.  They should agree.
+    Where they do not, `baseline` says whether the fit could possibly
+    have been right - it is the time-stamp counter its two ends span, and
+    each end carries the reflection cost, about 2.5 ms, as error.
+    """
+    members = ["reference_scale", "reference_offset", "reference_published",
+               "reference_fit_error", "reference_tsc_frequency",
+               "reference_fitted_scale", "reference_implied_hz",
+               "reference_fit_implied_hz", "reference_baseline_tsc",
+               "reference_publishes", "reference_read_count",
+               "l2_reference_tsc_written"]
+    off = gdb_offsets(elf, members)
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        reader.queue(instance + off[member], args.cpus)
+    got = reader.run()
+
+    def word(member, cpu):
+        return got.get(instance + off[member] + 8 * cpu, 0)
+
+    # **Read the page back.**  Every number below is what this VMM
+    # believes it wrote; none of it is evidence about what the guest
+    # actually reads.  Nothing in the tree closes that loop -
+    # `publish_reference_tsc_page` never re-reads the frame - so
+    # `reference_scale` is a record of an intention.  That matters
+    # because the page has **two possible writers**: we write it, and
+    # the level above is only *believed* not to.  A member and a frame
+    # that disagree is the one reading able to distinguish "we
+    # published a good scale" from "a good scale is there now", and it
+    # is the reading a stuck boot most needs, since a guest spinning on
+    # a clock that never advances is computing from the frame and not
+    # from the member.
+    #
+    # The frame is a second-level guest-physical address and this rig's
+    # extended page tables have measured identity for it, so it is an
+    # `xp` address directly - the route by which this page was read by
+    # hand as sequence 1, scale 0x0148ff7a8e83f7c6, offset 0x6a241a.
+    # Layout is the TLFS one: u32 sequence, u32 reserved, u64 scale,
+    # i64 offset.
+    pages = {}
+    page_reader = Monitor(args.rig, args.port)
+    for cpu in range(args.cpus):
+        enabled = got.get(
+            instance + off["l2_reference_tsc_written"] + 8 * cpu, 0)
+        if enabled:
+            pages[cpu] = enabled & ~0xfff
+            page_reader.queue(pages[cpu], 3)
+    page_got = page_reader.run() if pages else {}
+
+    # The counter frequency the hypervisor found for itself, where it
+    # found one.  Zero is the expected answer on this rig and is not a
+    # failure to read: QEMU's `cpu_x86_cpuid` has no case for CPUID leaf
+    # 0x15 and its default returns zero, and `kvm_x86_build_cpuid` builds
+    # the guest's table from that function.  The fallback below is the
+    # tree's own wall-clock measurement - 179,446,096,055 counts over a
+    # 90.08 second window - and it is labelled as a fallback wherever it
+    # is used, because a diagnostic that silently substitutes a constant
+    # for a reading is how the last three unit slips happened.
+    measured = 1_992_000_000
+
+    printed = False
+    for cpu in range(args.cpus):
+        enabled = word("l2_reference_tsc_written", cpu)
+        if not enabled and not word("reference_read_count", cpu):
+            continue
+
+        if not printed:
+            print("\nreference TSC page: the guest's clock, in hertz")
+            printed = True
+
+        tsc_hz = word("reference_tsc_frequency", cpu)
+        source = "CPUID.15H"
+        if not tsc_hz:
+            tsc_hz = measured
+            source = "FALLBACK, measured at the wall; CPUID.15H read zero"
+
+        published = word("reference_published", cpu)
+        scale = word("reference_scale", cpu)
+        fitted = word("reference_fitted_scale", cpu)
+        baseline = word("reference_baseline_tsc", cpu)
+
+        # Computed here rather than trusted from the member, so a stale
+        # deployed binary that does not have the member still gets a
+        # reading - and so the two can disagree, which is the only way a
+        # reader catches itself.
+        def implied(value):
+            return (value * tsc_hz) >> 64
+
+        print(f"\n  cpu {cpu}  page 0x{enabled & ~0xfff:x} "
+              f"{'enabled' if enabled & 1 else 'DISABLED'}, "
+              f"published {word('reference_publishes', cpu)} time(s), "
+              f"{word('reference_read_count', cpu):,} counter reads")
+        print(f"    time-stamp counter {tsc_hz:,} Hz  ({source})")
+
+        for what, value in (("published", scale), ("fitted", fitted)):
+            if not value:
+                print(f"    {what:<9} scale -                    "
+                      f"        -")
+                continue
+            hz = implied(value)
+            # 0.1%, which is `reference_tsc::frequency_tolerance`.  The
+            # honest fits recorded in BACKLOG.md came out at 9,998,562
+            # and 10,000,215 Hz; the failure was 15.8 million.
+            verdict = ("ok" if abs(hz - 10_000_000) <= 10_000
+                       else f"WRONG by {hz / 10_000_000.0:.3f}x")
+            print(f"    {what:<9} scale 0x{value:016x}  "
+                  f"implies {hz:>12,} Hz  {verdict}")
+
+        if baseline:
+            print(f"    fit baseline {baseline:,} counts "
+                  f"({1000.0 * baseline / tsc_hz:.1f} ms)")
+        # The removed check's own verdict, in hundred-nanosecond units,
+        # kept beside the frequency it could not see.  A zero here next
+        # to a WRONG above is the whole story: collinear samples always
+        # reproduce themselves, whatever their slope.
+        print(f"    offset 0x{word('reference_offset', cpu):x}, "
+              f"collinearity error {word('reference_fit_error', cpu):,} "
+              f"x100ns")
+
+        # The frame itself, against what we believe we wrote.
+        if cpu in pages:
+            head = page_got.get(pages[cpu])
+            pscale = page_got.get(pages[cpu] + 8)
+            poff = page_got.get(pages[cpu] + 16)
+            if head is None or pscale is None or poff is None:
+                print(f"    page 0x{pages[cpu]:x} UNREADABLE - the "
+                      f"comparison below is absent, not passing")
+            else:
+                seq = head & 0xffffffff
+                print(f"    page reads   sequence {seq}, "
+                      f"scale 0x{pscale:016x}, offset 0x{poff:x}")
+                # A sequence of 0 is the interface's "not a reliable
+                # source", which sends the guest to the counter MSR.
+                # A non-zero sequence with a zero scale is far worse:
+                # the guest computes a CONSTANT and any loop waiting
+                # for its clock to change spins for ever.
+                if 0 == seq:
+                    print("      sequence 0 - the guest is being sent "
+                          "to the counter MSR, page not in use")
+                elif 0 == pscale:
+                    print("      *** sequence is set but scale is ZERO: "
+                          "the guest's clock is a CONSTANT ***")
+                if scale and pscale and pscale != scale:
+                    print(f"      *** FRAME DISAGREES WITH THE MEMBER: "
+                          f"we believe 0x{scale:016x}, the guest reads "
+                          f"0x{pscale:016x} - somebody else wrote this "
+                          f"page ***")
+                elif scale and pscale == scale:
+                    print("      agrees with reference_scale - the "
+                          "guest reads what we published")
+
+        if not published:
+            print("    NOT PUBLISHED - the guest is still reading the "
+                  "counter MSR")
+
+    if not printed:
+        print("\nreference TSC page: never enabled by the guest")
+
+
+def dump_tick_account(args, elf, instance):
+    """**What the level above believes elapsed time to be, against what
+    it is.**
+
+    The whole investigation turns on one ratio and nothing could state
+    it.  The second-level guest arms Hyper-V synthetic timer 0
+    *periodically* with 17,400 hundred-nanosecond units - 1.74 ms,
+    574.7 Hz - and the clock vector arrives at about 1,080/s, which is
+    0.926 ms.  That was only ever obtained by dividing two *rates*
+    sampled from two different counters over a window, and a ratio
+    between two quantities that were never measured together is exactly
+    the mistake this file has already retired twice ("the ratio near
+    1213 was two different quantities").
+
+    `asked` and `given` below are measured on **one** clock, per arm:
+    the hypervisor timestamps the guest's write of `STIMER0_COUNT` and
+    the clock vector that answers it, and sums both.  `given / asked` is
+    the factor, directly.
+
+    Three things make it able to fail rather than merely print:
+
+    - The two arm counts are separate.  Every arm is counted in `asked`;
+      only an arm that a clock vector answered is counted in `given`.
+      They disagreeing means the vector is not the answer to the arm,
+      which is the one assumption the ratio rests on - and `unanswered`
+      is the same failure seen from the other side.
+    - The timeline below interleaves the guest's arms with the level
+      above's *own* local APIC timer armings, which is the clock it
+      actually schedules the expiry on.  A count against the real time
+      to the next arming gives that timer's rate, and the rate against
+      the count gives the interval the level above **intended**.  Three
+      numbers, and they separate "the level above converted 1.74 ms into
+      0.926 ms" from "it asked for 1.74 ms and the timer fired early".
+    - Nothing here substitutes a constant for a reading without saying
+      so.  The time-stamp counter frequency falls back to the tree's own
+      wall-clock measurement and is labelled when it does.
+
+    **If the APIC half of the timeline is empty, that is a finding and
+    not a broken reader.**  `timer_arm_recent_*` is filled from the write
+    watch on the local APIC *page*, so it sees an xAPIC-mode timer and
+    nothing else.  A level above using x2APIC (`IA32_X2APIC_INIT_COUNT`)
+    or TSC-deadline mode programs an MSR instead, and this VMM traps
+    those two only when `arm_guest_timer_poll` is armed - which happens
+    only where the processor refuses the VMX-preemption timer.  Empty
+    here therefore means "go and arm that", not "it programs no timer".
+    """
+    members = ["stimer_asked_units", "stimer_asked_arms",
+               "stimer_given_cycles", "stimer_given_arms",
+               "stimer_unanswered", "stimer_arm_pending_tsc",
+               "l2_stimer_config", "reference_tsc_frequency"]
+    rings = ["stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind",
+             "stimer_arm_count", "timer_arm_recent_value",
+             "timer_arm_recent_tsc", "timer_arm_recent_lvt",
+             "timer_arm_recent_divide", "timer_arm_recent_count"]
+    off = gdb_offsets(elf, members + rings)
+
+    # Both rings are 32 deep.  `reference_sample_capacity` and
+    # `timer_arm_capacity` are separate constants in the header that
+    # happen to be equal; tests/python_layout asserts both against it,
+    # so a change there fails a test rather than misreading a ring.
+    stimer_capacity = 32
+    apic_capacity = 32
+
+    reader = Monitor(args.rig, args.port)
+    for member in members:
+        reader.queue(instance + off[member], args.cpus)
+    for member in ("stimer_arm_count", "timer_arm_recent_count"):
+        reader.queue(instance + off[member], args.cpus)
+    for member in ("stimer_arm_value", "stimer_arm_tsc",
+                   "stimer_arm_kind"):
+        reader.queue(instance + off[member], args.cpus * stimer_capacity)
+    for member in ("timer_arm_recent_value", "timer_arm_recent_tsc",
+                   "timer_arm_recent_lvt", "timer_arm_recent_divide"):
+        reader.queue(instance + off[member], args.cpus * apic_capacity)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    measured = 1_992_000_000
+
+    printed = False
+    for cpu in range(args.cpus):
+        asked_arms = word("stimer_asked_arms", cpu)
+        given_arms = word("stimer_given_arms", cpu)
+        stimer_n = word("stimer_arm_count", cpu)
+        apic_n = word("timer_arm_recent_count", cpu)
+
+        if not (asked_arms or given_arms or stimer_n or apic_n):
+            continue
+
+        if not printed:
+            print("\nthe tick account: asked against given")
+            printed = True
+
+        tsc_hz = word("reference_tsc_frequency", cpu)
+        source = "CPUID.15H"
+        if not tsc_hz:
+            tsc_hz = measured
+            source = "FALLBACK, measured at the wall; CPUID.15H read zero"
+
+        config = word("l2_stimer_config", cpu)
+        print(f"\n  cpu {cpu}  STIMER0_CONFIG 0x{config:x} "
+              f"({'periodic' if config & 2 else 'one-shot'}, "
+              f"{'enabled' if config & 1 else 'DISABLED'}), "
+              f"time-stamp counter {tsc_hz:,} Hz ({source})")
+
+        if not asked_arms:
+            print("    no periodic arm recorded - the guest has not "
+                  "programmed a period yet, or STIMER0_CONFIG's periodic "
+                  "bit was never seen")
+            continue
+
+        # 100 ns units in, 100 ns units out, so the two sides are the
+        # same quantity before they are divided.
+        asked_units = word("stimer_asked_units", cpu) / asked_arms
+        print(f"    asked  {asked_units:>12,.1f} x100ns per arm "
+              f"({asked_units / 10_000.0:.3f} ms, "
+              f"{10_000_000.0 / max(asked_units, 1):.1f} Hz)  "
+              f"over {asked_arms:,} arms")
+
+        if not given_arms:
+            print("    given  -  NOT ONE ARM WAS ANSWERED by the clock "
+                  "vector.  The ratio cannot be formed, and that is the "
+                  "finding: the vector is not the answer to the arm.")
+        else:
+            cycles = word("stimer_given_cycles", cpu) / given_arms
+            given_units = cycles * 10_000_000.0 / tsc_hz
+            print(f"    given  {given_units:>12,.1f} x100ns per arm "
+                  f"({given_units / 10_000.0:.3f} ms, "
+                  f"{10_000_000.0 / max(given_units, 1):.1f} Hz)  "
+                  f"over {given_arms:,} answered")
+
+            ratio = asked_units / max(given_units, 1e-9)
+            verdict = ("ok" if abs(ratio - 1.0) <= 0.05
+                       else f"EARLY by {ratio:.3f}x")
+            if ratio < 0.95:
+                verdict = f"LATE by {1.0 / ratio:.3f}x"
+            print(f"    ratio  {ratio:>12.3f}x  {verdict}")
+
+        # The assumption the ratio rests on, stated rather than assumed.
+        missing = asked_arms - given_arms
+        unanswered = word("stimer_unanswered", cpu)
+        note = "one vector per arm" if missing <= 1 else "DISAGREE"
+        print(f"    arms asked {asked_arms:,}, answered {given_arms:,}, "
+              f"displaced before an answer {unanswered:,}  ({note})")
+        if word("stimer_arm_pending_tsc", cpu):
+            print("    one arm is outstanding, which is normal - it is "
+                  "the arm the guest is currently waiting on")
+
+        # ------------------------------------------- the timeline
+        #
+        # Two rings merged on the one clock they share.  Kinds 1, 2 and 3
+        # are the guest's count write, its config write and the clock
+        # vector; 'apic' rows are the level above arming its own timer,
+        # which is what it schedules the expiry on.
+        rows = []
+        kinds = {1: "STIMER0_COUNT", 2: "STIMER0_CONFIG",
+                 3: "clock vector injected"}
+        for i in range(min(stimer_n, stimer_capacity)):
+            slot = (stimer_n - 1 - i) % stimer_capacity
+            tsc = word("stimer_arm_tsc", cpu * stimer_capacity + slot)
+            if not tsc:
+                continue
+            kind = word("stimer_arm_kind", cpu * stimer_capacity + slot)
+            value = word("stimer_arm_value", cpu * stimer_capacity + slot)
+            rows.append((tsc, kinds.get(kind, f"kind {kind}"), value, None))
+
+        for i in range(min(apic_n, apic_capacity)):
+            slot = (apic_n - 1 - i) % apic_capacity
+            tsc = word("timer_arm_recent_tsc", cpu * apic_capacity + slot)
+            if not tsc:
+                continue
+            value = word("timer_arm_recent_value",
+                         cpu * apic_capacity + slot)
+            lvt = word("timer_arm_recent_lvt", cpu * apic_capacity + slot)
+            divide = word("timer_arm_recent_divide",
+                          cpu * apic_capacity + slot)
+            rows.append((tsc, "apic initial count", value, (lvt, divide)))
+
+        if not rows:
+            continue
+
+        rows.sort()
+
+        # ------------------- what the level above intended to wait for
+        #
+        # It schedules a synthetic timer's expiry on its own local APIC
+        # timer - measured, not assumed: the watch on the APIC page sees
+        # it write the initial count once per tick, one-shot at vector
+        # 0xef with divide-by-one.  So its arming, converted at that
+        # timer's rate, is the interval it *meant* to wait, and that is
+        # the third number the other two cannot supply.
+        #
+        # **Two rates, deliberately, because they can disagree.** The
+        # nominal is 1.0 GHz - this tree's own earlier measurement on
+        # this rig, recorded in BACKLOG.md where 2,382,592,343 counts
+        # were observed against a 4.747e9-cycle gap, which is where the
+        # "ratio near 1213" was retired.  It is not far-fetched
+        # arithmetic either: KVM converts a count to a wall-clock
+        # deadline in `tmict_to_ns` as `tmict * apic_bus_cycle_ns *
+        # divide_count`, so the rate is a nanosecond-domain constant and
+        # not anything derived from this processor.
+        #
+        # The fitted rate beside it is what these armings actually did:
+        # a count, against the real time until the next arming.  It is
+        # only the timer's rate if each one-shot arming ran to expiry -
+        # so a fit far above the nominal does not mean a fast timer, it
+        # means the level above re-armed early, and it is *that* which
+        # says the verdict below cannot be trusted.  A single-rate
+        # instrument could not tell the two apart.
+        apic = [r for r in rows if r[1] == "apic initial count"]
+        nominal = 1.0e9
+        if len(apic) >= 2:
+            fits = []
+            for a, b in zip(apic, apic[1:]):
+                gap = b[0] - a[0]
+                if gap > 0 and a[2]:
+                    fits.append(a[2] * tsc_hz / gap)
+            if fits:
+                fits.sort()
+                rate = fits[len(fits) // 2]
+                agrees = abs(rate - nominal) <= 0.1 * nominal
+                print(f"\n    the level above's own APIC timer")
+                print(f"      nominal {nominal / 1e6:,.1f} MHz "
+                      f"(measured on this rig, BACKLOG.md)")
+                print(f"      fitted  {rate / 1e6:,.1f} MHz "
+                      f"(median of {len(fits)} armings)  "
+                      f"{'agrees' if agrees else 'DISAGREES - the level '
+                         'above is re-arming before expiry, so the '
+                         'intended interval below is not what it waited'}")
+
+                last = apic[-1][2]
+                if last:
+                    intended = last / nominal * 10_000_000.0
+                    print(f"      its last arming of {last:,} counts is "
+                          f"{intended:,.1f} x100ns "
+                          f"({intended / 10_000.0:.3f} ms) at the "
+                          f"nominal rate - what it INTENDED to wait")
+
+                    # The discriminator, spelled out rather than left to
+                    # the reader, because getting it the wrong way round
+                    # sends the next session to the wrong layer.
+                    to_asked = abs(intended - asked_units)
+                    to_given = (abs(intended - given_units)
+                                if given_arms else None)
+                    if to_given is not None and to_given < to_asked:
+                        print("      -> intended matches GIVEN, not "
+                              "asked: the level above converted the "
+                              "guest's period into a shorter wait. The "
+                              "fault is its notion of elapsed time, and "
+                              "the reference-page fit above says whether "
+                              "its counter is fast too.")
+                    elif to_given is not None:
+                        print("      -> intended matches ASKED: the "
+                              "level above wanted the right interval and "
+                              "the timer fired early underneath it. The "
+                              "fault is below it - this VMM or KVM - not "
+                              "in its clock.")
+
+        first = rows[0][0]
+        print("\n    timeline, oldest first (us from the first row)")
+        for tsc, what, value, extra in rows:
+            when = (tsc - first) * 1e6 / tsc_hz
+            tail = ""
+            if extra is not None:
+                lvt, divide = extra
+                mode = {0: "one-shot", 1: "periodic",
+                        2: "tsc-deadline"}.get((lvt >> 17) & 3, "?")
+                tail = (f"  lvt 0x{lvt:x} ({mode}, vector 0x{lvt & 0xff:x}"
+                        f"{', masked' if lvt & 0x10000 else ''}), "
+                        f"divide 0x{divide:x}")
+            print(f"      {when:10.1f} us  {what:<22} {value:>14,}{tail}")
+
+
+def dump_vtl(args, elf, instance):
+    """The trust-level switch loop: whether it advances, and who calls it.
+
+    `changed` is against the previous switch of the same kind rather than
+    against the first, so it reads as "how often this register moved
+    while the loop ran".  All zero is a livelock; whichever rows are not
+    zero say what the loop carries.
+    """
+    members = ["vtl_switches", "vtl_differed", "vtl_first", "vtl_latest",
+               "vtl_stack", "vtl_rip", "vtl_rsp", "vtl_cr3",
+               "vtl_image_base", "vtl_caller_base", "vtl_caller_address",
+               "vtl_image_name", "vtl_caller_name", "vtl_captured",
+               "vtl_code", "vtl_code_base", "vtl_assist",
+               "l2_vp_assist", "l2_vp_assist_eptp", "vtl_assist_read",
+               "vtl_assist_error", "vtl_assist_first"]
+    off = gdb_offsets(elf, members)
+
+    kind = "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0][0]"
+    slots, kinds, stack_words, name_size = gdb_values(elf, [
+        f"{kind} / 8",
+        f"sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_differed[0] "
+        f"/ {kind}",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_stack[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_image_name[0]"])
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + off["vtl_switches"], args.cpus * kinds)
+    for cpu in range(args.cpus):
+        for k in range(kinds):
+            for member in ("vtl_differed", "vtl_first", "vtl_latest"):
+                reader.queue(instance + off[member]
+                             + ((cpu * kinds + k) * slots) * 8, slots)
+    for member in ("vtl_rip", "vtl_rsp", "vtl_cr3", "vtl_image_base",
+                   "vtl_caller_base", "vtl_caller_address",
+                   "vtl_captured"):
+        reader.queue(instance + off[member], kinds)
+    reader.queue(instance + off["vtl_stack"], kinds * stack_words)
+    code_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_code[0]"])[0]
+    reader.queue(instance + off["vtl_code"], kinds * code_size // 8)
+    reader.queue(instance + off["vtl_code_base"], kinds)
+    assist_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_assist[0][0]"])[0]
+    reader.queue(instance + off["vtl_assist"],
+                 kinds * 2 * assist_size // 8)
+    # **max_cpus * 2, not 2.** These are `[max_cpus][2]` in the
+    # header and were queued as if they were `[2]`, so every processor
+    # printed cpu 0's value - eight identical lines that read as "every
+    # virtual processor shares one VP assist page", which is a finding
+    # if true and was not.
+    reader.queue(instance + off["l2_vp_assist"], args.cpus * 2)
+    reader.queue(instance + off["l2_vp_assist_eptp"], args.cpus * 2)
+    for member in ("vtl_assist_read", "vtl_assist_error",
+                   "vtl_assist_first"):
+        reader.queue(instance + off[member], kinds * 2)
+    for member in ("vtl_image_name", "vtl_caller_name"):
+        reader.queue(instance + off[member], kinds * name_size // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    def text(member, k):
+        raw = b"".join(word(member, k * name_size // 8 + i)
+                       .to_bytes(8, "little")
+                       for i in range(name_size // 8))
+        return raw.split(b"\0")[0].decode("ascii", "replace")
+
+    if not any(word("vtl_switches", i) for i in range(args.cpus * kinds)):
+        return
+
+    for cpu in range(args.cpus):
+        for k in range(kinds):
+            count = word("vtl_switches", cpu * kinds + k)
+            if not count:
+                continue
+            print(f"\n--- cpu {cpu}: {VTL_KINDS[k]}, {count:,} switches ---")
+            print("     register       changed  first                "
+                  "latest")
+            for s, name in enumerate(VTL_SLOTS[:slots]):
+                index = (cpu * kinds + k) * slots + s
+                print(f"     {name:<8} {word('vtl_differed', index):>12}  "
+                      f"0x{word('vtl_first', index):<16x}   "
+                      f"0x{word('vtl_latest', index):x}")
+
+    for k in range(kinds):
+        if not word("vtl_captured", k):
+            continue
+        print(f"\n--- {VTL_KINDS[k]} call site ---")
+        print(f"  rip 0x{word('vtl_rip', k):x} "
+              f"rsp 0x{word('vtl_rsp', k):x} "
+              f"cr3 0x{word('vtl_cr3', k):x}")
+        print(f"  image  0x{word('vtl_image_base', k):x} "
+              f"{text('vtl_image_name', k)!r}")
+        print(f"  caller 0x{word('vtl_caller_base', k):x} "
+              f"{text('vtl_caller_name', k)!r} "
+              f"at 0x{word('vtl_caller_address', k):x}")
+        for i in range(stack_words):
+            value = word("vtl_stack", k * stack_words + i)
+            if value:
+                print(f"    +0x{i * 8:03x}  0x{value:x}")
+
+        # The loop body, as bytes.  Disassembled outside rather than
+        # here: there is no x86 decoder in this script and adding one to
+        # print a dozen instructions would be a second decoder to keep
+        # right.  llvm-objdump takes it from the hex directly.
+        raw = b"".join(word("vtl_code", k * code_size // 8 + i)
+                       .to_bytes(8, "little")
+                       for i in range(code_size // 8))
+        if any(raw):
+            print(f"  code at 0x{word('vtl_code_base', k):x}:")
+            print("    " + raw.hex())
+
+        # The page the trust levels talk through.  Printed as the
+        # quadwords that are non-zero, because most of it is reserved
+        # and a full hex dump of two 512 byte pages per side buries the
+        # handful of fields that carry anything.
+        for level in range(2):
+            # **No `l2_vp_assist` here.** This loop is over VTL KINDS
+            # (k = 0..2, the call sites), not processors, while
+            # `l2_vp_assist` is `[max_cpus][2]`. Indexing it by `k` mixes
+            # two index spaces on one line - which is what the previous
+            # two revisions of this code each did differently, and what
+            # made a `HvCallVtlReturn` call site read as "cpu 1". The
+            # per-processor MSR is printed in its own section below.
+            msr = word("vtl_assist_first", k * 2 + level)
+            base = ((k * 2) + level) * assist_size // 8
+            live = [(i * 8, word("vtl_assist", base + i))
+                    for i in range(assist_size // 8)
+                    if word("vtl_assist", base + i)]
+            if not (msr or live
+                    or word("vtl_assist_error", k * 2 + level)):
+                continue
+            print(f"  vp assist level {level}: page 0x{msr:x} "
+                  f"read {word('vtl_assist_read', k * 2 + level)} bytes "
+                  f"err 0x{word('vtl_assist_error', k * 2 + level):x} "
+                  f"first 0x{word('vtl_assist_first', k * 2 + level):x}")
+            for at, value in live:
+                mark = "  <- vtl control" if 0x100 <= at < 0x140 else ""
+                print(f"    +0x{at:03x}  0x{value:016x}{mark}")
+
+
+def dump_vtl_steps(args, elf, instance):
+    """The instruction trace of each side of the trust-level loop.
+
+    Printed as the ordered addresses with their repeat counts collapsed,
+    plus the distinct addresses with their bytes, because the loop is
+    expected to be short and a thousand lines of the same three
+    addresses buries what they are.
+
+    The bytes are not disassembled here for the reason `dump_vtl` gives
+    about the call site's window: there is no x86 decoder in this script
+    and llvm-objdump takes the hex directly.
+    """
+    members = ["vtl_step_rip", "vtl_step_cr3", "vtl_step_count",
+               "vtl_step_other", "vtl_step_other_reason",
+               "vtl_step_code", "vtl_step_at"]
+    off = gdb_offsets(elf, members)
+
+    kinds, capacity, code_size = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_count / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_rip[0] / 8",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->vtl_step_code[0][0]"])
+
+    reader = Monitor(args.rig, args.port)
+    for member in ("vtl_step_count", "vtl_step_other",
+                   "vtl_step_other_reason", "vtl_step_at"):
+        reader.queue(instance + off[member], kinds)
+    reader.queue(instance + off["vtl_step_rip"], kinds * capacity)
+    reader.queue(instance + off["vtl_step_cr3"], kinds * capacity)
+    reader.queue(instance + off["vtl_step_code"],
+                 kinds * capacity * code_size // 8)
+    got = reader.run()
+
+    def word(member, index):
+        return got.get(instance + off[member] + 8 * index, 0)
+
+    if not any(word("vtl_step_count", k) for k in range(kinds)):
+        return
+
+    armed = ["after HvCallVtlCall (expected VTL1)",
+             "after HvCallVtlReturn (expected VTL0)",
+             "free-running, on an ordinary second-level entry"]
+
+    for k in range(kinds):
+        count = word("vtl_step_count", k)
+        if not count:
+            continue
+
+        # The arming count against the switch total is what says
+        # whether this is a trace of the loop *now* or of the boot -
+        # the same two hypercalls carry both.
+        print(f"\n--- instruction trace {armed[k]}: {count} steps, "
+              f"armed at switch {word('vtl_step_at', k):,}, "
+              f"{word('vtl_step_other', k)} other exits "
+              f"(first reason 0x{word('vtl_step_other_reason', k):x}) ---")
+
+        # The bytes go on the step's own line rather than in a table
+        # beside it, so `disassemble-trace.py` needs no join and a
+        # reader with neither script can still see what ran.
+        #
+        # Runs rather than lines: a loop of three addresses spun a
+        # thousand times is three lines and a count, and the count is
+        # the finding.
+        def step(i):
+            base = (k * capacity + i) * code_size // 8
+            raw = b"".join(word("vtl_step_code", base + j)
+                           .to_bytes(8, "little")
+                           for j in range(code_size // 8))
+            return (word("vtl_step_rip", k * capacity + i),
+                    word("vtl_step_cr3", k * capacity + i),
+                    raw)
+
+        def show(entry, repeats):
+            rip, cr3, raw = entry
+            print(f"    0x{rip:016x}  cr3 0x{cr3:<9x} {raw.hex()}"
+                  + (f"  x{repeats}" if repeats > 1 else ""))
+
+        previous, repeats = None, 0
+        for i in range(count):
+            entry = step(i)
+            if entry == previous:
+                repeats += 1
+                continue
+            if previous is not None:
+                show(previous, repeats)
+            previous, repeats = entry, 1
+        if previous is not None:
+            show(previous, repeats)
+
+
+# EFI_GRAPHICS_PIXEL_FORMAT, by number.  Format 3 has no linear
+# framebuffer at all - the firmware offers only Blt() - so its base is
+# not an address anything can read, and saying so is the whole reason
+# the number is carried rather than normalised away by the loader.
+PIXEL_FORMAT = {0: "RGBX (red first)", 1: "BGRX (blue first)",
+                2: "bit mask", 3: "blt only - NO linear framebuffer"}
+
+
+def dump_framebuffer(args, elf, instance):
+    """Where the firmware's linear framebuffer is, as the loader found it.
+
+    Nothing in the VMM reads these members; they exist to be read from
+    out here.  On a rig whose display adapter is passed through the
+    emulator has no console and answers `screendump` with "There is no
+    console to take a screendump from", so this is what makes the boot
+    spinner and a pre-driver bugcheck screen observable at all - see
+    `scripts/rig-screen.py`, which takes these six numbers.
+
+    Optional offsets, because a *deployed* binary may predate the
+    members: a dump of an older one has to lose this section rather than
+    the whole dump.
+    """
+    members = ["framebuffer_base", "framebuffer_size", "framebuffer_width",
+               "framebuffer_height", "framebuffer_stride",
+               "framebuffer_format", "framebuffer_red_mask",
+               "framebuffer_green_mask", "framebuffer_blue_mask",
+               "framebuffer_reserved_mask"]
+    off = gdb_offsets(elf, members, optional=True)
+    if "framebuffer_base" not in off:
+        return
+
+    # The monitor reads 8-byte words and six of these members are 32 bits,
+    # so two of them share a word.  Reading each at its own **aligned**
+    # address and picking the half by `offset & 4` is what keeps that from
+    # being a layout assumption: it holds however the compiler chooses to
+    # pack them, and it fails loudly (a missing offset) rather than
+    # quietly if a member is ever removed.
+    reader = Monitor(args.rig, args.port)
+    for name in members:
+        reader.queue(instance + (off[name] & ~7), 1)
+    words = reader.run()
+
+    def value(name, bits):
+        word = words.get(instance + (off[name] & ~7))
+        if word is None:
+            return None
+        if 64 == bits:
+            return word
+        return (word >> (32 if (off[name] & 4) else 0)) & 0xffffffff
+
+    base = value("framebuffer_base", 64)
+    if base is None:
+        print("\nframebuffer: NOT READ")
+        return
+
+    size = value("framebuffer_size", 64)
+    width = value("framebuffer_width", 32)
+    height = value("framebuffer_height", 32)
+    stride = value("framebuffer_stride", 32)
+    fmt = value("framebuffer_format", 32)
+
+    print("\nframebuffer (the firmware's, from the graphics output "
+          "protocol)")
+    if not base:
+        # Not an error and not a bug.  The loader records zeros when the
+        # firmware offers no graphics output, and it must never fail a
+        # boot over one.
+        print("  none - the loader found no graphics output protocol")
+        return
+
+    print(f"  base   0x{base:x}  size 0x{size:x} ({size // 1024:,} KiB)")
+    print(f"  {width} x {height}, stride {stride} pixels, "
+          f"format {fmt} ({PIXEL_FORMAT.get(fmt, '?')})")
+    if 2 == fmt:
+        print(f"  masks  red 0x{value('framebuffer_red_mask', 32):08x} "
+              f"green 0x{value('framebuffer_green_mask', 32):08x} "
+              f"blue 0x{value('framebuffer_blue_mask', 32):08x} "
+              f"reserved "
+              f"0x{value('framebuffer_reserved_mask', 32):08x}")
+
+    # The arithmetic worth stating rather than leaving to be redone: a
+    # stride that is not the width is the field a reader gets wrong, and
+    # an image walked at the visible width shears diagonally.
+    if stride and width and stride != width:
+        print(f"  NOTE stride {stride} != width {width} - walk rows at "
+              f"the stride")
+    if size and stride and height and size < stride * height * 4:
+        print(f"  NOTE size 0x{size:x} is smaller than "
+              f"stride*height*4 = 0x{stride * height * 4:x}")
+
+    print(f"  read it with: scripts/rig-screen.py --base 0x{base:x} "
+          f"--width {width} --height {height} --stride {stride} "
+          f"--format {fmt}")
+
+
+# The CPUID leaves an application-processor bring-up loop plausibly
+# polls, so a census can be read without a second window open.  Only
+# leaves this VMM has an opinion about, or that carry identity, are
+# named - the rest print as their number.
+CPUID_LEAF = {
+    0x00000000: "max leaf + vendor",
+    0x00000001: "features; EBX[31:24] initial APIC ID",
+    0x00000004: "cache topology (subleaf)",
+    0x00000006: "thermal/power",
+    0x00000007: "structured features",
+    0x0000000b: "x2APIC topology; EDX = x2APIC ID",
+    0x0000000d: "xsave",
+    0x0000000f: "RDT monitoring",
+    0x00000015: "TSC/core crystal ratio",
+    0x00000016: "processor frequency",
+    0x0000001f: "V2 topology; EDX = x2APIC ID",
+    0x40000000: "hv vendor + max hv leaf",
+    0x40000001: "hv interface signature",
+    0x40000002: "hv version",
+    0x40000003: "hv features/privileges",
+    0x40000004: "hv recommendations",
+    0x40000005: "hv limits",
+    0x4000000a: "hv nested features",
+    0x40000100: "zpp diagnostic leaf",
+    0x80000000: "max extended leaf",
+    0x80000001: "extended features",
+    0x80000008: "physical address bits",
+    0x8fffffff: "zpp deep-presence leaf",
+}
+
+
+def dump_ap_census(args, elf, instance):
+    """What each processor asked this VMM for, and who it thinks it is.
+
+    **Every member read here was added to answer the application-
+    processor question and none of them had a reader.**  `cpuid_total`,
+    `cpuid_leaf_codes`, `cpuid_leaf_counts`, `cpuid_leaf_other`,
+    `cpuid_last_rip`, `cpuid_leaf0_raw`, `cpuid_leaf0_rip`, `l1_gs_base`,
+    `l1_gs_index`, `l1_gs_index_taken`, `start_up_applied`,
+    `init_emulated` and `exit_total` appear in no script in this tree.
+    The header comments beside them describe measurements
+    ("8,378 CPUIDs against cr-access 3, rdmsr 61") that were taken by
+    hand, once, and never taken again - so the numbers they argue from
+    are older than the code they sit in.
+
+    The question this answers directly: an application processor's exits
+    are 71% CPUID at two or three instruction pointers, and the *reason*
+    is unobtainable from the exit ring, which records that a CPUID
+    happened and not which leaf.  `cpuid_leaf_counts[cpu]` records it,
+    per processor, for the whole run.
+
+    Three cross-checks, printed as verdicts rather than left implied,
+    because five instruments in this investigation have reported
+    plausible nonsense:
+
+    - `cpuid_total[cpu]` must equal `exit_reason_counts[cpu][10]`.
+    - the slot counts plus `cpuid_leaf_other[cpu]` must equal
+      `cpuid_total[cpu]`.
+    - `exit_reason_counts[cpu]` must sum to `exit_total[cpu]`.
+
+    A reading that fails any of them is not to be used.
+    """
+    members = ["exit_total", "exit_trace_count", "exit_reason_counts",
+               "cpuid_total", "cpuid_leaf_codes", "cpuid_leaf_counts",
+               "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_raw",
+               "cpuid_leaf0_rip", "l1_gs_base", "l1_gs_index",
+               # `l1_own_cr3` is the guest hypervisor's OWN cr3, taken
+               # from vmcs12's host_cr3 on every reflection. Its offset
+               # was already resolved here but it had no print site, so
+               # the value existed and was unreadable. It is the second
+               # of the two anchors needed to walk hvix64's own address
+               # space from outside - `l1_gs_base` is the first.
+               "l1_own_cr3",
+               "l1_gs_index_taken", "start_up_applied", "init_emulated",
+               "started_by_start_up_ipi", "launch_error",
+               # `off` is a CURATED list, not every DWARF member, and
+               # the queue below skips silently on `if name in off`.
+               # A member absent from here reads as zero, which is
+               # indistinguishable from a counter that never moved -
+               # the exact failure these two exist to expose.
+               "start_up_declined", "start_up_from",
+               "resume_count", "last_resume_rip",
+               "vmcall_seen", "vmcall_max_code", "vmcall_code_bitmap",
+               "attach_pending", "attach_captured", "attach_status",
+               "attach_call_code", "attach_pending_rip"]
+    off = gdb_offsets(elf, members, optional=True)
+    if "cpuid_leaf_counts" not in off:
+        print("\n[ap census skipped: the deployed ELF has no "
+              "cpuid_leaf_counts]")
+        return
+
+    lengths = gdb_lengths(elf, ["cpuid_leaf_codes", "exit_reason_counts"])
+    slots = lengths["cpuid_leaf_codes"]
+    reasons = lengths["exit_reason_counts"]
+
+    reader = Monitor(args.rig, args.port)
+    for name in ("exit_total", "exit_trace_count", "cpuid_total",
+                 "cpuid_leaf_other", "cpuid_last_rip", "cpuid_leaf0_rip",
+                 "l1_gs_base", "l1_own_cr3",
+                 "l1_gs_index_taken", "start_up_applied",
+                 "init_emulated", "launch_error"):
+        if name in off:
+            reader.queue(instance + off[name], args.cpus)
+    # Thirty-two bit each, so two processors share a quadword.  Read as
+    # one per word and the second processor's value is silently the high
+    # half of the first's - which reads as a plausible zero.
+    for name in ("cpuid_leaf0_raw", "l1_gs_index"):
+        if name in off:
+            reader.queue(instance + off[name], (args.cpus + 1) // 2)
+    # A byte each; max_cpus of them fit in four words.
+    if "started_by_start_up_ipi" in off:
+        reader.queue(instance + off["started_by_start_up_ipi"],
+                     (args.cpus + 7) // 8)
+    # Four slots per processor, packed ASCII of the applying caller.
+    for _m in ("attach_pending", "attach_captured", "attach_status",
+               "attach_call_code", "attach_pending_rip"):
+        if _m in off:
+            reader.queue(instance + off[_m], args.cpus)
+    for _m in ("vmcall_seen", "vmcall_max_code"):
+        if _m in off:
+            reader.queue(instance + off[_m], 1)
+    if "vmcall_code_bitmap" in off:
+        reader.queue(instance + off["vmcall_code_bitmap"], 4)
+    for _m in ("resume_count", "last_resume_rip"):
+        if _m in off:
+            reader.queue(instance + off[_m], args.cpus)
+        else:
+            print(f"  [{_m} ABSENT from the deployed ELF]")
+    for _m in ("start_up_declined", "start_up_from"):
+        if _m in off:
+            reader.queue(instance + off[_m],
+                         args.cpus * (4 if _m == "start_up_from" else 1))
+        else:
+            print(f"  [{_m} ABSENT from the deployed ELF - the lines "
+                  f"below that need it are missing, not zero]")
+    for cpu in range(args.cpus):
+        for name in ("cpuid_leaf_codes", "cpuid_leaf_counts"):
+            reader.queue(instance + off[name] + cpu * slots * 8, slots)
+        reader.queue(
+            instance + off["exit_reason_counts"] + cpu * reasons * 8,
+            reasons)
+    words = reader.run()
+
+    def word(name, index=0):
+        if name not in off:
+            return None
+        return words.get(instance + off[name] + 8 * index)
+
+    def half(name, index):
+        got = word(name, index // 2)
+        if got is None:
+            return None
+        return (got >> (32 * (index % 2))) & 0xffffffff
+
+    def byte(name, index):
+        got = word(name, index // 8)
+        if got is None:
+            return None
+        return (got >> (8 * (index % 8))) & 0xff
+
+    def row(name, cpu, length):
+        base = instance + off[name] + cpu * length * 8
+        return [words.get(base + 8 * i, 0) for i in range(length)]
+
+    print("\n--- per-processor census: what each processor asked for ---")
+
+    for cpu in range(args.cpus):
+        total = word("cpuid_total", cpu) or 0
+        counts = row("exit_reason_counts", cpu, reasons)
+        exits = word("exit_total", cpu) or 0
+        slots_written = word("exit_trace_count", cpu) or 0
+
+        if not exits and not total:
+            print(f"\ncpu {cpu}: no exits recorded - this processor was "
+                  f"never launched, or the reader is pointed at the "
+                  f"wrong binary")
+            continue
+
+        print(f"\ncpu {cpu}  exits {exits:,}  ring slots {slots_written:,}"
+              f"  ({exits - slots_written:,} merged as repeats)")
+
+        # Verdict one.  A row that does not sum to exit_total means a
+        # reason at or above `exit_reason_capacity` was taken, which the
+        # ring still holds.
+        summed = sum(counts)
+        if summed != exits:
+            print(f"  CHECK FAILED: exit reasons sum to {summed:,} "
+                  f"against exit_total {exits:,} - a reason past the "
+                  f"table's bound, or a stale read")
+        cpuid_reason = counts[10] if len(counts) > 10 else 0
+        if total != cpuid_reason:
+            print(f"  CHECK FAILED: cpuid_total {total:,} against the "
+                  f"CPUID row {cpuid_reason:,} - do not use the census "
+                  f"below")
+
+        codes = row("cpuid_leaf_codes", cpu, slots)
+        leaf_counts = row("cpuid_leaf_counts", cpu, slots)
+        other = word("cpuid_leaf_other", cpu) or 0
+        accounted = sum(leaf_counts) + other
+        if accounted != total:
+            print(f"  CHECK FAILED: leaf slots + other = {accounted:,} "
+                  f"against cpuid_total {total:,}")
+
+        if total:
+            print(f"  cpuid leaves ({total:,} total"
+                  + (f", {other:,} past the {slots} slots" if other else "")
+                  + ")")
+            ordered = sorted(
+                ((c, codes[i]) for i, c in enumerate(leaf_counts) if c),
+                reverse=True)
+            for count, leaf in ordered:
+                print(f"    0x{leaf:08x}  {count:>10,}  "
+                      f"{100.0 * count / total:5.1f}%  "
+                      f"{CPUID_LEAF.get(leaf, '')}")
+            last = word("cpuid_last_rip", cpu)
+            leaf0 = half("cpuid_leaf0_raw", cpu)
+            leaf0_rip = word("cpuid_leaf0_rip", cpu)
+            print(f"    last cpuid at rip 0x{(last or 0):x}; leaf 0 "
+                  f"answered EAX=0x{(leaf0 or 0):x} from rip "
+                  f"0x{(leaf0_rip or 0):x}")
+
+        # The exit-reason row, whole.  It is the only whole-run answer to
+        # "what was this processor doing" and the ring's thirty-two slots
+        # are not it.
+        print("  exit reasons")
+        for count, reason in sorted(
+                ((c, i) for i, c in enumerate(counts) if c), reverse=True):
+            print(f"    {EXIT_REASON.get(reason, reason):<16} "
+                  f"{count:>10,}  {100.0 * count / max(exits, 1):5.1f}%")
+
+        # **Who this processor thinks it is.**  `l1_gs_index` is the
+        # guest hypervisor's own processor index, read out of its GS
+        # base at a CPUID exit with vmcs01 current.  The check it has to
+        # pass is stated in the header: on a processor that works, the
+        # value equals that processor's own index.  Zero on an
+        # application processor means every processor believes it is
+        # processor 0 - which would explain a bring-up that polls and
+        # never completes, and is not something the exit ring can say.
+        taken = word("l1_gs_index_taken", cpu) or 0
+        if taken:
+            index = half("l1_gs_index", cpu)
+            gs = word("l1_gs_base", cpu) or 0
+            verdict = "agrees" if index == cpu else "DISAGREES"
+            print(f"  guest hypervisor's own index {index} from gs base "
+                  f"0x{gs:x} - {verdict} with cpu {cpu}")
+            # The pair (gs base, own cr3) is what lets a reader walk into
+            # hvix64's private structures - its per-VP block and the
+            # software vAPIC hanging off it - which is otherwise
+            # unreachable from outside. Printed together because neither
+            # is usable alone.
+            # Distinguish "not queued" from "read as zero". Those are
+            # different failures and only one of them is about the guest:
+            # `word` returns None when the member was never queued or its
+            # offset never resolved, and 0 when it was read and is zero.
+            # Collapsing them with `or 0` printed "never recorded" for a
+            # plumbing gap, which is the exact shape of instrument this
+            # tree keeps getting caught by - a reader that cannot say why
+            # it has nothing.
+            own = word("l1_own_cr3", cpu)
+            if own is None:
+                print(f"    guest hypervisor's own cr3 NOT QUEUED by this "
+                      f"reader - the member exists and is written on every "
+                      f"reflection, so this is a gap here, not a fact "
+                      f"about the guest")
+            elif own:
+                print(f"    guest hypervisor's own cr3 0x{own:x}  "
+                      f"<- walk its address space with this, gs base above")
+            else:
+                print(f"    guest hypervisor's own cr3 read as ZERO - no "
+                      f"reflection has been seen on this processor")
+        else:
+            print(f"  guest hypervisor's own index never sampled "
+                  f"(no CPUID exit with vmcs01 current)")
+
+        if 0 == cpu:
+            seen = word("vmcall_seen") or 0
+            # uint16_t: a whole-word read carries neighbours in
+            # its high bits, so mask. Reading it wide is the
+            # element-size trap this session hit four times.
+            mx = (word("vmcall_max_code") or 0) & 0xffff
+            codes = []
+            for _w in range(4):
+                v = word("vmcall_code_bitmap", _w) or 0
+                for _b in range(64):
+                    if v >> _b & 1:
+                        codes.append(_w * 64 + _b)
+            print(f"  VMCALL census (second-level path): seen {seen:,}, "
+                  f"max code 0x{mx:x}, distinct codes {len(codes)}")
+            if codes:
+                print("    codes: " + " ".join(f"0x{c:x}" for c in codes[:40]))
+        applied = word("start_up_applied", cpu) or 0
+        inits = word("init_emulated", cpu) or 0
+        started = byte("started_by_start_up_ipi", cpu)
+        error = word("launch_error", cpu) or 0
+        # `start_up_applied` counts ENTRIES to apply_start_up, not
+        # applications - the increment is above the second-SIPI guard.
+        # `start_up_declined` is the difference, and the header member's
+        # own comment says so: without the pair, "start-ups applied 2"
+        # against one start-up-IPI exit has no consistent reading. It
+        # was never printed, so the ambiguous number was the only one a
+        # dump ever showed.
+        declined = word("start_up_declined", cpu) or 0
+        real = applied - declined
+        print(f"  start-ups applied {applied}  inits emulated {inits}  "
+              f"started_by_start_up_ipi {started}  launch_error {error}")
+        print(f"    of those, DECLINED as a repeat start-up {declined}, "
+              f"so {real} actually reached the guest state")
+        # Did the tracked hypercall RETURN? `pending` still set with
+        # `captured` zero means the guest hypervisor's handler never
+        # completed - which is the whole question for code 0x76.
+        ap = word("attach_pending", cpu)
+        if ap is not None:
+            cap = word("attach_captured", cpu) or 0
+            stt = (word("attach_status", cpu) or 0) & 0xffff
+            cod = (word("attach_call_code", cpu) or 0) & 0xffff
+            rip = word("attach_pending_rip", cpu) or 0
+            verdict = ("STILL PENDING - the handler did not return"
+                       if (ap & 0xff) else "returned")
+            print(f"    tracked hypercall: code 0x{cod:x} "
+                  f"pending {ap & 0xff} captured {cap} status 0x{stt:x} "
+                  f"rip 0x{rip:x}  <- {verdict}")
+        rc = word("resume_count", cpu)
+        rr = word("last_resume_rip", cpu)
+        if rc is not None:
+            print(f"    resumes {rc:,}, last resumed with rip "
+                  f"0x{(rr or 0):x}")
+        # Which caller applied each one, in order. The `from` literals
+        # live in the module, so read the bytes at the recorded address.
+        # A zero slot is "no such application"; a non-zero address whose
+        # string will not read is a READER failure and says so, rather
+        # than being reported as a missing application.
+        for slot in range(4):
+            packed = word("start_up_from", cpu * 4 + slot) or 0
+            if not packed:
+                continue
+            raw = packed.to_bytes(8, "little").split(b"\x00")[0]
+            name = raw.decode("ascii", "replace")
+            print(f"      application {slot + 1} applied by: {name}")
+        if real > 1:
+            print(f"    *** {real} start-up applications on one "
+                  f"processor: the second sends a processor that is "
+                  f"already running back to its entry point, which "
+                  f"wedges it exactly like never having started ***")
+
+
+# Windows' own enumerations, read out of the PDB rather than recalled.
+#
+# `llvm-pdbutil dump --types ntkrnlmp.pdb` on the exact build the rig
+# runs - GUID {C8A7F11B-37FE-2822-7B6B-11412E3A0519}, the same one
+# `guest_windows.h` names - carries full `LF_FIELDLIST` records, so
+# these are transcribed and not remembered. The type stream is NOT
+# publics-only on this file; `dump --summary` says `Has Types: true`.
+#
+# Every offset `guest_windows.h` uses was checked against the same dump
+# at the same time and all seven agree: `_KTHREAD.State` 388,
+# `.WaitIrql` 390, `.WaitReason` 643, `.Process` 544,
+# `_ETHREAD.StartAddress` 1248, `.ThreadListEntry` 1400,
+# `_EPROCESS.ThreadListHead` 880. That check is the only reason the
+# numbers below mean anything - the offsets are build specific and the
+# VMM cannot verify them from inside.
+THREAD_STATE = {
+    0: "Initialized", 1: "Ready", 2: "Running", 3: "Standby",
+    4: "Terminated", 5: "Waiting", 6: "Transition", 7: "DeferredReady",
+    8: "GateWaitObsolete", 9: "WaitingForProcessInSwap",
+}
+
+WAIT_REASON = {
+    0: "Executive", 1: "FreePage", 2: "PageIn", 3: "PoolAllocation",
+    4: "DelayExecution", 5: "Suspended", 6: "UserRequest",
+    7: "WrExecutive", 8: "WrFreePage", 9: "WrPageIn",
+    10: "WrPoolAllocation", 11: "WrDelayExecution", 12: "WrSuspended",
+    13: "WrUserRequest", 14: "WrSpare0", 15: "WrQueue",
+    16: "WrLpcReceive", 17: "WrLpcReply", 18: "WrVirtualMemory",
+    19: "WrPageOut", 20: "WrRendezvous", 21: "WrKeyedEvent",
+    22: "WrTerminated", 23: "WrProcessInSwap", 24: "WrCpuRateControl",
+    25: "WrCalloutStack", 26: "WrKernel", 27: "WrResource",
+    28: "WrPushLock", 29: "WrMutex", 30: "WrQuantumEnd",
+    31: "WrDispatchInt", 32: "WrPreempted", 33: "WrYieldExecution",
+    34: "WrFastMutex", 35: "WrGuardedMutex", 36: "WrRundown",
+    37: "WrAlertByThreadId", 38: "WrDeferredPreempt", 39: "WrPhysicalFault",
+    40: "WrIoRing", 41: "WrMdlCache", 42: "WrRcu",
+    43: "MaximumWaitReason",
+}
+
+# What a wait reason says about the diagnosis, which is the whole point
+# of reading it. A thread parked in `DelayExecution` is sleeping on its
+# own timer and is not blocked on anything this VMM does; one parked in
+# `Executive` on a storage stack thread is waiting for an object
+# somebody else has to signal, and an I/O completion is exactly that.
+#
+# Deliberately coarse. The classification is a hint for whoever reads
+# the table, not a verdict - a single wait reason cannot distinguish
+# "waiting for a device that will never answer" from "waiting for a
+# device that is about to", and pretending otherwise is how this
+# investigation has been misled before.
+WAIT_MEANING = {
+    4: "sleeping on its own timer - NOT blocked on anything external",
+    11: "sleeping on its own timer - NOT blocked on anything external",
+    0: "waiting on a dispatcher object somebody else must signal",
+    7: "waiting on a dispatcher object somebody else must signal",
+    15: "waiting on a work queue - idle worker, normal",
+    26: "waiting on a kernel-internal object",
+    27: "waiting on an ERESOURCE - somebody holds it",
+    30: "quantum end",
+    2: "waiting for a page to be read in - THIS IS DISK I/O",
+    9: "waiting for a page to be read in - THIS IS DISK I/O",
+    39: "waiting on a physical fault - THIS IS DISK I/O",
+    6: "waiting at a user request",
+    13: "waiting at a user request",
+}
+
+
+def guest_symbolizer(directory):
+    """Nearest-public-symbol lookup against the guest kernel, or None.
+
+    Reuses `scripts/symbolize-trace.py`'s `publics`, which is the copy
+    that had the segment-parsing bug fixed: `llvm-pdbutil dump --publics`
+    prints `addr = SSSS:OOOOOO` with **both fields decimal**, and the
+    four-digit zero-padded segment reads like hex and is not. Parsed as
+    hex it dropped 6,438 symbols and mis-resolved 6,326 - which does not
+    fail, it answers with a plausible wrong name.
+
+    Imported rather than copied for exactly that reason: a second copy of
+    that parser is a second chance to reintroduce the bug.
+    """
+    pdb = os.path.join(directory, "ntkrnlmp.pdb")
+    if not os.path.exists(pdb):
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import importlib
+        module = importlib.import_module("symbolize-trace".replace("-", "_"))
+    except Exception:
+        # The module name has a hyphen in it, so a plain import cannot
+        # reach it. Load it by path instead.
+        try:
+            import importlib.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            spec = importlib.util.spec_from_file_location(
+                "symbolize_trace", os.path.join(here, "symbolize-trace.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as failure:
+            print(f"  [no guest symbols: {failure}]")
+            return None
+    try:
+        syms, keys = module.publics(pdb)
+    except Exception as failure:
+        print(f"  [no guest symbols: {failure}]")
+        return None
+
+    def lookup(rva):
+        import bisect
+        j = bisect.bisect_right(keys, rva) - 1
+        if j < 0:
+            return None
+        return syms[j][1], rva - syms[j][0]
+
+    return lookup
+
+
+def dump_guest_threads(args, elf, instance):
+    """What the guest's own threads are doing, by name and wait reason.
+
+    **This member has existed since it was written and nothing in
+    `scripts/` has ever read it**, which is the same failure
+    `dump_l1_host_audit` records one screen below: a counter nobody
+    prints is a measurement nobody has.
+
+    It is the reading that separates the two diagnoses this
+    investigation is stuck between, and neither the exit ring nor the
+    module walk can separate them:
+
+      - a thread in `Waiting`/`DelayExecution` is asleep on its own
+        timer and is waiting for *time*, which means the guest is slow
+        and not stuck;
+      - a thread in `Waiting`/`Executive` on the storage stack is
+        blocked on a dispatcher object somebody else has to signal,
+        which is what an I/O that never completes looks like from
+        inside.
+
+    Those are opposite problems and they produce an identical exit
+    profile - the idle loop, at a hundred exits a second, for ever.
+
+    Read straight out of the singleton, so no guest page-table walk is
+    needed for the table itself: `walk_guest_threads` already did the
+    walk, inside the VMM, on a processor that had the address space
+    current. What is read here is this VMM's own `.bss`.
+
+    Every number is checked before it is believed, because this reader
+    can be wrong in four separate ways and three of them look like
+    data:
+
+      - the walk may never have run, and the array is zero-filled by
+        construction, which reads as "no threads";
+      - the refresh may never have run, so `state` and `wait_reason`
+        are from whichever moment the walk happened to succeed and can
+        be minutes stale;
+      - `guest_windows.h`'s offsets belong to one Windows build, and a
+        different one puts plausible bytes in every field;
+      - the list is bounded at `thread_walk_limit`, so a full one is
+        evidence of truncation and not of the process's size.
+
+    The range checks below catch the third: `State` has ten legal
+    values, `WaitIrql` sixteen, `WaitReason` forty-four, and a thread
+    pointer must be a canonical kernel address. Wrong offsets fail
+    those almost immediately - which is the property that makes this
+    instrument able to report its own failure, and the reason for the
+    `ActiveThreads` cross-check further down.
+    """
+    members = ["guest_thread_list", "guest_thread_list_count",
+               "guest_thread_list_process", "guest_thread_list_walked",
+               "guest_thread_refreshes", "guest_kernel_base",
+               "guest_kernel_size"]
+    off = gdb_offsets(elf, members, optional=True)
+    missing = [m for m in members if m not in off]
+    if "guest_thread_list" in missing or "guest_thread_list_count" in missing:
+        print("\n[guest threads: not in this ELF - the deployed binary "
+              "predates walk_guest_threads]")
+        return
+
+    # Stride and capacity from the type, never from the header's
+    # constants. `gdb_lengths` above records what a second copy of a
+    # capacity cost when the header moved and the reader did not: it did
+    # not fail, it reported exits for instructions the guest does not
+    # execute.
+    stride, capacity = gdb_values(elf, [
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list[0]",
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list / "
+        "sizeof(('zpp::hypervisor::hypervisor' *)0)->guest_thread_list[0]"])
+
+    fields = ["thread", "start_address", "state", "wait_reason", "wait_irql"]
+    inner = gdb_offsets(elf, [f"guest_thread_list[0].{f}" for f in fields])
+    base = off["guest_thread_list"]
+    inner = {f: inner[f"guest_thread_list[0].{f}"] - base for f in fields}
+
+    reader = Monitor(args.rig, args.port)
+    reader.queue(instance + base, (stride * capacity) // 8)
+    for m in ("guest_thread_list_count", "guest_thread_list_process",
+              "guest_thread_list_walked", "guest_thread_refreshes",
+              "guest_kernel_base", "guest_kernel_size"):
+        if m in off:
+            reader.queue(instance + off[m], 1)
+    got = reader.run()
+
+    def scalar(member):
+        if member not in off:
+            return None
+        return got.get(instance + off[member])
+
+    def field(index, name):
+        return got.get(instance + base + index * stride + inner[name])
+
+    count = scalar("guest_thread_list_count")
+    walked = scalar("guest_thread_list_walked")
+    refreshes = scalar("guest_thread_refreshes")
+    process = scalar("guest_thread_list_process")
+    kbase = scalar("guest_kernel_base") or 0
+    ksize = scalar("guest_kernel_size") or 0
+
+    print(f"\nguest thread list: {count} threads, walk ran {walked} time(s), "
+          f"refreshed {refreshes} time(s)")
+
+    if reader.unanswered:
+        print(f"  READER INCOMPLETE: {len(reader.unanswered)} read(s) never "
+              f"came back - every zero below may be an unread word rather "
+              f"than a value. Check nothing else holds the monitor.")
+
+    # The walk never firing and the process having no threads produce the
+    # same zero-filled array, and only this counter tells them apart.
+    if not walked:
+        print("  THE WALK NEVER RAN. `walk_guest_threads` fires from the "
+              "exit path and stops for good once it finds a process with "
+              "more than one thread; a zero here means it never found "
+              "one, so the array below is zero by construction and is "
+              "NOT evidence about the guest.")
+        return
+
+    if not count:
+        print("  the walk ran and recorded nothing - the list head read "
+              "back empty or the first link was not a kernel address")
+        return
+
+    if not refreshes:
+        print("  NOTE refreshes = 0: `state` and `wait_reason` are from "
+              "the moment the walk succeeded, not from now. During Phase "
+              "1 that moment can be minutes ago, and a thread recorded "
+              "`Running` then may have been `Waiting` ever since.")
+
+    if count >= capacity:
+        print(f"  NOTE the list is FULL at {capacity} - `thread_walk_limit` "
+              f"truncated it, so this is a prefix of the process's threads "
+              f"and not all of them")
+
+    print(f"  process 0x{(process or 0):x}"
+          + (f"   kernel image 0x{kbase:x} + 0x{ksize:x}" if kbase else ""))
+
+    symbolize = guest_symbolizer(args.guest_syms)
+    if symbolize is None:
+        print(f"  [start addresses unsymbolized: no ntkrnlmp.pdb under "
+              f"{args.guest_syms}/ - pass --guest-syms]")
+
+    # Guilty until read. Wrong offsets do not fail, they answer - so the
+    # legal ranges are checked and the count of violations is printed
+    # before any of the values are interpreted.
+    suspect = []
+    rows = []
+    for i in range(count if count <= capacity else capacity):
+        thread = field(i, "thread") or 0
+        start = field(i, "start_address") or 0
+        state = field(i, "state")
+        reason = field(i, "wait_reason")
+        irql = field(i, "wait_irql")
+        rows.append((thread, start, state, reason, irql))
+        if thread and thread < 0xffff800000000000:
+            suspect.append(f"thread[{i}] 0x{thread:x} is not a canonical "
+                           f"kernel address")
+        if state is not None and state not in THREAD_STATE:
+            suspect.append(f"thread[{i}] state {state} is not a legal "
+                           f"_KTHREAD_STATE")
+        if reason is not None and reason not in WAIT_REASON:
+            suspect.append(f"thread[{i}] wait_reason {reason} is not a legal "
+                           f"_KWAIT_REASON")
+        if irql is not None and irql > 15:
+            suspect.append(f"thread[{i}] wait_irql {irql} is above HIGH_LEVEL")
+
+    if suspect:
+        print(f"  OFFSETS SUSPECT: {len(suspect)} value(s) outside their "
+              f"legal range. `guest_windows.h`'s offsets are for ntkrnlmp "
+              f"GUID C8A7F11B37FE28227B6B11412E3A0519; a different Windows "
+              f"build moves them and nothing else notices.")
+        for line in suspect[:6]:
+            print(f"    {line}")
+        print("  The table below is printed anyway, and should not be "
+              "quoted until this is resolved.")
+
+    print("  idx  thread              state         irql  wait reason")
+    for i, (thread, start, state, reason, irql) in enumerate(rows):
+        name = ""
+        if symbolize and kbase and kbase <= start < kbase + (ksize or 1 << 30):
+            hit = symbolize(start - kbase)
+            if hit:
+                name = f"  {hit[0]}" + (f"+0x{hit[1]:x}" if hit[1] else "")
+        elif start:
+            name = f"  start 0x{start:x}"
+        print(f"  [{i:2d}] 0x{thread:016x}  "
+              f"{THREAD_STATE.get(state, f'?{state}'):<13} "
+              f"{(irql if irql is not None else -1):>4}  "
+              f"{WAIT_REASON.get(reason, f'?{reason}')}{name}")
+
+    # The verdict, which is the reason the table is here at all.
+    #
+    # `WaitReason` and `WaitIrql` are only about the *current* wait.
+    # `guest_windows.h` already records why: `_KTHREAD.WaitIrql` is the
+    # level at which a thread last called `KeWaitForSingleObject` and is
+    # stale for a thread that is not waiting. The same is true of
+    # `WaitReason`, so both are read only for threads in `Waiting`.
+    waiting = [r for r in rows if r[2] == 5]
+    running = [r for r in rows if r[2] in (2, 3)]
+    ready = [r for r in rows if r[2] in (1, 7)]
+
+    print(f"\n  {len(waiting)} waiting, {len(running)} running/standby, "
+          f"{len(ready)} ready, {len(rows) - len(waiting) - len(running) - len(ready)} other")
+
+    if running or ready:
+        print("  AT LEAST ONE THREAD IS RUNNABLE. The guest is executing "
+              "work, not blocked - which points at throughput and away "
+              "from a stalled device.")
+
+    seen = {}
+    for _, _, _, reason, _ in waiting:
+        seen[reason] = seen.get(reason, 0) + 1
+    for reason, n in sorted(seen.items(), key=lambda kv: -kv[1]):
+        meaning = WAIT_MEANING.get(reason, "")
+        print(f"    {n:>2} x {WAIT_REASON.get(reason, reason)}"
+              + (f" - {meaning}" if meaning else ""))
+
+    # The one number that says whether the two clocks in this reading
+    # agree, and it costs one more read of a member already resolved.
+    #
+    # `guest_thread_refreshes` climbing between two dumps means the
+    # sampler is still running and the states above are live; frozen
+    # means the exit path that calls it has stopped being reached, and
+    # every state above is a fossil. That distinction is exactly the one
+    # `clock_gap_buckets` could not make about itself.
+    print(f"\n  is this reading live? `guest_thread_refreshes` = "
+          f"{refreshes:,}. Run:")
+    print(f"    python3 scripts/rig-dump-state.py --elf {args.elf} "
+          f"--delta 20 2>&1 | grep -i thread")
+    print("  A refresh count that does not move over the window means "
+          "the sampler stopped and the states above are stale - NOT that "
+          "the threads stopped changing.")
+
+
+def interrupted_context_verdicts(rows, kbase=0, ksize=0):
+    """Is each interrupted context retrying, or progressing?
+
+    **Partitioned by `rip` first, and that is the whole point.** The
+    version this replaces took `len(set(...))` over every row in the
+    ring at once, which counts *how many contexts are interleaved*, not
+    *movement within a context*. Measured, on the boot recorded in
+    `BACKLOG.md` under "The guest is repeating identical work": sixteen
+    samples, two instruction pointers, and every register byte-identical
+    in every sample of each - and it printed "2 distinct - moving" for
+    all four registers. The guest was retrying and the reader said it
+    was progressing, which is the opposite verdict on the only question
+    this table exists to answer.
+
+    An alternating pair of frozen states is exactly what a guest bouncing
+    between two halves of a retry loop looks like, so this is not an
+    unlikely input - it is the expected one.
+
+    `rsp` and `frame` are verdicted alongside the registers, and they are
+    the reason not to believe "SAME" too quickly.
+    `sample_interrupted_stack`
+    finds a trap frame by scanning up from the guest's stack pointer for
+    the first thing shaped like one, so a `frame` address that never
+    moves is equally consistent with a genuine retry at a fixed stack
+    depth and with the search re-finding one stale frame. A `frame` that
+    moves while the registers do not is a real retry; a `frame` that is
+    also frozen is a reading that needs a second instrument before it is
+    quoted.
+
+    Returns lines rather than printing them so the partitioning can be
+    tested without a rig.
+    """
+    columns = (("rcx", 3), ("rdx", 4), ("rsi", 6), ("rdi", 7),
+               ("rsp", 2), ("frame", 9))
+    lines = []
+    if not rows:
+        return lines
+
+    order = []
+    groups = {}
+    for f in rows:
+        rip = f[1]
+        if rip not in groups:
+            groups[rip] = []
+            order.append(rip)
+        groups[rip].append(f)
+
+    for rip in order:
+        group = groups[rip]
+        where = (f"ntoskrnl+0x{rip - kbase:x}"
+                 if kbase and kbase <= rip < kbase + ksize
+                 else f"0x{rip:x}")
+        frozen = []
+        moving = []
+        for label, k in columns:
+            distinct = len(set(f[k] for f in group))
+            (frozen if 1 == distinct else moving).append(
+                label if 1 == distinct else f"{label}({distinct})")
+        if moving:
+            verdict = "moving: " + ", ".join(moving)
+            if frozen:
+                verdict += "   same: " + ", ".join(frozen)
+        else:
+            verdict = "EVERY field identical - a retry"
+        lines.append(f"{where:<20} {len(group):>3} samples  {verdict}")
+
+    if 1 < len(order):
+        # Said explicitly, because the count of contexts is the number
+        # the old verdict was accidentally reporting.
+        lines.append(f"-> {len(order)} interleaved contexts, verdicted "
+                     f"separately; the count of contexts is NOT movement")
+    return lines
+
+
+# ---------------------------------------------------------------------
+# Delta mode: two samples, and rates from the span between them
+# ---------------------------------------------------------------------
+#
+# Everything else in this file prints a cumulative reading, and a
+# cumulative reading answers "did this ever happen", not "is this
+# happening".  Eighteen mislabelled or stale readings in one
+# investigation came out of that gap, because the only way to close it
+# was to run the dump twice and subtract by hand - and hand-differencing
+# is where the errors were.  One of those hand scrapes produced -11,989
+# cycles on a monotonic accumulator, which is impossible and was within
+# one step of being reported as a 4 us cost.
+#
+# So the subtraction lives here, it refuses to subtract anything that is
+# not monotonic, and an impossible result is an error naming the member
+# rather than a number.
+
+# The one frequency constant this file's delta path uses.
+#
+# **The rest of the file disagrees with itself about this.** Six sites
+# divide by 1992.0 / 1.992e9 and three divide by 2e9 - a silent 0.4%
+# disagreement that is invisible in any single reading and shifts every
+# derived microsecond.  1.992 GHz is the measured one: BACKLOG.md records
+# it fitted at the wall over a 90.08 second window, and the part's
+# marketed 1.80 GHz base frequency is not its time-stamp counter
+# frequency.  2 GHz is a round number nobody measured.
+#
+# Delta mode prefers a frequency it measured *in this window* - the tick
+# span over the wall-clock span - and falls back to this only when the
+# tick span is unusable.  Which of the two was used is printed, because a
+# diagnostic that silently substitutes a constant for a reading is how
+# the unit slips this file keeps recording happened.
+TSC_HZ = 1_992_000_000
+
+# Per-processor monotonic event counts.  Every one of these is a
+# `std::uint64_t x[max_cpus]` that only ever `++`s, so the difference of
+# two samples is the number of events inside the window.
+#
+# `exit_trace_count` is in this list and is NOT exits - it counts ring
+# slots written, and a repeat of the newest record grows that record
+# instead of taking a slot.  It is differenceable all the same; the label
+# says what it is, which is the thing the cumulative printer got wrong
+# for five boots.
+DELTA_PER_CPU_COUNTERS = [
+    ("exit_total", "exits taken"),
+    ("resumes_reached", "handlers left"),
+    ("l2_entries", "second-level entries"),
+    ("exit_trace_count", "exit-ring slots written (NOT exits)"),
+    ("l2_exit_trace_count", "l2 ring slots written (NOT l2 exits)"),
+    ("l2_working_trace_count", "working-ring slots written"),
+    ("events_requeued", "events requeued"),
+    ("events_deferred", "events deferred"),
+    # A monotonic per-processor count and it was readable only
+    # cumulatively, which for this member is the wrong question: it is
+    # the count of interrupts the second-level guest was owed and that
+    # `reflect_l2_exit` destroyed, so what matters is whether it is
+    # still happening, not whether it ever happened during a boot. The
+    # guest's clock arrives as vector 0xd1 through the same path, so a
+    # non-zero rate here is a clock interrupt going missing - which
+    # leaves the message sitting in the SynIC slot with nothing to
+    # announce it.
+    ("pending_event_lost", "events owed to L2 and destroyed"),
+    ("nested_vmfail_count", "VMfails answered upward"),
+    ("nested_entry_refusals", "second-level entries refused"),
+    ("l2_start_up_waits", "parked at wait-for-SIPI"),
+    ("ept_violation_unclaimed", "violations with no watch left"),
+    ("shadow_ept_builds", "shadow EPT builds"),
+    ("shadow_ept_cache_hits", "shadow EPT cache hits"),
+    ("shadow_ept_rebuild_new_root", "rebuilds for a new root"),
+    ("shadow_ept_rebuild_stale", "rebuilds for a stale root"),
+    ("shadow_ept_generation_discards", "generation discards"),
+    ("shadow_ept_replayed", "replayed violations"),
+    ("shadow_ept_evictions", "shadow EPT evictions"),
+    ("shadow_ept_resets", "shadow EPT resets"),
+    ("shadow_ept_leaves_filled", "leaves installed"),
+    ("shadow_ept_leaves_that_did_not_help", "leaves that did not help"),
+    ("l2_invept_single_context", "INVEPT single-context"),
+    ("l2_invept_all_context", "INVEPT all-context"),
+    ("vmcs_shadow_loads", "shadow VMCS loads"),
+    ("vmcs_shadow_stores", "shadow VMCS stores"),
+    ("evmcs_reads", "enlightened VMCS reads"),
+    ("evmcs_writes", "enlightened VMCS writes"),
+    ("hot_state_writes_skipped", "hot-state writes skipped"),
+    ("hot_state_writes_done", "hot-state writes done"),
+    # The split `done` could not make. A write happens for two reasons -
+    # the value moved, or there was no record to compare against - and
+    # they need opposite work: the first is the guest and closes the
+    # avenue, the second is a precondition failing and is reachable.
+    # `done - uncached` is the first. Read as a rate: the cumulative
+    # figure averages a boot's cold start into its settled state, which
+    # is how one slot came to read 10.10 writes a call against a
+    # prediction of at most 5.18.
+    ("hot_state_writes_uncached", "hot-state writes with no record"),
+    ("guest_state_writes_skipped", "guest-state writes skipped"),
+    ("guest_state_writes_done", "guest-state writes done"),
+    # 44 VMWRITEs land together whenever the deferral's licence lapses,
+    # so divide by 44 for the number of builds that lost it.
+    ("guest_state_writes_unlicensed", "guest-state writes unlicensed"),
+    # The third population, and it had no reader at all - not in `done`,
+    # not in `skipped`, so a write budget formed from those two was
+    # missing it entirely.
+    ("guest_state_dirty_writes", "guest-state writes owed to L1"),
+    ("control_writes_skipped", "control writes skipped"),
+    ("control_writes_done", "control writes done"),
+    ("control_writes_uncached", "control writes with no record"),
+    ("hyperv_vp_assist_writes", "VP assist page writes"),
+    ("l2_vmfunc_calls", "VMFUNC calls"),
+    ("l2_vmfunc_refused", "VMFUNC refusals"),
+    ("vtl_fresh_calls", "fresh trust-level calls"),
+    ("vtl_reentries", "trust-level re-entries"),
+    ("vtl_code0_count", "call-class-0 blocks seen"),
+    ("vtl_copy_calls", "copy calls"),
+    ("vtl_protect_count", "protection-mask calls"),
+    ("vtl_protect_failures", "protection-mask failures"),
+    ("last_hypercall_count", "second-level hypercalls"),
+    # NOT "arms". `stimer_arm_count` is the *ring slot allocator* for
+    # `stimer_arm_value`/`_tsc`/`_kind`, and it is incremented from
+    # three places with three different tags: a STIMER0_COUNT write and
+    # a STIMER0_CONFIG write (`nested_entry.cpp:12046`, tags 1 and 2)
+    # and every injection of the clock vector into vmcs02
+    # (`nested_entry.cpp:3307`, tag 3). Three populations in one
+    # counter, so a rate taken from it divided by the tick rate is not
+    # arms per tick. The kind census beside the ring is what splits it.
+    ("stimer_arm_count", "STIMER0 writes + clock injections (NOT arms)"),
+    # The tick account, all four of them, because the cumulative
+    # section that forms the ratio cannot be read in a window and the
+    # ratio is the whole question. All are monotonic sums.
+    ("stimer_asked_arms", "periodic arms asked"),
+    ("stimer_asked_units", "periodic units asked (x100ns)"),
+    ("stimer_given_arms", "synthetic timer arms answered"),
+    ("stimer_given_cycles", "cycles from arm to the answering vector"),
+    ("stimer_unanswered", "arms displaced before an answer"),
+    ("guest_tick_floored", "guest ticks floored"),
+    ("guest_timer_stretched", "guest timers stretched"),
+    ("stall_withheld_total", "interrupts withheld"),
+    ("stall_forced_total", "interrupts forced"),
+    ("stall_restaged_total", "interrupts restaged"),
+    ("window_deferred_count", "interrupt windows deferred"),
+    # **The two numbers that separate "the guest is busy" from "the guest
+    # has nothing to run", and neither had ever been windowed.**
+    #
+    # `hlt_reflect_count` is the decisive one. The guest hypervisor sets
+    # HLT exiting, so every `hlt` the second-level guest executes is an
+    # exit here and is counted at `nested_entry.cpp:11830`. A thread
+    # blocked in `KeWaitForSingleObject` puts the processor on the idle
+    # thread, which halts; a thread spinning does not. Those two are the
+    # only remaining accounts of a `Phase1Initialization` that never
+    # returns and they are indistinguishable in every other counter in
+    # this file - the exit rate, the tick rate and the priority census
+    # read the same either way.
+    ("hlt_reflect_count", "second-level HLTs reflected (idle, NOT spin)"),
+    # And the `rdmsr` half of the clock loop, counted at
+    # `nested_vmx.cpp:2577`. `stimer_arm_count` covers the writes; this
+    # is the read of the reference counter that goes with them, and
+    # without it the `rdmsr` share of the exit histogram has nothing to
+    # be attributed to.
+    ("reference_read_count", "reference-counter RDMSRs"),
+    # The denominator the by-reason split must sum to.  `handler_cycles`
+    # is already differenced as an occupancy; this is the count that
+    # goes with it, and without it "the split covers N% of the exits"
+    # has to be taken on trust rather than checked.
+    ("handler_exits", "handler spans closed"),
+    # The two denominators of the hot-address census below.  Per
+    # processor since 2026-09-05 - see `interrupted_rip` in
+    # `hypervisor.h`.  They matter here more than most: every
+    # percentage the census prints is a hit count over one of these,
+    # and while they were single words the numerator was a lossy
+    # per-processor read-modify-write and the denominator was not, so
+    # the percentages were wrong in a direction the output could not
+    # show.
+    ("interrupted_samples", "interrupted-context samples"),
+    ("quiet_samples", "quiet samples"),
+    # The user-mode census's denominator, and the count of samples it
+    # could not attribute.  Both here rather than only in the printer
+    # because the interesting question is a *rate*: "is the guest in
+    # user mode at all right now" is a delta, and a cumulative figure
+    # from a boot that spent its first minute in user mode reads as
+    # health for ever after user mode stops.
+    ("user_rip_samples", "user-mode census samples"),
+    ("user_rip_unattributed", "user-mode samples with no cr3"),
+    # The shadowed-write census's denominator and its refusal.  The
+    # per-field rows themselves are `[max_cpus][slots]` and this list
+    # only differences one word per processor, so they stay cumulative
+    # in the main dump - which is the right presentation for them: the
+    # quantity the decision rule needs is writes per round trip over the
+    # whole run, and both halves of that ratio start at the same instant.
+    # These two are here so a window can still say whether the census is
+    # live at all.
+    ("shadow_write_samples", "shadow collections compared"),
+    ("shadow_write_unsampled", "shadow collections not comparable"),
+]
+
+# Monotonic counts that are single words, not per-processor rows.  Read
+# with a width of one deliberately: queued at the processor count they
+# would fetch the next member and print it under this one's name, which
+# is the shape of half the mislabelled readings this file records.
+DELTA_GLOBAL_COUNTERS = [
+    ("hypercalls_seen", "hypercalls seen (all processors)"),
+    ("guest_nmis_reinjected", "guest NMIs reinjected"),
+    ("cpuid_hypervisor_leaves_asked", "hypervisor CPUID leaves asked"),
+    # `interrupted_samples` and `quiet_samples` were here, and being in
+    # this list was itself the claim that they are whole-machine
+    # totals.  They were not: `record_l2_entry_event` runs on every
+    # processor and wrote a single word, so a two-processor boot summed
+    # both into it while the printer below labelled the result "cpu 0".
+    # They now carry `[max_cpus]` and live in DELTA_PER_CPU_COUNTERS.
+    # Left as a comment because "the member moved" is the one thing a
+    # reader of this list cannot work out from its absence.
+    # Both of these must read zero for the whole boot.  A *delta* is the
+    # stronger statement: it says nothing was fabricated or refused
+    # inside this window, which a cumulative zero cannot say about a
+    # window it does not bound.
+    ("impossible_decodes", "impossible decodes (MUST be 0)"),
+    ("refused_instruction_count", "refused guest stores (MUST be 0)"),
+    # **Not a fact about the guest - a fact about the instrument.**
+    #
+    # `dump_guest_threads` prints each thread's state and wait reason,
+    # and those are only as fresh as the last `refresh_guest_threads`.
+    # Frozen here means the exit path that calls it has stopped being
+    # reached and every state in that table is a fossil; climbing means
+    # the table is live. Nothing inside the table itself can say which,
+    # which is precisely the failure mode `clock_gap_buckets` above is
+    # in this list to avoid - an instrument that cannot report the
+    # absence of what it measures reports health for ever after it
+    # stops.
+    ("guest_thread_refreshes", "guest thread-state refreshes"),
+    ("guest_thread_list_walked", "guest thread-list walks"),
+]
+
+# Monotonic cycle accumulators.  Differenced and then divided by the
+# *tick* span rather than by the wall clock, which gives an occupancy
+# fraction and needs no frequency at all - so this column cannot be
+# wrong by 0.4% the way a microsecond derived from a guessed hertz can.
+DELTA_PER_CPU_CYCLES = [
+    ("l2_run_cycles", "in the second-level guest"),
+    ("l1_run_cycles", "in the first-level guest"),
+    ("handler_cycles", "inside this VMM's handler"),
+]
+
+# Per-processor histograms of *events*.  Each bucket is a count that only
+# increases, so a bucket difference is the events of that kind inside the
+# window - which is the census that says what is happening now rather
+# than what happened at some point in the boot.
+DELTA_PER_CPU_HISTOGRAMS = [
+    ("exit_reason_counts", "exit reasons"),
+    ("l2_ept_dispositions", "second-level fault dispositions"),
+    # **The one that most needed windowing and was the one refused.**
+    # It is a monotonic event histogram exactly like the two above -
+    # `nested_entry.cpp:3251` only ever `+= 1`s a bucket - and it was
+    # left out for read-window cost.  That cost is 64 quadwords per
+    # processor, under two round trips, and what the refusal bought was
+    # a boot-cumulative "96.3% of clock gaps are at the guest's own
+    # period" quoted as a statement about a guest that had stopped
+    # making progress.  A histogram of intervals cannot record the
+    # interval it is inside, so the cumulative reading survives the
+    # event stream ending; the difference of two samples cannot.
+    ("clock_gap_buckets", "gaps between stagings of the clock vector"),
+]
+
+# Global histograms indexed by basic exit reason, not by processor.
+#
+# **These answer the one question `exit_reason_counts` structurally
+# cannot: whose exit it was.**  `record_exit` runs at the top of the
+# handler for both levels and counts into one row, so a `wrmsr` the
+# guest hypervisor executed and a `wrmsr` its guest executed are the
+# same bucket.  `handler_reason_from_l2` is sampled from
+# `handler_was_l2`, taken at `exit_dispatch.cpp:647` *before*
+# `load_l1_host_state` clears `running_l2` on the reflection, and closed
+# in `resume_guest` at `resume.cpp:1388-1394` against
+# `handler_reason_exits` over the same span.  So the pair is a subset
+# and its superset by construction.
+#
+# Both were already resident, already read by `dump_handler_by_reason`,
+# and read **cumulatively only** - which for this pair is the wrong
+# question twice over.  A boot has phases, and the split the cumulative
+# reader printed (`vmresume at 38% of exits and vmptrld at 8%`) is a
+# mean over a configuration that no longer exists: VMCS shadowing was
+# not in force when it was taken, and with shadowing on the guest
+# hypervisor's VMREADs and VMWRITEs stop exiting entirely.  Quoting it
+# against a windowed `exit_total` is the same class of error as the
+# 96.3% two entries above.
+#
+# `handler_reason_slots` is 64 while `exit_reason_capacity` is 96, so
+# reasons at or above 64 appear in `exit_reason_counts` and *not* here.
+# The report says so rather than letting the two totals differ in
+# silence.
+DELTA_GLOBAL_HISTOGRAMS = [
+    ("handler_reason_exits", "exits, by reason, BOTH levels"),
+    ("handler_reason_from_l2", "of those, taken from the second level"),
+]
+
+# The cost rows that go with the counts above, and the last per-handler
+# accounting in this tree that could only be read cumulatively.
+#
+# **Every one of these is an accumulator paired with a count**, which is
+# what makes it differenceable: the quotient of two deltas is the mean
+# over the window, and the mean over the window is the quantity the
+# cumulative reader claimed to be printing and was not.
+# `dump_handler_by_reason` prints exactly these rows divided by
+# `handler_cycles` since boot, and its own docstring quotes `vmresume at
+# 38% of exits and vmptrld at 8%` - a mean taken before VMCS shadowing
+# was in force, under a present-tense heading, of a configuration that
+# no longer exists.
+#
+# What is NOT here and why: `handler_entry_tsc`, `handler_entry_reads`
+# and `handler_entry_writes` are the *open* end of the bracket these
+# close - one latched value per processor, replaced at every exit - so
+# their difference is a distance between two unrelated instants.  See
+# DELTA_REFUSALS.
+DELTA_HANDLER_REASON_COSTS = [
+    ("handler_reason_cycles", "cycles inside the handler, by reason"),
+    ("handler_reason_reads", "VMCS reads taken, by reason"),
+    ("handler_reason_writes", "VMCS writes taken, by reason"),
+]
+
+# When a share measured in this window is called a disagreement with the
+# same share measured over the whole boot.
+#
+# Percentage *points*, not a ratio.  A share is already a percentage and
+# the ratio of two small ones is noise - 0.1% against 0.3% is a "3x
+# disagreement" worth nothing, and a rule stated as a ratio would print
+# that as a finding while missing 40% -> 48%.  Five points is the
+# smallest drift that can change which row is largest in a table of this
+# shape, which is the reading somebody acts on.
+DELTA_SHARE_DRIFT_POINTS = 5.0
+
+# The same idea for a per-round-trip cost, which is not a share and so
+# cannot use points.  A quarter is the drift at which the windowed and
+# the boot-wide figures stop rounding to the same number at the
+# precision this table prints.
+DELTA_PER_RT_DRIFT = 0.25
+
+# The span source.  `handler_last_tsc` is a *last value*, not an
+# accumulator, so it is never rated - its difference is the wall clock
+# the counters were accumulating over, measured by the machine being
+# measured rather than by this script's own scheduler.
+DELTA_CLOCK = "handler_last_tsc"
+
+# The boot fingerprint.  `handler_first_tsc` is written once, at the
+# first handler entry of the boot, so it is constant for as long as the
+# same boot is running and different afterwards.  Together with the
+# module base off serial it is what catches a guest that reset between
+# the two samples - and this tree has a recorded run whose counters went
+# 8,687 then 8,258 then 8,014 mid-poll for exactly that reason.
+DELTA_FINGERPRINT = "handler_first_tsc"
+
+# A *targeted slice* of the synthetic-MSR census, not the whole census.
+#
+# The whole census is 320 entries per processor and reading it would
+# widen the read window by about a hundred monitor round trips - which
+# is exactly the reason `DELTA_REFUSALS` gives for leaving it out, and
+# that reason still stands.  Six indices per processor is twelve
+# quadwords, under two round trips, and it answers the one question
+# counting the whole range would.
+#
+# Why these five.  The synthetic interrupt message page holds sixteen
+# 256-byte slots and the guest's HAL timer posts to SINT3, so slot 3 at
+# page offset 0x300 is where an expiry message lands.  Draining it is a
+# plain store from `HalpHvTimerAcknowledgeInterrupt`, which takes no
+# exit at all and so cannot be counted from in here; what *can* be
+# counted is the handshake around it:
+#
+#   0x84 EOM            written by the guest only when the message it
+#                       drained had MessagePending set - that is, only
+#                       when the controller had already tried to deliver
+#                       into an occupied slot and been refused.  **This
+#                       is the backpressure rate, and it is the whole
+#                       point of this slice.**
+#   0xb1 STIMER0_COUNT  one write per arm; with auto-enable set in
+#                       CONFIG this is what re-arms the one-shot, so its
+#                       rate is the guest's own tick rate as the guest
+#                       sees it
+#   0xb0 STIMER0_CONFIG the rare re-arm that changes mode rather than
+#                       just the deadline
+#   0x70 EOI, 0x83 SIMP the denominator and the page identity
+#
+# EOM/s divided by STIMER0_COUNT/s is the fraction of ticks that hit
+# backpressure, measured as a rate over a window.  A cumulative
+# percentage of "all synthetic MSR writes" is not that quantity and has
+# already been read as though it were.
+#
+# 0x93 SINT3 joined them later and is a *sixth*, for a different
+# question: `clock_gap_buckets` counts one hardcoded vector and nothing
+# had ever checked that the guest programmed that vector into the
+# interrupt source the timer posts to.  `HalpHvTimerSetInterruptVector`
+# (ntoskrnl+0x55cd40) writes `0x40000093` with the vector in EAX and
+# nothing else, so `synthetic_msr_last_value[cpu][0x93] & 0xff` **is**
+# the SINT3 vector - already recorded by `nested_entry.cpp:11812` and
+# never read out.
+DELTA_SYNTHETIC_SLOTS = [
+    (0x70, "HV_X64_MSR_EOI written"),
+    (0x83, "HV_X64_MSR_SIMP written (message page named)"),
+    (0x84, "HV_X64_MSR_EOM written (SynIC backpressure acknowledged)"),
+    (0x93, "HV_X64_MSR_SINT3 written (the vector the timer posts on)"),
+    (0xb0, "HV_X64_MSR_STIMER0_CONFIG written"),
+    (0xb1, "HV_X64_MSR_STIMER0_COUNT written (one-shot re-armed)"),
+]
+
+# The last-value slots printed as state beside the counts above.
+# 0x93 and 0xb0 answer "is the histogram counting the right vector" and
+# "is this timer in message mode or direct mode", and neither can be
+# answered from a count.
+DELTA_SYNTHETIC_STATE_SLOTS = (0x83, 0x84, 0x93, 0xb0, 0xb1)
+
+
+def stimer_config_decode(value):
+    """`HV_X64_MSR_STIMER0_CONFIG`, field by field.
+
+    Layout from Linux's `union hv_stimer_config`, which is the reference
+    implementation this tree reads (`.references/kvm/hyperv.c` uses
+    `config.direct_mode`, `config.periodic`, `config.sintx` and
+    `config.apic_vector` at lines 233, 696-706 and 812-854): bit 0
+    enable, bit 1 periodic, bit 2 lazy, bit 3 auto-enable, bits 4-11 the
+    APIC vector, **bit 12 direct mode**, bits 16-19 the synthetic
+    interrupt source.
+
+    Why it is decoded rather than printed raw.  Direct mode delivers the
+    vector with **no message at all** - `stimer_notify_direct` calls
+    `kvm_apic_set_irq` and never touches the message page, while
+    `stimer_send_msg` is the only path that writes `expiration_time` and
+    `delivery_time`.  So a timer in direct mode makes every reading of
+    the message slot irrelevant to the clock, and a timer in message
+    mode makes the two rates comparable.  Reading `0x30008` as a number
+    does not say which.
+    """
+    return {
+        "enable": value & 1,
+        "periodic": (value >> 1) & 1,
+        "lazy": (value >> 2) & 1,
+        "auto_enable": (value >> 3) & 1,
+        "apic_vector": (value >> 4) & 0xff,
+        "direct_mode": (value >> 12) & 1,
+        "sintx": (value >> 16) & 0xf,
+    }
+
+# What this mode refuses to subtract, and why.  Grouped by *what kind of
+# thing it is*, because the refusal generalises to members added later
+# and a list of names would not.
+#
+# Printed on every delta run.  A reader that silently omits a member and
+# one that never had it look identical, which is the failure this whole
+# file is written against.
+DELTA_REFUSALS = [
+    ("ring buffers",
+     "exit_trace, l2_exit_trace, l2_working_trace, cpuid_trace, "
+     "vtl_code0_ring, vtl_reentry_ring, guest_stack_trace, "
+     "guest_interrupted_trace, interrupted_contexts, vtl_step_rip",
+     "a slot is overwritten in place, so the same slot in two samples "
+     "holds two unrelated records and their difference is not a count "
+     "of anything"),
+    ("last-value fields",
+     "nested_last_vmfail, ipi_last_command, last_hypercall_code/rcx/rdx/"
+     "r8/tsc, vtl_protect_last_*, vtl_copy_last_pfn, ap_probe_rip/cs, "
+     "host_exception*, profile_code_*",
+     "these hold the most recent value, not a running total; "
+     "subtracting two addresses gives a distance, which is not a rate. "
+     "Read them as moved / did not move"),
+    ("current-state fields",
+     "l2_activity_state, pending_event, running_l2, "
+     "shadow_ept_current_slot, resume_activity_state, "
+     "processor_virtualized, l1_own_cr3, l2_exit_cr3, host_page_table, "
+     "guest_kernel_base, vtl_block_page, watched_apic_page",
+     "a state is not an event count; the difference of two states is "
+     "meaningless even when both readings are correct"),
+    ("min/max accumulators",
+     "vtl_code0_min_pfn, vtl_code0_max_pfn, vtl_copy_min_pfn, "
+     "vtl_copy_max_pfn, vtl_code0_run_longest",
+     "monotonic in one direction but not counts - a max that grew by "
+     "4096 saw one page further out, not 4096 events"),
+    # The trap sitting directly beside the members this mode now
+    # differences, and the one somebody adding the next phase will hit.
+    # `phase_cycles` and `handler_reason_cycles` ARE differenced - they
+    # are closed accumulators. These are the open ends of the same
+    # brackets and they look identical in a dump: eight bytes, per
+    # processor, climbing.
+    ("open ends of a bracket, not accumulators",
+     "phase_mark, handler_entry_tsc, handler_entry_reads, "
+     "handler_entry_writes, handler_was_l2, reason_bucket",
+     "each holds where the CURRENT span started, replaced at every "
+     "exit, so two samples hold two unrelated instants and their "
+     "difference is a distance between them. `phase_mark` climbs like "
+     "a counter because it is an RDTSC, and its delta looks exactly "
+     "like a cycle count. The closed halves - phase_cycles, "
+     "phase_calls, handler_reason_cycles/reads/writes - are "
+     "differenced, and they are the only halves that are sums"),
+    ("composite records",
+     "unhandled_exit, vm_entry_failure, ap_fault, vtl_call_block",
+     "one struct mixing a flag, a reason and several addresses; there "
+     "is no single quantity to difference"),
+    ("state histograms",
+     "cpl_seen, guest_leaf_permissions, shadow_leaf_permissions, "
+     "vtl_protect_host_perms, vtl_protect_guest_perms, "
+     "vtl_protect_pfn_perm_seen",
+     "buckets of what a permission *is*, not of events; a bucket that "
+     "grew says a sample landed there, and the samples are not counted"),
+    ("event histograms not sampled here",
+     "vtl1_duration, vtl_call_gap_buckets, external_interrupt_vector_"
+     "counts, vtl_service_calls, hypercall_code_counts, "
+     "l2_injected_vector, l2_entry_vector, l2_synthetic_msr_writes, "
+     "l2_msr_write_counts, bucket_phase_cycles, bucket_phase_reads, "
+     "bucket_phase_writes, bucket_calls",
+     "differenceable in principle and deliberately left out: every "
+     "member added widens the read window, and the read window is this "
+     "measurement's own error bar. The four phase members at the end "
+     "are the sub-splits of phases the tree above already covers, so "
+     "the cheap reading is taken first and these are what to add when "
+     "it points at their parent. **vmcs02_split_* used to be on this "
+     "list and no longer is**: it pointed at its parent, its 'every "
+     "guest-state field' slot was quoted at 10.10 writes a call "
+     "against a prediction of at most 5.18, and the disagreement was "
+     "the cumulative denominator - a boot five minutes old is mostly "
+     "the calls that cannot elide, because every gate in build_vmcs02 "
+     "has a precondition that is false until a vmcs02 has run. It "
+     "rides --delta-phases now"),
+    ("synthetic_msr_writes - a SIX-INDEX SLICE, not the census",
+     "0x70 EOI, 0x83 SIMP, 0x84 EOM, 0x93 SINT3, 0xb0 STIMER0_CONFIG, "
+     "0xb1 STIMER0_COUNT, per processor",
+     "the other 314 indices per processor are still refused for the "
+     "reason above. Do not read the five as a distribution - they are "
+     "five named counters that happen to live in one array, and their "
+     "sum is not the synthetic-MSR total"),
+]
+
+
+def delta_span(clock_before, clock_after, wall_seconds):
+    """The measured span, in ticks and seconds, and the hertz between.
+
+    Returns `(ticks, seconds, hz, source, complaint)`.  `hz` is measured
+    from this window whenever the tick span is usable, and `source` says
+    which - the number and where it came from travel together, because
+    a fallback that does not announce itself is how a unit slip survives
+    a review.
+
+    `complaint` is non-empty when the two disagree by more than 5%, which
+    means one of the two clocks is not measuring what it is labelled as.
+    """
+    ticks = None
+    if clock_before is not None and clock_after is not None:
+        ticks = clock_after - clock_before
+
+    if ticks is not None and ticks > 0 and wall_seconds > 0:
+        hz = ticks / wall_seconds
+        source = "MEASURED in this window: tick span / wall span"
+        drift = abs(hz - TSC_HZ) / TSC_HZ
+        complaint = ""
+        if drift > 0.05:
+            complaint = (
+                f"the measured {hz:,.0f} Hz is {drift * 100:.1f}% from "
+                f"the tree's measured {TSC_HZ:,} Hz - one of the two "
+                f"clocks is not what its label says")
+        return ticks, wall_seconds, hz, source, complaint
+
+    return (ticks, wall_seconds, float(TSC_HZ),
+            f"FALLBACK constant {TSC_HZ:,} Hz; the tick span was "
+            f"unusable ({ticks})",
+            "")
+
+
+def delta_rows(before, after, entries):
+    """Difference a set of (key, label) readings, and refuse the impossible.
+
+    `before` and `after` are dicts keyed the same way.  A key missing
+    from either is **not** treated as zero - that is the single most
+    expensive habit this file records, because an unanswered read and a
+    counter reading zero look identical afterwards.
+
+    Returns `(rows, impossible, unread)` where a row is
+    `(key, label, before, after, delta)` and every row in `rows` has a
+    delta that is >= 0.  Anything negative goes to `impossible` instead,
+    never into `rows` - a monotonic counter cannot decrease, so the
+    number is not a measurement and must not be printed as one.
+    """
+    rows, impossible, unread = [], [], []
+    for key, label in entries:
+        a, b = before.get(key), after.get(key)
+        if a is None or b is None:
+            unread.append((key, label))
+            continue
+        if b < a:
+            impossible.append((key, label, a, b, b - a))
+            continue
+        rows.append((key, label, a, b, b - a))
+    return rows, impossible, unread
+
+
+def delta_key_name(key):
+    """`member[cpu N]`, or `member` for a member that has no processors.
+
+    Spelled out rather than printed as the tuple it is: a member name
+    with the wrong index beside it is the failure this whole file is
+    written against, and `('exit_total', 0)` reads as a Python
+    implementation detail rather than as an address in the singleton.
+    """
+    name, index = key
+    if index is None:
+        return name
+    if isinstance(index, tuple):
+        return f"{name}[cpu {index[0]}][{index[1]}]"
+    return f"{name}[cpu {index}]"
+
+
+def delta_impossible_lines(impossible):
+    """The single most valuable output this mode has.
+
+    Four things produce a counter that went backwards and every one of
+    them has happened on this rig: a torn read, a field that wrapped, a
+    reader pointed at a different binary from the one running, and a
+    guest that reset between the samples.  All four make every other
+    number in the report wrong, so this prints as an error naming the
+    member and says not to read the rest.
+    """
+    if not impossible:
+        return []
+    lines = ["", "*** IMPOSSIBLE: a monotonic counter went BACKWARDS ***"]
+    for key, label, a, b, delta in impossible:
+        lines.append(f"    {delta_key_name(key)}  {label}")
+        lines.append(f"        {a:,} -> {b:,}  ({delta:,})")
+    lines.append("    A counter that only increments cannot decrease. One "
+                 "of:")
+    lines.append("      - a torn read (the sample crossed a write)")
+    lines.append("      - the field wrapped")
+    lines.append("      - the ELF this reader used is not the binary that "
+                 "is running")
+    lines.append("      - the guest reset between the two samples")
+    lines.append("    Every rate below shares the same two samples. Do not "
+                 "read any of")
+    lines.append("    them until this is explained.")
+    return lines
+
+
+def delta_fingerprint_lines(before, after):
+    """Whether the two samples came from the same boot.
+
+    Two different machines' counters subtracted give nonsense that looks
+    like a measurement, and this rig has produced exactly that.  Two
+    independent fields are checked rather than one, per this tree's rule
+    about single-field instruments: the module base off serial, and the
+    time-stamp counter of the boot's first handler entry.
+
+    Returns `(lines, same)`.
+    """
+    def show(value):
+        if isinstance(value, tuple):
+            return "/".join("?" if v is None else f"0x{v:x}"
+                            for v in value)
+        return f"0x{value:x}"
+
+    lines, same = [], True
+    for what, a, b in (("module base", before.get("base"),
+                        after.get("base")),
+                       (DELTA_FINGERPRINT, before.get("first_tsc"),
+                        after.get("first_tsc"))):
+        if (a is None or b is None
+                or any(isinstance(value, tuple)
+                       and (not value or None in value)
+                       for value in (a, b))):
+            lines.append(f"  fingerprint {what}: NOT READ - cannot say "
+                         f"the two samples are the same boot")
+            same = False
+            continue
+        if a != b:
+            lines.append(f"  fingerprint {what}: CHANGED "
+                         f"{show(a)} -> {show(b)}")
+            same = False
+            continue
+        lines.append(f"  fingerprint {what}: unchanged ({show(a)})")
+    if not same:
+        lines.append("  *** boot identity could not be verified. A reset, reload,")
+        lines.append("      incorrect module base or failed read can cause this.")
+        lines.append("      No rates or later state sections are printed.")
+    return lines, same
+
+
+def delta_level_split_lines(before, after, slots, seconds, l2_entries):
+    """Exits by reason **and by level**, differenced over the window.
+
+    The decomposition question this mode could not answer.
+    `exit_reason_counts` says a window held N `wrmsr` exits; it cannot
+    say whether the guest hypervisor executed them or its guest did, and
+    the two have opposite consequences.  A second-level `wrmsr` is
+    reflected and comes back as the level above's `VMRESUME`, so it is
+    *one round trip costing two exits*; a first-level `wrmsr` is one
+    exit standing alone.  Halving the first halves two counts and
+    halving the second halves one.
+
+    Three things are printed and each is falsifiable on its own:
+
+    - the per-reason split, L1 against L2;
+    - the **round-trip identity**, `L2 exits` against `vmlaunch +
+      vmresume`.  Every reflected second-level exit is answered by the
+      level above with one entry instruction, and every entry
+      instruction that reaches `on_guest_vmlaunch` increments
+      `l2_entries`, so in a steady state those two are equal and their
+      sum is the whole window.  What is left over is the only traffic
+      that is neither - second-level exits this VMM answered itself
+      without reflecting, plus the guest hypervisor's own instructions
+      other than its entries.  That residue is a *small number* in a
+      settled clock loop and naming it is the point;
+    - the reasons this table cannot see, because
+      `handler_reason_slots` stops at 64.
+
+    Refuses, rather than reporting, three inconsistent measurements:
+
+    - a bucket that went backwards, for the four reasons
+      `delta_impossible_lines` gives;
+    - **`from_l2` exceeding `exits` for the same reason**, which is a
+      subset larger than its superset. The live reads are not atomic:
+      the guest can advance between reading the two members. Sampling
+      skew, incorrect offsets or different binaries can cause this. Without
+      this the reader prints an L1 count as a negative number and a
+      share above 100%, both of which look like findings;
+    - a total that is not the sum of its parts.
+
+    Takes dictionaries and numbers only, no rig, so every judgement
+    here is reachable from a test with values chosen to make it fail.
+    """
+    exits_rows, exits_bad, exits_unread = delta_rows(
+        before, after,
+        [(("handler_reason_exits", r), "") for r in range(slots)])
+    l2_rows, l2_bad, l2_unread = delta_rows(
+        before, after,
+        [(("handler_reason_from_l2", r), "") for r in range(slots)])
+
+    if exits_unread or l2_unread:
+        return ["",
+                "exits by level: NOT READ. `handler_reason_exits` or "
+                "`handler_reason_from_l2` is",
+                "  absent from this ELF, so the L1/L2 split is unknown "
+                "rather than zero."]
+
+    lines = []
+    for what, bad in (("handler_reason_exits", exits_bad),
+                      ("handler_reason_from_l2", l2_bad)):
+        for key, _label, a, b, delta in bad:
+            lines.append(f"    {what}[reason {key[1]}]  {a:,} -> {b:,} "
+                         f"({delta:,})")
+    if lines:
+        return (["", "*** IMPOSSIBLE: a monotonic counter went "
+                     "BACKWARDS ***"] + lines
+                + ["    The exit-by-level split is not printed. See the "
+                   "four causes above."])
+
+    exits = {key[1]: delta for key, _l, _a, _b, delta in exits_rows}
+    from_l2 = {key[1]: delta for key, _l, _a, _b, delta in l2_rows}
+
+    over = [(r, from_l2[r], exits[r])
+            for r in sorted(exits) if from_l2[r] > exits[r]]
+    if over:
+        lines = ["",
+                 "*** INCONSISTENT LIVE SAMPLE: a SUBSET exceeds its superset ***"]
+        for reason, l2, total in over:
+            lines.append(f"    {EXIT_REASON.get(reason, reason)}: "
+                         f"from_l2 {l2:,} of {total:,} exits")
+        lines.append("    The guest runs between these non-atomic counter reads;")
+        lines.append("    sampling skew can produce this mismatch. Incorrect offsets")
+        lines.append("    or different binaries can also cause it. The exit-by-level")
+        lines.append("    split is withheld; this sample does not establish the cause.")
+        return lines
+
+    total = sum(exits.values())
+    if not total:
+        return ["",
+                "exits by level: every reason unchanged in this window. "
+                "Not printed -",
+                "  a table of zeroes is not a distribution."]
+
+    total_l2 = sum(from_l2.values())
+    total_l1 = total - total_l2
+
+    lines = ["",
+             f"exits by REASON and by LEVEL IN THIS WINDOW "
+             f"({total:,}, {total / seconds:,.1f}/s)",
+             "  reason              total       from L1      from L2"
+             "        total/s"]
+    for reason in sorted(exits, key=lambda r: -exits[r]):
+        if not exits[reason]:
+            continue
+        name = EXIT_REASON.get(reason, reason)
+        l2 = from_l2[reason]
+        lines.append(f"  {name:<14} {exits[reason]:>11,} "
+                     f"{exits[reason] - l2:>13,} {l2:>12,} "
+                     f"{exits[reason] / seconds:>14,.2f}")
+    lines.append(f"  {'ALL':<14} {total:>11,} {total_l1:>13,} "
+                 f"{total_l2:>12,} {total / seconds:>14,.2f}")
+
+    # The round trip, stated as an identity rather than left to be
+    # divided out of two rows by hand.
+    entries = (exits.get(20, 0) + exits.get(24, 0))
+    lines.append("")
+    lines.append("  the round trip, as an identity")
+    lines.append(f"    vmlaunch + vmresume        {entries:>11,}  "
+                 f"{entries / seconds:>12,.2f}/s")
+    lines.append(f"    exits taken from L2        {total_l2:>11,}  "
+                 f"{total_l2 / seconds:>12,.2f}/s")
+    residue = total - entries - total_l2
+    lines.append(f"    everything else            {residue:>11,}  "
+                 f"{residue / seconds:>12,.2f}/s")
+    if residue < 0:
+        lines.append("    -> NEGATIVE, which is impossible: the entry "
+                     "instructions and the")
+        lines.append("       second-level exits cannot outnumber every "
+                     "exit taken. Read no")
+        lines.append("       further - the two members disagree about "
+                     "which exits exist.")
+    else:
+        lines.append("    -> 'everything else' is second-level exits "
+                     "this VMM answered")
+        lines.append("       WITHOUT reflecting, plus the guest "
+                     "hypervisor's own exits other")
+        lines.append("       than its entry instructions. In a settled "
+                     "clock loop it is small,")
+        lines.append("       and a large one is the finding.")
+
+    # And the independent cross-check the caller can supply.
+    if l2_entries is not None:
+        agree = (entries == l2_entries)
+        lines.append(
+            f"    l2_entries in the same window {l2_entries:>11,}  "
+            f"{'AGREES' if agree else 'DISAGREES'} with vmlaunch+vmresume")
+        if not agree:
+            lines.append("    -> `hypervisor.h` states these are equal "
+                         "when no entry is refused.")
+            lines.append("       Check `nested_entry_refusals` and "
+                         "`nested_vmfail_count` before")
+            lines.append("       reading anything above as a rate.")
+
+    unseen = [r for r in range(slots, 96) if r in EXIT_REASON]
+    lines.append(f"    reasons >= {slots} are outside this table "
+                 f"({len(unseen)} defined). They appear in")
+    lines.append("       `exit_reason_counts` and not here, so the two "
+                 "totals may differ.")
+    return lines
+
+
+def share_drift_lines(pairs, what, unit="of the split's cycles"):
+    """Boot-wide share against windowed share, as a verdict in words.
+
+    `pairs` is `(name, boot_percent, window_percent)`.  Both sides are
+    shares **of the same split**, never one of the split and one of
+    something else - a drift computed against two different
+    denominators is a unit slip wearing a percentage sign.
+
+    Prints the AGREE case as loudly as the DISAGREE case, on purpose.  A
+    check that only speaks when it fires cannot be distinguished from a
+    check that is not wired up, and this file records a verdict helper
+    that was one deletion away from exactly that.
+    """
+    drifts = sorted(((abs(w - b), name, b, w) for name, b, w in pairs),
+                    reverse=True)
+    if not drifts:
+        return []
+    worst = drifts[0][0]
+    if worst < DELTA_SHARE_DRIFT_POINTS:
+        return [
+            f"  the windowed {what} AGREES with the boot-wide one "
+            f"(worst drift {worst:.1f} points,",
+            f"  under the {DELTA_SHARE_DRIFT_POINTS:.1f} that would be "
+            f"called out). The cumulative table happens to",
+            "  describe the present HERE - which is a fact about this "
+            "window, not a licence to",
+            "  quote it about a later one."]
+
+    lines = ["",
+             f"  *** BOOT-WIDE {what.upper()} and THIS WINDOW DISAGREE "
+             f"***"]
+    for drift, name, boot, window in drifts:
+        if drift < DELTA_SHARE_DRIFT_POINTS:
+            continue
+        # Signed against the boot-wide figure, not the absolute drift
+        # the sort is on: a share that FELL and one that rose are
+        # opposite readings, and printing both as `+20.2 points` is the
+        # kind of label this whole file is written against.
+        lines.append(f"      {name:<14} {boot:>6.1f}% since boot  ->  "
+                     f"{window:>6.1f}% {unit} IN THIS WINDOW  "
+                     f"({window - boot:+.1f} points)")
+    lines.append("      -> a cumulative by-reason table is a mean over "
+                 "every phase of the boot,")
+    lines.append("         including phases that have ended. Quote the "
+                 "window column, and do")
+    lines.append("         not quote the cumulative one in the present "
+                 "tense.")
+    return lines
+
+
+def delta_handler_reason_lines(before, after, slots, seconds,
+                               handler_delta, exits_delta):
+    """Where the handler's time went, BY REASON, inside this window.
+
+    **The last per-handler number in this tree that could only be read
+    cumulatively.**  `dump_handler_by_reason` divides
+    `handler_reason_cycles` by `handler_cycles` since the first exit of
+    the boot and prints the quotient under a present-tense heading; the
+    same file's docstring quotes `vmresume at 38% of exits and vmptrld
+    at 8%`, taken before VMCS shadowing was in force, and with shadowing
+    on the guest hypervisor's VMREADs and VMWRITEs stop exiting at all.
+    So the table already carries a figure of exactly the kind this mode
+    exists to retire.
+
+    Four things are printed and each is falsifiable on its own:
+
+    - the windowed cost per exit, per reason, which is a mean over the
+      window rather than over the boot;
+    - **the coverage**, `handler_reason_cycles` summed against the
+      `handler_cycles` delta.  The header states these are closed from
+      the same pair of reads (`resume_guest`), so they must sum to each
+      other; a split that does not is measuring a different span from
+      the one it is being compared against;
+    - shared read/write counter deltas, including logical reads and
+      overlapping processor activity; these cannot price instructions;
+    - **the verdict**, in words, when a reason's windowed share differs
+      from its boot-wide share by more than `DELTA_SHARE_DRIFT_POINTS`.
+
+    `handler_reason_*` are `[handler_reason_slots]`, **not** per
+    processor - one global row summed over every CPU.  `handler_cycles`
+    is `[max_cpus]`, so the caller passes the sum of its deltas, and the
+    coverage line compares like with like.  Getting that wrong divides a
+    sum over eight processors by one processor's share and reports 800%
+    coverage, which reads as a finding.
+
+    Takes dictionaries and numbers only, no rig, so every judgement here
+    is reachable from a test with values chosen to make it fail.
+    """
+    names = ([n for n, _ in DELTA_HANDLER_REASON_COSTS]
+             + [n for n, _ in DELTA_GLOBAL_HISTOGRAMS])
+
+    moved, bad, unread = {}, [], []
+    for name in names:
+        rows, impossible, missing = delta_rows(
+            before, after, [((name, r), "") for r in range(slots)])
+        moved[name] = {key[1]: d for key, _l, _a, _b, d in rows}
+        bad += [(name, key[1], a, b, d)
+                for key, _l, a, b, d in impossible]
+        unread += [(name, key[1]) for key, _l in missing]
+
+    # An unanswered read and a handler that took no time produce the
+    # same missing row, and only one of them is a fact about the guest.
+    if unread:
+        absent = sorted({n for n, _r in unread})
+        return ["",
+                "the handler's time BY REASON: NOT READ ("
+                + ", ".join(absent) + ").",
+                "  Absent from one or both samples, and NOT counted as "
+                "zero. This section is",
+                "  unknown rather than empty."]
+
+    if bad:
+        lines = ["",
+                 "*** IMPOSSIBLE: a monotonic accumulator went "
+                 "BACKWARDS ***"]
+        for name, reason, a, b, delta in bad:
+            lines.append(f"    {name}[reason {reason}]  {a:,} -> {b:,} "
+                         f"({delta:,})")
+        lines.append("    The by-reason split is not printed. See the "
+                     "four causes above.")
+        return lines
+
+    cycles = moved["handler_reason_cycles"]
+    exits = moved["handler_reason_exits"]
+    reads = moved["handler_reason_reads"]
+    writes = moved["handler_reason_writes"]
+    from_l2 = moved["handler_reason_from_l2"]
+
+    split_cycles = sum(cycles.values())
+    split_exits = sum(exits.values())
+
+    if not split_exits:
+        return ["",
+                "the handler's time BY REASON: every reason unchanged "
+                "in this window.",
+                "  Not printed - a table of zeroes is not a "
+                "distribution. The handler took",
+                "  no exit here, which is a reading, not an absence."]
+
+    # Preserve the existing tolerance of two average exits. The members
+    # are read separately while the guest runs, so this is not a bound on
+    # sampling skew. Refuse a larger mismatch without diagnosing its cause.
+    if handler_delta:
+        slack = 2 * (split_cycles / split_exits)
+        if split_cycles > handler_delta + slack:
+            return ["",
+                    "*** INCONSISTENT LIVE SAMPLE: the split is LARGER than what it "
+                    "splits ***",
+                    f"    handler_reason_cycles summed  "
+                    f"{split_cycles:,}",
+                    f"    handler_cycles summed over cpus "
+                    f"{handler_delta:,}",
+                    "    These counters are read separately while the guest runs.",
+                    "    Sampling skew, incorrect offsets, different binaries or",
+                    "    the wrong processor set can cause this mismatch. The",
+                    "    reason-cost split is withheld; its cause is not established."]
+
+    lines = ["",
+             f"where the handler's time went, BY REASON, IN THIS WINDOW "
+             f"({split_exits:,} exits,",
+             f"  {split_exits / seconds:,.1f}/s). Cycles are summed over "
+             f"EVERY processor, as the member is.",
+             VMCS_ACCESS_ACCOUNTING_NOTE,
+             "  reason             exits    exits/s   cyc/exit    %cyc"
+             "  read_ctr/ex write_ctr/ex  whose"]
+
+    for reason in sorted(exits, key=lambda r: -cycles.get(r, 0)):
+        if not exits[reason]:
+            continue
+        name = EXIT_REASON.get(reason, reason)
+        took = cycles.get(reason, 0)
+        rd, wr = reads.get(reason, 0), writes.get(reason, 0)
+        l2 = from_l2.get(reason, 0)
+        whose = ("L2" if l2 == exits[reason]
+                 else ("L1" if not l2 else f"{l2}/{exits[reason]}"))
+        lines.append(
+            f"  {name:<14} {exits[reason]:>10,} "
+            f"{exits[reason] / seconds:>10,.1f} "
+            f"{took // exits[reason]:>10,} "
+            f"{100.0 * took / max(split_cycles, 1):>6.1f}% "
+            f"{rd / exits[reason]:>11.1f} {wr / exits[reason]:>12.1f}  {whose}")
+
+    # Coverage, as the header says it must be, and against the window
+    # rather than against the boot.
+    if handler_delta:
+        lines.append(
+            f"  --- the split covers "
+            f"{100.0 * split_cycles / handler_delta:.1f}% of the "
+            f"handler_cycles delta")
+    else:
+        lines.append("  --- handler_cycles was NOT READ in this window, "
+                     "so the split's coverage is")
+        lines.append("      unknown. A split with no denominator is not "
+                     "a fraction.")
+    if exits_delta:
+        lines.append(
+            f"  --- and {100.0 * split_exits / exits_delta:.1f}% of the "
+            f"handler_exits delta ({exits_delta:,})")
+    else:
+        lines.append("  --- handler_exits was NOT READ in this window, "
+                     "so the exit coverage is unknown.")
+
+    # The verdict, against the same split's boot-wide shares. Both sides
+    # are shares of `handler_reason_cycles`, so the comparison is of two
+    # measurements of one quantity over two spans - which is the only
+    # comparison that says anything.
+    boot = {r: (after.get(("handler_reason_cycles", r)) or 0)
+            for r in range(slots)}
+    boot_total = sum(boot.values())
+    pairs = []
+    if boot_total:
+        for reason in exits:
+            if not exits[reason]:
+                continue
+            pairs.append((str(EXIT_REASON.get(reason, reason)),
+                          100.0 * boot[reason] / boot_total,
+                          100.0 * cycles.get(reason, 0)
+                          / max(split_cycles, 1)))
+    lines.extend(share_drift_lines(pairs, "share of handler cycles"))
+    return lines
+
+
+def delta_vmcs02_split_lines(before, after, calls):
+    """Windowed phase cycles and shared access-counter deltas per build call.
+
+    `calls` sums phase_calls[cpu][2] over every processor. Shared access
+    counters can include other CPUs, and reads include cache hits, so
+    their deltas cannot attribute hardware costs. Counts per build call
+    also cannot be compared as a subset of counts per handler exit:
+    those ratios have different denominators.
+    """
+    if calls is None:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: NOT PRINTED. "
+                "`phase_calls[..][2]` was",
+                "  not read or went backwards, so there is no "
+                "denominator. Unknown, not zero."]
+    if not calls:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: build_vmcs02 was "
+                "not called at all.",
+                "  Not an empty table - a guest hypervisor that "
+                "launched nothing in this window."]
+
+    slots = len(VMCS02_SPLIT)
+    rows, bad, unread = {}, [], []
+    for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                 "vmcs02_split_writes"):
+        got, impossible, missing = delta_rows(
+            before, after, [((name, i), "") for i in range(slots)])
+        rows[name] = {key[1]: d for key, _l, _a, _b, d in got}
+        bad += [(name, key[1]) for key, _l, _a, _b, _d in impossible]
+        unread += [(name, key[1]) for key, _l in missing]
+
+    if unread or bad:
+        return ["",
+                "build_vmcs02 split IN THIS WINDOW: NOT PRINTED. A "
+                "slot was absent from a",
+                "  sample or went backwards, so the split is unknown "
+                "rather than empty."]
+
+    cycles = rows["vmcs02_split_cycles"]
+    reads = rows["vmcs02_split_reads"]
+    writes = rows["vmcs02_split_writes"]
+    total = sum(cycles.values()) or 1
+
+    lines = ["",
+             f"build_vmcs02, split IN THIS WINDOW "
+             f"({sum(cycles.values()) // calls:,} cycles a call over "
+             f"{calls:,} calls)",
+             VMCS_ACCESS_ACCOUNTING_NOTE,
+             f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
+             f"{'read_ctr/call':>13} {'write_ctr/call':>14}"]
+
+    for i, spent in sorted(cycles.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {VMCS02_SPLIT[i]:<40} {spent // calls:>9,} "
+                     f"{100.0 * spent / total:>5.1f}% "
+                     f"{reads[i] / calls:>13.2f} {writes[i] / calls:>14.2f}")
+    return lines
+
+
+def delta_phase_lines(before, after, cpu, slots, seconds, round_trips,
+                      handler_delta, boot_round_trips, boot_handler):
+    """`dump_phase_tree`, over the measured window instead of the boot.
+
+    The cumulative tree is the instrument that produced this session's
+    most expensive wrong answer - a boot-wide mean under a present-tense
+    heading, quoted present tense, describing a phase that had ended.
+    The shape here is deliberately the same as `dump_phase_tree`'s so
+    the two can be read against each other, and the heading says IN THIS
+    WINDOW so they cannot be confused.
+
+    `phase_cycles` and `phase_calls` are `[max_cpus][phase_count]` and
+    both only ever `+=`, so a difference is the cycles and the calls
+    inside the window.  `phase_mark` is the open end of the same bracket
+    and is refused - see DELTA_REFUSALS.
+
+    The two columns that are not simply the cumulative ones divided
+    differently:
+
+    - `cyc/RT` divides by the round trips **in this window**, so
+      siblings stay additive and the figure is a present-tense cost;
+    - `outside the split` is the windowed `handler_cycles` minus the
+      windowed top-level intervals, which is the coverage check.  Slots
+      25-30 are adjacent intervals over the whole of an exit and sum to
+      `handler_cycles` by construction, so a residue much above the
+      round-off means an exit left the handler somewhere this does not
+      know about - and a residue that appears only in the window is a
+      path the guest has *started* taking.
+    """
+    # A denominator that was not read is not a small denominator, and
+    # `round_trips` is the divisor of every column below.
+    if round_trips is None or handler_delta is None:
+        return ["",
+                f"cpu {cpu} phase tree: NOT PRINTED. `l2_entries` or "
+                f"`handler_cycles` was not",
+                "  read on this processor, or went backwards, so there "
+                "is no denominator to",
+                "  divide by. Unknown, not zero."]
+
+    rows, bad, unread = {}, [], []
+    for name in ("phase_cycles", "phase_calls"):
+        got, impossible, missing = delta_rows(
+            before, after,
+            [((name, (cpu, i)), "") for i in range(slots)])
+        rows[name] = {key[1][1]: d for key, _l, _a, _b, d in got}
+        bad += [(name, key[1][1], a, b, d)
+                for key, _l, a, b, d in impossible]
+        unread += [(name, key[1][1]) for key, _l in missing]
+
+    if unread:
+        return ["",
+                f"cpu {cpu} phase tree: NOT READ. `phase_cycles` or "
+                f"`phase_calls` is absent",
+                "  from one or both samples, so the split is unknown "
+                "rather than empty."]
+    if bad:
+        lines = ["",
+                 f"*** IMPOSSIBLE: a phase accumulator went BACKWARDS "
+                 f"on cpu {cpu} ***"]
+        for name, index, a, b, delta in bad:
+            lines.append(f"    {name}[cpu {cpu}][{index}]  {a:,} -> "
+                         f"{b:,} ({delta:,})")
+        lines.append("    The phase tree is not printed for this "
+                     "processor.")
+        return lines
+
+    calls = rows["phase_calls"]
+    cycles = rows["phase_cycles"]
+    if not any(calls.values()):
+        return ["",
+                f"cpu {cpu} phase tree: no phase was entered in this "
+                f"window.",
+                "  Not printed. The cumulative tree would still show "
+                "the whole boot's costs",
+                "  here, which is the reading this mode exists to "
+                "replace."]
+
+    children = [[] for _ in range(slots)]
+    for index in range(slots):
+        parent = (PHASE_PARENT[index] if index < len(PHASE_PARENT)
+                  else PHASE_CROSS)
+        if 0 <= parent < slots:
+            children[parent].append(index)
+
+    rt = round_trips or 1
+    total = handler_delta or 1
+
+    lines = ["",
+             f"cpu {cpu} phase tree IN THIS WINDOW "
+             f"({round_trips:,} round trips, "
+             f"{(handler_delta or 0) // max(round_trips, 1):,} handler "
+             f"cycles a round trip)",
+             "     phase                                     calls"
+             "  calls/RT     cyc/call      cyc/RT   self/RT   %vmm"]
+
+    def row(index, depth):
+        if not calls.get(index):
+            return
+        name = (("  " * depth) + (PHASE_NAMES[index]
+                                  if index < len(PHASE_NAMES)
+                                  else f"(slot {index})"))[:36]
+        own = cycles[index] - sum(cycles.get(c, 0)
+                                  for c in children[index])
+        lines.append(f"  {index:3d}  {name:<36} {calls[index]:>12,} "
+                     f"{calls[index] / rt:>8.2f} "
+                     f"{cycles[index] // calls[index]:>12,} "
+                     f"{cycles[index] / rt:>11,.0f} "
+                     f"{own / rt:>9,.0f} "
+                     f"{100.0 * cycles[index] / total:>6.1f}")
+        for child in children[index]:
+            row(child, depth + 1)
+
+    top = [i for i in range(slots)
+           if (i < len(PHASE_PARENT)) and (PHASE_PARENT[i] == PHASE_TOP)]
+    for index in top:
+        row(index, 0)
+
+    covered = sum(cycles.get(i, 0) for i in top)
+    for label, value in (
+            ("--- the adjacent intervals", covered),
+            ("--- handler_cycles delta", handler_delta or 0),
+            ("--- outside the split", (handler_delta or 0) - covered)):
+        lines.append(f"       {label:<36} {'':>12} {'':>8} {'':>12} "
+                     f"{value / rt:>11,.0f} {'':>9} "
+                     f"{100.0 * value / total:>6.1f}")
+
+    cross = [i for i in range(slots)
+             if (i < len(PHASE_PARENT))
+             and (PHASE_PARENT[i] == PHASE_CROSS) and calls.get(i)]
+    if cross:
+        lines.append("       cross-cutting - each is already inside one "
+                     "of the rows above and is")
+        lines.append("       NOT subtracted from that row's self, "
+                     "because it has more than one")
+        lines.append("       caller. Do not add them to the tree.")
+        for index in cross:
+            row(index, 1)
+
+    # The verdict. Cycles per round trip is not a share, so it is stated
+    # as a ratio - and the AGREE case is printed too, for the reason
+    # `share_drift_lines` gives.
+    if boot_round_trips and round_trips and boot_handler:
+        boot_rate = boot_handler / boot_round_trips
+        window_rate = (handler_delta or 0) / round_trips
+        if boot_rate > 0:
+            drift = abs(window_rate - boot_rate) / boot_rate
+            if drift >= DELTA_PER_RT_DRIFT:
+                lines.append(
+                    f"       *** BOOT-WIDE MEAN and THIS WINDOW "
+                    f"DISAGREE by {window_rate / boot_rate:.2f}x: "
+                    f"{boot_rate:,.0f}")
+                lines.append(
+                    f"           handler cycles a round trip since "
+                    f"boot against {window_rate:,.0f} here. The "
+                    f"cumulative")
+                lines.append(
+                    "           tree above this one describes neither "
+                    "the boot nor now - it is a")
+                lines.append(
+                    "           mean over both, and nothing ran at it.")
+            else:
+                lines.append(
+                    f"       the windowed cost agrees with the "
+                    f"boot-wide mean ({window_rate / boot_rate:.2f}x, "
+                    f"under")
+                lines.append(
+                    f"       the {DELTA_PER_RT_DRIFT:.2f} drift that "
+                    f"would be called out).")
+    return lines
+
+
+def delta_report(before, after, entries, cycles, histograms, span,
+                 fingerprints, cpus, asked_seconds, read_windows):
+    """The whole delta report, as lines, from data alone.
+
+    Takes no rig and no arguments object on purpose: every judgement it
+    makes is then checkable from a test with numbers chosen to make it
+    fail.
+    """
+    ticks, seconds, hz, source, complaint = span
+    lines = []
+
+    lines.append("")
+    lines.append("=" * 68)
+    lines.append(f"DELTA over a MEASURED {seconds:.3f} s window "
+                 f"(asked for {asked_seconds} s)")
+    lines.append("=" * 68)
+    lines.append("  Every number below is the change between two samples, "
+                 "not a total.")
+    a_window, b_window = read_windows
+    lines.append(f"  read window: sample A took {a_window:.2f} s, sample "
+                 f"B took {b_window:.2f} s")
+    lines.append("               <- the span is measured midpoint to "
+                 "midpoint; these are its error bar")
+    # Said out loud, with the size of the error, because a *nominal*
+    # epoch is one of the mislabelled readings this mode exists to
+    # prevent: the wait is not the span, the two reads are inside it,
+    # and dividing by what was asked for overstates every rate.
+    if asked_seconds and seconds > 0:
+        skew = (seconds - asked_seconds) / asked_seconds
+        if abs(skew) > 0.02:
+            lines.append(
+                f"  the nominal {asked_seconds} s is {abs(skew) * 100:.1f}%"
+                f" {'short of' if skew > 0 else 'longer than'} the "
+                f"measured span;")
+            lines.append(
+                f"  every rate below divides by {seconds:.3f}, not by "
+                f"{asked_seconds}")
+    if ticks is None:
+        lines.append(f"  span: {seconds:.3f} s wall, tick span NOT READ")
+    else:
+        lines.append(f"  span: {ticks:,} ticks / {seconds:.3f} s")
+    lines.append(f"  frequency: {hz:,.0f} Hz  ({source})")
+    if complaint:
+        lines.append(f"  *** {complaint}")
+
+    fingerprint_lines, same_boot = delta_fingerprint_lines(*fingerprints)
+    lines.extend(fingerprint_lines)
+
+    rows, impossible, unread = delta_rows(before, after, entries)
+    lines.extend(delta_impossible_lines(impossible))
+
+    if not same_boot:
+        return lines
+
+    if seconds <= 0:
+        lines.append("")
+        lines.append("  *** the measured span is not positive, so no rate "
+                     "can be derived from it.")
+        lines.append("      Nothing is rated. This is a broken "
+                     "measurement, not a quiet guest.")
+        return lines
+
+    moved = [r for r in rows if r[4]]
+    # A counter that is zero and stayed zero says nothing, and a hundred
+    # such lines bury the ones that do.  The interesting still counter is
+    # the one with a *large total* that stopped climbing - that is the
+    # reading a cumulative dump gets exactly backwards.
+    still = [r for r in rows if not r[4] and r[2]]
+    never = [r for r in rows if not r[4] and not r[2]]
+
+    lines.append("")
+    lines.append(f"counters that MOVED in the window ({len(moved)} of "
+                 f"{len(rows)})")
+    lines.append("  member                              cpu    delta"
+                 "        per second")
+    for key, label, _a, _b, delta in sorted(moved, key=lambda r: -r[4]):
+        name, index = key
+        where = "-" if index is None else str(index)
+        lines.append(f"  {name:<34s} {where:>4s} {delta:>10,} "
+                     f"{delta / seconds:>15,.2f}   {label}")
+
+    lines.append("")
+    lines.append(f"counters with a total that did NOT move ({len(still)})")
+    lines.append("  This is the half a cumulative dump cannot show: a "
+                 "large total here means")
+    lines.append("  it happened and has STOPPED, which is the opposite "
+                 "reading from a large")
+    lines.append("  total that is still climbing. The two are identical "
+                 "in the default dump.")
+    for key, label, a, _b, _delta in sorted(still, key=lambda r: -r[2]):
+        name, index = key
+        where = "-" if index is None else str(index)
+        lines.append(f"  {name:<34s} {where:>4s} {a:>10,} total, "
+                     f"+0 in this window   {label}")
+    if never:
+        lines.append(f"  ({len(never)} more read zero in both samples "
+                     f"and are not listed)")
+
+    if unread:
+        lines.append("")
+        lines.append(f"NOT READ ({len(unread)}) - absent from one or both "
+                     f"samples, and NOT")
+        lines.append("  counted as zero. An unanswered read and a counter "
+                     "at zero look the")
+        lines.append("  same afterwards, which is why they are separated "
+                     "here.")
+        for key, _label in unread:
+            lines.append(f"  {delta_key_name(key)}")
+
+    # Cycle accumulators, as occupancy against the tick span. No hertz
+    # enters this column, so it cannot inherit a wrong frequency.
+    cycle_rows, cycle_bad, cycle_unread = delta_rows(*cycles)
+    lines.extend(delta_impossible_lines(cycle_bad))
+    # Reported rather than dropped, for the same reason as the counter
+    # table's own unread list: a cycle accumulator that was not read and
+    # one that did not advance produce the same missing row, and only
+    # one of those is a fact about the guest.
+    for key, _label in cycle_unread:
+        lines.append(f"  {delta_key_name(key)}: NOT READ, so no "
+                     f"occupancy is derived for it")
+    if cycle_rows and ticks:
+        lines.append("")
+        lines.append("where the time went, as a fraction of the measured "
+                     "tick span")
+        lines.append("  (a ratio of two tick counts - no frequency enters "
+                     "this column)")
+        for key, label, _a, _b, delta in cycle_rows:
+            name, index = key
+            if not delta:
+                continue
+            lines.append(f"  cpu {index}  {name:<20s} "
+                         f"{100.0 * delta / ticks:6.2f}%   {label}")
+    elif cycle_rows:
+        lines.append("")
+        lines.append("  cycle accumulators read, but the tick span is "
+                     "unusable, so no")
+        lines.append("  occupancy is derived. A cycle count without a "
+                     "span is not a fraction.")
+
+    # ------------------------------------------- the tick account,
+    #                                              inside this window
+    #
+    # The cumulative dump forms this ratio two ways and one of them is
+    # wrong: the line in the cumulative dump divided the given interval
+    # by a **hardcoded period literal** rather than by what the guest
+    # actually asked for, so it read "1.46x the 1.74 ms it asked for"
+    # whether or not that was the period in the population it averaged.
+    # Formed here from the four deltas instead, so both sides are the
+    # same window and neither is a constant.
+    #
+    # `asked` and `answered` disagreeing is the finding, not a caveat:
+    # the ratio assumes the clock vector is the answer to the arm, and
+    # that assumption is exactly what the two counts test.
+    by_name = {}
+    for key, _label, _a, _b, delta in rows:
+        by_name[key] = delta
+
+    tick_lines = []
+    for cpu in range(cpus):
+        asked_arms = by_name.get(("stimer_asked_arms", cpu))
+        asked_units = by_name.get(("stimer_asked_units", cpu))
+        given_arms = by_name.get(("stimer_given_arms", cpu))
+        given_cycles = by_name.get(("stimer_given_cycles", cpu))
+        missed = by_name.get(("stimer_unanswered", cpu))
+
+        if None in (asked_arms, asked_units, given_arms, given_cycles):
+            continue
+        if not (asked_arms or given_arms):
+            continue
+
+        tick_lines.append(f"  cpu {cpu}  asked {asked_arms:,} arms, "
+                          f"answered {given_arms:,}, displaced "
+                          f"{missed if missed is not None else '?'}")
+
+        if not asked_arms:
+            tick_lines.append("    no PERIODIC arm in this window - the "
+                              "guest armed one-shot deadlines only, so "
+                              "there is no period to be late against")
+            continue
+
+        per_asked = asked_units / asked_arms
+        tick_lines.append(f"    asked {per_asked:>12,.1f} x100ns per arm "
+                          f"({per_asked / 10_000.0:.3f} ms, "
+                          f"{10_000_000.0 / max(per_asked, 1):.1f} Hz)")
+
+        if not given_arms:
+            tick_lines.append("    given  -  NOT ONE ARM ANSWERED in this "
+                              "window. The ratio cannot be formed, and "
+                              "that is the finding.")
+            continue
+        if not hz:
+            tick_lines.append("    given  -  no usable frequency, so "
+                              "cycles cannot be converted")
+            continue
+
+        # `hz` is the span's own frequency - measured from the tick
+        # count in this window where that is usable, and only otherwise
+        # the constant. Deliberately not a frequency literal of its own:
+        # `DeltaSpanIsMeasuredNeverNominal` forbids one here, and the
+        # cumulative line this mirrors carries exactly that mistake.
+        per_given = (given_cycles / given_arms) * 10_000_000.0 / hz
+        tick_lines.append(f"    given {per_given:>12,.1f} x100ns per arm "
+                          f"({per_given / 10_000.0:.3f} ms, "
+                          f"{10_000_000.0 / max(per_given, 1):.1f} Hz) "
+                          f"at {hz / 1e9:.3f} GHz ({source})")
+
+        ratio = per_asked / max(per_given, 1e-9)
+        verdict = ("ok" if abs(ratio - 1.0) <= 0.05
+                   else (f"LATE by {1.0 / ratio:.3f}x" if ratio < 1.0
+                         else f"EARLY by {ratio:.3f}x"))
+        tick_lines.append(f"    ratio {ratio:>12.3f}x  {verdict}")
+
+        # The assumption, stated. A periodic timer fires repeatedly from
+        # one arm, so an arm the guest makes rarely is followed by the
+        # next repeat of a tick it did not cause - and that interval is
+        # a forward recurrence time, not a period. Answered far below
+        # asked is what says the pairing is measuring phase.
+        if given_arms < asked_arms * 0.9:
+            tick_lines.append("    -> answered is far below asked, so "
+                              "most arms were displaced: the vector is "
+                              "NOT the answer to the arm and the ratio "
+                              "above is not a period")
+
+    if tick_lines:
+        lines.append("")
+        lines.append("the tick account IN THIS WINDOW: asked against "
+                     "given")
+        lines.extend(tick_lines)
+
+    for title, cpu, buckets, namer in histograms:
+        hist_rows, hist_bad, _ = delta_rows(*buckets)
+        lines.extend(delta_impossible_lines(hist_bad))
+        moved_buckets = [r for r in hist_rows if r[4]]
+        if not moved_buckets:
+            continue
+        total = sum(r[4] for r in moved_buckets)
+        lines.append("")
+        lines.append(f"cpu {cpu} {title} IN THIS WINDOW "
+                     f"({total:,}, {total / seconds:,.1f}/s)")
+        for key, _label, _a, _b, delta in sorted(moved_buckets,
+                                                 key=lambda r: -r[4]):
+            _name, index = key
+            lines.append(f"  {namer(index):<20} {delta:>10,}  "
+                         f"{100.0 * delta / total:5.1f}%  "
+                         f"{delta / seconds:>12,.2f}/s")
+
+    lines.append("")
+    lines.append("what this mode REFUSED to difference, and why")
+    for what, names, why in DELTA_REFUSALS:
+        lines.append(f"  {what}:")
+        lines.append(f"    {names}")
+        lines.append(f"    -> {why}")
+
+    lines.append("")
+    lines.append(f"cpus sampled: {cpus}. Every number above is a change "
+                 f"over the measured span,")
+    lines.append("except the one column headed `total`.")
+    return lines
+
+
+def serial_module_base(rig):
+    """The module base the loader printed, or None.
+
+    Its own function because delta mode reads it a second time: the base
+    moves when the module is reloaded, which is what a guest reset looks
+    like from outside.
+    """
+    out = subprocess.run(
+        SSH + [rig,
+               'grep -ah "allocate_rwx done at" /home/tc/zpp/serial.out '
+               '2>/dev/null | tail -1'],
+        capture_output=True, text=True).stdout.strip()
+    m = re.search(r"done at (0x[0-9a-f]+)", out)
+    return m.group(1) if m else None
+
+
+def delta_sample(args, instance, off, cpus, reason_capacity,
+                 disposition_capacity, synthetic_capacity=None,
+                 gap_capacity=None, reason_slots=None,
+                 phase_slots=None, vmcs_globals=None):
+    """One complete delta sample: open, read, close.
+
+    **The monitor takes exactly one connection.**  `Monitor` opens and
+    closes one per batch and holds none between them, and this function
+    returns only after its last `run()` has come back - so nothing is
+    held across the wait between samples.  A leaked socket makes every
+    later reader fail with no diagnosis, and a poller that leaks one
+    reports every field as None for ever.
+
+    Returns `(readings, first_tsc, clock, started, ended)`.
+    """
+    monitor = Monitor(args.rig, args.port)
+
+    per_cpu = [n for n, _ in DELTA_PER_CPU_COUNTERS if n in off]
+    per_cpu += [n for n, _ in DELTA_PER_CPU_CYCLES if n in off]
+    per_cpu += [DELTA_CLOCK, DELTA_FINGERPRINT]
+    for name in per_cpu:
+        if name in off:
+            monitor.queue(instance + off[name], cpus)
+    for name, _ in DELTA_GLOBAL_COUNTERS:
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    if "exit_reason_counts" in off:
+        for cpu in range(cpus):
+            monitor.queue(instance + off["exit_reason_counts"]
+                          + cpu * reason_capacity * 8, reason_capacity)
+    if "l2_ept_dispositions" in off:
+        monitor.queue(instance + off["l2_ept_dispositions"],
+                      cpus * disposition_capacity)
+    # The by-level split and the cost rows that go with it.  Global
+    # rows, one read each, at the row length the ELF reports - never a
+    # literal 64, for the reason `gdb_flat_lengths` exists.  Five rows
+    # is 320 quadwords and one extra monitor round trip.
+    if reason_slots:
+        for name, _ in (DELTA_GLOBAL_HISTOGRAMS
+                        + DELTA_HANDLER_REASON_COSTS):
+            if name in off:
+                monitor.queue(instance + off[name], reason_slots)
+    # The phase tree, and the widest thing this mode reads: two rows of
+    # `phase_count` per processor, so eight processors is sixteen more
+    # commands where the whole sample is around two hundred.  Behind
+    # `--delta-phases` for that reason - the read window is this
+    # measurement's own error bar, and a section nobody asked for should
+    # not widen it.  `phase_slots` is None when the flag is absent, and
+    # `delta_main` says so in the report rather than printing nothing.
+    if phase_slots:
+        for name in ("phase_cycles", "phase_calls"):
+            if name not in off:
+                continue
+            for cpu in range(cpus):
+                monitor.queue(instance + off[name]
+                              + cpu * phase_slots * 8, phase_slots)
+        # `build_vmcs02`'s own split, which is a sub-split of phase 2
+        # and rides the same flag.  Twenty-five quadwords, four more
+        # commands on a sample of about two hundred.
+        #
+        # **This table was boot-cumulative and named in
+        # DELTA_REFUSED_MEMBERS as "left out deliberately", and that is
+        # how one of its slots came to be quoted at 10.10 writes a call
+        # against a prediction of at most 5.18.**  A cumulative mean
+        # over a five-minute-old boot is mostly its cold start: every
+        # elision in that function has a precondition that is false
+        # until a vmcs02 has run and been saved from.  Differenced, the
+        # slot says what the settled guest costs.
+        for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                     "vmcs02_split_writes"):
+            if name in off:
+                monitor.queue(instance + off[name], len(VMCS02_SPLIT))
+        if "vmcs02_split_calls" in off:
+            monitor.queue(instance + off["vmcs02_split_calls"], 1)
+    # Optional, and read per processor rather than as one run: the row
+    # length comes from the ELF, never a literal 64, for the reason
+    # `gdb_lengths` exists.
+    if gap_capacity and "clock_gap_buckets" in off:
+        for cpu in range(cpus):
+            monitor.queue(instance + off["clock_gap_buckets"]
+                          + cpu * gap_capacity * 8, gap_capacity)
+    # The five named synthetic-MSR counters, one quadword each, plus the
+    # two state fields that turn them into an address and a deadline.
+    # `synthetic_capacity` is the row length read out of the ELF, never
+    # a literal 320 - `gdb_lengths` exists because a capacity copied
+    # here once went stale and every processor but cpu 0 read the wrong
+    # slot, which reported plausible counts for MSRs nothing writes.
+    if synthetic_capacity and "synthetic_msr_writes" in off:
+        for cpu in range(cpus):
+            for slot, _ in DELTA_SYNTHETIC_SLOTS:
+                monitor.queue(instance + off["synthetic_msr_writes"]
+                              + (cpu * synthetic_capacity + slot) * 8, 1)
+            for name in ("synthetic_msr_last_value",
+                         "synthetic_msr_last_write_tsc"):
+                if name not in off:
+                    continue
+                for slot in DELTA_SYNTHETIC_STATE_SLOTS:
+                    monitor.queue(instance + off[name]
+                                  + (cpu * synthetic_capacity + slot) * 8,
+                                  1)
+
+    # The counters that are NOT singleton members, at `module base +
+    # symbol` rather than `instance + offset`.  Queued into the SAME
+    # batch as everything above, deliberately: a second connection would
+    # be a second instant, and these have to be differenced against the
+    # exit count sampled beside them or the reads-per-exit ratio is two
+    # windows divided by each other.  One word each, so a dozen names
+    # cost two more monitor commands on a sample of about two hundred.
+    for address in (vmcs_globals or {}).values():
+        monitor.queue(address, 1)
+
+    started = time.monotonic()
+    words = monitor.run()
+    ended = time.monotonic()
+
+    def read(name, index=0):
+        if name not in off:
+            return None
+        return words.get(instance + off[name] + 8 * index)
+
+    readings = {}
+    for name, _ in DELTA_PER_CPU_COUNTERS + DELTA_PER_CPU_CYCLES:
+        for cpu in range(cpus):
+            readings[(name, cpu)] = read(name, cpu)
+    for name, _ in DELTA_GLOBAL_COUNTERS:
+        readings[(name, None)] = read(name)
+    if reason_slots:
+        for name, _ in (DELTA_GLOBAL_HISTOGRAMS
+                        + DELTA_HANDLER_REASON_COSTS):
+            for reason in range(reason_slots):
+                readings[(name, reason)] = read(name, reason)
+    if phase_slots:
+        for name in ("phase_cycles", "phase_calls"):
+            for cpu in range(cpus):
+                for slot in range(phase_slots):
+                    readings[(name, (cpu, slot))] = read(
+                        name, cpu * phase_slots + slot)
+        for name in ("vmcs02_split_cycles", "vmcs02_split_reads",
+                     "vmcs02_split_writes"):
+            for slot in range(len(VMCS02_SPLIT)):
+                readings[(name, slot)] = read(name, slot)
+        readings[("vmcs02_split_calls", None)] = read("vmcs02_split_calls")
+    for cpu in range(cpus):
+        for reason in range(reason_capacity):
+            readings[("exit_reason_counts", (cpu, reason))] = read(
+                "exit_reason_counts", cpu * reason_capacity + reason)
+        for disposition in range(disposition_capacity):
+            readings[("l2_ept_dispositions", (cpu, disposition))] = read(
+                "l2_ept_dispositions",
+                cpu * disposition_capacity + disposition)
+        if gap_capacity and "clock_gap_buckets" in off:
+            for bucket in range(gap_capacity):
+                readings[("clock_gap_buckets", (cpu, bucket))] = read(
+                    "clock_gap_buckets", cpu * gap_capacity + bucket)
+        if synthetic_capacity and "synthetic_msr_writes" in off:
+            for slot, _ in DELTA_SYNTHETIC_SLOTS:
+                readings[("synthetic_msr_writes", (cpu, slot))] = read(
+                    "synthetic_msr_writes",
+                    cpu * synthetic_capacity + slot)
+            # State, not events: recorded under a key delta mode never
+            # differences, and printed as a value.  A last-value field
+            # subtracted from itself gives a distance, not a rate - the
+            # second entry in DELTA_REFUSALS.
+            for name in ("synthetic_msr_last_value",
+                         "synthetic_msr_last_write_tsc"):
+                for slot in DELTA_SYNTHETIC_STATE_SLOTS:
+                    readings[("state", name, cpu, slot)] = read(
+                        name, cpu * synthetic_capacity + slot)
+
+    # `("global:<name>", None)` rather than `(name, None)`, so that a
+    # global can never collide with a singleton member of the same name -
+    # today none does, and a member added later would silently overwrite
+    # a reading rather than fail.  `delta_key_name` renders a None index
+    # as the bare name, so the prefix is what appears in any complaint
+    # and it says which addressing mode produced the number.
+    #
+    # `words.get` with no default: a missing address stays **None** and
+    # `delta_rows` reports it as unread.  Defaulting it to 0 here would
+    # turn a monitor that did not answer into a counter that did not
+    # move, which is the single habit this file records as most
+    # expensive.
+    for name, address in (vmcs_globals or {}).items():
+        readings[("global:" + name, None)] = words.get(address)
+
+    clock = max((read(DELTA_CLOCK, cpu) or 0) for cpu in range(cpus))
+    first = tuple(read(DELTA_FINGERPRINT, cpu) for cpu in range(cpus))
+    return readings, first, clock, started, ended
+
+
+L2_DISPOSITION = ["none", "installed", "replayed", "cached", "refused",
+                  "no-entry", "mapped", "generation", "root-failed",
+                  "pointer-failed"]
+
+
+def delta_synic_lines(after, cpus):
+    """The synthetic message page, and the two fields that date it.
+
+    **This prints the address to read and the value to compare it
+    against - it does not print a verdict**, because the verdict needs
+    one `xp` this script does not issue.
+
+    The question it is built for: the message slot for SINT3 has been
+    read by hand and found occupied most of the time, and a duty cycle
+    estimated from a handful of monitor reads against a 574.7 Hz event
+    cannot tell "occupied because the guest is slow to drain" from
+    "occupied because it is refilled the moment it is drained".  Those
+    want opposite fixes and look identical under sampling.
+
+    One field settles it without any sampling at all.  The message
+    payload for a timer expiry is 24 bytes - timer index, reserved,
+    expiration time, delivery time - so the expiry the occupying message
+    was posted for sits at page offset 0x318 and the moment the
+    controller wrote it at 0x320, both in 100 ns reference units.  The
+    guest arms the one-shot by writing that same absolute deadline to
+    STIMER0_COUNT, which is the last value printed here.  So:
+
+      message expiration_time == last STIMER0_COUNT written
+          the occupying message belongs to the arm currently
+          outstanding.  It is at most one tick old and the slot is a
+          pipeline, not a wedge.
+
+      message expiration_time <  last STIMER0_COUNT written
+          the guest has re-armed at least once since that message was
+          posted and never drained it.  The message is stale and the
+          drain is genuinely failing.
+
+    Sampled twice a few hundred milliseconds apart, a value at 0x318
+    that moves is turnover and a value that does not is one stuck
+    message.  Two absolute timestamps compared against each other, with
+    no duty cycle and no rate anywhere in the argument.
+    """
+    lines = []
+    rows = []
+    for cpu in range(cpus):
+        simp = after.get(("state", "synthetic_msr_last_value", cpu, 0x83))
+        count = after.get(("state", "synthetic_msr_last_value", cpu, 0xb1))
+        sint3 = after.get(("state", "synthetic_msr_last_value", cpu, 0x93))
+        config = after.get(("state", "synthetic_msr_last_value", cpu, 0xb0))
+        eom_tsc = after.get(
+            ("state", "synthetic_msr_last_write_tsc", cpu, 0x84))
+        now = after.get((DELTA_CLOCK, cpu))
+        if simp or count or eom_tsc or sint3 or config:
+            rows.append((cpu, simp, count, sint3, config, eom_tsc, now))
+    if not rows:
+        return lines
+
+    lines.append("")
+    lines.append("synthetic interrupt controller, per processor "
+                 "(state, NOT differenced)")
+    for cpu, simp, count, sint3, config, eom_tsc, now in rows:
+        lines.append(f"  cpu {cpu}")
+        # **The check the gap histogram has never had.** It counts one
+        # hardcoded vector; this is the vector the guest actually
+        # programmed into the source the timer posts to. A disagreement
+        # means the histogram is a census of something else entirely
+        # and its percentages say nothing about the clock.
+        if sint3:
+            vector = sint3 & 0xff
+            agrees = ("AGREES with clock_gap_vector"
+                      if vector == CLOCK_GAP_VECTOR
+                      else f"DISAGREES with clock_gap_vector "
+                           f"0x{CLOCK_GAP_VECTOR:02x} - the gap "
+                           f"histogram is counting a different vector")
+            lines.append(
+                f"    SINT3 (0x40000093) 0x{sint3:016x}  "
+                f"vector 0x{vector:02x}  masked {(sint3 >> 16) & 1}  "
+                f"auto_eoi {(sint3 >> 17) & 1}")
+            lines.append(f"      -> {agrees}")
+        else:
+            lines.append(
+                "    SINT3 not recorded on this processor - no wrmsr to "
+                "0x40000093 was seen here, so the vector the gap "
+                "histogram counts is UNCHECKED, not confirmed")
+        # Message mode or direct mode. In direct mode the expiry is an
+        # APIC vector with no message at all (KVM's
+        # `stimer_notify_direct`), so nothing is ever written to the
+        # message page and every reading of that page is off the clock
+        # path. In message mode the two rates are comparable.
+        if config is not None and config:
+            bits = stimer_config_decode(config)
+            lines.append(
+                f"    STIMER0_CONFIG (0x400000b0) 0x{config:016x}")
+            lines.append(
+                f"      enable {bits['enable']}  periodic "
+                f"{bits['periodic']}  lazy {bits['lazy']}  auto_enable "
+                f"{bits['auto_enable']}")
+            lines.append(
+                f"      direct_mode {bits['direct_mode']}  sintx "
+                f"{bits['sintx']}  apic_vector "
+                f"0x{bits['apic_vector']:02x}")
+            if bits["direct_mode"]:
+                lines.append(
+                    "      -> DIRECT MODE: the expiry is delivered as a "
+                    "bare vector and NO message")
+                lines.append(
+                    "         is ever posted. Every reading of the "
+                    "message page is off the clock path.")
+            else:
+                lines.append(
+                    f"      -> message mode to SINT{bits['sintx']}: every "
+                    f"expiry posts a message into slot "
+                    f"{bits['sintx']}, so the message")
+                lines.append(
+                    "         rate and the interrupt rate are the same "
+                    "quantity and must agree.")
+            if not bits["periodic"]:
+                lines.append(
+                    "      -> one-shot, so STIMER0_COUNT below is an "
+                    "ABSOLUTE reference-time deadline,")
+                lines.append(
+                    "         not a period - and the guest computed it "
+                    "from its own clock.")
+        if simp:
+            lines.append(f"    SIMP  0x{simp:016x}  enabled {simp & 1}  "
+                         f"page 0x{simp & ~0xfff:x}")
+            slot3 = (simp & ~0xfff) + 0x300
+            lines.append(f"      header  xp /2xw 0x{slot3:x}       "
+                         f"type, then payload_size|flags|reserved")
+            lines.append(f"      expiry  xp /1xg 0x{slot3 + 0x18:x}       "
+                         f"<- compare with STIMER0_COUNT below")
+            lines.append(f"      posted  xp /1xg 0x{slot3 + 0x20:x}       "
+                         f"when the controller wrote it")
+        else:
+            lines.append("    SIMP  not recorded on this processor - no "
+                         "wrmsr to 0x40000083 was seen here, which is "
+                         "NOT the same as the page not existing")
+        if count is not None:
+            lines.append(f"    last STIMER0_COUNT written  "
+                         f"0x{count:x} ({count:,})")
+        if eom_tsc:
+            age = (now - eom_tsc) if (now and now >= eom_tsc) else None
+            when = (f"{age:,} ticks ago" if age is not None
+                    else "age unavailable")
+            lines.append(f"    last EOM written at tsc 0x{eom_tsc:x}  "
+                         f"({when})")
+        else:
+            lines.append("    no EOM has EVER been written on this "
+                         "processor - the guest has never drained a "
+                         "message that had MessagePending set")
+
+    lines.append("  The SIMP recorded here is whatever last wrote "
+                 "0x40000083 *on this processor*, and that array does "
+                 "not distinguish trust levels: VTL0's kernel and VTL1's "
+                 "secure kernel each run their own controller with their "
+                 "own page, and both write the same MSR. A page read "
+                 "from here is not attributed to a VTL by this reader.")
+    # **`delivery_time - expiration_time` is not a latency unless the two
+    # fields share an epoch, and here they may not.** KVM's
+    # `stimer_send_msg` (`.references/kvm/hyperv.c:824-826`) writes
+    # `expiration_time = stimer->exp_time` and
+    # `delivery_time = get_time_ref_counter(...)`.  For a **one-shot**
+    # arm `exp_time` is the absolute deadline the *guest* wrote, computed
+    # from whatever the guest reads reference time out of - and this VMM
+    # publishes its own reference-TSC page into the address the guest
+    # named (`nested_entry.cpp:6868` `publish_reference_tsc_page`, with
+    # the offset re-anchored on every revision at line 7076).
+    # `delivery_time` comes from the level above's counter.  Two
+    # producers, two anchors: a difference that is *constant* across
+    # samples is what a fixed epoch skew looks like, and a difference
+    # that *grows* is what a clock-rate divergence looks like.  Neither
+    # is a delivery latency, which would jitter.
+    lines.append("  delivery_time - expiration_time is only a latency if "
+                 "both fields are on the same")
+    lines.append("  clock. For a one-shot arm expiration_time is the "
+                 "deadline the GUEST computed and")
+    lines.append("  delivery_time is the level above's reference "
+                 "counter; this VMM publishes its own")
+    lines.append("  reference-TSC page to the guest, so they need not "
+                 "share an epoch. Sample the pair")
+    lines.append("  twice a minute apart: constant = epoch skew, growing "
+                 "= rate divergence, jittering")
+    lines.append("  = a real latency. A value stable to four decimals is "
+                 "NOT a latency.")
+    return lines
+
+
+def delta_vmcs_global_lines(before, after, missing, exits, seconds):
+    """The non-singleton VMCS counters, differenced over the window.
+
+    **This is where these counters belong**, and the reason is one
+    number: the same `vmcs_cache_hits`/`vmcs_cache_misses` pair reads
+    52.8% cumulative and 36.2% differenced over 45 s on one boot
+    (`8fce1c9`).  A boot has phases with completely different VMCS
+    access patterns and a cumulative ratio averages them, so a
+    cumulative-only presentation would have overstated the cache by half
+    again - the failure this whole file is written against.
+
+    Every difference goes through `delta_rows`, so a counter that went
+    backwards is reported as IMPOSSIBLE rather than printed, and one
+    that was never read stays unread rather than becoming a zero.  The
+    ratios then run on the deltas, through the same printer the
+    cumulative dump uses, so the two cannot drift apart.
+    """
+    entries = [(("global:" + s.rsplit("::", 1)[-1], None), label)
+               for s, label in VMCS_GLOBAL_COUNTERS
+               if s.rsplit("::", 1)[-1] not in missing]
+    rows, impossible, unread = delta_rows(before, after, entries)
+
+    lines = ["", "vmcs counters that are NOT singleton members, "
+                 "DIFFERENCED over this window"]
+    lines.append("  (namespace-scope constinit globals in vmcs.h - see "
+                 "VMCS_GLOBAL_COUNTERS for why")
+    lines.append("   nothing in this reader could see them until now)")
+
+    if not entries:
+        lines.append("  NOTHING SAMPLED: not one of these symbols is in "
+                     "the ELF.")
+        lines += vmcs_globals_missing_lines(missing)
+        return lines
+
+    values, still = {}, []
+    for key, label, a, b, delta in rows:
+        name = key[0].split(":", 1)[1]
+        values[name] = delta
+        rate = f"{delta / seconds:>14,.1f}/s" if seconds else " " * 17
+        lines.append(f"  {name:<28} +{delta:>16,} {rate}  {label}")
+        if 0 == delta:
+            still.append(name)
+
+    for key, label in unread:
+        name = key[0].split(":", 1)[1]
+        lines.append(f"  {name:<28} NOT READ in one or both samples - "
+                     f"unknown, NOT zero")
+
+    # **"Did not move" and "did not read" must not print the same**, and
+    # here the two samples settle it without any extra work: a row that
+    # is in `rows` at all was answered twice, so a delta of zero is a
+    # measurement.  A row the monitor never answered is in `unread`
+    # above and says so.  Collected into one line rather than repeated
+    # under every row, because on a healthy guest most of these are the
+    # MUST-be-0 refusal counters and a dozen identical notes would bury
+    # the counters that did move.
+    if still:
+        lines.append(f"  the {len(still)} counter(s) at +0 above were "
+                     f"READ TWICE and did not move, so those are")
+        lines.append("  genuine zeroes rather than failed reads:")
+        row = "   "
+        for name in still:
+            if len(row) + len(name) + 2 > 74:
+                lines.append(row)
+                row = "   "
+            row += " " + name + ","
+        lines.append(row.rstrip(","))
+
+    lines += delta_impossible_lines(impossible)
+
+    # State, printed from sample B as a VALUE and never differenced -
+    # `VMCS_GLOBAL_STATE` says which three kinds these are and why
+    # subtracting any of them produces a distance rather than a rate.
+    # Printed here rather than left out of delta mode entirely, because a
+    # non-zero `zpp_launch_failed` or `vmcs_*_failed_field` invalidates
+    # every rate above it and this is the only mode some runs use.
+    state = []
+    for symbol, label in VMCS_GLOBAL_STATE:
+        short = symbol.rsplit("::", 1)[-1]
+        if short in missing:
+            continue
+        value = after.get(("global:" + short, None))
+        if value is None:
+            state.append(f"  {short:<28} NOT READ - unknown, NOT zero")
+        else:
+            state.append(f"  {short:<28} {value:>18,}  {label}")
+    if state:
+        lines.append("")
+        lines.append("  state, from sample B (NOT differenced - see "
+                     "VMCS_GLOBAL_STATE):")
+        lines += state
+
+    lines += vmcs_globals_missing_lines(missing)
+    lines += vmcs_global_ratio_lines(
+        values, exits, f"DIFFERENCED over {seconds:.1f} s", seconds)
+    return lines
+
+
+def delta_main(args, base, instance, off, cpus, reason_capacity,
+               disposition_capacity, synthetic_capacity=None,
+               gap_capacity=None, reason_slots=None, phase_slots=None):
+    """Two samples, a measured span between them, and rates from it."""
+    # **Before the samples, not after**, and it costs one monitor round
+    # trip: `manifest_field` answers None until this has run, and delta
+    # mode returns long before the cumulative dump's own manifest read.
+    # Without it every switch-dependent caveat in this report - `vcache=`
+    # beside the hit rate above all - printed "unknown" in the one mode
+    # this file asks people to trust.  Failure here is not fatal: the
+    # caveats then say the manifest was not read, which is the honest
+    # third answer and is not the same as a switch reading zero.
+    try:
+        read_build_manifest(args, base)
+        if BUILD_MANIFEST:
+            print(f"  {BUILD_MANIFEST}")
+    except Exception as failure:
+        print(f"  build manifest not read: {failure} - every `switch=` "
+              f"caveat below will say so")
+
+    # Resolved once, from the ELF, and reused for both samples: the
+    # module base does not move under a running guest, and re-resolving
+    # between samples would put a gdb invocation inside the measured
+    # span.
+    try:
+        vmcs_globals, vmcs_missing = vmcs_globals_resolve(args.elf, base)
+    except Exception as failure:
+        vmcs_globals, vmcs_missing = {}, []
+        print(f"  vmcs non-singleton counters not resolved: {failure}")
+
+    print(f"\ntaking sample A, then waiting {args.delta} s, then sample "
+          f"B ...")
+    before, first_a, clock_a, a0, a1 = delta_sample(
+        args, instance, off, cpus, reason_capacity, disposition_capacity,
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots,
+        vmcs_globals)
+
+    # The socket is closed before this sleep and reopened after it: no
+    # connection is held across the wait.
+    time.sleep(args.delta)
+
+    after, first_b, clock_b, b0, b1 = delta_sample(
+        args, instance, off, cpus, reason_capacity, disposition_capacity,
+        synthetic_capacity, gap_capacity, reason_slots, phase_slots,
+        vmcs_globals)
+    base_b = serial_module_base(args.rig)
+
+    # Midpoint to midpoint, because each sample takes a measurable time
+    # and a counter read at the start of A and the start of B spans a
+    # different interval from one read at their ends.  Nominal spans have
+    # already cost this investigation one reading; this one is measured
+    # even down to which instant it is measured between.
+    seconds = ((b0 + b1) / 2.0) - ((a0 + a1) / 2.0)
+    span = delta_span(clock_a or None, clock_b or None, seconds)
+
+    entries = [((n, cpu), label)
+               for n, label in DELTA_PER_CPU_COUNTERS
+               for cpu in range(cpus)]
+    entries += [((n, None), label) for n, label in DELTA_GLOBAL_COUNTERS]
+    entries += [(("synthetic_msr_writes", (cpu, slot)), label)
+                for cpu in range(cpus)
+                for slot, label in DELTA_SYNTHETIC_SLOTS]
+    cycles = (before, after,
+              [((n, cpu), label) for n, label in DELTA_PER_CPU_CYCLES
+               for cpu in range(cpus)])
+
+    histograms = []
+    for cpu in range(cpus):
+        histograms.append((
+            "exit reasons", cpu,
+            (before, after,
+             [(("exit_reason_counts", (cpu, r)), "")
+              for r in range(reason_capacity)]),
+            lambda r: EXIT_REASON.get(r[1], r[1])))
+        histograms.append((
+            "second-level fault dispositions", cpu,
+            (before, after,
+             [(("l2_ept_dispositions", (cpu, d)), "")
+              for d in range(disposition_capacity)]),
+            lambda d: (L2_DISPOSITION[d[1]]
+                       if d[1] < len(L2_DISPOSITION) else str(d[1]))))
+        if gap_capacity:
+            # The bucket label carries the period it stands for, at the
+            # frequency this window measured rather than the constant -
+            # `delta_span` already picked one and said which, and a
+            # histogram labelled from a different frequency than the
+            # rates beside it is the unit slip this file keeps
+            # recording.
+            hz = span[2] or TSC_HZ
+            histograms.append((
+                f"gaps between stagings of vector "
+                f"0x{CLOCK_GAP_VECTOR:02x} into vmcs02", cpu,
+                (before, after,
+                 [(("clock_gap_buckets", (cpu, b)), "")
+                  for b in range(gap_capacity)]),
+                lambda b, hz=hz: f"2^{b[1]:<2} "
+                                 f"({(1 << b[1]) / (hz / 1000.0):8.3f} ms)"))
+
+    fingerprints = ({"base": base, "first_tsc": first_a},
+                    {"base": (int(base_b, 16) if base_b else None),
+                     "first_tsc": first_b})
+
+    for line in delta_report(before, after, entries, cycles, histograms,
+                             span, fingerprints, cpus, args.delta,
+                             (a1 - a0, b1 - b0)):
+        print(line)
+
+    # delta_report withholds its tables when identity or timing fails.
+    # The separately printed global/phase/state sections use the same
+    # samples and must obey that rejection too.
+    if not delta_fingerprint_lines(*fingerprints)[1] or seconds <= 0:
+        return
+
+    # After the report rather than inside it, because it is a *global*
+    # table and every histogram `delta_report` prints is per processor.
+    # Folding it in would put a figure summed over every processor under
+    # a `cpu 0` heading, which is the mislabelling this mode exists to
+    # end.
+    if reason_slots:
+        entered = sum(
+            d for (n, cpu), _l, _a, _b, d in
+            delta_rows(before, after,
+                       [(("l2_entries", cpu), "") for cpu in range(cpus)])[0])
+        for line in delta_level_split_lines(
+                before, after, reason_slots, span[1] or args.delta,
+                entered):
+            print(line)
+
+    # `handler_reason_*` is one global row, so its denominators have to
+    # be summed over the processors sampled - `handler_cycles` and
+    # `handler_exits` are `[max_cpus]`. Summed here rather than inside
+    # the printer, so the printer stays reachable from a test with
+    # numbers chosen to make it fail.
+    def summed(name):
+        rows, bad, unread = delta_rows(
+            before, after, [((name, cpu), "") for cpu in range(cpus)])
+        if bad or unread:
+            return None
+        return sum(d for _k, _l, _a, _b, d in rows)
+
+    # Straight after `summed`, because the reads-per-exit ratio needs
+    # `exit_total` differenced over the SAME window and summed over the
+    # SAME processors - and through `delta_rows`, so a denominator that
+    # went backwards comes back as None and the printer says "NOT
+    # COMPUTED" instead of dividing by it.  `843690a` lost a whole
+    # before/after because the numerator was taken and the denominator
+    # was not; here they cannot be separated.
+    try:
+        for line in delta_vmcs_global_lines(
+                before, after, vmcs_missing, summed("exit_total"),
+                span[1] or args.delta):
+            print(line)
+    except Exception as failure:
+        print(f"\n[vmcs non-singleton counters not reported: {failure}]")
+
+    if reason_slots:
+        for line in delta_handler_reason_lines(
+                before, after, reason_slots, span[1] or args.delta,
+                summed("handler_cycles"), summed("handler_exits")):
+            print(line)
+    else:
+        # Said out loud. A section that is silently absent and one that
+        # measured nothing look identical afterwards, which is the whole
+        # subject of this file.
+        print("")
+        print("the handler's time BY REASON: NOT SAMPLED - the row "
+              "length could not be read")
+        print("  from the ELF, so `handler_reason_cycles` was not "
+              "queued. This is unknown,")
+        print("  not zero.")
+
+    # Through `delta_rows` rather than by subtracting two `.get`s, so a
+    # denominator that went backwards or was never read comes out as
+    # None and the printer says so. Subtracting them by hand is how this
+    # investigation produced -11,989 cycles on a monotonic accumulator.
+    def one_cpu(name, cpu):
+        rows, bad, unread = delta_rows(
+            before, after, [((name, cpu), "")])
+        if bad or unread:
+            return None
+        return rows[0][4]
+
+    if phase_slots:
+        for cpu in range(cpus):
+            for line in delta_phase_lines(
+                    before, after, cpu, phase_slots,
+                    span[1] or args.delta,
+                    one_cpu("l2_entries", cpu),
+                    one_cpu("handler_cycles", cpu),
+                    after.get(("l2_entries", cpu)) or 0,
+                    after.get(("handler_cycles", cpu)) or 0):
+                print(line)
+
+        # `build_vmcs02`'s own bracket, summed over every processor,
+        # because `vmcs02_split_*` has no `[max_cpus]` - it is one
+        # array all processors add into, and dividing it by one
+        # processor's call count reads about 2x high on a two-processor
+        # guest.  That was a live defect in the cumulative printer and
+        # is the same arithmetic here.
+        calls = 0
+        for cpu in range(cpus):
+            rows, bad, unread = delta_rows(
+                before, after, [(("phase_calls", (cpu, 2)), "")])
+            if bad or unread:
+                calls = None
+                break
+            calls += rows[0][4]
+
+        for line in delta_vmcs02_split_lines(before, after, calls):
+            print(line)
+    else:
+        print("")
+        print("the phase tree: NOT SAMPLED in this window. Pass "
+              "--delta-phases for it.")
+        print("  Two rows of phase_count per processor is the widest "
+              "read this mode can")
+        print("  make, and the read window is this measurement's own "
+              "error bar - so it is")
+        print("  opt-in. **The cumulative tree in the default dump is "
+              "NOT a substitute:**")
+        print("  it is a mean over the whole boot and has already been "
+              "quoted in the")
+        print("  present tense about a phase that had ended.")
+
+    for line in delta_synic_lines(after, cpus):
+        print(line)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    # The archived copy first, because it is the binary the guest is
+    # running; out/ is whatever was built most recently, which during an
+    # investigation is routinely a different shape. See deploy-to-rig.sh.
+    ap.add_argument("--elf",
+                    default=(".rig-deployed-hypervisor.elf"
+                             if os.path.exists(".rig-deployed-hypervisor.elf")
+                             else "out/debug/x86_64/zpp_hypervisor"))
+    ap.add_argument("--rig", default="tc@192.168.1.199")
+    ap.add_argument("--port", default="4446")
+    ap.add_argument("--cpus", type=int, default=8)
+    ap.add_argument("--base", default=None,
+                    help="module base; read from serial when omitted")
+    ap.add_argument("--l2", type=int, default=None,
+                    help="also dump this processor's second-level ring")
+    ap.add_argument("--log", type=int, nargs="?", const=4096, default=None,
+                    metavar="N",
+                    help="also dump the hypervisor's log ring, oldest "
+                         "first (default all 4096 lines)")
+    ap.add_argument("--l2-entries", type=int, default=24,
+                    help="how many second-level entries to show")
+    # Where the guest's own symbols are, for naming thread start
+    # addresses. Defaults to the directory `symbolize-trace.py` already
+    # assumes, so the two agree by default rather than by discipline.
+    ap.add_argument("--guest-syms", default="syms", metavar="DIR",
+                    help="directory holding the guest's ntkrnlmp.pdb, "
+                         "used to name thread start addresses")
+    # Steady state, rather than the whole boot averaged into one number.
+    #
+    # Without this every column in this dump is cumulative, and the only
+    # way to ask "is this happening now" was to run the dump twice and
+    # subtract by hand. That is where the mislabelled readings in this
+    # investigation came from, including one hand scrape that produced a
+    # negative delta on a monotonic accumulator.
+    #
+    # Nothing about the default path changes when this is absent - it is
+    # a separate report and a separate, much smaller set of reads.
+    ap.add_argument("--delta", type=float, default=None, metavar="N",
+                    help="take two samples N seconds apart and print "
+                         "rates and deltas over the MEASURED span "
+                         "instead of the cumulative dump")
+    # Opt-in because it is the widest read in the mode: two rows of
+    # `phase_count` per processor, sixteen more monitor commands on an
+    # eight-processor guest. The report says so when it is off, so an
+    # absent section cannot be read as an empty one.
+    ap.add_argument("--delta-phases", action="store_true",
+                    help="with --delta, also difference the per-phase "
+                         "cycle tree (phase_cycles/phase_calls). Widens "
+                         "the read window, which is this measurement's "
+                         "own error bar")
+    args = ap.parse_args()
+
+    base = args.base
+    if base is None:
+        base = serial_module_base(args.rig)
+        if base is None:
+            sys.exit("no module base on serial - did the loader run?")
+    base = int(base, 16)
+
+    members = ["cpl_seen", "guest_leaf_permissions",
+               "vtl_protect_rcx", "vtl_protect_rdx",
+               "vtl_protect_rax", "vtl_protect_count",
+               "vtl_call_rcx",
+               "shadow_leaf_permissions", "exit_trace", "exit_trace_count",
+               "exit_total", "l2_exit_trace",
+               "l2_exit_trace_count", "l2_working_trace",
+               "l2_working_trace_count", "l2_entries", "l2_activity_state",
+               "running_l2", "events_requeued", "events_deferred",
+               "pending_event", "unhandled_exit", "ap_fault",
+               "vm_entry_failure",
+               # `on_sleep_request` has recorded these since it was
+               # written and NOTHING has ever printed them - the member
+               # resolves in the ELF and was simply absent from this
+               # list, which is the same way `start_up_declined` read
+               # as a plausible zero for three boots. It is the one
+               # field that separates "the guest asked the platform to
+               # power off" from a triple fault and from a device-model
+               # reset, all three of which end in `paused (shutdown)`
+               # and are otherwise indistinguishable by run state.
+               "sleep_request", "reset_request",
+               # The VT-d instruments. They exist in the binary, are
+               # incremented by dmar_register_read/write, and had never
+               # been printed for any failure - the fourth member in
+               # this tree to be recorded and never read out. With
+               # nvtd=1 this VMM absorbs the guest hypervisor's VT-d
+               # traffic, so these say whether it is touching the unit
+               # at all, and how much got past.
+               "pending_event_handed_over",
+               "dmar_reads", "dmar_writes", "dmar_qi_descriptors",
+               "dmar_qi_waits_completed", "dmar_register_page",
+               # Recorded by exit_dispatch.cpp since the nesting work and
+               # never read out. The exit ring of four consecutive resets
+               # ends on one of these.
+               "l1_vmcall_count", "l1_vmcall_rcx", "l1_vmcall_rdx",
+               "l1_vmcall_rax", "l1_vmcall_rip", "l1_vmcall_codes",
+               "l1_vmcall_code_counts", "l1_vmcall_code_other",
+               # Where VTL1 resumes on each armed entry. Also recorded
+               # and never read: it is the only thing that says whether
+               # an outstanding secure service is progressing or
+               # restarting.
+               "vtl1_resume_rip", "vtl1_resume_count",
+               "exit_reason_counts",
+               "shadow_ept_builds", "shadow_ept_cache_hits",
+               "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_generation_discards",
+               "l2_invept_single_context", "l2_invept_all_context",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "host_exception", "host_exception_cr2",
+               "cpuid_trace", "cpuid_trace_count", "host_page_table",
+               "cpuid_hypervisor_leaves_asked",
+               "hypercall_codes", "hypercall_code_counts",
+               "msr_write_codes", "msr_write_counts",
+               "msr_write_last_value",
+               "l2_msr_write_codes", "l2_msr_write_counts",
+               "l2_msr_write_last_value", "l2_msr_write_reflected",
+               "msr_write_uncounted", "msr_write_uncounted_code",
+               "evmcs_reads", "evmcs_writes", "evmcs_recommended",
+               "hot_state_writes_skipped", "hot_state_writes_done",
+               "hot_state_writes_uncached",
+               "l2_run_cycles", "l1_run_cycles", "handler_cycles",
+               "handler_first_tsc", "handler_last_tsc",
+               "shadow_ept_evictions", "shadow_ept_resets",
+               "shadow_ept_reclaims", "guest_nmis_reinjected",
+               "pending_event_lost", "pending_event_lost_first",
+               "pending_event_lost_last", "pending_event_lost_reason",
+               # Distinguishes a hand-over correctly REFUSED (the
+               # hardware idt-vectoring field was valid, so the
+               # architecture reported the interrupted delivery itself)
+               # from an event genuinely destroyed. Without it the
+               # report below can only guess, and it guessed.
+               "pending_event_lost_while_valid",
+               "l2_simp_msr", "l2_siefp_msr", "l2_synic_eptp",
+               # Read by `--delta` as a windowed histogram. The
+               # cumulative reader has its own offsets for it; this one
+               # is the delta path's, and it is in the required list
+               # rather than the optional one because a run that
+               # silently omitted it would print the same report as a
+               # run where the clock stream had stopped.
+               "clock_gap_buckets",
+               "shadow_ept_leaves_filled",
+               # How each second-level fault was answered. Without this
+               # the only visible fact is that faults arrive, and a fault
+               # that installs nothing looks exactly like one that
+               # installs something - which is the case that livelocks.
+               # `leaves_filled` frozen while the fault count climbs says
+               # some branch other than `installed` is taking them, and
+               # only this array says which.
+               "l2_ept_dispositions",
+               "shadow_ept_leaves_that_did_not_help",
+               "shadow_ept_recall_root", "shadow_ept_current_slot",
+               "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
+               "vtl_call_block_physical", "vtl_call_vtpr",
+               "vtl_call_gap_buckets", "vtl1_entry_vector",
+               "vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count", "vina_block_physical",
+               "vina_at_call_set", "vina_at_call_clear",
+               "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
+               "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
+               "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_service_calls", "vtl_service_other",
+               "vtl_service_class", "vtl_service_class_other",
+               "vtl_service_reason", "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_by_reason",
+               "vtl_reentry_reason_other", "vtl_reentry_orphan",
+               "vtl_reentry_owner", "vtl_reentry_owner_valid",
+               "vtl_reentry_service", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring",
+               "vtl_reentry_ring_count",
+               "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable",
+               "vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_return_rbx", "vtl_return_rax",
+               "vtl1_clock_withheld", "vtl1_clock_delivered",
+               "l2_self_ipi_swallowed", "l2_self_ipi_reflected",
+               "lazy_tick_first_tsc", "lazy_tick_after_expiry",
+               "lazy_tick_withheld", "lazy_tick_delivered",
+               "lazy_tick_redelivered", "lazy_tick_not_yet",
+               "lazy_tick_owed",
+               "vtl1_clock_owed", "in_vtl1",
+               "vtl_return_count", "vtl_return_distinct",
+               "vtl_protect_after_stack", "vtl_protect_after_read",
+               "vtl_protect_early_before", "vtl_protect_early_after",
+               "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
+               "vtl_protect_answer_to_other",
+               "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
+               "vtl_protect_answer_rip_count",
+               "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
+               "vtl_protect_step_count", "vtl_protect_step_other",
+               "vtl_protect_next_reason", "vtl_protect_next_last",
+               "vtl_protect_next_code", "vtl_protect_next_code_last",
+               "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
+               "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
+               "vtl_protect_readonly_count", "vtl_protect_host_perms",
+               "vtl_protect_host_status", "vtl_protect_thread",
+               "vtl_protect_thread_flags", "vtl_protect_thread_read",
+               "vtl_protect_thread_locked", "vtl_protect_thread_clear",
+               "vmcs_shadow_loads", "vmcs_shadow_stores",
+               "vmcs_field_read_encoding", "vmcs_field_read_count",
+               "vmcs_field_write_encoding", "vmcs_field_write_count",
+               "vmcs_field_use_overflow",
+               "l2_entry_vector", "l2_entries_carrying_nothing",
+               "external_interrupt_vector_counts",
+               "l2_injected_vector", "l2_external_vector",
+               "phase_cycles", "phase_calls",
+               "guest_state_writes_skipped", "guest_state_writes_done",
+               "guest_state_writes_unlicensed", "guest_state_dirty_writes",
+               "control_writes_skipped", "control_writes_done",
+               "control_writes_uncached",
+               # The refusal itself. `scripts/zpp.gdb` has printed these
+               # for a dozen sessions and this reader never did, so the
+               # monitor path - the one that works on a wedged guest -
+               # could not see the number that names a failed entry.
+               "nested_vmfail_count", "nested_last_vmfail",
+               # Whether GS is telling the truth about which processor it
+               # is on. Two scalars, not per-processor arrays, so they are
+               # read with their own queue below rather than with the
+               # per-processor run.
+               "gs_processor_index_disagreements",
+               "gs_processor_index_checked",
+               # The synthetic timer's arm-to-fire interval. This decides
+               # whether the guest's clock handler can finish inside its
+               # own period, and nothing else in this reader shows it.
+               # `asked` beside `given`, because the ratio between them
+               # is the whole question and the line that formed it
+               # divided by a hardcoded 1,740 instead.
+               "stimer_given_cycles", "stimer_given_arms",
+               "stimer_asked_units", "stimer_asked_arms",
+               "stimer_unanswered",
+               "stimer_arm_count", "stimer_arm_value", "stimer_arm_tsc",
+               "stimer_arm_kind",
+               # Where the second-level guest's hot instruction lives, so
+               # the bytes can be read. See `profile_code_physical`.
+               "profile_code_physical", "profile_code_virtual",
+               # The call stacks. Sampled for sessions and printed by
+               # nothing, which is why "what is the guest waiting on" has
+               # been answered from exit histograms every time.
+               "guest_stack_trace", "guest_stack_count",
+               "guest_stack_pointer", "guest_stack_rip",
+               "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+               "l1_own_cr3",
+               "synthetic_msr_writes", "synthetic_msr_last_value",
+               "interrupted_rip", "interrupted_hits",
+               "interrupted_samples", "interrupted_overflow",
+               "stall_withheld_total", "stall_forced_total",
+               "window_deferred_count", "window_granted_on_drop",
+               # The two ways the armed TPR threshold is taken back down.
+               # Left standing over a priority that has already fallen it
+               # is a VM-entry consistency check (SDM 29.2.1.1) and the
+               # entry is refused.
+               "window_threshold_disarmed", "window_threshold_withheld",
+               # Refused second-level entries that reached the recovery
+               # path at all, and the one-boot probe of the field that
+               # recovery pointer used to live in.
+               # `recovery_field_readback` is the whole answer: it holds
+               # 0x5a5a12345a5a1234 where the layer below keeps
+               # CR3-target value 0 and 0 where it discards it, which is
+               # what made every refusal a dead processor.
+               "nested_entry_refusals", "entry_refusals",
+               "l2_vp_assist", "l2_vp_assist_eptp",
+               "guest_in_vmx_operation", "guest_vmxon_pointer",
+               "guest_current_vmcs", "index_out_of_range",
+               "index_out_of_range_last", "index_out_of_range_vpid",
+               "vmx_refusal_vmfunc", "vmx_refusal_unhandled",
+               "vmx_refusal_unhandled_reason",
+               "vmx_refusal_cpl", "vmx_refusal_ss_rights",
+               "vmx_refusal_mode", "vmx_refusal_vmxe", "vmx_refusal_cr0",
+               "vmx_refusal_rflags", "vmx_refusal_entry_controls",
+               "vmx_refusal_cs_rights",
+               "vmx_operand_decode_failures", "vmx_operand_read_failures",
+               "vmx_operand_failure_reason", "vmx_operand_failure_linear",
+               "vmx_operand_failure_error",
+               "vmx_operand_failure_running_l2", "vmx_operand_failure_cr3",
+               "walk_refusal_level", "walk_refusal_entry",
+               "walk_refusal_table", "walk_refusal_linear",
+               "vmx_instructions_refused", "refused_xsetbv_count",
+               "refused_xsetbv_index", "refused_xsetbv_value",
+               "recovery_field_readback",
+               "stall_restaged_total", "stall_restage_blocked",
+               "quiet_rip", "quiet_hits",
+               "quiet_samples", "quiet_overflow",
+               # The user-mode census, which is the only thing here that
+               # names the *address space* a sampled address ran in. The
+               # two above name the code and can never name whose - a
+               # system DLL sits at one base in every process that maps
+               # it, so a module walk cannot separate them either.
+               "user_rip_cr3", "user_rip_rip", "user_rip_hits",
+               "user_rip_samples", "user_rip_overflow",
+               "user_rip_unattributed",
+               "user_cr3_seen", "user_cr3_hits", "user_cr3_overflow",
+               # Which shadowed writable fields the level above writes.
+               # The `vmwrite` table above cannot answer this - a
+               # shadowed field's write does not exit, so it never
+               # reaches `record_vmcs_field_use` and its absence there
+               # is the bitmap working. See the printer.
+               "shadow_field_written", "shadow_field_seen",
+               "shadow_field_published",
+               "shadow_write_samples", "shadow_write_unsampled",
+               "guest_interrupted_trace", "guest_interrupted_count",
+               "guest_interrupted_rsp", "guest_interrupted_rip",
+               # The interrupted thread's own registers and its own
+               # interrupt request level, which no other field here
+               # carries. See `interrupted_context`: the instruction
+               # pointer cannot separate a walk that is retrying from one
+               # that is progressing, and the addresses can.
+               "interrupted_contexts", "interrupted_context_count",
+               "interrupted_context_found",
+               "interrupted_context_not_found",
+               # Which thread the guest is running. Sampled for sessions
+               # and printed by nothing, and it is the only progress
+               # metric here that a livelock cannot fake.
+               "guest_thread_samples", "guest_thread_sample_count",
+               # How often the thread table below was rebuilt and
+               # re-read. In `--delta` these say whether
+               # `dump_guest_threads`' output is live or a fossil, and
+               # nothing inside that table can say so itself.
+               "guest_thread_refreshes", "guest_thread_list_walked",
+               # Which hypercalls each level makes. Recorded for sessions
+               # and printed by nothing, and the second-level one names
+               # what Windows is asking Hyper-V to do.
+               "hypercall_codes", "hypercall_code_counts",
+               "msr_write_codes", "msr_write_counts",
+               "msr_write_last_value",
+               "l2_msr_write_codes", "l2_msr_write_counts",
+               "l2_msr_write_last_value", "l2_msr_write_reflected",
+               "msr_write_uncounted", "msr_write_uncounted_code",
+               "l2_hypercall_codes", "l2_hypercall_code_counts",
+               # What the guest hypervisor asked vmcs02 for against what
+               # it was given. A bit it asked for and did not get changes
+               # how its guest's APIC behaves.
+               "control_secondary_requested", "control_secondary_granted",
+               # The IUM block memory breakpoint. See
+               # nested_vmx::watch_vtl_block.
+               "capability_answers", "nested_capability_reads",
+               # VMFUNC, which is how a guest hypervisor switches extended
+               # page tables. A refusal injects #UD into its guest.
+               "l2_vmfunc_calls", "l2_vmfunc_refused",
+               "vtl_block_page", "vtl_block_writes",
+               "vtl_block_writer_rip", "vtl_block_write_address",
+               "vtl_block_write_value",
+               # These three are queued below and were added to the
+               # queue list without being added here, which is not a
+               # typo worth passing over: `gdb_offsets` is the only
+               # place a name is checked against the ELF, so a name
+               # missing from it is a `KeyError` at queue time - loud,
+               # and the reason the reader failed rather than printing a
+               # plausible zero. The two lists are the same fact and
+               # want to be one, which is the next thing to do here.
+               "resumes_reached", "l2_start_up_waits",
+               "ept_violation_unclaimed",
+               # Two counters whose own declarations say what a
+               # non-zero reading means, and which no script has
+               # ever printed. `impossible_decodes` is documented
+               # as having to read zero: non-zero means the decoder
+               # produced a value it could not justify and a
+               # fabricated write was about to happen.
+               # `refused_instruction_count` counts guest stores
+               # the emulator declined - a store the guest believes
+               # it made and did not. Scalars, not per-processor.
+               "impossible_decodes", "refused_instruction_count",
+               # The application-processor liveness probe. Six members,
+               # and they have to be read together - see the comment at
+               # the printer and `nested_vmx::probe_aps`.
+               "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs",
+               # See the note beside these in `scalars`: recorded since
+               # they were added, read by nothing until now.
+               "last_hypercall_code", "last_hypercall_rcx",
+               "last_hypercall_rdx", "last_hypercall_r8",
+               "last_hypercall_tsc", "last_hypercall_count"]
+    off = gdb_offsets(args.elf, members)
+    # The start-up and local-APIC state, which this reader has been
+    # carrying offsets for and printing nowhere.
+    #
+    # **This is the gap that made a whole class of failure unreadable.**
+    # A dump taken after a guest hypervisor tried to start its second
+    # virtual processor showed an INIT and a start-up IPI as the last two
+    # records in the target's exit ring and then nothing - and not one
+    # number in the dump said whether this VMM had seen the interrupt
+    # command that produced them, whether it swallowed it, queued it,
+    # handed it over or passed it to hardware, or whether the target then
+    # halted on an unhandled exit or a refused VM entry. Every one of
+    # those is a member of the singleton and was already in memory.
+    #
+    # Optional and merged rather than added to `members`, because that
+    # call is not optional: a name a deployed binary predates would take
+    # the whole dump down instead of one section.
+    off.update(gdb_offsets(args.elf, [
+        "ipi_last_command", "ipi_init_seen", "ipi_start_up_seen",
+        "ipi_refused_shorthand", "ipi_refused_logical",
+        "apic_page_commands_filtered", "apic_writes_undecoded",
+        "watched_apic_page", "all_processors_started",
+        "unresponsive_processors", "number_of_known_processors",
+        "processor_virtualized", "started_by_guest_start_up_ipi",
+        "start_up_launched", "resume_activity_state",
+        "queued_start_up", "start_up_handoff",
+        # What this VMM did to the guest's own clock. `guest_tick_floored`
+        # is the count of times the second-level guest's periodic timer
+        # count was replaced with the floor - so a run with the switch on
+        # and this counter at zero changed nothing, and a run with it
+        # non-zero is not a run of an honest configuration.
+        "guest_tick_floored", "guest_timer_stretched",
+        # The third permission reading. `vtl_protect_host_perms` is our
+        # own first-level table and `shadow_ept_lookup` is the composed
+        # shadow; those two are *meant* to differ. Only the guest
+        # hypervisor's own eptp12 says whether it asked for the
+        # protection that is installed - see nested_entry.cpp, which
+        # records it and calls it "the only reading that separates 'it
+        # protected them' from 'our composition is wrong'".
+        "vtl_protect_guest_perms", "vtl_protect_guest_status",
+        "vtl_protect_status_seen",
+        # When the guest last wrote each synthetic MSR, which is what
+        # dates the EOM in delta mode. Optional for the reason above:
+        # `synthetic_msr_writes` and `synthetic_msr_last_value` are in
+        # the required list already, and this one is newer than both.
+        "synthetic_msr_last_write_tsc",
+        # The by-level exit split, and the two per-processor counts that
+        # go with it.  Optional for the reason above: all three are
+        # newer than binaries that are still deployed, and a name a
+        # deployed binary predates would take the whole dump down
+        # instead of one section.
+        "handler_reason_exits", "handler_reason_from_l2",
+        "hlt_reflect_count", "hlt_reflect_rflags",
+        "hlt_reflect_interruptibility", "reference_read_count",
+        # The cost rows that go with the two counts above, and the
+        # per-processor exit count the split has to sum to. Optional for
+        # the same reason: a deployed binary predating one of them must
+        # cost this section, not the whole dump.
+        "handler_reason_cycles", "handler_reason_reads",
+        "handler_reason_writes", "handler_exits",
+    ], optional=True))
+    instance = base + gdb_symbol(
+        args.elf, "zpp::hypervisor::hypervisor::instance()::instance")
+    # Derived from the type rather than carried here, for the reason
+    # gdb_lengths gives at length: a constant copied out of the header
+    # does not fail when the header changes, it reads the ring at the
+    # wrong stride and reports plausible nonsense. The record gained a
+    # field the day this comment was written.
+    entry_size = int(subprocess.run(
+        ["x86_64-elf-gdb", "-q", "-batch", args.elf, "-ex",
+         "print (int)sizeof(('zpp::hypervisor::hypervisor' *)0)"
+         "->exit_trace[0][0]"],
+        capture_output=True, text=True).stdout.split("=")[-1].strip())
+    lengths = gdb_lengths(args.elf, ["exit_trace", "l2_exit_trace",
+                                     "l2_working_trace",
+                                     "exit_reason_counts"])
+    ring = lengths["exit_trace"]
+    l2ring = lengths["l2_exit_trace"]
+    working_ring = lengths["l2_working_trace"]
+    reason_capacity = lengths["exit_reason_counts"]
+
+    # A processor named by --l2 must have its scalars read even when it is
+    # outside --cpus, or `l2_exit_trace_count` comes back as None and the
+    # dump dies in arithmetic rather than saying what it wanted.
+    scalar_cpus = max(args.cpus, 0 if args.l2 is None else args.l2 + 1)
+
+    print(f"module base 0x{base:x}, singleton 0x{instance:x}")
+
+    # Delta mode is a different report from a much smaller set of reads,
+    # and it returns before the cumulative dump rather than beside it -
+    # printing both would put a total and a rate under adjacent headings,
+    # which is the confusion this mode exists to end.
+    if args.delta is not None:
+        disposition_capacity = gdb_lengths(
+            args.elf, ["l2_ept_dispositions"])["l2_ept_dispositions"]
+        # Optional: a deployed binary can predate the member, and a
+        # reader that dies on its absence is worse than one that says
+        # so. The row length comes from the ELF for the reason
+        # gdb_lengths exists - a literal 320 here would read cpu 0
+        # correctly and every other processor wrong.
+        try:
+            synthetic_capacity = gdb_lengths(
+                args.elf,
+                ["synthetic_msr_writes"])["synthetic_msr_writes"]
+        except SystemExit:
+            synthetic_capacity = None
+            print("note: synthetic_msr_writes is absent from this ELF; "
+                  "the synthetic-MSR slice will not be reported")
+        # Same treatment, same reason: optional so an older deployed
+        # binary still reports, and the row length from the ELF so the
+        # stride cannot go stale.
+        try:
+            gap_capacity = gdb_lengths(
+                args.elf, ["clock_gap_buckets"])["clock_gap_buckets"]
+        except SystemExit:
+            gap_capacity = None
+            print("note: clock_gap_buckets is absent from this ELF; the "
+                  "clock-gap histogram will not be reported")
+        # Same treatment again.  The row length comes from the ELF, not
+        # from `handler_reason_slots` copied here: the header owns that
+        # constant and a copy of it does not fail when it changes, it
+        # reads the second row at the wrong stride and prints a coherent
+        # histogram of exits the guest never took.  `exit_reason_counts`
+        # has already cost this file exactly that.
+        #
+        # **`gdb_flat_lengths`, not `gdb_lengths`.**  These rows are
+        # `[handler_reason_slots]` and flat, and the nested question
+        # `gdb_lengths` asks cannot be put to a flat array at all - gdb
+        # answers `cannot subscript something of type 'unsigned long'`,
+        # this `except` caught it, and the note below claimed the member
+        # was *absent*.  It is not absent, it has been resident all
+        # along, and the exits-by-level split has therefore never
+        # printed.  Measured against a stand-in object; see
+        # `gdb_flat_lengths`.
+        try:
+            reason_slots = gdb_flat_lengths(
+                args.elf,
+                ["handler_reason_exits"])["handler_reason_exits"]
+        except SystemExit:
+            reason_slots = None
+            print("note: handler_reason_exits is absent from this ELF; "
+                  "the exits-by-level split and the by-reason cost "
+                  "split will not be reported")
+        # The phase tree, only when asked for. Nested, so `gdb_lengths`
+        # is the right question here and the flat one would answer
+        # `max_cpus` - which is a plausible small number and would walk
+        # every processor's row at the wrong stride.
+        phase_slots = None
+        if args.delta_phases:
+            try:
+                phase_slots = gdb_lengths(
+                    args.elf, ["phase_cycles"])["phase_cycles"]
+            except SystemExit:
+                print("note: phase_cycles is absent from this ELF; the "
+                      "windowed phase tree will not be reported")
+        delta_main(args, base, instance, off, args.cpus, reason_capacity,
+                   disposition_capacity, synthetic_capacity, gap_capacity,
+                   reason_slots, phase_slots)
+        return
+
+    monitor = Monitor(args.rig, args.port)
+    # The scalar per-processor arrays, one read each - they are contiguous.
+    scalars = ["exit_trace_count", "exit_total", "l2_exit_trace_count",
+               "l2_working_trace_count", "l2_entries",
+               "l2_activity_state", "events_requeued", "events_deferred",
+               "pending_event", "shadow_ept_builds", "shadow_ept_cache_hits",
+               "shadow_ept_rebuild_new_root", "shadow_ept_rebuild_stale",
+               "shadow_ept_generation_discards",
+               "l2_invept_single_context", "l2_invept_all_context",
+               "shadow_ept_replayed", "hyperv_vp_assist_writes", "hypercalls_seen",
+               "host_exception", "host_exception_cr2",
+               "cpuid_trace", "cpuid_trace_count", "host_page_table",
+               "cpuid_hypervisor_leaves_asked",
+               "evmcs_reads", "evmcs_writes", "evmcs_recommended",
+               "hot_state_writes_skipped", "hot_state_writes_done",
+               "hot_state_writes_uncached",
+               "l2_run_cycles", "l1_run_cycles", "handler_cycles",
+               "handler_first_tsc", "handler_last_tsc",
+               "shadow_ept_evictions", "shadow_ept_resets",
+               "shadow_ept_leaves_filled",
+               "l2_ept_dispositions",
+               "shadow_ept_leaves_that_did_not_help",
+               "shadow_ept_recall_root", "shadow_ept_current_slot",
+               "vtl_call_rdx", "vtl_call_block", "vtl_call_block_read",
+               "vtl_call_block_physical", "vtl_call_vtpr",
+               "vtl_call_gap_buckets", "vtl1_entry_vector",
+               "vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count", "vina_block_physical",
+               "vina_at_call_set", "vina_at_call_clear",
+               "vina_at_call_unread", "vtl1_duration", "vtl_call_request",
+               "vtl_block_changes", "vtl_code0_param_changes", "vtl_code0_ring",
+               "vtl_code0_count", "vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls",
+               "vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_code0_word_value", "vtl_code0_word_count",
+               "vtl_service_calls", "vtl_service_other",
+               "vtl_service_class", "vtl_service_class_other",
+               "vtl_service_reason", "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_by_reason",
+               "vtl_reentry_reason_other", "vtl_reentry_orphan",
+               "vtl_reentry_owner", "vtl_reentry_owner_valid",
+               "vtl_reentry_service", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring",
+               "vtl_reentry_ring_count",
+               "l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_cpu_other", "l2_hypercall_epoch_delta",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable",
+               "vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp", "vtl_protect_last_stack",
+               "vtl_return_rbx", "vtl_return_rax",
+               "vtl1_clock_withheld", "vtl1_clock_delivered",
+               "l2_self_ipi_swallowed", "l2_self_ipi_reflected",
+               "lazy_tick_first_tsc", "lazy_tick_after_expiry",
+               "lazy_tick_withheld", "lazy_tick_delivered",
+               "lazy_tick_redelivered", "lazy_tick_not_yet",
+               "lazy_tick_owed",
+               "vtl1_clock_owed", "in_vtl1",
+               "vtl_return_count", "vtl_return_distinct",
+               "vtl_protect_after_stack", "vtl_protect_after_read",
+               "vtl_protect_early_before", "vtl_protect_early_after",
+               "vtl_protect_last_r15", "vtl_protect_answer_to_caller",
+               "vtl_protect_answer_to_other",
+               "vtl_protect_answer_last_cr3", "vtl_protect_answer_rip",
+               "vtl_protect_answer_rip_count",
+               "vtl_protect_answer_rip_other", "vtl_protect_step_rip",
+               "vtl_protect_step_count", "vtl_protect_step_other",
+               "vtl_protect_next_reason", "vtl_protect_next_last",
+               "vtl_protect_next_code", "vtl_protect_next_code_last",
+               "vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal",
+               "vtl_protect_pfn_perm_seen", "vtl_protect_readonly_pfn",
+               "vtl_protect_readonly_count", "vtl_protect_host_perms",
+               "vtl_protect_host_status", "vtl_protect_thread",
+               "vtl_protect_thread_flags", "vtl_protect_thread_read",
+               "vtl_protect_thread_locked", "vtl_protect_thread_clear",
+               "vmcs_shadow_loads",
+               "vmcs_shadow_stores",
+               "guest_state_writes_skipped", "guest_state_writes_done",
+               "guest_state_writes_unlicensed", "guest_state_dirty_writes",
+               "control_writes_skipped", "control_writes_done",
+               "control_writes_uncached",
+               # The refusal itself. `scripts/zpp.gdb` has printed these
+               # for a dozen sessions and this reader never did, so the
+               # monitor path - the one that works on a wedged guest -
+               # could not see the number that names a failed entry.
+               "nested_vmfail_count", "nested_last_vmfail",
+               # The three that say what a *frozen* exit count means,
+               # and none of them had a reader anywhere in this tree.
+               #
+               # `exit_total` alone cannot tell a processor spinning in
+               # its own guest apart from one stopped inside this VMM's
+               # handler, and those want opposite investigations. The
+               # difference against `resumes_reached` does, which is
+               # what `resume.cpp` says that counter is for: "Counted
+               # here, at the last point before control leaves this
+               # handler, so a frozen exit count can be read two ways
+               # round."
+               #
+               # `l2_start_up_waits` is the other half. A processor
+               # parked in `wait_for_l2_start_up_ipi` shows
+               # `l2_entries` **zero** for as long as it waits - the
+               # increment is on the `entered` branch only
+               # (`nested_vmx.cpp:2376`) - so "l2-entries 0" reads
+               # identically for "never attempted a second-level entry"
+               # and "attempts one every pass and is refused". This
+               # counter is the only thing that separates them, and
+               # `hypervisor.h` says so at its declaration.
+               "resumes_reached", "l2_start_up_waits",
+               "ept_violation_unclaimed",
+               # One word per processor each, so the plain scalar queue
+               # covers them. Listed here *as well as* in `members`
+               # above: `gdb_offsets` is the only place a name is
+               # checked against the ELF, and this loop is the only
+               # place one is actually fetched, so a name in one list
+               # and not the other is either a KeyError or a silent
+               # `None`. That mismatch has already cost a run.
+               "ap_probe_sent", "ap_wake_exit", "ap_wake_root",
+               "ap_probe_activity", "ap_probe_rip", "ap_probe_cs",
+               # The last hypercall each processor's second-level guest
+               # made, with its arguments and the time it was made.
+               # Written since the member was added and printed by
+               # nothing, which is why "is this hypercall still being
+               # issued" has only ever been answered from a cumulative
+               # census - and a cumulative census cannot tell "no longer
+               # called" from "called once and never returned". The
+               # member's own doc at `hypervisor.h:7765-7771` says
+               # exactly that, and a timestamp seconds old while exits
+               # continue is the second.
+               "last_hypercall_code", "last_hypercall_rcx",
+               "last_hypercall_rdx", "last_hypercall_r8",
+               "last_hypercall_tsc", "last_hypercall_count"]
+    for name in scalars:
+        monitor.queue(instance + off[name], scalar_cpus)
+    # Two singles rather than per-processor rows. Queued separately so
+    # the scalar loop's `scalar_cpus` width is not silently applied to
+    # a one-word member, which would read the next member as this one's
+    # cpu 1 and print a plausible number for a field that has no cpus.
+    singles = ["impossible_decodes", "refused_instruction_count"]
+    for name in singles:
+        monitor.queue(instance + off[name], 1)
+    # The phase rows are [cpu][phase_count], so each processor's row has
+    # to be queued separately rather than as one run of scalars.
+    phase_count = gdb_lengths(args.elf, ["phase_cycles"])["phase_cycles"]
+    for cpu in range(args.cpus):
+        monitor.queue(instance + off["phase_cycles"]
+                      + cpu * phase_count * 8, phase_count)
+        monitor.queue(instance + off["phase_calls"]
+                      + cpu * phase_count * 8, phase_count)
+    # Arrays that are not per-processor have to be queued with **their
+    # own length**, not with the processor count. Queued as scalars they
+    # fetch eight words and the rest resolves against whatever the next
+    # queue covers - which is how sixteen hypercall slots read back as
+    # eight populated ones with the same values from a different binary
+    # and fresh guest memory. The same failure gdb_lengths was written
+    # for: a capacity carried in the reader is a second copy of a
+    # constant that lives in the header.
+    # 512 entries of four 32-bit words - two words each - queued at its
+    # own length for the reason the entry above records.
+    cpuid_trace_words = 512 * 2
+    monitor.queue(instance + off["cpuid_trace"], cpuid_trace_words)
+
+    # Resolved for its offset is not the same as fetched. This was
+    # registered and not queued, so it read as absent, the loop below saw
+    # zero entries and printed nothing - and silence from an instrument
+    # is exactly what this file keeps warning is not a measurement.
+    # Seven words - vector, error code, rip, cs, rflags, rsp, ss - queued
+    # at its own length. The rig notes say to read this first for a
+    # failure before the guest gets going, and it was never read.
+    #
+    # **Per processor since 2026-09-05.** It was one frame and one CR2
+    # for the whole machine, so two processors faulting left a record
+    # that was neither of theirs - the frame is copied field by field,
+    # so the tear is silent and the vector can belong to one processor
+    # and the RIP to another. Queued for every processor now, and the
+    # printer names which one.
+    monitor.queue(instance + off["host_exception"], 7 * args.cpus)
+    monitor.queue(instance + off["host_exception_cr2"], args.cpus)
+
+    # Queued at their own length, which is the difference between a
+    # reading and a plausible lie. A member resolved for its offset and
+    # not queued reads as absent; one queued short reads as zero past the
+    # end. Both look like data. cpl_seen is [max_cpus][4] and the two
+    # permission histograms are [max_cpus][8], so each needs the whole
+    # array, not one word.
+    monitor.queue(instance + off["cpl_seen"], scalar_cpus * 4)
+    for name in ("vtl_protect_rcx", "vtl_protect_rdx", "vtl_protect_rax"):
+        monitor.queue(instance + off[name], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_count"], scalar_cpus)
+    for _n in ("vtl_protect_failures", "vtl_protect_last_failure",
+               "vtl_protect_reps_short", "vtl_protect_reps_asked",
+               "vtl_protect_reps_done", "vtl_protect_last_rip",
+               "vtl_protect_last_cr3", "vtl_protect_last_caller",
+               "vtl_protect_last_rsp"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_last_stack"],
+                  scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_after_stack"],
+                  scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_after_read"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_early_before"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_early_after"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_last_r15"], scalar_cpus)
+    for _n in ("vtl_protect_answer_to_caller",
+               "vtl_protect_answer_to_other",
+               "vtl_protect_answer_last_cr3",
+               "vtl_protect_answer_rip_other"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    for _n in ("vtl_protect_answer_rip", "vtl_protect_answer_rip_count",
+               "vtl_protect_step_rip", "vtl_protect_step_count"):
+        monitor.queue(instance + off[_n], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_step_other"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_next_reason"], scalar_cpus * 72)
+    monitor.queue(instance + off["vtl_protect_next_last"], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_next_code"], scalar_cpus * 32)
+    monitor.queue(instance + off["vtl_protect_next_code_last"], scalar_cpus)
+    for _n in ("vtl_protect_pfn_status", "vtl_protect_pfn_perms",
+               "vtl_protect_pfn_probed", "vtl_protect_pfn_abnormal"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_protect_pfn_perm_seen"],
+                  scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_readonly_pfn"],
+                  scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_protect_readonly_count"], scalar_cpus)
+    for _n in ("vtl_protect_host_perms", "vtl_protect_host_status"):
+        monitor.queue(instance + off[_n], scalar_cpus * 8)
+    for _n in ("vtl_protect_thread", "vtl_protect_thread_flags",
+               "vtl_protect_thread_read", "vtl_protect_thread_locked",
+               "vtl_protect_thread_clear"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    for _n in ():
+        monitor.queue(instance + off[_n], scalar_cpus)
+    for _n in ():
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_rcx"], scalar_cpus)
+    monitor.queue(instance + off["guest_leaf_permissions"], scalar_cpus * 8)
+    monitor.queue(instance + off["shadow_leaf_permissions"],
+                  scalar_cpus * 8)
+
+    # The guest hypervisor's EPT roots this processor holds shadows for.
+    # Four slots. **VSM gives each trust level its own extended page
+    # tables** - that is the mechanism HvCallModifyVtlProtectionMask acts
+    # through, and it is how VTL0 is denied the pages VTL1 owns. So a
+    # single distinct root across every slot would mean the two levels are
+    # sharing a view they must not share, and securekernel refusing to
+    # proceed would be correct rather than mysterious.
+    monitor.queue(instance + off["shadow_ept_recall_root"],
+                  scalar_cpus * 4)
+    monitor.queue(instance + off["shadow_ept_current_slot"], scalar_cpus)
+    monitor.queue(instance + off["guest_nmis_reinjected"], 1)
+    for _m in ("pending_event_lost", "pending_event_lost_first",
+               "pending_event_lost_last", "pending_event_lost_reason",
+               "pending_event_lost_while_valid",
+               "pending_event_handed_over"):
+        if _m in off:
+            monitor.queue(instance + off[_m], scalar_cpus)
+    # Two slots per processor each, keyed by the extended-page-table
+    # pointer beside them: the synthetic interrupt controller is
+    # per-VTL and both trust levels write the same MSR index. See
+    # `l2_simp_msr` in hypervisor.h.
+    monitor.queue(instance + off["l2_simp_msr"], scalar_cpus * 2)
+    monitor.queue(instance + off["l2_siefp_msr"], scalar_cpus * 2)
+    monitor.queue(instance + off["l2_synic_eptp"], scalar_cpus * 2)
+
+    # The IUM secure-call block. See hypervisor.h `vtl_call_block`.
+    monitor.queue(instance + off["vtl_call_rdx"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_block"], scalar_cpus * 4)
+    monitor.queue(instance + off["vtl_call_block_read"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_block_physical"], scalar_cpus)
+    monitor.queue(instance + off["vtl_call_vtpr"], scalar_cpus * 16)
+    monitor.queue(instance + off["vtl_call_gap_buckets"], scalar_cpus * 40)
+    monitor.queue(instance + off["vtl1_entry_vector"], scalar_cpus * 257)
+    monitor.queue(instance + off["vtl1_duration"],
+                  scalar_cpus * 2 * VTL1_DURATION_BUCKETS)
+    monitor.queue(instance + off["vtl_call_request"], scalar_cpus * 256)
+    monitor.queue(instance + off["vtl_block_changes"], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_param_changes"], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_count"], scalar_cpus)
+    for _n in ("vtl_code0_min_pfn", "vtl_code0_max_pfn",
+               "vtl_code0_consecutive", "vtl_code0_pfn_calls"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    monitor.queue(instance + off["vtl_code0_ring"], scalar_cpus * 8 * 3)
+    for _n in ("vtl_code0_run_current", "vtl_code0_run_longest",
+               "vtl_code0_same", "vtl_code0_back", "vtl_code0_skip",
+               "vtl_code0_epoch_count", "vtl_code0_epoch_last",
+               "vtl_service_other", "vtl_service_class_other",
+               "vtl_service_reason_other",
+               "vtl_copy_min_pfn", "vtl_copy_max_pfn", "vtl_copy_last_pfn",
+               "vtl_copy_calls", "vtl_copy_consecutive", "vtl_copy_same",
+               "vtl_copy_back", "vtl_copy_skip",
+               "l2_hypercall_cpu_other",
+               "l2_hypercall_epoch_tsc", "l2_hypercall_epoch_span",
+               "vtl_code0_word_other", "vtl_call_block_below_floor",
+               "vtl_call_block_untranslated",
+               "vtl_call_block_unreadable",
+               "vtl_fresh_calls", "vtl_reentries",
+               "vtl_class0_with_service", "vtl_reentry_reason_other",
+               "vtl_reentry_orphan", "vtl_reentry_owner",
+               "vtl_reentry_owner_valid", "vtl_reentry_service_other",
+               "vtl_reentry_block", "vtl_reentry_block_same",
+               "vtl_reentry_block_moved", "vtl_reentry_ring_count"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+    # The widths here are the members' own, not `scalar_cpus`: a table
+    # queued at the wrong width reads the next member and reports it
+    # under this one's name, which is the shape of half the mislabelled
+    # readings in this investigation.
+    monitor.queue(instance + off["vtl_service_calls"],
+                  scalar_cpus * 0x120)
+    monitor.queue(instance + off["vtl_service_class"], scalar_cpus * 4)
+    monitor.queue(instance + off["vtl_service_reason"], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_reentry_service"],
+                  scalar_cpus * 0x120)
+    monitor.queue(instance + off["vtl_reentry_by_reason"], scalar_cpus * 8)
+    monitor.queue(instance + off["vtl_reentry_ring"], scalar_cpus * 16 * 6)
+    for _n in ("l2_hypercall_cpu_codes", "l2_hypercall_cpu_counts",
+               "l2_hypercall_epoch_delta"):
+        monitor.queue(instance + off[_n], scalar_cpus * 32)
+    for _n in ("vtl_code0_epoch_tsc", "vtl_code0_epoch_pfn",
+               "vtl_code0_epoch_code0", "vtl_code0_epoch_calls"):
+        monitor.queue(instance + off[_n], scalar_cpus * 64)
+    for _n in ("vtl_code0_word_value", "vtl_code0_word_count"):
+        monitor.queue(instance + off[_n], scalar_cpus * 16)
+    for _n in ("vina_gs_base", "vina_block", "vina_flags", "vina_read",
+               "vina_set_count", "vina_clear_count",
+               "vina_block_physical", "vina_at_call_set",
+               "vina_at_call_clear", "vina_at_call_unread"):
+        monitor.queue(instance + off[_n], scalar_cpus)
+
+    # Ten dispositions per processor - `none` through `pointer_failed`.
+    monitor.queue(instance + off["l2_ept_dispositions"], scalar_cpus * 10)
+    monitor.queue(instance + off["shadow_ept_leaves_that_did_not_help"],
+                  scalar_cpus)
+
+    monitor.queue(instance + off["cpuid_trace_count"], 1)
+    monitor.queue(instance + off["cpuid_hypervisor_leaves_asked"], 1)
+    monitor.queue(instance + off["host_page_table"], 1)
+
+    hypercall_slots = 16
+    for _name in ("msr_write_codes", "msr_write_counts",
+                  "msr_write_last_value", "l2_msr_write_codes",
+                  "l2_msr_write_counts", "l2_msr_write_last_value",
+                  "l2_msr_write_reflected"):
+        if _name in off:
+            monitor.queue(instance + off[_name], 96)
+
+    for _name in ("msr_write_uncounted", "msr_write_uncounted_code"):
+        if _name in off:
+            monitor.queue(instance + off[_name], 1)
+
+    monitor.queue(instance + off["hypercall_codes"], hypercall_slots)
+    monitor.queue(instance + off["hypercall_code_counts"], hypercall_slots)
+
+    monitor.queue(instance + off["running_l2"], (scalar_cpus + 7) // 8)
+    # Nineteen words, which is every member the record has. It was
+    # six, and six was the number of members it had when this line
+    # was written - three commits have since added the mode-switch
+    # state, CR3 and the addressing registers, and the reader went
+    # on stopping at `guest_cs_selector`. tests/python_layout counts
+    # the members out of the header and fails when the two disagree.
+    monitor.queue(instance + off["unhandled_exit"], 19)
+    if "sleep_request" in off:
+        # occurred, port, value, sleep_type, processor, stage
+        monitor.queue(instance + off["sleep_request"], 6)
+    if "reset_request" in off:
+        # occurred, port, value, bytes, processor, rip, count
+        monitor.queue(instance + off["reset_request"], 7)
+    for _m in ("dmar_reads", "dmar_writes", "dmar_qi_descriptors",
+               "dmar_qi_waits_completed"):
+        if _m in off:
+            monitor.queue(instance + off[_m], 8)
+    if "dmar_register_page" in off:
+        monitor.queue(instance + off["dmar_register_page"], 1)
+    if "ap_fault" in off:
+        monitor.queue(instance + off["ap_fault"], 14)
+    # Eighteen words, which is every member the record has. Six was the
+    # number when this line was written and the record has since grown the
+    # activity and interruptibility state, the entry controls, the code
+    # segment and - the fields that matter for a processor that dies at
+    # its start-up IPI - `cpu`, `virtual_processor`, `from_trampoline` and
+    # `start_up_vector`. Reading six of eighteen is how a refused VM entry
+    # on an application processor reads as no record at all.
+    monitor.queue(instance + off["vm_entry_failure"], 18)
+    # Scalars, one word each.
+    for name in ("ipi_last_command", "ipi_init_seen", "ipi_start_up_seen",
+                 "ipi_refused_shorthand", "ipi_refused_logical",
+                 "apic_page_commands_filtered", "apic_writes_undecoded",
+                 "watched_apic_page", "unresponsive_processors",
+                 "number_of_known_processors"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    # Byte arrays and a single byte. `max_cpus` of them fit in one word,
+    # which is why these are read as one word and unpacked rather than
+    # indexed - reading `processor_virtualized[cpu]` as a quadword reads
+    # eight processors' flags and calls them one.
+    for name in ("processor_virtualized", "started_by_guest_start_up_ipi",
+                 "start_up_launched", "all_processors_started"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    for name in ("resume_activity_state", "queued_start_up",
+                 "start_up_handoff", "guest_tick_floored",
+                 "guest_timer_stretched"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("vtl_protect_guest_perms", "vtl_protect_guest_status"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus * 8)
+    if "vtl_protect_status_seen" in off:
+        monitor.queue(instance + off["vtl_protect_status_seen"],
+                      args.cpus * 16)
+    for cpu in range(args.cpus):
+        monitor.queue(instance + off["exit_trace"] + cpu * ring * entry_size,
+                      ring * entry_size // 8)
+    # The synthetic timer, which is what decides whether the guest's clock
+    # handler can finish inside its own period. Queued here rather than in
+    # a section of its own because every read has to precede monitor.run().
+    stimer_ring = 32
+    for name in ("stimer_given_cycles", "stimer_given_arms",
+                 "stimer_asked_units", "stimer_asked_arms",
+                 "stimer_unanswered", "stimer_arm_count"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("stimer_arm_value", "stimer_arm_tsc", "stimer_arm_kind"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus * stimer_ring)
+    # Two scalars, not per-processor arrays - the profiler is boot
+    # processor only, which is why these are queued with a count of one.
+    for name in ("profile_code_physical", "profile_code_virtual",
+                 "guest_kernel_base", "guest_kernel_size", "l2_exit_cr3",
+                 # The eight `interrupted_*` / `quiet_*` members were
+                 # queued here at a width of one.  They are
+                 # `[max_cpus]` rows now and the block that prints them
+                 # queues them per processor; a width-of-one read here
+                 # would have kept cpu 0 alone in `words` and left the
+                 # heading honest only by accident.
+                 ):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    # The call-stack members moved out of the list above on 2026-09-05.
+    # They were queued at a width of one under the heading "two scalars,
+    # not per-processor arrays - the profiler is boot processor only",
+    # and that was true of `profile_code_*` and never of these: the
+    # walk runs from `record_l2_entry_event` on every processor and from
+    # the preemption-timer exit, resetting the shared `count` to zero at
+    # the top, so what got printed was two processors' frames spliced
+    # into one list and labelled "cpu 0".  See `guest_stack_trace`.
+    for name in ("guest_stack_count", "guest_stack_pointer",
+                 "guest_stack_rip", "guest_interrupted_count",
+                 "guest_interrupted_rsp", "guest_interrupted_rip"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    stack_capacity = 48
+    for name in ("guest_stack_trace", "guest_interrupted_trace"):
+        if name in off:
+            monitor.queue(instance + off[name],
+                          args.cpus * stack_capacity)
+    # guest_thread_sample is eight 64-bit fields; 32 of them per processor.
+    thread_fields, thread_capacity = 8, 32
+    # `hypervisor::interrupted_context` - ten quadwords, sixteen deep.
+    interrupted_context_fields, interrupted_context_capacity = 10, 16
+    for name in ("control_secondary_requested", "control_secondary_granted"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    for name in ("l2_vmfunc_calls", "l2_vmfunc_refused"):
+        if name in off:
+            monitor.queue(instance + off[name], args.cpus)
+    if "capability_answers" in off:
+        monitor.queue(instance + off["capability_answers"], 48 * 2)
+        monitor.queue(instance + off["nested_capability_reads"], 1)
+    for name in ("vtl_block_page", "vtl_block_writes", "vtl_block_writer_rip",
+                 "vtl_block_write_address", "vtl_block_write_value"):
+        if name in off:
+            monitor.queue(instance + off[name], 1)
+    for name in ("hypercall_codes", "hypercall_code_counts",
+                 "l2_hypercall_codes", "l2_hypercall_code_counts"):
+        if name in off:
+            monitor.queue(instance + off[name], 16)
+    if "guest_thread_samples" in off:
+        monitor.queue(instance + off["guest_thread_samples"],
+                      args.cpus * thread_capacity * thread_fields)
+        monitor.queue(instance + off["guest_thread_sample_count"], args.cpus)
+    if "interrupted_contexts" in off:
+        monitor.queue(instance + off["interrupted_contexts"],
+                      interrupted_context_capacity *
+                      interrupted_context_fields)
+        for name in ("interrupted_context_count",
+                     "interrupted_context_found",
+                     "interrupted_context_not_found"):
+            monitor.queue(instance + off[name], 1)
+
+    words = monitor.run()
+
+    def read(name, index=0):
+        return words.get(instance + off[name] + 8 * index)
+
+    # **This column used to be `exit_trace_count` under the heading
+    # "exits", and it is not exits.**  `hypervisor.h:4392` says so in the
+    # member's own comment: a repeat of the entry already in the newest
+    # slot grows that entry's `repeated` instead of consuming a slot, so
+    # the count is *ring slots written*.  `exit_total` beside it is the
+    # count of exits and had no reader anywhere in this tree.
+    #
+    # What that cost: cpu 1 was reported as taking "110 exits" across
+    # five application-processor boots and the determinism of 110/110/
+    # 110/109/109 was treated as the signature of the failure.  The same
+    # processor's `exit_reason_counts` row summed to 201.  Both numbers
+    # were right and one of them was answering a different question -
+    # 110 distinct-from-predecessor records covering 201 exits.
+    print("\ncpu  exits       slots  l2-entries  l2-exits  requeued  "
+          "deferred  pending  l2-activity")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('exit_total', cpu) or 0:-10d}  "
+              f"{read('exit_trace_count', cpu):-5d}  "
+              f"{read('l2_entries', cpu):-10d}  "
+              f"{read('l2_exit_trace_count', cpu):-8d}  "
+              f"{read('events_requeued', cpu):-8d}  "
+              f"{read('events_deferred', cpu):-8d}  "
+              f"0x{read('pending_event', cpu):-6x}  "
+              f"{ACTIVITY.get(read('l2_activity_state', cpu), '?')}")
+
+    # The last hypercall each second-level guest made, which is the one
+    # reading that separates the two ways a hypercall census freezes.
+    #
+    # **A cumulative census cannot tell "no longer called" from "called
+    # once and never returned."** Those are opposite failures - the
+    # first is a guest that moved on, the second is a guest suspended
+    # inside a call - and this file has argued both from the same frozen
+    # number. The member's own doc says so and nothing has ever printed
+    # it.
+    #
+    # `count` beside `tsc` is the second field, deliberately: a
+    # timestamp alone cannot say whether it is old because the call
+    # stopped or because the *recording* stopped, and the count moving
+    # while the timestamp does not is the second. Read both, per this
+    # tree's rule about single-field instruments.
+    #
+    # Zero everywhere is not evidence about the guest - it is what
+    # `vtltrc=0` produces, because the whole recognition block is behind
+    # `nested_vmx::trace_vtl`. Check the manifest before reading this
+    # table as a finding.
+    if "last_hypercall_code" in off:
+        HV_CALL = {0x0002: "HvCallFlushVirtualAddressSpace",
+                   0x0003: "HvCallFlushVirtualAddressList",
+                   0x0008: "HvCallSendSyntheticClusterIpi",
+                   0x000c: "HvCallModifyVtlProtectionMask",
+                   0x000d: "HvCallEnablePartitionVtl",
+                   0x000f: "HvCallEnableVpVtl",
+                   0x0011: "HvCallVtlCall", 0x0012: "HvCallVtlReturn"}
+        rows = [(cpu, read('last_hypercall_count', cpu) or 0)
+                for cpu in range(args.cpus)]
+        if any(count for _, count in rows):
+            print("\nlast hypercall from the second level, per processor")
+            for cpu, count in rows:
+                if not count:
+                    print(f"  cpu {cpu}: none recorded")
+                    continue
+                code = read('last_hypercall_code', cpu) or 0
+                print(f"  cpu {cpu}: 0x{code:04x} "
+                      f"{HV_CALL.get(code, ''):<30s} "
+                      f"seen {count:,}")
+                rcx = read('last_hypercall_rcx', cpu) or 0
+                rdx = read('last_hypercall_rdx', cpu) or 0
+                r8 = read('last_hypercall_r8', cpu) or 0
+                tsc = read('last_hypercall_tsc', cpu) or 0
+                print(f"         rcx 0x{rcx:016x}  rdx 0x{rdx:016x}"
+                      f"  r8 0x{r8:016x}")
+                print(f"         at tsc {tsc:,}   <- compare against a "
+                      f"SECOND dump: a tsc that does not move while "
+                      f"exits climb is a guest suspended inside this "
+                      f"call, not one that stopped calling")
+
+    # And the three readings that say what a frozen row above *means*.
+    #
+    # Every column above is cumulative, so a processor that stopped and
+    # one that is between exits look identical in all of them. These
+    # separate the three states that produce the same still numbers:
+    #
+    # - `in-handler` is `exit_total - resumes_reached`.  Zero means the
+    #   processor finished every handler it entered, so it is out in its
+    #   own guest - spinning on memory, or not being scheduled - and a
+    #   still exit count is the *guest* having stopped exiting.  One
+    #   means an exit is in flight or ended in `on_unhandled_exit`,
+    #   which does not return; the processor is inside this VMM.  More
+    #   than one should be impossible and is worth saying so out loud.
+    # - `sipi-waits` is `l2_start_up_waits`.  Rising means the processor
+    #   is executing the level above's VMLAUNCH over and over and being
+    #   parked because vmcs12 says wait-for-SIPI.  **`l2-entries 0` says
+    #   nothing about this on its own**: the increment is on the
+    #   `entered` branch only, so a processor that never attempted an
+    #   entry and one refused on every pass both read zero there.
+    # - `unclaimed` is `ept_violation_unclaimed`: violations that
+    #   arrived after the watch that caused them was dropped.  Bounded
+    #   and resumed from, so a small number is the disarm race the
+    #   dispatcher documents and a growing one is a protection stuck on
+    #   with nothing left to answer it.
+    print("\ncpu  exits       resumes-reached  in-handler  sipi-waits  "
+          "unclaimed")
+    for cpu in range(args.cpus):
+        exits = read('exit_total', cpu) or 0
+        reached = read('resumes_reached', cpu) or 0
+        print(f"{cpu:3d}  {exits:-10d}  {reached:-15d}  "
+              f"{exits - reached:-10d}  "
+              f"{read('l2_start_up_waits', cpu) or 0:-10d}  "
+              f"{read('ept_violation_unclaimed', cpu) or 0:-9d}"
+              + ("   <- inside this VMM's exit handler"
+                 if (exits - reached) == 1 else
+                 ("   <- IMPOSSIBLE: more exits than handlers left"
+                  if (exits - reached) > 1 else "")))
+
+    # Both of these must read zero, and neither has ever been printed.
+    # Printed with what a non-zero value MEANS, because a bare number
+    # here is one somebody then has to go and look up in the header.
+    bad_decode = read('impossible_decodes', 0)
+    refused = read('refused_instruction_count', 0)
+    print("\nemulator: impossible_decodes "
+          f"{bad_decode if bad_decode is not None else '?'}"
+          "  refused_instruction_count "
+          f"{refused if refused is not None else '?'}")
+    if bad_decode:
+        print("    *** NON-ZERO impossible_decodes: the decoder produced "
+              "a value it could not justify, and a fabricated write was "
+              "about to happen ***")
+    if refused:
+        print("    *** NON-ZERO refused_instruction_count: guest stores "
+              "this emulator declined - the guest believes it made them "
+              "and it did not ***")
+    if not bad_decode and not refused:
+        print("    both zero - nothing fabricated, nothing refused")
+
+    # The application-processor liveness probe.
+    #
+    # **This answers the one question "takes no exits" cannot.** Four
+    # completely different states produce an identical silence in every
+    # other instrument here - a processor executing guest code that has
+    # no reason to exit, one halted, one shut down, and one stopped
+    # inside the VMM itself - and the place a non-maskable interrupt is
+    # answered separates them. See `nested_vmx::probe_aps` for the SDM
+    # citations.
+    #
+    # Read as a delta across two dumps, never cumulatively. A cumulative
+    # reading says a processor answered at some point in the boot, which
+    # is not the question.
+    #
+    # `wake-exit` and `wake-root` count *every* wake interrupt, including
+    # the extended-page-table rendezvous' own, so they can move while
+    # `sent` stands still. `sent` is a lower bound on what was aimed at
+    # the processor, not an equal - the columns are named for what they
+    # measure rather than for what the probe wanted them to measure.
+    ACTIVITY_READING = {
+        0: "active - executing guest code",
+        1: "halted",
+        2: "shut down after a triple fault",
+        3: "wait-for-SIPI",
+    }
+    probed = any((read('ap_probe_sent', cpu) or 0) or
+                 (read('ap_wake_exit', cpu) or 0) or
+                 (read('ap_wake_root', cpu) or 0)
+                 for cpu in range(args.cpus))
+    print("\ncpu  probes-sent  wake-exit  wake-root  activity  cs:rip")
+    if not probed:
+        # The two readings that look identical, separated by the
+        # manifest rather than guessed at - the same trap the fault
+        # trap below records.
+        print("  nothing probed. If `probe=0` in `zpp switches` this "
+              "instrument was not built;")
+        print("  if `probe=1` then no processor ever reached a probe "
+              "round, which means the")
+        print("  driving processor stopped exiting too.")
+    for cpu in range(args.cpus):
+        sent = read('ap_probe_sent', cpu) or 0
+        by_exit = read('ap_wake_exit', cpu) or 0
+        by_root = read('ap_wake_root', cpu) or 0
+        activity = read('ap_probe_activity', cpu)
+        rip = read('ap_probe_rip', cpu) or 0
+        cs = read('ap_probe_cs', cpu) or 0
+
+        if by_exit:
+            verdict = ACTIVITY_READING.get(activity,
+                                           f"activity {activity}")
+        elif by_root:
+            verdict = "inside this VMM"
+        elif sent:
+            verdict = "answered nothing - wait-for-SIPI, or not delivered"
+        else:
+            verdict = "never probed"
+
+        print(f"{cpu:3d}  {sent:-11d}  {by_exit:-9d}  {by_root:-9d}  "
+              f"{'-' if activity is None else activity:>8}  "
+              f"0x{cs:04x}:0x{rip:x}")
+        print(f"     <- {verdict}")
+
+    # The application-processor fault trap, read as a pair.
+    #
+    # `armed` and `occurred` say three different things between them and
+    # a single field says none of them - see nested_vmx.h. The middle
+    # state is the one worth printing loudest: armed and nothing caught
+    # means no exception was ever delivered to that guest, so a triple
+    # fault read as "it faulted at the far jump" is being read wrong.
+    if "ap_fault" in off:
+        armed = read("ap_fault", 0)
+        caught = read("ap_fault", 3)
+        if armed is None:
+            pass
+        elif not armed:
+            print("\nap-fault trap: never armed "
+                  "(switch off, or no paging transition on an "
+                  "application processor) - this says nothing")
+        elif not caught:
+            print(f"\nap-fault trap: ARMED on cpu {read('ap_fault', 1)} "
+                  f"at rip 0x{read('ap_fault', 2):x} and CAUGHT NOTHING - "
+                  "no exception was delivered to this guest")
+        else:
+            print(f"\nap-fault trap: cpu {read('ap_fault', 4)} "
+                  f"vector {read('ap_fault', 5)} "
+                  f"error 0x{read('ap_fault', 6):x} "
+                  f"address 0x{read('ap_fault', 7):x} "
+                  f"rip 0x{read('ap_fault', 9):x} "
+                  f"cs 0x{read('ap_fault', 10):x} "
+                  f"cr0 0x{read('ap_fault', 11):x} "
+                  f"cr3 0x{read('ap_fault', 12):x} "
+                  f"efer 0x{read('ap_fault', 13):x}")
+
+    # What the guest asked its synthetic timer for, and what it was given.
+    #
+    # The pair is the point. `stimer_given_cycles / stimer_given_arms` is
+    # the measured arm-to-fire interval; the guest's own constant
+    # `KeQuantumEndTimerIncrement` is 17,400 units of 100 ns, so 1.74 ms is
+    # what it believes it asked for. **A handler that costs more than the
+    # interval it is given can never return**, and the guest then never
+    # lowers IRQL far enough to take the DPC interrupt it keeps requesting -
+    # which is exactly the 0x2f-at-task-priority-0xd0 census below.
+    #
+    # Read both, never one: the interval alone cannot distinguish "the
+    # guest asked for a short period" from "the guest asked for 1.74 ms and
+    # the level above expired it early", and those need different fixes.
+    # The `kind` column is what separates them - 1 is the guest writing a
+    # count, 3 is the clock vector actually going in.
+    # Secondary controls: what the guest hypervisor asked vmcs02 for
+    # against what it was granted.
+    #
+    # **A bit asked for and not granted changes how the second-level
+    # guest's APIC behaves**, and the three APIC-virtualization controls
+    # are exactly the ones that decide where its INIT and start-up IPIs
+    # go. If those are missing, a processor the guest tries to start
+    # never hears about it.
+    SECONDARY = {
+        0: "virtualize_apic_accesses", 1: "enable_ept",
+        3: "enable_rdtscp", 5: "enable_vpid", 7: "unrestricted_guest",
+        8: "apic_register_virtualization", 9: "virtual_interrupt_delivery",
+        12: "enable_invpcid", 14: "vmcs_shadowing",
+        18: "conceal_vmx_from_pt", 20: "enable_xsaves",
+        22: "mode_based_execute_control",
+    }
+    if "control_secondary_requested" in off:
+        for cpu in range(args.cpus):
+            asked = read("control_secondary_requested", cpu) or 0
+            got = read("control_secondary_granted", cpu) or 0
+            if not asked and not got:
+                continue
+            missing = asked & ~got
+            print(f"\ncpu {cpu} vmcs02 secondary controls: "
+                  f"asked 0x{asked:x}, granted 0x{got:x}"
+                  f"{'  <- ALL GRANTED' if not missing else ''}")
+            if missing:
+                for bit in range(64):
+                    if missing & (1 << bit):
+                        print(f"    NOT GRANTED bit {bit}  "
+                              f"{SECONDARY.get(bit, '')}")
+            for bit in (0, 8, 9):
+                state = "yes" if got & (1 << bit) else "no"
+                print(f"    {SECONDARY[bit]:<30} {state}")
+
+    # VMFUNC: extended-page-table pointer switching, which is how a
+    # guest hypervisor moves its guest between page-table sets.
+    #
+    # **A refusal is not silent - it injects #UD** - so refused > 0 means
+    # the guest hypervisor asked for a switch and got an invalid-opcode
+    # fault instead. Printed because a counter that only matters when
+    # non-zero is exactly the kind that goes unread until it is too late.
+    if "l2_vmfunc_calls" in off:
+        calls = sum((read("l2_vmfunc_calls", c) or 0)
+                    for c in range(args.cpus))
+        refused = sum((read("l2_vmfunc_refused", c) or 0)
+                      for c in range(args.cpus))
+        if calls or refused:
+            note = "  <- REFUSED, #UD injected" if refused else ""
+            print(f"\ncpu* VMFUNC: {calls:,} calls, {refused:,} refused{note}")
+
+    # What this VMM told the guest hypervisor about VMX, which is a set
+    # of values we genuinely originate - unlike the hypercall answers,
+    # which Hyper-V produces and we only carry.
+    #
+    # A capability narrowed away here is a thing the guest hypervisor
+    # will not attempt. That is the point of narrowing - do not promise
+    # what the shadow builder cannot honour - but it also means this list
+    # is the complete set of ways this VMM can make Hyper-V behave
+    # differently from how it would on the metal.
+    VMX_MSRS = {
+        0x480: "IA32_VMX_BASIC",          0x481: "PINBASED_CTLS",
+        0x482: "PROCBASED_CTLS",          0x483: "EXIT_CTLS",
+        0x484: "ENTRY_CTLS",              0x485: "MISC",
+        0x486: "CR0_FIXED0",              0x487: "CR0_FIXED1",
+        0x488: "CR4_FIXED0",              0x489: "CR4_FIXED1",
+        0x48a: "VMCS_ENUM",               0x48b: "PROCBASED_CTLS2",
+        0x48c: "EPT_VPID_CAP",            0x48d: "TRUE_PINBASED_CTLS",
+        0x48e: "TRUE_PROCBASED_CTLS",     0x48f: "TRUE_EXIT_CTLS",
+        0x490: "TRUE_ENTRY_CTLS",         0x491: "VMFUNC",
+    }
+    if "capability_answers" in off:
+        n = read("nested_capability_reads") or 0
+        if n:
+            print(f"\ncpu 0 VMX capabilities answered to the guest "
+                  f"hypervisor ({n} reads)")
+            seen = {}
+            for i in range(min(n, 48)):
+                a = instance + off["capability_answers"] + i * 16
+                msr = words.get(a, 0)
+                val = words.get(a + 8, 0)
+                seen[msr] = val
+            for msr in sorted(seen):
+                print(f"    0x{msr:03x}  {VMX_MSRS.get(msr,''):<22} "
+                      f"0x{seen[msr]:016x}")
+
+    # The IUM context block memory breakpoint.
+    #
+    # **A write that is attempted and lost, and a write that never
+    # happens, leave the same bytes in memory.** The second-level guest
+    # loops on a state byte that polling shows unchanged; only a watch
+    # says which of those is true. `writes 0` with the page armed means
+    # nothing writes it - the state is stale by omission, not by loss.
+    if "vtl_block_page" in off:
+        page = read("vtl_block_page") or 0
+        if page:
+            n = read("vtl_block_writes") or 0
+            print(f"\ncpu 0 IUM block watch: page 0x{page:x}, "
+                  f"{n:,} writes seen")
+            if n:
+                print(f"    last write: address 0x{read('vtl_block_write_address') or 0:x}"
+                      f"  value 0x{read('vtl_block_write_value') or 0:x}"
+                      f"  from rip 0x{read('vtl_block_writer_rip') or 0:x}")
+            else:
+                print("    NOTHING writes this page - the state is stale by "
+                      "omission, not by a lost write")
+
+    # Which hypercalls each level is making, by code.
+    #
+    # `HvCallStartVirtualProcessor` and friends are how Windows asks the
+    # hypervisor above it to bring up a virtual processor, and nothing in
+    # this reader has ever shown them. A code that repeats without the
+    # guest moving on is a request that is not completing.
+    MSR_NAMES = {
+        0x0000001b: "IA32_APIC_BASE",
+        0x0000006e0: "IA32_TSC_DEADLINE",
+        0x00000830: "X2APIC_ICR",
+        0x0000080b: "X2APIC_EOI",
+        0x00000838: "X2APIC_INIT_COUNT",
+        0x00000808: "X2APIC_TPR",
+        0x00000832: "X2APIC_LVT_TIMER",
+        0x0000083f: "X2APIC_SELF_IPI",
+        0x40000070: "HV_EOI",
+        0x40000071: "HV_ICR",
+        0x40000072: "HV_TPR",
+        0x40000020: "HV_TIME_REF_COUNT",
+        0x40000082: "HV_SIEFP",
+        0x40000083: "HV_SIMP",
+        0x40000084: "HV_EOM",
+        0x40000073: "HV_VP_ASSIST_PAGE",
+        0x40000080: "HV_SCONTROL",
+        0x4000008d: "HV_EOM",
+        0x400000b0: "HV_STIMER0_CONFIG",
+        0x400000b1: "HV_STIMER0_COUNT",
+        0x400000b2: "HV_STIMER1_CONFIG",
+        0x400000b3: "HV_STIMER1_COUNT",
+        0xc0000080: "IA32_EFER",
+        0xc0000101: "GS_BASE",
+        0xc0000102: "KERNEL_GS_BASE",
+    }
+    # The secure service number in bytes 2-3 of the secure call block,
+    # named by the function that issues it.
+    #
+    # Built by disassembling the guest's own `ntoskrnl.exe`: every
+    # secure call funnels through `VslpEnterIumSecureMode`, which takes
+    # the number in DX, so each of its 164 call sites names one. This
+    # is the map, and it is what turns "0x00f40002, 48.1%, never
+    # decoded" into "MiCopyPage is validating an image".
+    #
+    # Two honesty notes. The name is the *caller*, resolved by nearest
+    # preceding public symbol - for the thin `Vsl*` wrappers that is
+    # the service itself, and for entries like `NtProtectVirtualMemory`
+    # it is the function that happens to contain the call site, which
+    # may be an inlined helper. And the map is per Windows build; a
+    # different `ntoskrnl.exe` may renumber it. Treat a name as a lead,
+    # never as a citation.
+    SK_SERVICE = {
+        0x0000: "VslFlushEntireTb",
+        0x0001: "VslpIumPhase4Initialize",
+        0x0002: "VslStartSecureProcessor",
+        0x0003: "VslFinishStartSecureProcessor",
+        0x0005: "VslRegisterSecureSystemProcess",
+        0x0006: "VslCreateSecureProcess",
+        0x0007: "VslInitializeSecureProcess",
+        0x0008: "VslCreateSecureThread",
+        0x0009: "VslRequestSecureThreadExit",
+        0x000a: "VslTerminateSecureThread",
+        0x000b: "VslRundownSecureProcess",
+        0x000c: "NtRemoveProcessDebug",
+        0x000d: "VslGetSecureTebAddress",
+        0x0010: "VslSendDebugAttachNotifications",
+        0x0011: "VslGetEtwDebugId",
+        0x0012: "VslGetOnDemandDebugChallenge",
+        0x0013: "VslEnableOnDemandDebugWithResponse",
+        0x0014: "VslRetrieveMailbox",
+        0x0015: "VslIsTrustletRunning",
+        0x0016: "VslCreateSecureAllocation",
+        0x0017: "VslFillSecureAllocation",
+        0x0018: "VslMakeCodeCatalog",
+        0x0019: "VslCreateSecureImageSection",
+        0x001a: "VslFinalizeSecureImageHash",
+        0x001c: "VslCaptureImageHotPatchMetadata",
+        0x001d: "VslPrepareSecureImageRelocations",
+        0x001e: "VslRelocateImage",
+        0x001f: "VslCloseSecureHandle",
+        0x0020: "VslValidateDynamicCodePages",
+        0x0021: "VslTransferSecureImageVersionResource",
+        0x0022: "VslSetCodeIntegrityPolicy",
+        0x0023: "VslExchangeEntropy",
+        0x0025: "VslAllocateSecureHibernateResources",
+        0x0026: "VslFreeSecureHibernateResources",
+        0x0027: "VslConfigureDynamicMemory",
+        0x0028: "NtProtectVirtualMemory",
+        0x0029: "VslDebugReadWriteSecureProcess",
+        0x002a: "VslQueryVirtualMemory",
+        0x002b: "VslCaptureSecureImageIat",
+        0x002c: "VslFreeSecureImageIat",
+        0x002d: "VslApplySecureImageFixups",
+        0x002e: "MmProtectDriverSection",
+        0x002f: "VslCreateEnclave",
+        0x0030: "VslLoadEnclaveData",
+        0x0031: "VslLoadEnclaveModule",
+        0x0032: "VslInitializeEnclave",
+        0x0033: "PsTerminateVsmEnclave",
+        0x0034: "PsRundownVsmEnclave",
+        0x0038: "VslRelaxQuotas",
+        0x003a: "VslLiveDumpQuerySecondaryDataSize",
+        0x003b: "VslpLiveDumpStart",
+        0x003c: "VslpAddLiveDumpBufferChunk",
+        0x003d: "VslpSetupLiveDumpBuffer",
+        0x003e: "VslFinalizeLiveDumpInSk",
+        0x003f: "VslAbortLiveDump",
+        0x0040: "VslLiveDumpCaptureProcess",
+        0x0041: "VslpConnectedStandbyWnfCallback",
+        0x0042: "VslQuerySecureKernelProfileInformation",
+        0x0043: "VslUpdateFreezeTimeBias",
+        0x0044: "VslCreateSecureSection",
+        0x0045: "VslDeleteSecureSection",
+        0x0046: "VslQuerySecureDevice",
+        0x0047: "PipUnprotectDevice",
+        0x0048: "VslRegisterSecurePatch",
+        0x0049: "VslQueryActiveSecurePatches",
+        0x004a: "VslDetermineHotPatchType",
+        0x004c: "VslObtainHotPatchUndoTable",
+        0x004d: "VslApplyHotPatch",
+        0x004e: "VslPrepareDriverForPatch",
+        0x004f: "VslProvisionDumpEncryption",
+        0x0050: "VslCapturePgoData",
+        0x0058: "MmWriteSystemImageTracepoint",
+        0x005a: "PsRegisterSyscallProvider",
+        0x005b: "VslRevokeSyscallProviderServiceTables",
+        0x00c0: "VslGetSecurePebAddress",
+        0x00c1: "VslValidateSecureImagePages",
+        0x00d1: "VslpSecureKernelPeriodicTick",
+        0x00d2: "VslExecuteWorkItems",
+        0x00d3: "VslReserveProtectedPages",
+        0x00d5: "VslIumEtwEnableCallback",
+        0x00d6: "VslInitializeSecurePool",
+        0x00d7: "VslInitializeSecureKernelCfg",
+        0x00d9: "VslCompleteSecureDriverLoad",
+        0x00da: "VslUnloadSecureDriver",
+        0x00db: "VslMapKernelScpPages",
+        0x00dc: "VslEnableKernelCfgTarget",
+        0x00e2: "VslReapplyImportOptimizationForDriverVerifier",
+        0x00e3: "VslInitFunctionOverrideCapabilities",
+        0x00e5: "VslSynchronizeXSave",
+        0x00e6: "VslAllocateKernelShadowStack",
+        0x00e7: "VslFreeKernelShadowStack",
+        0x00e8: "VslResetKernelShadowStack",
+        0x00e9: "VslRegisterSyscallProviderServiceTableMetadata",
+        0x00f0: "VslFlushSecureAddressSpace",
+        0x00f1: "VslFastFlushSecureRangeList",
+        0x00f2: "VslSlowFlushSecureRangeList",
+        0x00f3: "VslRemoveProtectedPage",
+        0x00f4: "VslCopyProtectedPage",
+        0x00f5: "VslWriteProtectedPage",
+        0x00f6: "VslRegisterProtectedPage",
+        0x00f7: "VslSetPrivilegedPte",
+        0x00f8: "VslQueryPrivilegedAccessedState",
+        0x00fa: "VslMakeProtectedPageExecutable",
+        0x00fc: "VslIumEfiRuntimeService",
+        0x00fd: "HvlCollectLivedump",
+        0x00fe: "VslRegisterLogPages",
+        0x00ff: "VslReclaimPartitionPages",
+        0x0101: "VslSetPlaceholderPages",
+        0x0102: "VslGetSecureSpeculationControlInformation",
+        0x0103: "MiProtectDriverSectionPte",
+        0x0104: "VslExemptSecurePteRange",
+        0x0105: "VslVerifyPage",
+        0x0106: "HvlPrepareForSecureHibernate",
+        0x0107: "VslPrepareForCrashdump",
+        0x0109: "VslSwapHiberShadowStacks",
+        0x010a: "VslNotifyShutdown",
+        0x010b: "VslGetSecurePciDeviceAlternateFunctionNumberForVtl0Dma",
+        0x010c: "VslAccessPciDevice",
+        0x010d: "VslGetSecurePciDeviceBootConfiguration",
+        0x010e: "VslReinitializeIumDebuggerTransport",
+        0x010f: "VslpKsrEnterIumSecureMode",
+        0x0110: "VslSvcEnterIumSecureMode",
+        0x0112: "VslKernelShadowStackAssist",
+        0x0113: "VslRequestSecureKernelDebuggerBreakIn",
+        0x0114: "VslConfigureSecureAtsDevice",
+        0x0115: "VslTerminateSecureServices",
+        0x0116: "VslQueryRuntimeAttestationReport",
+        0x0700: "VslTestRoutine",
+        0x0800: "VslStartSecurePageIteration",
+        0x0801: "HvlpEndSecurePageListIteration",
+        0x0802: "VslGetSecurePageList",
+        0x0803: "VslResumeFromCrashdump",
+    }
+    HV_CALLS = {
+        # Corrected against Linux's include/asm-generic/hyperv-tlfs.h.
+        # The previous table put SendSyntheticClusterIpi here and
+        # Get/SetVpRegisters at 0x005b/0x005c, and both were wrong -
+        # 0x0008 is the call a guest makes when it has been spinning too
+        # long, which is exactly the signal a livelock investigation
+        # wants, and it was being printed under another name.
+        0x0008: "HvCallNotifyLongSpinWait",
+        0x000b: "HvCallSendSyntheticClusterIpi",
+        0x0046: "HvCallGetPartitionId",
+        0x0048: "HvCallDepositMemory",
+        0x004e: "HvCallCreateVp",
+        0x0050: "HvCallGetVpRegisters",
+        0x0051: "HvCallSetVpRegisters",
+        0x005c: "HvCallPostMessage",
+        0x005d: "HvCallSignalEvent",
+        0x0099: "HvCallStartVirtualProcessor",
+        0x009a: "HvCallGetVpIndexFromApicId",
+        0x00af: "HvCallFlushGuestPhysicalAddressSpace",
+        0x00b0: "HvCallFlushGuestPhysicalAddressList",
+        0x000c: "HvCallModifyVtlProtectionMask",
+        0x000d: "HvCallEnablePartitionVtl",
+        0x000f: "HvCallEnableVpVtl",
+        0x0011: "HvCallVtlCall",
+        0x0012: "HvCallVtlReturn",
+        0x0013: "HvCallFlushVirtualAddressSpaceEx",
+        0x0014: "HvCallFlushVirtualAddressListEx",
+        0x0015: "HvCallSendSyntheticClusterIpiEx",
+    }
+    for label, codes, counts in (
+            ("first level (Hyper-V)", "hypercall_codes",
+             "hypercall_code_counts"),
+            ("SECOND level (Windows)", "l2_hypercall_codes",
+             "l2_hypercall_code_counts")):
+        if codes not in off:
+            continue
+        rows = []
+        for i in range(16):
+            c = words.get(instance + off[codes] + 8 * i, 0)
+            n = words.get(instance + off[counts] + 8 * i, 0)
+            if n:
+                rows.append((n, c))
+        if not rows:
+            continue
+        print(f"\ncpu 0 hypercalls from the {label}")
+        for n, c in sorted(rows, reverse=True):
+            print(f"    0x{c:04x}  {n:>12,}  "
+                  f"{HV_CALLS.get(c, '')}")
+
+    # Which MSRs the wrmsr exits actually are. An exit reason is not an
+    # instrument - see `msr_write_codes`. The value is printed beside the
+    # count so a deadline being advanced can be told from one rewritten
+    # unchanged, which the count alone cannot do.
+    for label, pfx in (("every exit, at the trace record", "msr_write"),
+                       ("SECOND level, at the reflect decision",
+                        "l2_msr_write")):
+        if pfx + "_codes" not in off:
+            continue
+        rows = []
+        for i in range(96):
+            c = words.get(instance + off[pfx + "_codes"] + 8 * i, 0)
+            n = words.get(instance + off[pfx + "_counts"] + 8 * i, 0)
+            v = words.get(instance + off[pfx + "_last_value"] + 8 * i, 0)
+            r = words.get(instance + off.get(pfx + "_reflected", 0)
+                          + 8 * i, 0) if pfx + "_reflected" in off else 0
+            if n:
+                rows.append((n, c, v, r))
+        if not rows:
+            print(f"\ncpu 0 wrmsr by MSR ({label}): none censused")
+            continue
+        total = sum(r[0] for r in rows)
+        print(f"\ncpu 0 wrmsr by MSR ({label}, {total:,} censused)")
+        for n, c, v, r in sorted(rows, reverse=True)[:12]:
+            up = f"  up {r:>10,}" if (pfx + "_reflected") in off else ""
+            print(f"    0x{c:08x}  {n:>12,}  {100.0*n/total:5.1f}%{up}  "
+                  f"last 0x{v:016x}  {MSR_NAMES.get(c, '')}")
+        if len(rows) > 12:
+            print(f"    ... and {len(rows) - 12} more MSRs")
+        if pfx == "msr_write" and "msr_write_uncounted" in off:
+            lost = words.get(instance + off["msr_write_uncounted"], 0)
+            code = words.get(instance + off["msr_write_uncounted_code"], 0)
+            if lost:
+                print(f"    NO SLOT: {lost:,} writes uncounted, "
+                      f"one of them MSR 0x{code:08x} - the table "
+                      f"saturated and this census is incomplete")
+
+    # Where the guest was when an interrupt landed on it - the only
+    # unbiased sample of the guest's own code in this tool. See
+    # `interrupted_rip`.
+    #
+    # **Per processor, and the heading said "cpu 0" while it was not.**
+    # Until 2026-09-05 all eight members were single words in the
+    # singleton, written from `record_l2_entry_event` on every
+    # processor. So on a two-processor guest this printed the *sum* of
+    # both processors under one processor's name, and the hit counts
+    # underneath had lost increments to an unlocked read-modify-write
+    # that the sample counts beside them had not. That combination
+    # inflates every percentage here by an amount the output has no way
+    # to show. See `interrupted_rip` in `hypervisor.h`.
+    #
+    # The row length comes from the ELF for the reason `gdb_lengths`
+    # exists: a literal 2048 here reads cpu 0 correctly - its row starts
+    # at offset zero, so a wrong stride cancels - and every other
+    # processor wrong, which is the exact failure `exit_reason_counts`
+    # already cost this file once.
+    if "interrupted_rip" in off:
+        kbase0 = read("guest_kernel_base") or 0
+        ksize0 = read("guest_kernel_size") or 0
+        try:
+            CAP = gdb_lengths(args.elf,
+                              ["interrupted_rip"])["interrupted_rip"]
+        except SystemExit:
+            CAP = None
+            print("note: interrupted_rip is flat in this ELF (it "
+                  "predates the per-processor dimension); the "
+                  "hot-address census is skipped rather than printed "
+                  "under a processor it cannot be attributed to")
+    if "interrupted_rip" in off and CAP:
+        for _p in ("interrupted", "quiet"):
+            if _p + "_rip" not in off:
+                continue
+            for _c in range(args.cpus):
+                for _n in (_p + "_rip", _p + "_hits"):
+                    monitor.queue(instance + off[_n] + _c * CAP * 8, CAP)
+            for _n in (_p + "_samples", _p + "_overflow"):
+                monitor.queue(instance + off[_n], args.cpus)
+        words.update(monitor.run())
+        for _p, _what in (("interrupted",
+                           "when an interrupt landed on it"),
+                          ("quiet",
+                           "on an entry staging nothing (the control)")):
+            if _p + "_rip" not in off:
+                continue
+            for _c in range(args.cpus):
+                rows = []
+                for i in range(CAP):
+                    r = words.get(instance + off[_p + "_rip"]
+                                  + (_c * CAP + i) * 8, 0)
+                    h = words.get(instance + off[_p + "_hits"]
+                                  + (_c * CAP + i) * 8, 0)
+                    if h:
+                        rows.append((h, r))
+                tot = words.get(instance + off[_p + "_samples"] + _c * 8,
+                                0)
+                lost = words.get(instance + off[_p + "_overflow"]
+                                 + _c * 8, 0)
+                if not rows:
+                    # Say so rather than skipping: a processor with no
+                    # rows and a processor absent from the output look
+                    # identical, and the second is what a wrong stride
+                    # produces.
+                    print(f"\ncpu {_c} where the guest was {_what}: no "
+                          f"rows ({tot:,} samples counted)")
+                    continue
+                print(f"\ncpu {_c} where the guest was {_what} "
+                      f"({tot:,} samples, {len(rows)} distinct)")
+
+                def _label(r):
+                    if kbase0 and kbase0 <= r < kbase0 + (ksize0 or 0):
+                        return f"  ntoskrnl+0x{r - kbase0:x}"
+                    return ""
+
+                # **The cut used to be 14 and that hid the answer.** The
+                # census samples second-level ENTRIES, and on a wedged
+                # guest almost every entry happens inside the interrupt
+                # path - so the five clock-loop addresses take the top
+                # rows and the code the *thread itself* runs between
+                # interrupts sits below them. Those rows are a fraction
+                # of a percent each and were never printed, which is why
+                # "what is the spinning thread executing" could not be
+                # answered from a census that had the answer in it.
+                #
+                # Print every row at or above 0.05% instead, with 14 as
+                # the floor. On the dumps this was written against that
+                # is 40-60 rows, not hundreds - the tail is genuinely
+                # cold.
+                #
+                # `ZPP_CENSUS_ALL=1` removes the cut entirely. That is
+                # the only way to DIFFERENCE the census legally: the
+                # standing rule against differencing across a cut
+                # (`read-the-control-and-difference-everything`) exists
+                # because an absent row reads as zero, and with no cut
+                # there are no absent rows. Use it to answer "is the
+                # interrupted thread progressing or looping" - a
+                # progressing thread grows the row *set* between two
+                # dumps, a looping one revisits the same addresses. The
+                # tail is ~600 rows on a wedged guest, which prints.
+                ordered = sorted(rows, reverse=True)
+                _floor = (len(ordered)
+                          if os.environ.get('ZPP_CENSUS_ALL') == '1'
+                          else max(14, sum(1 for h, _ in ordered
+                                           if h >= 0.0005 * (tot or 1))))
+                for h, r in ordered[:_floor]:
+                    print(f"  0x{r:016x}  {h:>10}  "
+                          f"{100.0 * h / (tot or 1):5.1f}%{_label(r)}")
+                # Everything NOT in ntoskrnl, however cold. The secure
+                # kernel and the hypercall page are where the
+                # trust-level livelock lives, and they are three orders
+                # of magnitude below the clock path - a top-N cut hides
+                # exactly the rows this census exists to show.
+                # `SkpReturnFromNormalModeRaxSet+0x114` was found only
+                # because it happened to make the fourteen; the rest of
+                # VTL1 did not.
+                rest = [(h, r) for h, r in ordered[_floor:] if not _label(r)]
+                if rest:
+                    print(f"  ... and every non-ntoskrnl row below the "
+                          f"cut ({len(rest)} of "
+                          f"{len(ordered) - _floor} remaining):")
+                    for h, r in rest:
+                        print(f"  0x{r:016x}  {h:>10}  "
+                              f"{100.0 * h / (tot or 1):5.1f}%")
+                # The sum of the rows against the count taken beside
+                # them.  They cannot agree exactly - a decayed entry
+                # subtracts a hit the sample count keeps - but a large
+                # gap is the instrument reporting its own loss, which is
+                # the one thing the old single-word version could not
+                # do.
+                # **Name the ntoskrnl rows the cut suppressed.** They
+                # are the one class this printer still truncates, and a
+                # reader differencing two dumps will otherwise take
+                # "absent from the list" for "was zero" - which is
+                # exactly what happened: five shares of one loop were
+                # differenced across the cut and summed to 106.3%, an
+                # impossibility that was the only thing that caught it.
+                # A suppressed row is not a cold row; the fourteenth
+                # here has stood at 4% of the samples.
+                hidden = [(h, r) for h, r in ordered[_floor:] if _label(r)]
+                if hidden:
+                    hsum = sum(h for h, _ in hidden)
+                    print(f"  *** {len(hidden)} ntoskrnl row(s) below the "
+                          f"cut, totalling {hsum:,} samples "
+                          f"({100.0 * hsum / (tot or 1):.1f}%). A row "
+                          f"absent from the list above is NOT zero - do "
+                          f"not difference this census across two dumps "
+                          f"unless both printed the row. ***")
+                seen = sum(h for h, _ in rows)
+                if tot:
+                    print(f"  rows sum to {seen:,} of {tot:,} samples "
+                          f"({100.0 * seen / tot:5.1f}%); the shortfall "
+                          f"is eviction, not processors summed together")
+                if lost:
+                    print(f"  contention: {lost:,} colliding samples "
+                          f"decayed a resident entry (a rate, not lost "
+                          f"hot addresses)")
+
+    # The same population, keyed on the ADDRESS SPACE as well as the
+    # address - which is the one question the census above cannot
+    # answer and no post-hoc reader of it can recover.
+    #
+    # Why it had to move into the hypervisor. A hot user-mode address
+    # resolves to a module by walking a process's PEB, and that names
+    # *what code* and never *whose*: ASLR randomises a system DLL's base
+    # once per boot, not per process, so `win32u.dll` was found at the
+    # identical address in `csrss.exe` and in `WerFault.exe` with both
+    # walks proof-passing. The exit ring cannot do it either - a few
+    # hundred entries, zero user-mode addresses in them, and a snapshot
+    # cannot be joined to a cumulative census after the fact.
+    #
+    # **What this prints is a cr3 and what to do with it.** The join is
+    # deliberately not done here: `guest-user-module.py` already reads
+    # `_KPROCESS.DirectoryTableBase` for every process by walking
+    # `PsActiveProcessHead`, and duplicating that walk into this file
+    # would make two readers of one guest structure that can disagree.
+    #
+    # **The mask is stated because a silent mismatch reads as "no
+    # process executes".** The hypervisor stores the cr3 masked to bits
+    # 12..51, its page frame; every `DirectoryTableBase` observed in
+    # this guest ends `...002`, so the reader of the process list must
+    # mask its side the same way before comparing. The dictionary below
+    # keeps the value UNMASKED, so the low bits can be read rather than
+    # assumed.
+    if "user_rip_cr3" in off:
+        try:
+            UCAP = gdb_lengths(args.elf, ["user_rip_cr3"])["user_rip_cr3"]
+            DCAP = gdb_lengths(args.elf,
+                               ["user_cr3_seen"])["user_cr3_seen"]
+        except SystemExit:
+            UCAP = None
+            DCAP = None
+            print("note: user_rip_cr3 is flat in this ELF; the user-mode "
+                  "attribution census is skipped rather than printed "
+                  "under a processor it cannot be attributed to")
+
+        if UCAP and DCAP:
+            for _c in range(args.cpus):
+                for _n in ("user_rip_cr3", "user_rip_rip",
+                           "user_rip_hits"):
+                    monitor.queue(instance + off[_n] + _c * UCAP * 8,
+                                  UCAP)
+                for _n in ("user_cr3_seen", "user_cr3_hits"):
+                    monitor.queue(instance + off[_n] + _c * DCAP * 8,
+                                  DCAP)
+            for _n in ("user_rip_samples", "user_rip_overflow",
+                       "user_rip_unattributed", "user_cr3_overflow"):
+                monitor.queue(instance + off[_n], args.cpus)
+            words.update(monitor.run())
+
+            for _c in range(args.cpus):
+                tot = words.get(
+                    instance + off["user_rip_samples"] + _c * 8, 0)
+                lost = words.get(
+                    instance + off["user_rip_overflow"] + _c * 8, 0)
+                none = words.get(
+                    instance + off["user_rip_unattributed"] + _c * 8, 0)
+                dlost = words.get(
+                    instance + off["user_cr3_overflow"] + _c * 8, 0)
+
+                # The dictionary first, because it is the control. It
+                # is linear and does not evict, so it counts every
+                # sample against its address space whatever the hashed
+                # pair table did with the addresses - and a process
+                # carrying a large share here while appearing in no
+                # pair row below is the pair table saturating.
+                dict_rows = []
+                for i in range(DCAP):
+                    v = words.get(instance + off["user_cr3_seen"]
+                                  + (_c * DCAP + i) * 8, 0)
+                    h = words.get(instance + off["user_cr3_hits"]
+                                  + (_c * DCAP + i) * 8, 0)
+                    if v:
+                        dict_rows.append((h, v))
+
+                print(f"\ncpu {_c} user-mode address spaces "
+                      f"({tot:,} user-mode samples)")
+
+                if not tot:
+                    # Say which of the two it is. An empty census and a
+                    # guest that never reached user mode are the same
+                    # zeroes, and only the build manifest separates
+                    # them - so name the field to look at.
+                    print("  no user-mode samples at all. That is either "
+                          "a guest that never left kernel mode or a "
+                          "build with userip=0 - check `strings "
+                          "<hypervisor> | grep 'zpp switches'` before "
+                          "reading it either way.")
+                elif not dict_rows:
+                    print("  samples counted but NO address space "
+                          "recorded - see the unattributed count below")
+                else:
+                    for h, v in sorted(dict_rows, reverse=True):
+                        print(f"  cr3 0x{v:016x}  masked 0x"
+                              f"{v & 0x000ffffffffff000:012x}  "
+                              f"{h:>10,}  {100.0 * h / tot:5.1f}%")
+                    dsum = sum(h for h, _ in dict_rows)
+                    print(f"  {len(dict_rows)} of {DCAP} slots used, "
+                          f"rows sum to {dsum:,} of {tot:,} samples")
+
+                if dlost:
+                    print(f"  *** the address-space dictionary "
+                          f"SATURATED: {dlost:,} samples found no slot, "
+                          f"so the shares above are of the {DCAP} "
+                          f"address spaces seen first, not of all of "
+                          f"them ***")
+
+                # The instrument reporting its own failure. Printed
+                # whenever the census ran at all, including when it is
+                # zero, because "no sample was refused" is a reading
+                # and its absence is not.
+                if tot:
+                    print(f"  unattributed: {none:,} of {tot:,} "
+                          f"({100.0 * none / tot:.1f}%) user-mode "
+                          f"samples had a cr3 that masked to zero and "
+                          f"were NOT recorded. No row above or below "
+                          f"can carry cr3 0 - 'not recorded' and "
+                          f"'recorded as zero' are different readings "
+                          f"here.")
+
+                rows = []
+                for i in range(UCAP):
+                    c = words.get(instance + off["user_rip_cr3"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    r = words.get(instance + off["user_rip_rip"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    h = words.get(instance + off["user_rip_hits"]
+                                  + (_c * UCAP + i) * 8, 0)
+                    if h:
+                        rows.append((h, c, r))
+
+                if not rows:
+                    print(f"cpu {_c} user-mode (address space, address) "
+                          f"pairs: no rows")
+                else:
+                    print(f"\ncpu {_c} user-mode (address space, "
+                          f"address) pairs ({len(rows)} distinct of "
+                          f"{UCAP} slots)")
+                    # Every row, no cut. The population is the user half
+                    # only - one dump held 1,973 distinct addresses -
+                    # and a top-N cut over a census is what hid the
+                    # whole secure-kernel tail for a week. `_floor` in
+                    # the census above exists because that one holds
+                    # tens of thousands of kernel rows; this one cannot.
+                    for h, c, r in sorted(rows, reverse=True):
+                        print(f"  cr3 0x{c:012x}  rip 0x{r:016x}  "
+                              f"{h:>10,}  {100.0 * h / (tot or 1):5.1f}%")
+                    seen = sum(h for h, _, _ in rows)
+                    print(f"  rows sum to {seen:,} of {tot:,} samples "
+                          f"({100.0 * seen / (tot or 1):5.1f}%); the "
+                          f"shortfall is eviction")
+
+                if lost:
+                    print(f"  contention: {lost:,} colliding samples "
+                          f"decayed a resident entry. This table is "
+                          f"{UCAP} slots over a key space of (address "
+                          f"space x address), so a HIGH rate here is "
+                          f"expected and means the medium rows are "
+                          f"suppressed - the hot rows are not, since a "
+                          f"row with n hits survives n collisions. "
+                          f"Compare the shares above against the "
+                          f"address-space dictionary before quoting "
+                          f"either.")
+
+                print("  join: mask both sides with 0x000ffffffffff000 "
+                      "and look the cr3 up with "
+                      "scripts/guest-user-module.py, which reads "
+                      "_KPROCESS.DirectoryTableBase (+0x28) for every "
+                      "process on PsActiveProcessHead. Every "
+                      "DirectoryTableBase in this guest ends ...002, so "
+                      "an unmasked compare matches nothing and reads "
+                      "as 'no process executes'.")
+
+    # Which shadowed writable fields the guest hypervisor actually
+    # writes - the one question `dump_field_use` above structurally
+    # cannot answer.
+    #
+    # **Why it needs its own instrument.** `record_vmcs_field_use` is
+    # called from inside `on_guest_vmwrite`, a VM exit handler. A field
+    # on `shadow_read_write_fields` has its bit cleared in
+    # `vmcs_shadow_write_bitmap` precisely so that the guest
+    # hypervisor's VMWRITE of it does NOT exit. So those encodings can
+    # never appear in the `vmwrite` table above while they are
+    # shadowed, and their absence there is the bitmap working rather
+    # than the guest abstaining. Reading the field-use table and
+    # concluding "hvix64 never writes CS access rights" is the mistake
+    # this block exists to make impossible.
+    #
+    # **What it measures instead.** `copy_shadow_to_vmcs12` reads every
+    # writable entry back anyway, and `shadow_cache` holds what this VMM
+    # last published into the region; a difference is the level above
+    # having written it. One compare, no new VMREAD, no new exit.
+    #
+    # **The bias, which must be quoted with any number here: a write of
+    # the value already present is invisible.** Every count is a LOWER
+    # BOUND on the VMWRITEs that would exit if the field moved to the
+    # read-only shadow list.
+    #
+    # The order of `SHADOW_RW_FIELDS` must match
+    # `nested_vmx::shadow_read_write_fields`. Nothing in python can
+    # check that, so `tests/nested_exit` pins it with
+    # `nested_vmx::shadow_read_write_slot` - a reorder fails the host
+    # suite instead of silently relabelling every row below.
+    SHADOW_RW_FIELDS = [
+        (0x681a, "guest_dr7"),
+        (0x681e, "guest_rip"),
+        (0x6820, "guest_rflags"),
+        (0x4824, "guest_interruptibility_state"),
+        (0x4016, "vm_entry_interruption_information_field"),
+        (0x4002, "primary_processor_based_vm_execution_controls"),
+        (0x401c, "tpr_threshold"),
+        (0x4816, "guest_cs_access_rights"),
+        (0x4818, "guest_ss_access_rights"),
+        # Added with the three control entries in `nested_vmx.h`; the
+        # order must match that list, and `tests/nested_exit` checks it.
+        (0x400c, "vm_exit_controls"),
+        (0x4012, "vm_entry_controls"),
+        (0x4004, "exception_bitmap"),
+    ]
+
+    if "shadow_field_written" in off:
+        SWSLOTS = len(SHADOW_RW_FIELDS)
+        for _n in ("shadow_field_written", "shadow_field_seen",
+                   "shadow_field_published"):
+            for _c in range(args.cpus):
+                monitor.queue(instance + off[_n] + _c * SWSLOTS * 8,
+                              SWSLOTS)
+        for _n in ("shadow_write_samples", "shadow_write_unsampled"):
+            monitor.queue(instance + off[_n], args.cpus)
+        if "vmcs_shadow_loads" in off:
+            monitor.queue(instance + off["vmcs_shadow_loads"], args.cpus)
+        words.update(monitor.run())
+
+        for _c in range(args.cpus):
+            seen = words.get(
+                instance + off["shadow_write_samples"] + _c * 8, 0)
+            skipped = words.get(
+                instance + off["shadow_write_unsampled"] + _c * 8, 0)
+            loads = None
+            if "vmcs_shadow_loads" in off:
+                loads = words.get(
+                    instance + off["vmcs_shadow_loads"] + _c * 8, 0)
+
+            print(f"\ncpu {_c} guest-hypervisor writes to SHADOWED "
+                  f"fields ({seen:,} collections compared)")
+
+            # The census reporting its own absence, before any row is
+            # read. Zero comparisons against a live collection count is
+            # a shadowwr=0 build, and that reads identically to a guest
+            # hypervisor that never wrote a single shadowed field.
+            if not seen:
+                if loads:
+                    print(f"  NOT MEASURED: {loads:,} shadow collections "
+                          f"happened and none was compared, so this is a "
+                          f"build with the census off. Check `strings "
+                          f"<hypervisor> | grep 'zpp switches'` for "
+                          f"shadowwr= and rebuild with "
+                          f"-DZPP_CENSUS_SHADOW_WRITES=ON.")
+                else:
+                    print("  no shadow collections on this processor at "
+                          "all - vmcs_shadow_loads is zero too, so this "
+                          "says nothing about the census.")
+                continue
+
+            rows = []
+            for i, (enc, name) in enumerate(SHADOW_RW_FIELDS):
+                n = words.get(instance + off["shadow_field_written"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                v = words.get(instance + off["shadow_field_seen"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                p = words.get(instance + off["shadow_field_published"]
+                              + (_c * SWSLOTS + i) * 8, 0)
+                rows.append((n, enc, name, v, p))
+
+            # No top-N cut and no suppression of zero rows. The rows
+            # worth the most are the ones reading zero - that is the
+            # whole finding - and a census printed only where it is
+            # non-zero cannot show it.
+            for n, enc, name, v, p in rows:
+                share = n / seen
+                per = f"1 per {seen / n:>10,.1f} RT" if n else \
+                      "never observed  "
+                print(f"  0x{enc:04x} {name:<46} {n:>12,}  "
+                      f"{share:8.5f}/RT  {per}")
+                if n:
+                    print(f"         last differing pair: region "
+                          f"0x{v:016x} had been published "
+                          f"0x{p:016x}")
+
+            total = sum(n for n, _, _, _, _ in rows)
+            print(f"  {total:,} differences over {seen:,} comparisons, "
+                  f"{skipped:,} collections not comparable (the cache "
+                  f"was invalid - the first round trip after the "
+                  f"control is armed, and any after a stand-down)")
+
+            # The positive control, and it is not optional. guest_rip
+            # and the interruptibility state are what a guest
+            # hypervisor's exit handler writes on essentially every
+            # resume; if THOSE read zero the instrument is broken, or
+            # the region is frozen, and no other row means anything.
+            live = sum(n for n, enc, _, _, _ in rows
+                       if enc in (0x681e, 0x4824))
+            if not live:
+                print("  *** CONTROL FAILED: guest_rip and "
+                      "guest_interruptibility_state both read zero "
+                      "differences. Those are written on nearly every "
+                      "resume, so either the comparison is not seeing "
+                      "the region (check shadowing_ineffective and "
+                      "vmcs_shadowing_stranded) or this census is "
+                      "measuring nothing. Do not read the rows above "
+                      "as a finding. ***")
+            else:
+                print(f"  control: guest_rip + interruptibility carry "
+                      f"{live:,} differences, so the comparison does "
+                      f"see the level above's stores")
+
+            # The decision the census was built for, priced in advance
+            # so the reading cannot be fitted to it afterwards. See the
+            # BACKLOG entry and nested_vmx::census_shadow_writes.
+            print("  decision rule: moving one field to the read-only "
+                  "shadow list saves 3,791 cyc/RT (phase slot 47, the "
+                  "un-elidable read-back) and costs one vmwrite EXIT "
+                  "per write, priced at the vmread row's 106,488 "
+                  "cycles. Break-even is 0.0356 writes/RT, one per "
+                  "28.1 round trips. Above that it is a loss under any "
+                  "pricing; below 0.0178 (one per 56.2) it is a win "
+                  "even if a vmwrite exit costs twice a vmread. And "
+                  "these counts are a LOWER bound - a write of the "
+                  "value already there is invisible.")
+
+    # The interface's own crash report. HV_X64_MSR_CRASH_P0..P4 are
+    # 0x40000100-0x40000104 and the control is 0x40000105; the guest
+    # writes them when it reports a fatal error, and Windows shows
+    # HYPERVISOR_ERROR (0x20001) on the screen at the same moment. This
+    # is the only place those parameters survive.
+    if "synthetic_msr_last_value" in off and "synthetic_msr_writes" in off:
+        CAPS = 320
+        for _c in range(args.cpus):
+            for i in range(0x100, 0x106):
+                monitor.queue(instance + off["synthetic_msr_writes"]
+                              + (_c * CAPS + i) * 8, 1)
+                monitor.queue(instance + off["synthetic_msr_last_value"]
+                              + (_c * CAPS + i) * 8, 1)
+        words.update(monitor.run())
+        for _c in range(args.cpus):
+            rows = []
+            for i in range(0x100, 0x106):
+                n = words.get(instance + off["synthetic_msr_writes"]
+                              + (_c * CAPS + i) * 8, 0)
+                v = words.get(instance + off["synthetic_msr_last_value"]
+                              + (_c * CAPS + i) * 8, 0)
+                if n:
+                    rows.append((i, n, v))
+            if rows:
+                print(f"\ncpu {_c} HYPERVISOR CRASH REGISTERS - the "
+                      f"interface reported a fatal error")
+                for i, n, v in rows:
+                    nm = {0x100: "CRASH_P0", 0x101: "CRASH_P1",
+                          0x102: "CRASH_P2", 0x103: "CRASH_P3",
+                          0x104: "CRASH_P4", 0x105: "CRASH_CTL"}[i]
+                    print(f"    0x{0x40000000 + i:08x} {nm:<9} "
+                          f"writes {n:>6}  last 0x{v:016x}")
+
+    # Which call sites take the VMCS reads. The field census says *what*
+    # is read; this says *who* reads it, which is the only one of the two
+    # that can be acted on. Empty unless ZPP_VMCS_CENSUS was on.
+    # The kernel image bounds, used by both the thread and stack sections
+    # below to turn an address into an offset that survives KASLR.
+    kbase = read("guest_kernel_base") or 0
+    ksize = read("guest_kernel_size") or 0
+
+    # Which thread the guest is running, and whether it is the idle one.
+    #
+    # **This is the only progress metric here that a livelock cannot
+    # fake.** `leaves-filled` counts new *mappings*, so a guest working
+    # hard over a resident set reads as frozen; exits/s and l2-entries/s
+    # rise when the guest is given room and say nothing about whether the
+    # work is getting anywhere. A changing thread pointer is scheduling,
+    # and scheduling is progress. One unchanging thread over minutes is
+    # not.
+    #
+    # `thread == idle_thread` is the case worth calling out separately: a
+    # guest that is idle is not stuck, it is waiting, and those want
+    # opposite work.
+    if "guest_thread_samples" in off:
+        stride = thread_fields * 8
+        for cpu in range(args.cpus):
+            n = read("guest_thread_sample_count", cpu) or 0
+            if not n:
+                continue
+            print(f"\ncpu {cpu} second-level threads "
+                  f"({n} samples, newest last)")
+            seen = []
+            for slot in range(max(0, n - 6), n):
+                i = slot % thread_capacity
+                a = (instance + off["guest_thread_samples"] +
+                     (cpu * thread_capacity + i) * stride)
+                f = [words.get(a + 8 * k, 0) for k in range(thread_fields)]
+                gs, prcb, thread, idle, start, state, why, irql = f
+                tag = " IDLE" if thread and thread == idle else ""
+                seen.append(thread)
+                where = (f"ntoskrnl+0x{start - kbase:x}"
+                         if kbase and kbase <= start < kbase + ksize
+                         else f"0x{start:x}")
+                print(f"    thread 0x{thread:x}{tag}  start {where}  "
+                      f"state {state}  wait {why}/irql {irql}")
+            distinct = len(set(x for x in seen if x))
+            print(f"    -> {distinct} distinct thread(s) in the last "
+                  f"{len(seen)} samples"
+                  f"{'  <- ONE THREAD, not scheduling' if distinct == 1 else ''}")
+
+    # What the interrupted code was *doing*, which the instruction
+    # pointer alone cannot say.
+    #
+    # Read the address columns, not the count. `Phase1Initialization`
+    # sits in `MiWalkEntireImage -> MiCopyPfnEntryEx -> MiCopyPage` while
+    # the shadow tables gain no new leaf, and that is equally consistent
+    # with a walk that is retrying one page and a walk that is
+    # progressing over pages already mapped. Registers that repeat across
+    # the ring are the first; registers that move are the second. The two
+    # want opposite work, and only this table separates them.
+    #
+    # `irql` here is `_KTRAP_FRAME.PreviousIrql` - the interrupted
+    # thread's own level. It is not `wait irql` in the table above, which
+    # is stale for a thread that is not waiting, and it is not the
+    # virtual task priority, which inside a handler is the handler's.
+    if "interrupted_contexts" in off:
+        found = read("interrupted_context_found") or 0
+        missed = read("interrupted_context_not_found") or 0
+        n = read("interrupted_context_count") or 0
+        print(f"\ninterrupted context ({found} frames found, "
+              f"{missed} samples with no frame)")
+        if not found:
+            # An empty ring is a fact about the search, not about the
+            # guest, and saying so is the whole reason both are counted.
+            print("    no hardware frame was ever located - this says "
+                  "nothing about the guest")
+        else:
+            base_a = instance + off["interrupted_contexts"]
+            stride = interrupted_context_fields * 8
+            rows = []
+            for slot in range(max(0, n - interrupted_context_capacity), n):
+                i = slot % interrupted_context_capacity
+                f = [words.get(base_a + i * stride + 8 * k, 0)
+                     for k in range(interrupted_context_fields)]
+                if not f[0]:
+                    continue
+                rows.append(f)
+            # **`rdi` is NOT printed, and that is a fix, not an
+            # omission.** `KiIsrLinkage` writes only Rax, Rcx, Rdx, R8,
+            # R9, R10, R11 into the `_KTRAP_FRAME`, plus Rsi via its own
+            # `push %rsi`. It **never writes Rbx (+0x140) or Rdi
+            # (+0x148)**, so those slots hold whatever the kernel stack
+            # last left there. The offsets in `guest_windows.h` are
+            # correct; the fields are simply not populated on an
+            # interrupt frame.
+            #
+            # This was caught the way everything in this file gets
+            # caught - by a second reading. A frozen row printed
+            # `rdi = KiEndInterruptCycleAccumulation+0x274`, **a code
+            # address in a register that should hold data**, and it was
+            # read past. Printing it invites exactly that.
+            #
+            # `r8` IS written by the stub and was being discarded here.
+            # It is now printed, because it carries a decisive test: for
+            # a frame in `KiUpdateThreadQosGroupingSummaries`, `rdx` must
+            # equal `*(KPRCB+0xc0)` (SchedulerSubNode) and `r8` must
+            # equal `*(KPRCB+0xc8)` (GroupSetMember) - two reads that
+            # say whether the frame is genuine or a fossil.
+            print("      rip                  irql  rcx"
+                  "                rdx                r8"
+                  "                 rsi                rsp"
+                  "                frame")
+            for f in rows:
+                _, rip, rsp, rcx, rdx, r8, rsi, rdi, irql, fr = f
+                where = (f"ntoskrnl+0x{rip - kbase:x}"
+                         if kbase and kbase <= rip < kbase + ksize
+                         else f"0x{rip:x}")
+                print(f"      {where:<20} {irql:>4}  0x{rcx:016x} "
+                      f"0x{rdx:016x} 0x{r8:016x} 0x{rsi:016x} "
+                      f"0x{rsp:016x} 0x{fr:016x}")
+                _ = rdi
+            print("      (rdi and rbx are omitted: the ISR stub does not "
+                  "write them, so those slots are stale kernel stack. "
+                  "rcx/rdx/r8/rsi are genuine.)")
+            print("      (this ring is SHARED across processors and "
+                  "carries no cpu field, so N rows is one snapshot, not "
+                  "N independent samples, and per-cpu attribution is an "
+                  "inference - not a reading.)")
+            for line in interrupted_context_verdicts(rows, kbase, ksize):
+                print(f"      {line}")
+
+    # The call stacks, which say what the guest is *doing* rather than
+    # where it is.
+    #
+    # These have been sampled for several sessions and printed by nothing,
+    # so every attempt at "what is the second-level guest waiting on" has
+    # been answered from exit histograms and instruction pointers instead -
+    # and those say where it is, never what called it there.
+    #
+    # Offsets from the kernel base rather than raw addresses, because the
+    # base moves every boot (KASLR) and an offset is comparable across
+    # runs and against a PDB. Values outside the image are printed raw:
+    # they are stack data that survived the scan's filter, not frames.
+    # **Per processor, and the heading claimed "cpu 0" while it was
+    # not.** The walk was a shared 48-entry array with a shared count
+    # that it resets to zero at the top, so a second processor starting
+    # a walk sent the first one's next frame to index 0. The result is a
+    # frame list every entry of which is inside the kernel image -
+    # because that is the filter - assembled from two stacks. It
+    # symbolises exactly as cleanly as a real one, which is why nothing
+    # in the output could have caught it: CLAUDE.md's 26-frame
+    # `Phase1Initialization -> ... -> HvlSwitchToVsmVtl1+0xab` came out
+    # of here. See `guest_stack_trace` in `hypervisor.h`.
+    for label, tr, cnt, rsp, rip in (
+            ("where it is now", "guest_stack_trace", "guest_stack_count",
+             "guest_stack_pointer", "guest_stack_rip"),
+            ("what it interrupted", "guest_interrupted_trace",
+             "guest_interrupted_count", "guest_interrupted_rsp",
+             "guest_interrupted_rip")):
+        if tr not in off:
+            continue
+        for _c in range(args.cpus):
+            n = read(cnt, _c) or 0
+            if not n:
+                # Say so. A processor with no walk and a processor
+                # missing from the output are the same silence, and the
+                # second is what a wrong stride produces.
+                print(f"\ncpu {_c} second-level call stack - {label}: "
+                      f"no frames walked")
+                continue
+            print(f"\ncpu {_c} second-level call stack - {label} "
+                  f"({n} frames, rsp 0x{read(rsp, _c) or 0:x}, "
+                  f"rip 0x{read(rip, _c) or 0:x})")
+            if kbase:
+                print(f"    kernel base 0x{kbase:x} size 0x{ksize:x} "
+                      f"- offsets below are into it")
+            for i in range(min(n, stack_capacity)):
+                frame = words.get(instance + off[tr]
+                                  + 8 * (_c * stack_capacity + i), 0)
+                if kbase and kbase <= frame < kbase + ksize:
+                    print(f"    ntoskrnl+0x{frame - kbase:x}")
+                else:
+                    print(f"    0x{frame:x}")
+
+    # The instruction the second level is sitting on, read as bytes.
+    #
+    # `xp` is a physical read and the hypervisor has already resolved this
+    # address through the *second* level's page tables, which is the part
+    # nothing outside could do. Sixteen bytes is enough to tell a `vmcall`
+    # from a `pause` loop from a `hlt`, which is the whole question.
+    code_phys = read("profile_code_physical") or 0
+    code_virt = read("profile_code_virtual") or 0
+    if code_phys:
+        raw = monitor.read_bytes(code_phys, 16) if hasattr(
+            monitor, "read_bytes") else None
+        print(f"\ncpu 0 second-level hot instruction: "
+              f"virtual 0x{code_virt:x} -> physical 0x{code_phys:x}")
+        if raw:
+            print(f"    bytes {raw.hex()}")
+        else:
+            print(f"    read it with:  xp /16xb 0x{code_phys:x}")
+
+    if "stimer_given_arms" in off:
+        # **The denominator is measured, not 1,740.** This line used to
+        # divide by a hardcoded `1740.0` and report "N.NNx the 1.74 ms
+        # it asked for" - which states a ratio against a period the
+        # population may not contain. `stimer_asked_arms` counts only
+        # arms made while STIMER0_CONFIG's periodic bit was set
+        # (`nested_entry.cpp:12135`), and the guest arms one-shot
+        # deadlines the rest of the time, so "what it asked for" is a
+        # question with an answer and must not be a literal.
+        #
+        # `arms` here is `stimer_given_arms` - arms *answered* - and it
+        # is printed beside `stimer_asked_arms` because the two
+        # disagreeing is the finding: a periodic timer fires repeatedly
+        # from one arm, so an interval from a rare re-arm to the next
+        # tick is a forward recurrence time and not a period.
+        print("\ncpu  stimer arm->fire, against what was actually asked")
+        for cpu in range(args.cpus):
+            arms = read("stimer_given_arms", cpu) or 0
+            cycles = read("stimer_given_cycles", cpu) or 0
+            asked_arms = read("stimer_asked_arms", cpu) or 0
+            asked_units = read("stimer_asked_units", cpu) or 0
+            if not arms:
+                continue
+            per = cycles / arms
+            micro = per / 1992.0
+            if asked_arms:
+                asked_micro = (asked_units / asked_arms) / 10.0
+                against = (f"-> {micro / asked_micro:.2f}x the "
+                           f"{asked_micro / 1000.0:.3f} ms it asked for "
+                           f"over {asked_arms:,} periodic arms")
+            else:
+                against = ("-> NO PERIODIC ARM RECORDED, so there is no "
+                           "period this can be a ratio against")
+            print(f"{cpu:3d}  {arms:,} answered, {per:,.0f} cycles "
+                  f"({micro:,.1f} us at 1.992 GHz), "
+                  f"{1e6 / micro if micro else 0:,.1f} Hz  {against}")
+
+        # The ring, newest last, so an interval can be differenced by hand
+        # rather than trusted from the average above. Kind 1 and kind 3
+        # alternating is one arm and one delivery per tick.
+        # NOT named `base`. That is the module base, it is live for the
+        # rest of this function, and shadowing it here pointed the
+        # manifest check at 0x14daf40 + 0x2020 and made it report
+        # BASE SUSPECT on a base that was provably correct.
+        ring_base = off.get("stimer_arm_value")
+        if ring_base is not None:
+            count = read("stimer_arm_count", 0) or 0
+
+            # **`stimer_arm_count` is not arms.** It is this ring's slot
+            # allocator, incremented from three places with three tags:
+            # a STIMER0_COUNT write and a STIMER0_CONFIG write
+            # (`nested_entry.cpp:12046`) and every injection of the
+            # clock vector (`nested_entry.cpp:3307`). Dividing its rate
+            # by the tick rate therefore mixes three populations and
+            # reports "N arms per tick" for a quantity that is not arms.
+            #
+            # Censused over the whole ring rather than the eight slots
+            # printed below, because eight slots at two thousand events
+            # a second is four milliseconds and every claim in this tree
+            # about the arm pattern came from that window.
+            kinds_seen = {}
+            for slot in range(max(0, count - stimer_ring), count):
+                i = slot % stimer_ring
+                k = words.get(instance + off["stimer_arm_kind"] + 8 * i)
+                if k:
+                    kinds_seen[k] = kinds_seen.get(k, 0) + 1
+            if kinds_seen:
+                n = sum(kinds_seen.values())
+                names = {1: "COUNT written", 2: "CONFIG written",
+                         3: "clock vector injected"}
+                split = ", ".join(
+                    f"{names.get(k, f'kind {k}')} {v} ({100.0 * v / n:.0f}%)"
+                    for k, v in sorted(kinds_seen.items()))
+                print(f"\ncpu 0 synthetic timer ring by kind, newest "
+                      f"{n} of {count:,} slots taken: {split}")
+
+            print(f"\ncpu 0 last synthetic timer events "
+                  f"({count:,} slots taken - NOT arms, newest last)")
+            for slot in range(max(0, count - 8), count):
+                i = slot % stimer_ring
+                value = words.get(instance + off["stimer_arm_value"] +
+                                  8 * i)
+                tsc = words.get(instance + off["stimer_arm_tsc"] + 8 * i)
+                kind = words.get(instance + off["stimer_arm_kind"] + 8 * i)
+                name = {1: "COUNT written", 2: "CONFIG written",
+                        3: "clock vector injected"}.get(kind, f"kind {kind}")
+                print(f"    {name:<24} value 0x{value or 0:x} "
+                      f"tsc 0x{tsc or 0:x}")
+
+    # A census over every exit, not a sample. One entry at ring 3 proves
+    # the guest reached user mode; hundreds of `info registers` samples
+    # reading CPL 0 prove only that nothing user-mode was scheduled at
+    # those instants, which on an idle machine is unremarkable.
+    print("\ncpu  cpl0        cpl1     cpl2     cpl3 (first level, every exit)")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('cpl_seen', cpu * 4):-10d}  "
+              f"{read('cpl_seen', cpu * 4 + 1):-7d}  "
+              f"{read('cpl_seen', cpu * 4 + 2):-7d}  "
+              f"{read('cpl_seen', cpu * 4 + 3):-7d}")
+
+    # The pair that decides whether HvCallModifyVtlProtectionMask is
+    # expressed through the extended page tables at all. Neither column
+    # means anything alone: a composed side stuck at 7 is only a bug if
+    # the guest side was ever something else.
+    #
+    # bit 0 read, bit 1 write, bit 2 execute - so 7 is read-write-execute
+    # and anything less is a permission the level above withheld.
+    print("\nept leaf permissions, as bits rwx (guest = eptp12 alone, "
+          "composed = installed)")
+    for cpu in range(args.cpus):
+        guest = [read('guest_leaf_permissions', cpu * 8 + i)
+                 for i in range(8)]
+        composed = [read('shadow_leaf_permissions', cpu * 8 + i)
+                    for i in range(8)]
+        if not any(guest or []) and not any(composed or []):
+            continue
+        for i in range(8):
+            g, c = guest[i] or 0, composed[i] or 0
+            if g or c:
+                print(f"  cpu {cpu}  {i:03b}  guest {g:>12,}  "
+                      f"composed {c:>12,}")
+
+    # HvCallModifyVtlProtectionMask, decoded rather than censused raw.
+    # RCX is structured: bits 15:0 call code, bit 16 fast, bits 43:32 rep
+    # count, bits 59:48 rep start. Printed in full for a handful of calls
+    # before any aggregate, because an aggregate over a misdecoded field
+    # is exactly the failure this replaces.
+    def decode(rcx):
+        return (rcx & 0xffff, (rcx >> 16) & 1,
+                (rcx >> 32) & 0xfff, (rcx >> 48) & 0xfff)
+
+    for cpu in range(args.cpus):
+        total = read('vtl_protect_count', cpu) or 0
+        if not total:
+            continue
+
+        # The decode's control first. HvCallVtlCall carries no reps, so
+        # a nonzero rep count here means the shifts are wrong and
+        # nothing below counts.
+        control = read('vtl_call_rcx', cpu) or 0
+        c_code, c_fast, c_reps, c_start = decode(control)
+        verdict = ("DECODE OK" if (c_reps == 0 and c_start == 0)
+                   else "DECODE WRONG - rep fields nonzero on a non-rep call")
+        print(f"\ncpu {cpu} decode check: HvCallVtlCall rcx=0x{control:016x} "
+              f"code=0x{c_code:x} fast={c_fast} reps={c_reps} "
+              f"start={c_start}  <- {verdict}")
+
+        f = read("vtl_protect_failures", cpu) or 0
+        sh = read("vtl_protect_reps_short", cpu) or 0
+        ra = read("vtl_protect_reps_asked", cpu) or 0
+        rd = read("vtl_protect_reps_done", cpu) or 0
+        print(f"cpu {cpu} ModifyVtlProtectionMask census over ALL calls "
+              f"(the ring below is only the last few):")
+        print(f"    non-zero statuses {f:,}"
+              + (f"   last rax 0x{read('vtl_protect_last_failure', cpu):x}"
+                 if f else "   <- never failed"))
+        print(f"    answers short of the reps asked: {sh:,}")
+        print(f"    reps asked {ra:,}  reps done {rd:,}"
+              + ("   <- SHORTFALL" if rd < ra else "   <- all completed"))
+        print(f"    the LAST call - the final act of the work item "
+              f"that stops:")
+        print(f"      rip 0x{read('vtl_protect_last_rip', cpu):x}  "
+              f"cr3 0x{read('vtl_protect_last_cr3', cpu):x}")
+        print(f"      rsp 0x{read('vtl_protect_last_rsp', cpu):x}")
+        print("      stack window:")
+        for w in range(32):
+            v = read('vtl_protect_last_stack', (cpu * 32) + w) or 0
+            if v:
+                print(f"        +0x{w * 8:02x}  0x{v:016x}")
+        nr = read('vtl_protect_after_read', cpu) or 0
+        print(f"      AFTER the answer landed ({nr} words readable) - "
+              f"differences from the window above:")
+        for w in range(32):
+            b4 = read('vtl_protect_last_stack', (cpu * 32) + w) or 0
+            af = read('vtl_protect_after_stack', (cpu * 32) + w) or 0
+            if b4 != af:
+                print(f"        +0x{w * 8:02x}  0x{b4:016x} -> 0x{af:016x}")
+        tc = read('vtl_protect_answer_to_caller', cpu) or 0
+        to = read('vtl_protect_answer_to_other', cpu) or 0
+        print(f"      the answer was delivered to the CALLING level "
+              f"{tc:,} times, to the OTHER level {to:,} times"
+              + ("   <- answers land in the wrong trust level"
+                 if to > tc else ""))
+        print("      where the answer resumes the guest, over all calls:")
+        for k in range(8):
+            c = read('vtl_protect_answer_rip_count', (cpu * 8) + k) or 0
+            if c:
+                print(f"        0x{read('vtl_protect_answer_rip', (cpu * 8) + k):x}"
+                      f"  {c:9,d}")
+        oth = read('vtl_protect_answer_rip_other', cpu) or 0
+        if oth:
+            print(f"        (beyond eight distinct) {oth:,}")
+        pr = read('vtl_protect_pfn_probed', cpu) or 0
+        ab = read('vtl_protect_pfn_abnormal', cpu) or 0
+        if pr:
+            print(f"      shadow lookup of the walked frames: {pr:,} probed, "
+                  f"{ab:,} not normally mapped"
+                  + ("   <- ALL NORMAL, not an EPT difference" if not ab
+                     else "   <- a difference on our side"))
+            NAMES = {0: "---", 1: "r--", 2: "-w-", 3: "rw-", 4: "--x",
+                     5: "r-x", 6: "-wx", 7: "rwx"}
+            for k in range(8):
+                c = read('vtl_protect_pfn_perm_seen', (cpu * 8) + k) or 0
+                if c:
+                    print(f"          perms {NAMES[k]}  {c:9,d}")
+            rc = read('vtl_protect_readonly_count', cpu) or 0
+            if rc:
+                pfns = [read('vtl_protect_readonly_pfn', (cpu * 8) + k) or 0
+                        for k in range(min(rc, 8))]
+                # `vtl_protect_readonly_count` increments outside the
+                # `n < 8` guard that fills the slots, so it can exceed
+                # them - and these are the FIRST eight read-only frames
+                # ever seen, not the last eight. Say so: the ring above
+                # is newest-last and these are oldest-only, and reading
+                # one as the other is the same error twice.
+                print(f"          the read-only frames: {rc:,} seen, "
+                      f"first {min(rc, 8)} recorded"
+                      + ("   <- FIRST eight, not the last eight"
+                         if rc > 8 else ""))
+                for k, pf in enumerate(pfns):
+                    hp = read('vtl_protect_host_perms', (cpu * 8) + k) or 0
+                    hs = read('vtl_protect_host_status', (cpu * 8) + k) or 0
+                    # Three tables, not two, and the third is the one
+                    # that decides. `hp` is our own first-level table,
+                    # which maps guest RAM read-write-execute by
+                    # construction and is *supposed* to disagree with a
+                    # protected shadow - so "ours GRANT write" on its own
+                    # is not a finding. `gp` is the guest hypervisor's
+                    # own eptp12: it agreeing with the shadow means this
+                    # VMM installed what was asked for, and it
+                    # disagreeing means the composition is wrong.
+                    gp = read('vtl_protect_guest_perms', (cpu * 8) + k)
+                    gs = read('vtl_protect_guest_status', (cpu * 8) + k)
+                    guest = ("" if gp is None else
+                             f"  eptp12: status {gs} perms "
+                             f"{NAMES.get(gp & 7, '?')}"
+                             + ("   <- AGREES: the guest hypervisor asked "
+                                "for this" if (gp & 7) == 1 else
+                                "   <- DISAGREES with the shadow: our "
+                                "composition, not its request"))
+                    print(f"            0x{pf:x}  shadow r--   "
+                          f"our own tables: status {hs} perms "
+                          f"{NAMES.get(hp & 7, '?')}"
+                          f"{guest}")
+            print(f"        last frame status {read('vtl_protect_pfn_status', cpu)} "
+                  f"perms 0x{read('vtl_protect_pfn_perms', cpu):x}")
+        print("      the first exit after a protection answer, by reason:")
+        for k in range(72):
+            c = read('vtl_protect_next_reason', (cpu * 72) + k) or 0
+            if c:
+                print(f"        {EXIT_REASON.get(k, hex(k)):<16s} {c:9,d}")
+        HV = {0x0c: "ModifyVtlProtectionMask", 0x11: "VtlCall",
+              0x12: "VtlReturn", 0x0d: "EnablePartitionVtl",
+              0x0f: "EnableVpVtl"}
+        for k in range(32):
+            c = read('vtl_protect_next_code', (cpu * 32) + k) or 0
+            if c:
+                print(f"          code 0x{k:02x} {HV.get(k, ''):<24s} "
+                      f"{c:9,d}")
+        lc = read('vtl_protect_next_code_last', cpu) or 0
+        print(f"          the LAST answer was followed by code 0x{lc:02x} "
+              f"{HV.get(lc, '')}")
+        print(f"        last one was: "
+              f"{EXIT_REASON.get(read('vtl_protect_next_last', cpu), '?')}")
+        print("      and where the NEXT instruction lands:")
+        for k in range(8):
+            c = read('vtl_protect_step_count', (cpu * 8) + k) or 0
+            if c:
+                print(f"        0x{read('vtl_protect_step_rip', (cpu * 8) + k):x}"
+                      f"  {c:9,d}")
+        so = read('vtl_protect_step_other', cpu) or 0
+        if so:
+            print(f"        (beyond eight distinct) {so:,}")
+        print(f"      last answer entered cr3 "
+              f"0x{read('vtl_protect_answer_last_cr3', cpu):x}, "
+              f"call was from cr3 "
+              f"0x{read('vtl_protect_last_cr3', cpu):x}")
+        if read('vtl_protect_thread_read', cpu):
+            fl = read('vtl_protect_thread_flags', cpu) or 0
+            lk = read('vtl_protect_thread_locked', cpu) or 0
+            cl = read('vtl_protect_thread_clear', cpu) or 0
+            print(f"      secure-kernel thread 0x{read('vtl_protect_thread', cpu):x}"
+                  f"  [+0xac] = 0x{fl:08x}  bit4 = {(fl >> 4) & 1}")
+            print(f"        over all calls: bit4 SET {lk:,}, clear {cl:,}"
+                  + ("   <- the in-use lock is held at the call"
+                     if lk > cl else ""))
+        print(f"      r15 at the last call (loop remaining) = "
+              f"{read('vtl_protect_last_r15', cpu):,}"
+              + ("   <- zero: the walk finished"
+                 if not read('vtl_protect_last_r15', cpu) else
+                 "   <- non-zero: it had work left"))
+        diffs = [(w,
+                  read('vtl_protect_early_before', (cpu * 32) + w) or 0,
+                  read('vtl_protect_early_after', (cpu * 32) + w) or 0)
+                 for w in range(32)]
+        diffs = [d for d in diffs if d[1] != d[2]]
+        print(f"      EARLY call (#100) - what the answer wrote "
+              f"({len(diffs)} words changed):")
+        for w, b4, af in diffs:
+            print(f"        +0x{w * 8:02x}  0x{b4:016x} -> 0x{af:016x}")
+        if not diffs:
+            print("        nothing changed there either <- 0x40(%rsp) is "
+                  "probably NOT the output area, and the reading is wrong")
+        print(f"cpu {cpu} HvCallModifyVtlProtectionMask: {total:,} calls")
+        cap = 32
+        order = ([(total - cap + i) % cap for i in range(cap)]
+                 if total >= cap else list(range(min(total, cap))))
+        starts = []
+        for i in order[-14:]:
+            rcx = read('vtl_protect_rcx', cpu * cap + i) or 0
+            rdx = read('vtl_protect_rdx', cpu * cap + i) or 0
+            rax = read('vtl_protect_rax', cpu * cap + i) or 0
+            code, fast, reps, start = decode(rcx)
+            done = (rax >> 32) & 0xfff
+            status = rax & 0xffff
+            self_id = "SELF" if rdx == 0xffffffffffffffff else f"0x{rdx:x}"
+            print(f"    code=0x{code:03x} fast={fast} reps={reps:5d} "
+                  f"start={start:5d} | answer status=0x{status:04x} "
+                  f"done={done:5d} | partition={self_id}")
+        for i in order:
+            rcx = read('vtl_protect_rcx', cpu * cap + i)
+            if rcx:
+                starts.append(decode(rcx)[3])
+        if starts:
+            print(f"  rep start over the last {len(starts)}: "
+                  f"{len(set(starts))} distinct, "
+                  f"min {min(starts)} max {max(starts)}")
+
+    # **Hyper-V asked to see NMIs from its guest** - its captured pin
+    # controls are 0x1e, and bit 3 is NMI exiting - but `l0_wants_l2_exit`
+    # claims every NMI unconditionally and nothing in the tree reflects
+    # one to the level above. Both KVM (`vmx_check_nested_events`) and the
+    # architecture say it should be reflected when vmcs12 asked. This
+    # counter says whether it ever fires.
+    # Two slots per processor, keyed by the extended-page-table pointer
+    # in force at the write. **The level a page belongs to is the eptp
+    # beside it and nothing else** - the slot index is allocation order,
+    # so it is not "0 is VTL0". A single-slot reading of this was quoted
+    # as VTL0's message page and was whichever level wrote last.
+    for _c in range(min(args.cpus, 1)):
+        for _level in range(2):
+            _simp = read('l2_simp_msr', _c * 2 + _level) or 0
+            _sief = read('l2_siefp_msr', _c * 2 + _level) or 0
+            _eptp = read('l2_synic_eptp', _c * 2 + _level) or 0
+            if not (_simp or _sief):
+                continue
+            print(f"\nsynthetic interrupt controller pages, as the guest "
+                  f"named them - cpu {_c} slot {_level}, "
+                  f"eptp 0x{_eptp:x}:")
+            print(f"  SIMP  0x{_simp:016x}  enabled {_simp & 1}  "
+                  f"gpa 0x{_simp & ~0xfff:x}")
+            print(f"  SIEFP 0x{_sief:016x}  enabled {_sief & 1}  "
+                  f"gpa 0x{_sief & ~0xfff:x}")
+            print("  read the message slots with xp at the SIMP gpa: "
+                  "sixteen 256-byte slots, a non-zero type word at slot "
+                  "base means a message the guest has not consumed")
+    print(f"\nNMIs re-injected into a guest rather than reflected: "
+          f"{words.get(instance + off['guest_nmis_reinjected'], 0):,}")
+
+    # A held event reflect_l2_exit found. **This counts DETECTIONS, not
+    # losses**, and the label used to say "destroyed", which asserts
+    # something it cannot see: `hand_over_pending_event` (hand=1 in the
+    # switch manifest) rescues the event by rebuilding vmcs12's
+    # IDT-vectoring field from software state, exactly as KVM's
+    # `vmcs12_save_pending_event` does, and it counts that in
+    # `pending_event_handed_over`. That member existed in the binary and
+    # was ABSENT FROM THIS READER, so the two cases - rescued and truly
+    # gone - printed identically. Fifth member in this tree recorded
+    # faithfully and never read out.
+    # **Per processor and per reason, which the aggregate cannot say.**
+    # `nested_entry_refusals` counts them all together, and a refusal of
+    # `resume_not_launched` is the one Hyper-V answers by bugchecking:
+    # it reports VMfailValid with VM-instruction error 5, "VMRESUME with
+    # non-launched VMCS", through HvpBugCheckVmEntryFailure - crash code
+    # 0x06, which is what a failing 2-CPU boot leaves in hvix64's crash
+    # record. So which reason, on which processor, is the whole question
+    # and the array has been carrying the answer all along.
+    # The per-PROCESSOR VP assist pages, in a per-processor section,
+    # because that is how they are indexed. Kept apart from the per-kind
+    # probe results above for the reason recorded there.
+    if "l2_vp_assist" not in off:
+        print("\nVP assist per processor: MEMBER ABSENT from this "
+              "reader - not 'none'. Add it rather than reading the "
+              "silence as an answer.")
+    else:
+        printed_any = False
+        for cpu in range(args.cpus):
+            for level in range(2):
+                msr = words.get(instance + off["l2_vp_assist"]
+                                + 8 * (cpu * 2 + level), 0)
+                if not msr:
+                    continue
+                if not printed_any:
+                    print("\nVP assist page each processor registered, "
+                          "as Windows wrote the MSR")
+                    printed_any = True
+                eptp = words.get(instance + off["l2_vp_assist_eptp"]
+                                 + 8 * (cpu * 2 + level), 0)
+                print(f"  cpu {cpu} level {level}: msr 0x{msr:x} "
+                      f"eptp 0x{eptp:x}")
+        if not printed_any:
+            print("\nVP assist page: no processor has registered one")
+
+    # **The two fields a refused VMX instruction turns on.** hvix64
+    # executes VMPTRLD on every VP context switch; zpp answers it with
+    # #UD from exactly two places - `cpu >= max_cpus`, or
+    # `!guest_in_vmx_operation[cpu]` - and hvix64, believing nothing is
+    # above it, bugchecks with HvpHandleHostException (crash code 0x11).
+    # `read-channel-state.sh` prints this and this reader never did.
+    # **Can an interrupt wake the halted processor at all?** The state
+    # captured at the moment a second-level HLT is reflected upward.
+    # RFLAGS.IF clear at that instant means the processor cannot take
+    # the IPI that is meant to wake it, and the sender spins for ever.
+    if "hlt_reflect_rflags" not in off:
+        print("\nHLT reflect state: MEMBER ABSENT from this reader.")
+    else:
+        hm = Monitor(args.rig, args.port)
+        for _m in ("hlt_reflect_rflags", "hlt_reflect_interruptibility"):
+            if _m in off:
+                hm.queue(instance + off[_m], args.cpus)
+        hgot = hm.run()
+        shown = False
+        for cpu in range(args.cpus):
+            fl = hgot.get(instance + off["hlt_reflect_rflags"] + 8 * cpu, 0)
+            ib = hgot.get(instance + off.get("hlt_reflect_interruptibility", 0)
+                          + 8 * cpu, 0) if "hlt_reflect_interruptibility" in off else 0
+            if not (fl or ib):
+                continue
+            if not shown:
+                print("\nstate at the last second-level HLT reflected up")
+                shown = True
+            iff = 1 if (fl & (1 << 9)) else 0
+            print(f"  cpu {cpu}  rflags 0x{fl:x}  IF {iff}  "
+                  f"interruptibility 0x{ib:x}"
+                  + ("" if iff else
+                     "   <- IF CLEAR: no interrupt can wake this halt"))
+        if not shown:
+            print("\nno second-level HLT was reflected on any processor")
+
+    # The two refusals in `on_vmx_instruction` that had no counter: the
+    # MODE check (real mode / v86 / IA-32e with a non-64-bit CS) and
+    # VMXON without CR4.VMXE in the read shadow. KVM makes neither in
+    # software; zpp re-derives the first from `ia_32e_mode_guest`, which
+    # is the field `apply_start_up` clears on the AP only.
+    if "vmx_refusal_mode" not in off:
+        print("\nVMX mode refusals: MEMBER ABSENT from this reader.")
+    else:
+        mm = Monitor(args.rig, args.port)
+        for _m in ("vmx_refusal_mode", "vmx_refusal_vmxe",
+                   "vmx_refusal_cpl", "vmx_refusal_vmfunc",
+                   "vmx_refusal_unhandled"):
+            if _m in off:
+                mm.queue(instance + off[_m], args.cpus)
+        if "vmx_refusal_ss_rights" in off:
+            mm.queue(instance + off["vmx_refusal_ss_rights"], 1)
+        for _m in ("vmx_refusal_cr0", "vmx_refusal_rflags",
+                   "vmx_refusal_entry_controls", "vmx_refusal_cs_rights"):
+            if _m in off:
+                mm.queue(instance + off[_m], 1)
+        mg = mm.run()
+        hit = False
+        for cpu in range(args.cpus):
+            md = mg.get(instance + off["vmx_refusal_mode"] + 8 * cpu, 0)
+            vx = mg.get(instance + off["vmx_refusal_vmxe"] + 8 * cpu, 0)
+            cp = (mg.get(instance + off["vmx_refusal_cpl"] + 8 * cpu, 0)
+                  if "vmx_refusal_cpl" in off else 0)
+            vf = (mg.get(instance + off["vmx_refusal_vmfunc"] + 8 * cpu, 0)
+                  if "vmx_refusal_vmfunc" in off else 0)
+            uh = (mg.get(instance + off["vmx_refusal_unhandled"] + 8 * cpu, 0)
+                  if "vmx_refusal_unhandled" in off else 0)
+            if md or vx or cp or vf or uh:
+                if not hit:
+                    print("\nVMX INSTRUCTIONS REFUSED ON MODE / VMXE "
+                          "(each is a #UD to the guest hypervisor)")
+                    hit = True
+                print(f"  cpu {cpu}  mode {md:,}  cr4.vmxe {vx:,}  "
+                      f"cpl!=0 {cp:,}  vmfunc {vf:,}  unhandled {uh:,}"
+                      + ("   <- injects #GP, not #UD" if cp else ""))
+                if cp and "vmx_refusal_ss_rights" in off:
+                    ssr = mg.get(instance + off["vmx_refusal_ss_rights"], 0)
+                    print(f"        ss access rights 0x{ssr:x}, "
+                          f"dpl {(ssr >> 5) & 3}")
+        if hit:
+            ec = mg.get(instance + off.get("vmx_refusal_entry_controls", 0), 0)
+            cs = mg.get(instance + off.get("vmx_refusal_cs_rights", 0), 0)
+            print(f"  last: cr0 0x"
+                  f"{mg.get(instance + off.get('vmx_refusal_cr0', 0), 0):x}"
+                  f"  rflags 0x"
+                  f"{mg.get(instance + off.get('vmx_refusal_rflags', 0), 0):x}"
+                  f"  entry_controls 0x{ec:x}  cs_rights 0x{cs:x}")
+            print(f"        ia32e_mode_guest {1 if ec & (1 << 9) else 0}"
+                  f"  cs.L {1 if cs & (1 << 13) else 0}"
+                  f"   <- if these disagree, THIS is the refusal")
+        else:
+            print("\nVMX instructions refused on mode / cr4.vmxe: none")
+
+    # **The page-table walk's own account of why it refused.** Recorded
+    # at the one place in `guest_linear_to_physical` that returns
+    # `guest_address_not_mapped` after actually walking - level, the
+    # entry it stopped on, the table it read it from, and the linear
+    # address. It has existed all along and was never printed.
+    if "walk_refusal_level" not in off:
+        print("\nwalk refusals: MEMBER ABSENT from this reader.")
+    else:
+        wr = Monitor(args.rig, args.port)
+        for _m in ("walk_refusal_level", "walk_refusal_entry",
+                   "walk_refusal_table", "walk_refusal_linear"):
+            if _m in off:
+                wr.queue(instance + off[_m], args.cpus)
+        wg = wr.run()
+        shown = False
+        for cpu in range(args.cpus):
+            lin = wg.get(instance + off.get("walk_refusal_linear", 0)
+                         + 8 * cpu, 0)
+            ent = wg.get(instance + off.get("walk_refusal_entry", 0)
+                         + 8 * cpu, 0)
+            tab = wg.get(instance + off.get("walk_refusal_table", 0)
+                         + 8 * cpu, 0)
+            lvl = wg.get(instance + off.get("walk_refusal_level", 0)
+                         + 8 * cpu, 0)
+            if not (lin or ent or tab):
+                continue
+            if not shown:
+                print("\nPAGE-TABLE WALK REFUSALS (why this VMM said "
+                      "'not mapped')")
+                shown = True
+            print(f"  cpu {cpu}  level {lvl}  linear 0x{lin:x}")
+            print(f"          table 0x{tab:x}  entry 0x{ent:x}"
+                  + ("   <- entry has PRESENT clear" if not (ent & 1)
+                     else "   <- entry IS present, so the refusal is "
+                          "not absence"))
+        if not shown:
+            print("\npage-table walk refusals: none on any processor")
+
+    # **WHY** a VMX instruction was refused, split by half. The caller
+    # answers a false with #UD, which is the wrong fault for a memory
+    # access that did not work - `nested_vmx.cpp` says exactly that
+    # about VMREAD and predicts "on a multi-processor boot exactly one
+    # of these fires, on the second processor".
+    if "vmx_operand_decode_failures" not in off:
+        print("\nVMX operand failures: MEMBER ABSENT from this reader - "
+              "not zero.")
+    else:
+        om = Monitor(args.rig, args.port)
+        for _m in ("vmx_operand_decode_failures",
+                   "vmx_operand_read_failures"):
+            om.queue(instance + off[_m], args.cpus)
+        for _m in ("vmx_operand_failure_reason",
+                   "vmx_operand_failure_linear",
+                   "vmx_operand_failure_error",
+                   "vmx_operand_failure_running_l2",
+                   "vmx_operand_failure_cr3"):
+            if _m in off:
+                om.queue(instance + off[_m], 1)
+        og = om.run()
+        any_row = False
+        for cpu in range(args.cpus):
+            d = og.get(instance + off["vmx_operand_decode_failures"]
+                       + 8 * cpu, 0)
+            r = og.get(instance + off["vmx_operand_read_failures"]
+                       + 8 * cpu, 0)
+            if not (d or r):
+                continue
+            if not any_row:
+                print("\nVMX OPERAND FAILURES (each becomes a #UD to the "
+                      "guest hypervisor)")
+                any_row = True
+            print(f"  cpu {cpu}  decode {d:,}  guest-read {r:,}")
+        if any_row:
+            print(f"  last: rip 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_reason', 0), 0):x}"
+                  f"  linear 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_linear', 0), 0):x}"
+                  f"  error "
+                  f"{og.get(instance + off.get('vmx_operand_failure_error', 0), 0)}")
+            rl = og.get(instance + off.get("vmx_operand_failure_running_l2", 0), 0)
+            print(f"        running_l2 {rl}  guest_cr3 0x"
+                  f"{og.get(instance + off.get('vmx_operand_failure_cr3', 0), 0):x}"
+                  + ("   <- SET while the LEVEL ABOVE executed: the walk "
+                     "went through EPT12 and could not have worked"
+                     if rl == 1 else
+                     "   <- clear, so the walk was a plain L1 walk and "
+                     "the page really was absent"))
+        else:
+            print("\nVMX operand failures: none on any processor")
+
+    # **The direct count of #UDs this VMM handed the level above.**
+    # `exit_dispatch.cpp` calls `inject_invalid_opcode_exception()` when
+    # `on_vmx_instruction` refuses, and increments this. A guest
+    # hypervisor answers a #UD on a VMX instruction by bugchecking - it
+    # believes nothing is above it - so a single one ends the machine.
+    # The counter existed and was never printed.
+    if "vmx_instructions_refused" not in off:
+        print("\nVMX instructions refused: MEMBER ABSENT from this "
+              "reader - not zero.")
+    else:
+        vr2 = Monitor(args.rig, args.port)
+        vr2.queue(instance + off["vmx_instructions_refused"], args.cpus)
+        for _m in ("refused_xsetbv_count", "refused_xsetbv_index",
+                   "refused_xsetbv_value"):
+            if _m in off:
+                vr2.queue(instance + off[_m], 1)
+        vg2 = vr2.run()
+        rows = [(c, vg2.get(instance + off["vmx_instructions_refused"]
+                            + 8 * c, 0)) for c in range(args.cpus)]
+        rows = [r for r in rows if r[1]]
+        if rows:
+            print("\nVMX INSTRUCTIONS THIS VMM REFUSED (each one is a "
+                  "#UD to the guest hypervisor)")
+            for c, n in rows:
+                print(f"  cpu {c}  {n:,}")
+        else:
+            print("\nVMX instructions refused by this VMM: none on any "
+                  "processor")
+        if "refused_xsetbv_count" in off:
+            xn = vg2.get(instance + off["refused_xsetbv_count"], 0)
+            if xn:
+                print(f"  xsetbv refused {xn:,}  index "
+                      f"{vg2.get(instance + off.get('refused_xsetbv_index', 0), 0)}"
+                      f"  value 0x"
+                      f"{vg2.get(instance + off.get('refused_xsetbv_value', 0), 0):x}")
+            else:
+                print("  xsetbv refused: none")
+
+    # The #UD branch that had no counter. `on_vmx_instruction` refuses
+    # any VMX instruction from the level above when the processor index
+    # is out of range, and the caller turns that into a #UD - which a
+    # guest hypervisor answers by bugchecking. Once is enough to end the
+    # machine.
+    if "index_out_of_range" not in off:
+        print("\nindex out of range: MEMBER ABSENT from this reader - "
+              "not zero.")
+    else:
+        ir = Monitor(args.rig, args.port)
+        for _m in ("index_out_of_range", "index_out_of_range_last",
+                   "index_out_of_range_vpid"):
+            if _m in off:
+                ir.queue(instance + off[_m], 1)
+        ig = ir.run()
+        n = ig.get(instance + off["index_out_of_range"], 0)
+        if n:
+            print(f"\nVMX INSTRUCTIONS REFUSED FOR AN OUT-OF-RANGE "
+                  f"PROCESSOR INDEX: {n:,}")
+            print(f"  last index {ig.get(instance + off['index_out_of_range_last'], 0)}"
+                  f"  vpid at that moment "
+                  f"{ig.get(instance + off['index_out_of_range_vpid'], 0)}"
+                  f"   <- each one is a #UD to the guest hypervisor")
+        else:
+            print("\nVMX instructions refused for an out-of-range "
+                  "processor index: none")
+
+    if "guest_in_vmx_operation" not in off:
+        print("\nnested VMX state per processor: MEMBER ABSENT from "
+              "this reader - not 'clear'.")
+    else:
+        gr = Monitor(args.rig, args.port)
+        # **`guest_in_vmx_operation` is `bool[max_cpus]` - ONE BYTE per
+        # processor.** The whole array is eight bytes, so it is a single
+        # quadword and each processor is a byte within it. Queued as
+        # `args.cpus` quadwords it reads seven words past the array and
+        # reports processors that do not exist as being in VMX
+        # operation, which is what the first revision of this code did.
+        # The two pointers beside it really are `uint64_t[max_cpus]`.
+        gr.queue(instance + off["guest_in_vmx_operation"], 1)
+        for _m in ("guest_vmxon_pointer", "guest_current_vmcs"):
+            if _m in off:
+                gr.queue(instance + off[_m], args.cpus)
+        gg = gr.run()
+        inop_word = gg.get(instance + off["guest_in_vmx_operation"], 0)
+        print("\nnested VMX state per processor "
+              "(a clear in_vmx_operation is a #UD to the level above)")
+        for cpu in range(args.cpus):
+            inop = (inop_word >> (8 * cpu)) & 0xff
+            vxon = gg.get(instance + off.get("guest_vmxon_pointer", 0)
+                          + 8 * cpu, 0) if "guest_vmxon_pointer" in off else 0
+            curr = gg.get(instance + off.get("guest_current_vmcs", 0)
+                          + 8 * cpu, 0) if "guest_current_vmcs" in off else 0
+            if not (inop or vxon or curr):
+                continue
+            mark = "" if inop else "   <- CLEAR: VMX instructions get #UD"
+            print(f"  cpu {cpu}  in_vmx_operation {inop}  "
+                  f"vmxon 0x{vxon:x}  current_vmcs 0x{curr:x}{mark}")
+
+    if "entry_refusals" in off:
+        REFUSALS = ["no_current_vmcs", "launch_not_clear",
+                    "resume_not_launched", "control_or_host_state"]
+        rr = Monitor(args.rig, args.port)
+        rr.queue(instance + off["entry_refusals"], args.cpus * len(REFUSALS))
+        rg = rr.run()
+        rows = []
+        for cpu in range(args.cpus):
+            for i, name in enumerate(REFUSALS):
+                n = rg.get(instance + off["entry_refusals"]
+                           + 8 * (cpu * len(REFUSALS) + i), 0)
+                if n:
+                    rows.append((cpu, name, n))
+        if rows:
+            print("\nsecond-level entries REFUSED by this VMM, "
+                  "per processor and reason")
+            for cpu, name, n in rows:
+                mark = ("   <- Hyper-V answers this with "
+                        "HvpBugCheckVmEntryFailure, crash code 0x06"
+                        if name == "resume_not_launched" else "")
+                print(f"  cpu {cpu}  {name:22s} {n:>10,}{mark}")
+        else:
+            print("\nsecond-level entries refused: none on any processor")
+    else:
+        print("\nentry_refusals: MEMBER ABSENT from this reader - not "
+              "zero. Add it rather than reading this as none.")
+
+    if "pending_event_lost" in off:
+        print("\ncpu  held events seen by reflect_l2_exit  "
+              "first          last           at reason")
+        for cpu in range(args.cpus):
+            n = read("pending_event_lost", cpu)
+            if 0 == n:
+                continue
+            first = read("pending_event_lost_first", cpu)
+            last = read("pending_event_lost_last", cpu)
+            why = read("pending_event_lost_reason", cpu)
+            print(f"{cpu:3d}  {n:-36,d}  0x{first:08x}     "
+                  f"0x{last:08x}     {name_reason(why & 0xffff)}"
+                  f" (0x{why:x})")
+            if "pending_event_handed_over" not in off:
+                print("     handed over: MEMBER ABSENT from this reader "
+                      "- cannot say whether these were rescued or lost")
+            else:
+                given = read("pending_event_handed_over", cpu)
+                if given >= n:
+                    print(f"     handed over {given:,} of {n:,} - RESCUED, "
+                          f"vmcs12 got the event in its IDT-vectoring "
+                          f"field; nothing was destroyed")
+                else:
+                    # **"GENUINELY LOST" was asserted from `n - given`
+                    # alone, and that arithmetic cannot support it.**
+                    # `pending_event_lost_while_valid` counts the losses
+                    # where the HARDWARE idt-vectoring field was valid at
+                    # the reflection - and in exactly those cases the
+                    # architecture had its own account of the interrupted
+                    # delivery, the normal copy handed vmcs12 that field,
+                    # and nothing was destroyed. `hand_over_pending_event`
+                    # declines there deliberately, so that it never
+                    # overwrites a real report from the processor.
+                    #
+                    # So a loss that is `while_valid` is a hand-over
+                    # correctly REFUSED, not an event owed to the guest
+                    # and thrown away. The member has existed in
+                    # `hypervisor.h` since the switch was written and
+                    # this reader had never read it, which made the
+                    # switch's own stated pass criterion - *"if `lost`
+                    # stays non-zero the hand-over condition is wrong"* -
+                    # impossible to evaluate.
+                    valid = (read("pending_event_lost_while_valid", cpu)
+                             if "pending_event_lost_while_valid" in off
+                             else None)
+                    if valid is None:
+                        print(f"     handed over {given:,} of {n:,}, and "
+                              f"pending_event_lost_while_valid is ABSENT "
+                              f"from this reader - so whether the rest "
+                              f"were destroyed or were hand-overs "
+                              f"correctly refused CANNOT BE SAID")
+                    elif valid >= n - given:
+                        print(f"     handed over {given:,} of {n:,}; the "
+                              f"other {n - given:,} had a VALID hardware "
+                              f"idt-vectoring field ({valid:,} while_valid)"
+                              f" - the architecture reported the "
+                              f"interrupted delivery itself and vmcs12 got "
+                              f"it by the normal copy. Hand-over was "
+                              f"correctly refused; NOTHING WAS DESTROYED")
+                    else:
+                        print(f"     handed over {given:,} of {n:,}, "
+                              f"{valid:,} refused on a valid hardware "
+                              f"field - leaving {n - given - valid:,} "
+                              f"GENUINELY LOST, an event the second-level "
+                              f"guest was owed and nobody reported")
+            print(f"     first vector 0x{first & 0xff:02x}, "
+                  f"last vector 0x{last & 0xff:02x}")
+        if all(0 == read("pending_event_lost", c)
+               for c in range(args.cpus)):
+            print("\nno held event was destroyed by reflect_l2_exit "
+                  "(pending_event_lost = 0 on every cpu)")
+    print("\ncpu  shadow-builds  cache-hits  evictions  resets  reclaims  leaves-filled")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('shadow_ept_builds', cpu):-13d}  "
+              f"{read('shadow_ept_cache_hits', cpu):-10d}  "
+              f"{read('shadow_ept_evictions', cpu):-9d}  "
+              f"{read('shadow_ept_resets', cpu):-6d}  "
+              f"{(read('shadow_ept_reclaims', cpu) or 0):-8d}  "
+              f"{read('shadow_ept_leaves_filled', cpu):-13d}")
+
+    # **How each fault was answered.** `leaves-filled` above counts only
+    # the `installed` branch, so it going nowhere while the fault count
+    # climbs means some other branch is taking every fault - and a fault
+    # answered without installing anything resumes the guest onto the
+    # identical fault. That is a livelock, and it is invisible in every
+    # other counter here: exits climb, cache hits climb, nothing errors.
+    #
+    # Read the *rate*, never the total. Reflections are legitimate and a
+    # booting guest makes plenty; what is not legitimate is a steady
+    # state where the same disposition keeps rising and `installed` does
+    # not move at all.
+    # The roots themselves. See the queue above for why one distinct value
+    # would be a finding rather than a detail.
+    # **Every processor, not just the boot one.** This read was
+    # `0 * 4 + i` and printed "cpu 0" - so an application processor's
+    # roots could not be seen at all, and the absence of a section for it
+    # read exactly like a processor that holds none. That matters
+    # directly: the failure being chased is an application processor that
+    # never performs a trust-level transition, and whether it holds one
+    # root, two, or none is the first thing to compare against the boot
+    # processor, which does switch.
+    for cpu in range(args.cpus):
+        roots = [read('shadow_ept_recall_root', cpu * 4 + i) or 0
+                 for i in range(4)]
+        current = read('shadow_ept_current_slot', cpu)
+        distinct = sorted({r for r in roots if r})
+
+        if not distinct and not current:
+            print(f"\ncpu {cpu} shadow EPT roots held: none")
+            continue
+
+        print(f"\ncpu {cpu} shadow EPT roots held (slot "
+              f"{current} current)")
+        for i, r in enumerate(roots):
+            print(f"  slot {i}  0x{r:012x}" +
+                  ("  <- current" if i == current else ""))
+        print(f"  {len(distinct)} distinct non-zero root(s)")
+        if len(distinct) == 1:
+            print("  ONE ROOT <- both trust levels would be sharing an "
+                  "extended page table, which VSM requires them not to")
+
+    # **What fraction of wall time this VMM occupies.** Every account of
+    # the cost of this hang so far has been a rate multiplied by an
+    # estimated per-exit cost; this is the quantity those were estimating,
+    # measured directly. handler_cycles is time inside the exit handler,
+    # and the two time stamps bracket the window it accumulated over, so
+    # the ratio is the duty cycle - and it needs no assumption about how
+    # much an exit costs or how many there were.
+    #
+    # A guest starved by exit handling shows a duty near 1. A guest that
+    # is stuck for some other reason shows a small one, and then the cost
+    # arithmetic is a red herring however convincing it looks.
+    for cpu in range(min(args.cpus, 1)):
+        cycles = read('handler_cycles', cpu) or 0
+        first = read('handler_first_tsc', cpu) or 0
+        last = read('handler_last_tsc', cpu) or 0
+        span = last - first
+        if span > 0:
+            duty = cycles / span
+            print(f"\ncpu {cpu} share of wall time spent in the exit "
+                  f"handler")
+            print(f"  handler cycles  {cycles:>20,}")
+            print(f"  elapsed cycles  {span:>20,}"
+                  f"   ({span / 1.992e9:,.1f} s at 1.992 GHz)")
+            print(f"  duty            {duty:>20.3f}"
+                  + ("   <- starved: the handler owns the processor"
+                     if duty > 0.85 else
+                     "   <- NOT starved: the guest has time it is not using"))
+
+        # And **whose** the remaining time is. The duty cycle above says
+        # how much is not this VMM's; it does not say whether what is left
+        # reaches Windows at all. `l1_run_cycles` is the guest hypervisor
+        # executing and `l2_run_cycles` is its guest - and "Windows has a
+        # fifth of the machine" and "Hyper-V has a fifth of the machine
+        # and Windows has almost none" are opposite diagnoses that the
+        # duty cycle alone cannot tell apart.
+        l1 = read('l1_run_cycles', cpu) or 0
+        l2 = read('l2_run_cycles', cpu) or 0
+        if span > 0 and (l1 or l2):
+            print(f"  of which:")
+            print(f"    guest hypervisor (L1)  {l1:>18,}"
+                  f"   {100.0 * l1 / span:5.1f}% of wall")
+            print(f"    Windows          (L2)  {l2:>18,}"
+                  f"   {100.0 * l2 / span:5.1f}% of wall")
+            if (l1 + l2) > 0:
+                print(f"    Windows' share of non-VMM time: "
+                      f"{100.0 * l2 / (l1 + l2):.1f}%")
+
+    # **The secure kernel's own answer.** Byte 1 of the block is the
+    # request it is making and the 32-bit word at offset 8 is the status
+    # it returned - the slot VslpEnterIumSecureMode itself writes
+    # 0xC000001C and 0xC0000030 into on its error paths. A trust-level
+    # call that takes zero exits and declines has a reason, and this is
+    # the field that carries it.
+    if read('vtl_call_block_read', 0):
+        blk = [read('vtl_call_block', 0 * 4 + i) or 0 for i in range(4)]
+        state = (blk[0] >> 8) & 0xff
+        status = blk[1] & 0xffffffff
+        print(f"\ncpu 0 IUM secure-call block at "
+              f"0x{read('vtl_call_rdx', 0):x}"
+              f"  ->  guest-physical "
+              f"0x{read('vtl_call_block_physical', 0):x}")
+        print(f"  read the same physical from the monitor and compare: "
+              f"a disagreement means the two trust levels' extended page "
+              f"tables alias it to different host pages")
+        for i, q in enumerate(blk):
+            print(f"  +0x{i * 8:02x}  0x{q:016x}")
+        print(f"  request byte  = {state} (0x{state:02x})")
+        MEANING = {0: "secure memory manager (SkmiMapViewOfImage etc)",
+                   2: "WPP tracing", 4: "VINA notification",
+                   5: "process/thread teardown"}
+        req = [read('vtl_call_request', 0 * 256 + i) or 0
+               for i in range(256)]
+        rtot = sum(req)
+        if rtot:
+            print(f"  every request byte ever seen ({rtot:,} calls):")
+            for i, c in enumerate(req):
+                if c:
+                    print(f"    code {i:3d}  {c:9,d}  "
+                          f"{100.0 * c / rtot:5.1f}%   "
+                          f"{MEANING.get(i, '')}")
+            print(f"  the block's first quadword changed "
+                  f"{read('vtl_block_changes', 0):,} times")
+            c0 = read('vtl_code0_count', 0) or 0
+            ch = read('vtl_code0_param_changes', 0) or 0
+            if c0:
+                print(f"  code-0 requests: {c0:,}, parameters differed "
+                      f"from the previous one {ch:,} times "
+                      f"({100.0 * ch / c0:.1f}%)"
+                      + ("   <- one request repeated" if ch * 20 < c0 else
+                         "   <- distinct requests"))
+                lo = read('vtl_code0_min_pfn', 0) or 0
+                hi = read('vtl_code0_max_pfn', 0) or 0
+                nc = read('vtl_code0_pfn_calls', 0) or 0
+                cons = read('vtl_code0_consecutive', 0) or 0
+                if nc:
+                    # `lo` and `hi` are the extremes of what was ASKED
+                    # FOR, so the span is defined by what the walk
+                    # reached and nothing can fall short of it. The old
+                    # "short of the span - it stopped inside" verdict
+                    # read a DENSITY as a completion fraction; it was
+                    # retracted in 83818da and is not reinstated here,
+                    # because reading it as completion is what revived
+                    # the four-frame lead after 1e22213 killed it.
+                    span = hi - lo + 1
+                    print(f"  page-walk span: 0x{lo:x}..0x{hi:x} "
+                          f"= {span:,} pages ({span * 4096 / 1048576:.1f} MB)"
+                          f", {nc:,} page requests")
+                    print(f"    density {100.0 * nc / span:.1f}% of the range "
+                          f"its own extremes define - NOT a completion "
+                          f"fraction, and 0x{hi:x} was reached by definition")
+                    same = read('vtl_code0_same', 0)
+                    back = read('vtl_code0_back', 0)
+                    skip = read('vtl_code0_skip', 0)
+                    longest = read('vtl_code0_run_longest', 0)
+                    if None in (same, back, skip, longest):
+                        print(f"    {cons:,} '+1' steps - a COUNT of steps, "
+                              f"not a run length; rebuild for the partition")
+                    else:
+                        total = cons + same + back + skip
+                        print(f"    steps: {cons:,} +1, {same:,} repeat, "
+                              f"{back:,} backward, {skip:,} forward-gap")
+                        print(f"      longest run {longest + 1:,} pages "
+                              f"(~{nc / max(1, back + skip + same + 1):.1f} "
+                              f"pages per run over "
+                              f"{back + skip + same + 1:,} runs)")
+                        # The identity is the reader checking its own
+                        # arithmetic - every transition is exactly one of
+                        # the four. A partition that does not add up is a
+                        # miscount, and this is the only class of error
+                        # this file has ever caught without a second
+                        # instrument.
+                        print("      partition " + (
+                            f"HOLDS ({total:,} == {nc - 1:,})"
+                            if total == nc - 1 else
+                            f"BROKEN: {total:,} != {nc - 1:,} - do not "
+                            f"believe any figure on this line"))
+                        if back:
+                            print("      backward steps present: the walk "
+                                  "RESTARTS or revisits; it is not one "
+                                  "monotonic pass")
+                # Newest LAST. Reading these eight slots in raw order is
+                # exactly what produced the four-frame lead, and 1e22213
+                # retracted that lead for this reason - but the printer
+                # was never fixed, so 0c20f16 revived it from the same
+                # unrotated buffer. See hypervisor.h `vtl_code0_wide`.
+                print(f"  the last code-0 blocks seen (oldest first, "
+                      f"newest LAST; ring position {c0 % 8}):")
+                for n in range(8):
+                    sl = (c0 + n) % 8
+                    w = [read('vtl_code0_ring', (sl * 3) + k) or 0
+                         for k in range(3)]
+                    if any(w):
+                        tag = "   <- NEWEST" if n == 7 else ""
+                        print(f"    +0x00 0x{w[0]:016x}  "
+                              f"+0x08 0x{w[1]:016x}  +0x10 0x{w[2]:016x}"
+                              f"{tag}")
+                # The population the 0x01010002 filter selects from. That
+                # constant appears nowhere in ntoskrnl.exe, and this
+                # file's own later reading makes bytes 2-3 a batch COUNT
+                # - under which the filter selects one batch size and the
+                # span above is that batch size's span alone.
+                wv = [read('vtl_code0_word_value', k) for k in range(16)]
+                wc = [read('vtl_code0_word_count', k) for k in range(16)]
+                if any(v is not None for v in wc) and any(wc):
+                    print("  request word, low half, as a population:")
+                    for v, c in sorted(zip(wv, wc),
+                                       key=lambda p: -(p[1] or 0)):
+                        if c:
+                            print(f"    0x{v:08x}  {c:9,d}  "
+                                  f"{100.0 * c / c0:5.1f}%"
+                                  + ("   <- what the PFN filter selects"
+                                     if v == 0x01010002 else ""))
+                    oth = read('vtl_code0_word_other', 0) or 0
+                    if oth:
+                        print(f"    (beyond sixteen distinct) {oth:,}")
+                # The same population, DECODED. See hypervisor.h
+                # `vtl_service_calls` for the disassembly: bytes 2-3 of
+                # the block are the secure service number, byte 0 is the
+                # call class and byte 1 is the reason VTL1 writes on the
+                # way back. Neither reading the low half as one field
+                # nor byte 1 as a request survives that.
+                sc = [read('vtl_service_calls', i) or 0
+                      for i in range(0x120)]
+                if any(sc):
+                    total = sum(sc)
+                    print(f"\n  secure calls by SERVICE ({total:,} with a "
+                          f"readable block):")
+                    for v, n in sorted(enumerate(sc),
+                                       key=lambda p: -p[1]):
+                        if not n:
+                            continue
+                        print(f"    0x{v:04x}  {n:>10,}  "
+                              f"{100.0 * n / total:5.1f}%  "
+                              f"{SK_SERVICE.get(v, '')}")
+                    o = read('vtl_service_other', 0) or 0
+                    if o:
+                        print(f"    (service >= 0x120) {o:,}")
+                    kl = [read('vtl_service_class', i) or 0
+                          for i in range(4)]
+                    ko = read('vtl_service_class_other', 0) or 0
+                    print("    call class  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(kl) if v)
+                        + (f"  other={ko:,}" if ko else ""))
+                    rs = [read('vtl_service_reason', i) or 0
+                          for i in range(8)]
+                    ro = read('vtl_service_reason_other', 0) or 0
+                    print("    entry reason  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(rs) if v)
+                        + (f"  other={ro:,}" if ro else ""))
+                # RE-ENTRIES, attributed to the call stuck in them.
+                # See hypervisor.h `vtl_reentry_service`: ntoskrnl's
+                # re-entry path at 0038df53 writes call class 0 and
+                # service number 0 into the block before re-issuing,
+                # so the census above counts a stuck call ONCE however
+                # long it stays stuck, and every re-entry is added to
+                # service 0x0000 beside the real VslFlushEntireTb.
+                fresh = read('vtl_fresh_calls', 0) or 0
+                rent = read('vtl_reentries', 0) or 0
+                if fresh or rent:
+                    # Recomputed here rather than reused: the service
+                    # total above is inside its own `if any(sc)`, and a
+                    # name that may or may not be bound is how a
+                    # reader reports a stale value from the run before.
+                    blocks = sum(read('vtl_service_calls', i) or 0
+                                 for i in range(0x120)) \
+                        + (read('vtl_service_other', 0) or 0)
+                    bad = read('vtl_class0_with_service', 0) or 0
+                    rr = [read('vtl_reentry_by_reason', i) or 0
+                          for i in range(8)]
+                    rro = read('vtl_reentry_reason_other', 0) or 0
+                    # What VTL1 ANSWERED. Everything below this
+                    # watches the request; this is the only thing that
+                    # watches the reply, and it separates "the answer
+                    # says not-done" from "the answer is fine and is
+                    # being lost", which want opposite fixes.
+                    rcount = read("vtl_return_count", cpu) or 0
+                    if rcount:
+                        distinct = read("vtl_return_distinct", cpu) or 0
+                        slots = min(rcount, 16)
+                        start = (rcount - slots) % 16
+                        print(f"\n  what VTL1 ANSWERED at HvCallVtlReturn "
+                              f"({rcount:,} returns)")
+                        print(f"    answers that differed from the one "
+                              f"before: {distinct:,}")
+                        if 0 == distinct and rcount > 1:
+                            print("    *** every answer identical - the "
+                                  "reply is stuck, so the caller re-asking "
+                                  "is a consequence and not the fault")
+                        elif distinct:
+                            print(f"    the reply moves, so a re-asked "
+                                  f"request is being answered differently "
+                                  f"each time")
+                        for i in range(slots):
+                            k = (start + i) % 16
+                            rbx = read("vtl_return_rbx", cpu * 16 + k)
+                            rax = read("vtl_return_rax", cpu * 16 + k)
+                            if rbx is None:
+                                continue
+                            print(f"      rbx 0x{rbx:016x}  rax "
+                                  f"0x{(rax or 0):016x}")
+
+                    print(f"\n  fresh calls {fresh:,}   re-entries "
+                          f"{rent:,}   (partition "
+                          + ("OK" if (fresh + rent) == blocks
+                             else f"BROKEN vs {blocks:,} blocks - do not "
+                                  "use these numbers") + ")")
+                    # The disagreement check. The decode says a block
+                    # with class 0 cannot carry a service number; a
+                    # non-zero count here means class 0 does not mark a
+                    # re-entry and every figure below is wrong.
+                    print("    class-0 blocks carrying a service: "
+                          f"{bad:,}"
+                          + ("" if 0 == bad else
+                             "   <- READER WRONG, the class-0 marker "
+                             "does not separate re-entries"))
+                    if (sum(rr) + rro) != rent:
+                        print("    reason partition BROKEN - do not use")
+                    print("    re-entry by reason  " + "  ".join(
+                        f"{i}={v:,}" for i, v in enumerate(rr) if v)
+                        + (f"  other={rro:,}" if rro else ""))
+                    same = read('vtl_reentry_block_same', 0) or 0
+                    moved = read('vtl_reentry_block_moved', 0) or 0
+                    # One stuck call re-enters through ONE block
+                    # address - the block is the caller's stack local.
+                    # Many calls that each retried once do not.
+                    print(f"    block address  same {same:,}  "
+                          f"moved {moved:,}  "
+                          f"last 0x{read('vtl_reentry_block', 0) or 0:x}")
+                    orphan = read('vtl_reentry_orphan', 0) or 0
+                    rs = [read('vtl_reentry_service', i) or 0
+                          for i in range(0x120)]
+                    if any(rs) or orphan:
+                        print("    re-entries CHARGED TO the call that "
+                              "issued them:")
+                        for v, n in sorted(enumerate(rs),
+                                           key=lambda p: -p[1]):
+                            if not n:
+                                continue
+                            print(f"      0x{v:04x}  {n:>10,}  "
+                                  f"{SK_SERVICE.get(v, '')}")
+                        so = read('vtl_reentry_service_other', 0) or 0
+                        if so:
+                            print(f"      (service >= 0x120) {so:,}")
+                        if orphan:
+                            print(f"      (no fresh call seen first) "
+                                  f"{orphan:,}")
+                    rc = read('vtl_reentry_ring_count', 0) or 0
+                    if rc:
+                        print(f"    the last re-entries ({rc:,} seen), "
+                              f"oldest first:")
+                        n = min(rc, 16)
+                        # Newest is at (count - 1) % 16, so start
+                        # `count - n` slots back. A ring printed in raw
+                        # slot order has already misled this
+                        # investigation twice.
+                        prev = None
+                        for k in range(rc - n, rc):
+                            row = [read('vtl_reentry_ring',
+                                        (k % 16) * 6 + c) or 0
+                                   for c in range(6)]
+                            gap = "" if prev is None else \
+                                f"  +{(row[0] - prev) / 2e9:8.3f}s"
+                            prev = row[0]
+                            w = row[1]
+                            print(f"      class {w & 0xff} reason "
+                                  f"{(w >> 8) & 0xff} service "
+                                  f"0x{(w >> 16) & 0xffff:04x} cont "
+                                  f"0x{(w >> 32) & 0xffffffff:08x}  "
+                                  f"+0x08 0x{row[2]:016x}  "
+                                  f"+0x10 0x{row[3]:016x}  block "
+                                  f"0x{row[4]:x}  owner "
+                                  f"0x{row[5]:x}{gap}")
+                # The IMAGE VALIDATION walk - service 0x0f4,
+                # `VslCopyProtectedPage`, called from `MiCopyPage`.
+                # `vtl_code0_*` above measures service 0x101,
+                # `VslSetPlaceholderPages`, whose only caller is
+                # `MiUpdateSlabPagePlaceholderState`. They are different
+                # walks and only the second was ever instrumented.
+                cc = read('vtl_copy_calls', 0) or 0
+                if cc:
+                    lo = read('vtl_copy_min_pfn', 0) or 0
+                    hi = read('vtl_copy_max_pfn', 0) or 0
+                    con = read('vtl_copy_consecutive', 0) or 0
+                    sm = read('vtl_copy_same', 0) or 0
+                    bk = read('vtl_copy_back', 0) or 0
+                    sk = read('vtl_copy_skip', 0) or 0
+                    ok = "OK" if (con + sm + bk + sk) == (cc - 1) else (
+                        "BROKEN - do not use these numbers")
+                    print(f"\n  the IMAGE VALIDATION walk "
+                          f"(0x0f4 VslCopyProtectedPage <- MiCopyPage):")
+                    print(f"    {cc:,} calls, frames 0x{lo:x}..0x{hi:x}, "
+                          f"last 0x{read('vtl_copy_last_pfn', 0) or 0:x}")
+                    print(f"    +1 {con:,}  same {sm:,}  back {bk:,}  "
+                          f"skip {sk:,}   partition {ok}")
+                # Progress against wall-clock time. One dump, not two.
+                ec = read('vtl_code0_epoch_count', 0)
+                if ec:
+                    # The column named `0x101` here is a CALL COUNT, not
+                    # a page frame number, however much "pfn" suggested
+                    # otherwise - `nested_entry.cpp` samples
+                    # `vtl_code0_pfn_calls`, which counts blocks whose
+                    # low dword is `0x01010002`, i.e. one per
+                    # `VslSetPlaceholderPages`. It was labelled `pfn`
+                    # and read as a frame number in three commits, and
+                    # the mistake confirmed itself: "the frozen pfn
+                    # equals the VslSetPlaceholderPages count exactly"
+                    # is `n == n` by construction, not a coincidence
+                    # worth explaining. The real last frame is
+                    # `vtl_code0_last_pfn`, which this table never
+                    # samples.
+                    #
+                    # The column is still the right thing to watch: a
+                    # flat call count beside a climbing hypercall count
+                    # is a walk that stopped. Only its units changed.
+                    print(f"  the walk's RATE over time ({ec:,} epochs, "
+                          f"newest last) - a flat 0x101 column beside a "
+                          f"climbing calls column is a walk that STOPPED. "
+                          f"0x101 is a COUNT of VslSetPlaceholderPages "
+                          f"calls, NOT a page frame number:")
+                    n_slots = min(ec, 64)
+                    prev = None
+                    for n in range(n_slots):
+                        sl = (ec - n_slots + n) % 64
+                        t = read('vtl_code0_epoch_tsc', sl) or 0
+                        pf = read('vtl_code0_epoch_pfn', sl) or 0
+                        c0e = read('vtl_code0_epoch_code0', sl) or 0
+                        ca = read('vtl_code0_epoch_calls', sl) or 0
+                        # The gap, in units of the sampling threshold,
+                        # and the delta as a RATE. An epoch boundary is
+                        # only crossed on a hypercall, so an epoch is
+                        # 2^34 ticks long only while hypercalls keep
+                        # arriving; when they stop it stretches, and a
+                        # delta read as "per epoch" then understates the
+                        # silence by exactly the stretch. `x9.1` in this
+                        # column means eight consecutive thresholds
+                        # elapsed with NO hypercall at all - which is a
+                        # much stronger statement than the delta beside
+                        # it, and the opposite of "calls keep arriving".
+                        gap = 0 if prev is None else (t - prev[3])
+                        d = "" if prev is None else (
+                            f"  (+{pf - prev[0]:,} 0x101, "
+                            f"+{c0e - prev[1]:,} code0, "
+                            f"+{ca - prev[2]:,} calls"
+                            + (f", x{gap / float(1 << 34):.1f} threshold"
+                               f", {(ca - prev[2]) * 2e9 / gap:,.1f}/s"
+                               if gap else "") + ")")
+                        print(f"    tsc {t:>18,}  0x101 {pf:>8,}  "
+                              f"code0 {c0e:>8,}  calls {ca:>8,}{d}")
+                        prev = (pf, c0e, ca, t)
+                # Which codes are still arriving, as a delta over the
+                # most recent epoch. Cumulative totals cannot answer
+                # "what is being called NOW", and that is the question a
+                # frozen walk beside continuing traffic poses.
+                ed = [(read('l2_hypercall_cpu_codes', i) or 0,
+                       read('l2_hypercall_epoch_delta', i) or 0,
+                       read('l2_hypercall_cpu_counts', i) or 0)
+                      for i in range(32)]
+                span = read('l2_hypercall_epoch_span', 0) or 0
+                if any(c for _, _, c in ed):
+                    secs = span / 2e9 if span else 0.0
+                    print(f"\n  cpu 0 second-level hypercalls, MOST "
+                          f"RECENT epoch (span {span:,} ticks"
+                          + (f" = {secs:.1f}s at 2 GHz" if span else "")
+                          + "):")
+                    for c, dl, tot in sorted(ed, key=lambda p: -p[1]):
+                        if not tot:
+                            continue
+                        rate = (f"{dl / secs:8.2f}/s" if secs
+                                else "       -  ")
+                        print(f"    0x{c:04x}  +{dl:>8,}  {rate}  "
+                              f"total {tot:>10,}  {HV_CALLS.get(c, '')}")
+                    o = read('l2_hypercall_cpu_other', 0) or 0
+                    print(f"    (beyond 32 distinct codes) {o:,}"
+                          + ("   <- census complete" if not o
+                             else "   <- SATURATED, totals are lower "
+                                  "bounds"))
+                # How many calls the census never saw. Every total above
+                # is a lower bound until these read zero.
+                bf = read('vtl_call_block_below_floor', 0)
+                ut = read('vtl_call_block_untranslated', 0)
+                ur = read('vtl_call_block_unreadable', 0)
+                if None not in (bf, ut, ur):
+                    print(f"  trust-level calls the census MISSED: "
+                          f"{bf:,} below the kernel floor, {ut:,} "
+                          f"untranslated, {ur:,} unreadable"
+                          + ("   <- census complete" if not (bf or ut or ur)
+                             else "   <- every total above is a LOWER BOUND"))
+        signed = status - (1 << 32) if status & 0x80000000 else status
+        # The priority each trust-level call is made at. Class 13
+        # masks both the clock vector 0xd1 and the deferred-call vector
+        # 0x2f, so a call made there with either pending holds VINA
+        # asserted - and VINA is what the instruction trace shows
+        # preempting the secure kernel after it selects a thread.
+        vt = [read('vtl_call_vtpr', 0 * 16 + i) or 0 for i in range(16)]
+        vtotal = sum(vt)
+        if vtotal:
+            print("  task priority at the trust-level call:")
+            for i, c in enumerate(vt):
+                if c:
+                    note = ("  <- masks the clock AND the deferred call"
+                            if i == 13 else
+                            ("  <- admits both" if i < 2 else ""))
+                    print(f"    class {i:2d} (0x{i << 4:02x})  {c:9,d}  "
+                          f"{100.0 * c / vtotal:5.1f}%{note}")
+        # The latency distribution. A rate cannot separate "delayed a
+        # little every iteration" from "delayed enormously on a few",
+        # and those want opposite fixes.
+        gaps = [read('vtl_call_gap_buckets', 0 * 40 + i) or 0
+                for i in range(40)]
+        gtotal = sum(gaps)
+        if gtotal:
+            print("  gaps between consecutive trust-level calls "
+                  f"({gtotal:,} of them):")
+            run = 0
+            for i, c in enumerate(gaps):
+                if not c:
+                    continue
+                run += c
+                lo = (1 << i) / 1.992e9
+                print(f"    2^{i:<2d} {lo * 1e6:12,.1f} us  {c:9,d}  "
+                      f"{100.0 * c / gtotal:5.1f}%  "
+                      f"(cumulative {100.0 * run / gtotal:5.1f}%)")
+        # What the entry that runs VTL1 carries. VINA reaches the
+        # secure kernel as an injected interrupt, and injections go
+        # through vmcs02, so this is direct evidence rather than
+        # inference from a priority.
+        ev = [read('vtl1_entry_vector', 0 * 257 + i) or 0
+              for i in range(257)]
+        etotal = sum(ev)
+        if etotal:
+            print(f"  what the entry running VTL1 carried "
+                  f"({etotal:,} entries):")
+            for i, c in enumerate(ev[:256]):
+                if c:
+                    print(f"    vector 0x{i:02x}   {c:9,d}  "
+                          f"{100.0 * c / etotal:5.1f}%")
+            if ev[256]:
+                print(f"    no event      {ev[256]:9,d}  "
+                      f"{100.0 * ev[256] / etotal:5.1f}%"
+                      "  <- nothing injected; whatever ends its turn "
+                      "is not an injected interrupt")
+        # The bit ShvlVinaHandler tests. See hypervisor.h `vina_flags`.
+        if read('vina_read', 0):
+            fl = read('vina_flags', 0) or 0
+            print(f"  VINA flag chain: gs 0x{read('vina_gs_base', 0):x}"
+                  f" -> block 0x{read('vina_block', 0):x}")
+            print(f"    dword at +4 = 0x{(fl >> 32) & 0xffffffff:08x}"
+                  f"   bit 0 = {(fl >> 32) & 1}"
+                  + ("  <- SET: the secure kernel yields"
+                     if (fl >> 32) & 1 else "  <- clear"))
+            print(f"    block physical = "
+                  f"0x{read('vina_block_physical', 0):x}")
+            print(f"    at the RETURN (after KiVinaInterrupt cleared "
+                  f"it - the aftermath, not the decision):")
+            print(f"      set {read('vina_set_count', 0):,}  "
+                  f"clear {read('vina_clear_count', 0):,}")
+        cs = read('vina_at_call_set', 0) or 0
+        cc = read('vina_at_call_clear', 0) or 0
+        cu = read('vina_at_call_unread', 0) or 0
+        if cs or cc or cu:
+            tot = cs + cc
+            print(f"    at the CALL, before VTL1 runs - THE DECISION:")
+            print(f"      set {cs:,}  clear {cc:,}  unread {cu:,}"
+                  + (f"   -> SET on {100.0 * cs / tot:.1f}% of entries"
+                     if tot else ""))
+        else:
+            print("  VINA flag chain: NOT READ  <- walk failed, the "
+                  "values above are meaningless")
+        # How long VTL1 ran, split by the VINA flag. Aggregated over
+        # every entry rather than read off one or two traces.
+        # The width is `vtl1_duration_buckets` in hypervisor.h and is
+        # NOT 24 any more. A histogram walked with a stale stride reads
+        # its neighbour and prints it under this name.
+        nb = VTL1_DURATION_BUCKETS
+        dur = [[read('vtl1_duration', (v * nb) + i) or 0
+                for i in range(nb)] for v in range(2)]
+        if sum(dur[0]) or sum(dur[1]):
+            print("  how long VTL1 ran (us), by VINA flag at its return:")
+            print("      bucket        us     VINA clear     VINA set")
+            for i in range(nb):
+                if not (dur[0][i] or dur[1][i]):
+                    continue
+                print(f"      2^{i:<2d} {(1 << i) / 1.992e3:9,.1f}  "
+                      f"{dur[0][i]:12,d} {dur[1][i]:12,d}"
+                      + ("   <- SATURATED: this bucket is 'at least'"
+                         if i == (nb - 1) else ""))
+        print(f"  STATUS        = 0x{status:08x}"
+              + ("  <- an NTSTATUS error" if signed < 0 else
+                 "  (success or not an error)"))
+    else:
+        print("\ncpu 0 IUM secure-call block: NOT READ"
+              "  <- rdx unmapped or not yet captured, field is meaningless")
+
+    DISPOSITIONS = ("none", "without-ept", "reflected-walk",
+                    "reflected-misconfig", "reflected-permission",
+                    "watched", "unwatched", "installed",
+                    "install-failed", "pointer-failed")
+    # **Every processor, not cpu 0.** The row was already being read for
+    # all of them - the queue above asks for `scalar_cpus * 10` words -
+    # and only the printing was pinned to the boot processor, so the one
+    # row nobody could see was the application processor's.
+    #
+    # `watched` is the load-bearing entry for anything about the local
+    # APIC: it counts second-level faults that this VMM's own tables
+    # refused and something here answered, which for the APIC page means
+    # a *second-level* guest writing the interrupt command register. A
+    # zero there says the guest hypervisor virtualises its guest's local
+    # APIC and never writes ours, which is what `nested_vmx.h` asserts
+    # beside `l2_startup_spin` - and it was an assertion about cpu 0's
+    # row, because cpu 0's row is the only one that has ever printed.
+    for cpu in range(args.cpus):
+        print(f"\ncpu {cpu} how each second-level fault was answered")
+        total = sum(read('l2_ept_dispositions', cpu * 10 + i) or 0
+                    for i in range(len(DISPOSITIONS)))
+        if not total:
+            print("  none - this processor took no second-level fault")
+            continue
+        for i, name in enumerate(DISPOSITIONS):
+            count = read('l2_ept_dispositions', cpu * 10 + i) or 0
+            if not count:
+                continue
+            share = 100.0 * count / total
+            print(f"  {name:<22s} {count:12,d}  {share:5.1f}%")
+    # **Which page.** `guest_physical` is recorded for every EPT violation
+    # unconditionally - it is not behind ZPP_CENSUS_EXITS, unlike the
+    # qualification - so the address is in the ring on every build and
+    # nothing here has ever read it.
+    #
+    # The reason this matters: a fault whose disposition is not
+    # `installed` resumes the guest onto the same access. One address
+    # repeating across the whole ring is that livelock; a spread of
+    # addresses is a guest touching memory, which is normal.
+    pages = {}
+    reasons = {}
+    for slot in range(ring):
+        a = instance + off["exit_trace"] + (0 * ring + slot) * entry_size
+        reason = words.get(a)
+        if reason is None:
+            continue
+        basic = reason & 0xffff
+        reasons[basic] = reasons.get(basic, 0) + 1
+        if basic not in (48, 49):
+            continue
+        physical = words.get(a + 8 * 5)
+        if physical is None:
+            continue
+        page = physical & ~0xfff
+        pages[page] = pages.get(page, 0) + 1
+    if pages:
+        ordered = sorted(pages.items(), key=lambda kv: -kv[1])
+        seen = sum(pages.values())
+        print(f"\ncpu 0 ept-violation pages in the exit ring "
+              f"({seen} of {ring} slots, {len(pages)} distinct)")
+        for page, count in ordered[:12]:
+            print(f"  0x{page:012x}  {count:6d}  "
+                  f"{100.0 * count / seen:5.1f}%")
+        if len(pages) == 1:
+            print("  ONE PAGE across the whole ring <- a livelock, not "
+                  "a guest touching memory")
+
+    unhelpful = read('shadow_ept_leaves_that_did_not_help', 0) or 0
+    print(f"  {'leaves that did not help':<22s} {unhelpful:12,d}"
+          f"  <- must be zero" if unhelpful else
+          f"  leaves that did not help: 0")
+
+    # Why a rebuild happened, which the total above cannot say. A stale
+    # generation is this VMM's own tables moving under a root it had
+    # already shadowed - `invalidate_ept` bumps one global counter, so a
+    # permission change on a single page discards every shadow root and
+    # each is refilled a fault at a time.
+    # Did the guest hypervisor accept the enlightened VMCS offer? A
+    # switch is not on until a counter says the code ran.
+    # Which hypercalls the guest hypervisor makes before declining the
+    # enlightenment. Not per cpu - the codes are what matter.
+    # **Prove the reader before believing anything it says.** The first
+    # quadword of the host page table is a present PML4 entry and ends
+    # 023; if that does not read back, no other number in this dump is
+    # evidence. Four readings were believed this session that were not
+    # measurements, and this is the check that would have caught them.
+    # One row per processor, and a processor that took none says so.
+    # "no host exception on cpu 1" and "cpu 1 is not in this dump" were
+    # the same output while the record was a single shared frame.
+    for _c in range(args.cpus):
+        vec = read('host_exception', _c * 7 + 0)
+        if vec is None:
+            continue
+        if 0 == vec and 0 == (read('host_exception', _c * 7 + 2) or 0):
+            print(f"\ncpu {_c} host exception: none taken")
+            continue
+        print(f"\ncpu {_c} host exception: vector {vec} error 0x"
+              f"{read('host_exception', _c * 7 + 1):x} rip 0x"
+              f"{read('host_exception', _c * 7 + 2):x} "
+              f"cs 0x{read('host_exception', _c * 7 + 3):x} cr2 0x"
+              f"{read('host_exception_cr2', _c):x}")
+
+    # **Why a processor stopped, which nothing above can say.**
+    #
+    # `record_exit` runs on the resume path, so a processor that never
+    # resumes leaves no ring entry - and the two records that *are*
+    # written immediately before it stops were read by this script and
+    # printed by none of it. A ring whose last entry is a start-up IPI
+    # followed by silence is exactly the case these settle, and without
+    # them "it took the IPI and executed nothing" and "it took the IPI
+    # and was refused entry" are the same picture.
+    u_reason = read('unhandled_exit', 1)
+    if read('unhandled_exit', 0):
+        print(f"\nUNHANDLED EXIT - a processor stopped here")
+        print(f"  reason 0x{u_reason:x} qualification 0x"
+              f"{read('unhandled_exit', 2):x} "
+              f"linear 0x{read('unhandled_exit', 3):x}")
+        print(f"  rip 0x{read('unhandled_exit', 4):x} "
+              f"cs 0x{read('unhandled_exit', 5):x} "
+              f"cr0 0x{read('unhandled_exit', 11):x} "
+              f"cr3 0x{read('unhandled_exit', 15):x} "
+              f"cr4 0x{read('unhandled_exit', 12):x} "
+              f"efer 0x{read('unhandled_exit', 13):x}")
+        print(f"  gdtr 0x{read('unhandled_exit', 6):x}/"
+              f"0x{read('unhandled_exit', 7):x} "
+              f"idtr 0x{read('unhandled_exit', 8):x}/"
+              f"0x{read('unhandled_exit', 9):x} "
+              f"cs ar 0x{read('unhandled_exit', 10):x}")
+        print(f"  rdi 0x{read('unhandled_exit', 16):x} "
+              f"rsi 0x{read('unhandled_exit', 17):x} "
+              f"rsp 0x{read('unhandled_exit', 18):x}")
+    elif u_reason is not None:
+        print("\nunhandled exit: never - no processor stopped on one")
+
+    if "sleep_request" not in off:
+        print("\nsleep request: MEMBER ABSENT from this reader - not "
+              "'never'. Add it rather than reading this as a zero.")
+    elif read('sleep_request', 0):
+        print(f"\nSLEEP REQUEST - the guest asked the platform to sleep "
+              f"or power off, and this is why the machine stopped")
+        print(f"  port 0x{read('sleep_request', 1):x} "
+              f"value 0x{read('sleep_request', 2):x} "
+              f"slp_typ {read('sleep_request', 3)}")
+        print(f"  seen by vpid {read('sleep_request', 4)}, "
+              f"quiesce reached stage {read('sleep_request', 5)}")
+        print(f"  This is NOT a triple fault and NOT a device-model "
+              f"reset - the guest wrote PM1_CNT with SLP_EN itself.")
+    else:
+        print("\nsleep request: never - no processor saw a PM1_CNT write "
+              "with SLP_EN, so the stop was NOT a guest ACPI sleep")
+
+    _dmar = [m for m in ("dmar_reads", "dmar_writes",
+                         "dmar_qi_descriptors",
+                         "dmar_qi_waits_completed") if m in off]
+    if not _dmar:
+        print("\nVT-d: MEMBERS ABSENT from this reader - not zero.")
+    else:
+        page = read('dmar_register_page', 0) if "dmar_register_page" in off else 0
+        print(f"\nVT-d (DMAR) traffic this VMM absorbed, register page "
+              f"0x{page:x}")
+        if not page:
+            print("  register page is 0 - the unit was never found, so "
+                  "every count below is zero for that reason and not "
+                  "because the guest hypervisor left VT-d alone")
+        _tot = 0
+        for cpu in range(8):
+            vals = [read(m, cpu) for m in _dmar]
+            _tot += sum(vals)
+            if any(vals):
+                print("  cpu %d  %s" % (cpu, "  ".join(
+                    f"{m.replace('dmar_','')} {v:,}"
+                    for m, v in zip(_dmar, vals))))
+        if not _tot:
+            print("  nothing on any processor - the guest hypervisor "
+                  "never touched the VT-d registers through us")
+
+    if "reset_request" not in off:
+        print("\nreset request: MEMBER ABSENT from this reader - not "
+              "'never'. Add it rather than reading this as a zero.")
+    elif read('reset_request', 0):
+        rport = read('reset_request', 1)
+        value = read('reset_request', 2)
+        if rport == 0x64:
+            what = ('0xfe: the 8042 PULSE RESET - this is hvix64 '
+                    'HvpResetSystem resetting the machine'
+                    if value == 0xfe
+                    else 'an ordinary 8042 command, NOT a reset')
+        else:
+            what = ('bit 2 SET, this is the reset' if value & 4
+                    else 'bit 2 clear, this write did NOT reset')
+        print(f"\nRESET PORT WRITTEN - port 0x{rport:x}")
+        print(f"  value 0x{value:x} ({what}) width {read('reset_request', 3)}")
+        print(f"  written by vpid {read('reset_request', 4)} "
+              f"at guest rip 0x{read('reset_request', 5):x}")
+        print(f"  {read('reset_request', 6)} write(s) seen in total; the "
+              f"fields describe the most recent")
+    else:
+        print("\nreset request: never - nothing wrote 0xcf9 or 0x64. Both "
+              "are armed, so this is a real negative for BOTH of "
+              "hvix64 HvpResetSystem's writes")
+
+    if read('vm_entry_failure', 0):
+        print(f"\nVM ENTRY FAILURE - a processor was refused entry")
+        print(f"  cpu {read('vm_entry_failure', 14)} "
+              f"vp {read('vm_entry_failure', 15)} "
+              f"from-trampoline {read('vm_entry_failure', 16)} "
+              f"start-up vector {read('vm_entry_failure', 17)}")
+        print(f"  reason 0x{read('vm_entry_failure', 1):x} "
+              f"qualification 0x{read('vm_entry_failure', 2):x} "
+              f"instruction error {read('vm_entry_failure', 3)}")
+        print(f"  activity {read('vm_entry_failure', 4)} "
+              f"interruptibility 0x{read('vm_entry_failure', 5):x} "
+              f"entry controls 0x{read('vm_entry_failure', 6):x}")
+        print(f"  cr0 0x{read('vm_entry_failure', 7):x} "
+              f"cr4 0x{read('vm_entry_failure', 8):x} "
+              f"rflags 0x{read('vm_entry_failure', 9):x} "
+              f"rip 0x{read('vm_entry_failure', 10):x} "
+              f"cs 0x{read('vm_entry_failure', 11):x} "
+              f"base 0x{read('vm_entry_failure', 12):x} "
+              f"ar 0x{read('vm_entry_failure', 13):x}")
+    elif read('vm_entry_failure', 1) is not None:
+        print("vm entry failure: never - no entry was refused")
+
+    # Hypercalls the GUEST HYPERVISOR made of us, which is a different
+    # population from the 91,976 the second level makes and was recorded
+    # by `exit_dispatch.cpp` for months without anything reading it.
+    #
+    # It matters because of what the answer is. Every one of these is
+    # refused with HV_STATUS_INVALID_HYPERCALL_CODE, and the exit ring
+    # of four consecutive resets ends on exactly one of them - a single
+    # `vmcall` at hvix64's own rip, code 0x0076, immediately before the
+    # machine resets. Against 91,975 second-level vmcalls tagged L2 in
+    # the same ring, that one is not noise.
+    #
+    # `codes`/`counts` are parallel arrays of 16 slots; a code past the
+    # sixteenth distinct one lands in `other`, so a non-zero `other` means
+    # the list below is incomplete and must say so rather than read as
+    # exhaustive.
+    if 'l1_vmcall_count' in off:
+        # Queued explicitly. `read()` returns None for anything the bulk
+        # prefetch did not fetch, and None reads as "zero" through
+        # `or 0` - so a member that is merely *resolvable* prints as
+        # "never happened". That is how this block first reported "the
+        # guest hypervisor never issued a vmcall", which is a claim it
+        # had fetched no bytes to support.
+        for _n in ('l1_vmcall_count', 'l1_vmcall_rcx', 'l1_vmcall_rdx',
+                   'l1_vmcall_rax', 'l1_vmcall_rip',
+                   'l1_vmcall_code_other'):
+            monitor.queue(instance + off[_n], args.cpus)
+        words.update(monitor.run())
+        rows = []
+        for cpu in range(args.cpus):
+            total = read('l1_vmcall_count', cpu) or 0
+            if total:
+                rows.append((cpu, total))
+        if not rows:
+            print("\nVMX-instruction exits from the level above: none")
+        for cpu, total in rows:
+            # **Not hypercalls.** Thirteen instructions share this
+            # counter - vmxon/vmxoff/vmclear/vmptrld/vmptrst/vmread/
+            # vmwrite/vmlaunch/vmresume/invept/invvpid/vmfunc/vmcall -
+            # and vmresume alone is most of it. Only the code list below
+            # is VMCALL-specific, because only for VMCALL is RCX a
+            # hypercall code; for VMREAD it is a field encoding and for
+            # VMPTRLD an operand address, and censusing those as call
+            # codes is what the comment in exit_dispatch.cpp warns about.
+            # So an EMPTY code list is the meaningful reading: the guest
+            # hypervisor issued no VMCALL at all.
+            print(f"\ncpu {cpu} VMX-instruction exits from the LEVEL "
+                  f"ABOVE (all thirteen instructions): {total:,}")
+            print(f"  last one: rip 0x{read('l1_vmcall_rip', cpu):x} "
+                  f"rcx 0x{read('l1_vmcall_rcx', cpu):x} "
+                  f"rdx 0x{read('l1_vmcall_rdx', cpu):x} "
+                  f"rax 0x{read('l1_vmcall_rax', cpu):x}")
+            codes_base = instance + off['l1_vmcall_codes'] + cpu * 16 * 8
+            cbase = instance + off['l1_vmcall_code_counts'] + cpu * 16 * 8
+            for i in range(16):
+                monitor.queue(codes_base + 8 * i, 1)
+                monitor.queue(cbase + 8 * i, 1)
+            got = monitor.run()
+            seen = [(got.get(cbase + 8 * i, 0), got.get(codes_base + 8 * i, 0))
+                    for i in range(16)]
+            for count, code in sorted(seen, reverse=True):
+                if count:
+                    print(f"    code 0x{code:04x}  {count:>8,}"
+                          "   answered HV_STATUS_INVALID_HYPERCALL_CODE")
+            other = read('l1_vmcall_code_other', cpu) or 0
+            if other:
+                print(f"    beyond 16 distinct codes: {other:,}"
+                      "   <- the list above is NOT complete")
+            elif not any(c for c, _ in seen):
+                print("    no VMCALL from the level above - the count "
+                      "above is other VMX instructions, and the guest "
+                      "hypervisor made no hypercall of this VMM")
+            else:
+                print("    (16 slots, none overflowed - the list is "
+                      "every VMCALL code this processor was asked for)")
+
+    # Where the secure kernel resumes on each entry armed for it. The
+    # outstanding request says WHAT is being asked; only this says
+    # whether the answer is getting anywhere.
+    #
+    # **Newest first**, computed from the counter, because this ring is
+    # circular and CLAUDE.md records the same reader printing slots 0..7
+    # in order and producing the same false lead twice five days apart.
+    if 'vtl1_resume_rip' in off:
+        CAP = 64
+        monitor.queue(instance + off['vtl1_resume_count'], args.cpus)
+        words.update(monitor.run())
+        for cpu in range(args.cpus):
+            count = read('vtl1_resume_count', cpu)
+            if count is None:
+                print(f"\ncpu {cpu} VTL1 resume ring: NOT READ - the "
+                      "counter was never fetched, which is not the same "
+                      "as zero")
+                continue
+            if not count:
+                continue
+            ring_base = instance + off['vtl1_resume_rip'] + cpu * CAP * 8
+            for i in range(CAP):
+                monitor.queue(ring_base + 8 * i, 1)
+            got = monitor.run()
+            live = min(count, CAP)
+            rips = [got.get(ring_base + 8 * ((count - 1 - k) % CAP), 0)
+                    for k in range(live)]
+            distinct = len(set(rips))
+            print(f"\ncpu {cpu} where VTL1 RESUMED, newest first "
+                  f"({count:,} armed entries, last {live} shown, "
+                  f"{distinct} distinct)")
+            for r in rips[:16]:
+                print(f"    0x{r:016x}")
+            if distinct == 1:
+                print("    -> ONE address across the whole window: the "
+                      "secure kernel restarts from the same place every "
+                      "time and the outstanding service is NOT "
+                      "progressing")
+            else:
+                print(f"    -> {distinct} distinct addresses: the resume "
+                      "point moves, so something is advancing")
+
+    # What this VMM saw of the guest's own interrupt command register,
+    # and what it did about each start-up sequence.
+    if 'ipi_init_seen' in off:
+        print("\nstart-up IPIs, as this VMM saw them")
+        print(f"  local apic page watched at 0x{read('watched_apic_page'):x}"
+              + ("   <- NOT WATCHED: no xAPIC interrupt command reaches "
+                 "this VMM" if not read('watched_apic_page') else ""))
+        print(f"  commands decoded off the page {read('apic_page_commands_filtered'):,}"
+              f"  undecoded writes {read('apic_writes_undecoded'):,}")
+        print(f"  INIT seen {read('ipi_init_seen'):,}   "
+              f"start-up seen {read('ipi_start_up_seen'):,}   "
+              f"refused broadcast {read('ipi_refused_shorthand'):,}   "
+              f"refused logical {read('ipi_refused_logical'):,}")
+        print(f"  last command written 0x{read('ipi_last_command'):x}")
+        print(f"  processors known to this VMM "
+              f"{read('number_of_known_processors')}   "
+              f"unresponsive at an EPT rendezvous "
+              f"{read('unresponsive_processors'):,}")
+        virt = read('processor_virtualized') or 0
+        bysipi = read('started_by_guest_start_up_ipi') or 0
+        launched = read('start_up_launched') or 0
+        print("  cpu  virtualized  by-guest-sipi  launched  "
+              "activity  queued-vector  hand-off")
+        for cpu in range(args.cpus):
+            print(f"  {cpu:3d}  {(virt >> (8 * cpu)) & 1:11d}  "
+                  f"{(bysipi >> (8 * cpu)) & 1:13d}  "
+                  f"{(launched >> (8 * cpu)) & 1:8d}  "
+                  f"{read('resume_activity_state', cpu):8d}  "
+                  f"0x{read('queued_start_up', cpu):11x}  "
+                  f"0x{read('start_up_handoff', cpu):x}")
+        print("  activity 3 is wait-for-SIPI; a queued vector still set "
+              "is one this VMM swallowed and never delivered")
+
+    # Whether this run told the guest the truth about its own clock.
+    if 'guest_tick_floored' in off:
+        floored = sum((read('guest_tick_floored', c) or 0)
+                      for c in range(args.cpus))
+        stretched = sum((read('guest_timer_stretched', c) or 0)
+                        for c in range(args.cpus))
+        print(f"\nthe guest's periodic timer count, rewritten by this VMM: "
+              f"floored {floored:,}, stretched {stretched:,}"
+              + ("   <- this run is NOT an honest configuration; "
+                 "BACKLOG/CLAUDE.md record that lying about the tick "
+                 "ends in a bugcheck or a shutdown"
+                 if (floored or stretched) else "   <- untouched"))
+
+    # The refusal, by number, before anything else. `l2_entries` at zero
+    # with `exits` climbing is a second level that never started, and
+    # this is the field that says why - SDM 31.4 lists the VM-instruction
+    # error codes.
+    for cpu in range(args.cpus):
+        fails = read('nested_vmfail_count', cpu)
+        if fails:
+            print(f"cpu {cpu} nested VMfail: {fails:,} times, "
+                  f"last error {read('nested_last_vmfail', cpu)}")
+
+    proof = read('host_page_table', 0)
+    if proof is None:
+        print("\nREADER UNPROVEN: host_page_table did not read back")
+    elif 0x023 == (proof & 0xfff):
+        print(f"\nreader proven: host_page_table[0] = 0x{proof:x}")
+    else:
+        print(f"\nREADER SUSPECT: host_page_table[0] = 0x{proof:x}, "
+              f"expected a present entry ending 023")
+
+    # And a second proof that is sensitive to the BASE, which the one
+    # above is not: it checks twelve bits, so a module base that has
+    # moved still lands on some present entry and passes. Measured - a
+    # dump taken at a stale base printed `reader proven` and then a phase
+    # table of zeroes and an entry count of four billion.
+    #
+    # The build manifest is a fixed string at a fixed offset from the
+    # base, so reading it back is a direct test of the base itself.
+    try:
+        manifest_va, raw = read_build_manifest(args, base)
+        if raw.startswith(b"zpp switches:"):
+            print("base proven: zpp_build_switches reads back at the base")
+            manifest = raw.split(b"\0")[0].decode("ascii", "replace")
+            print(f"  {manifest}")
+            # Kept for the sections below, which run after this and have
+            # no base of their own to re-read it from. See
+            # `BUILD_MANIFEST`.
+            global BUILD_MANIFEST
+            BUILD_MANIFEST = manifest
+            # `census=0` leaves the exit ring's qualification, activity
+            # state and CS selector reading zero and `cpl_seen` empty -
+            # and zero is a legal value for all three, so nothing in the
+            # data says so. Said here, where it is read.
+            if b"census=0" in raw:
+                print("  NOTE census=0: the exit ring's qualification, "
+                      "activity state and CS selector are NOT filled, and "
+                      "the cpl columns below are empty by construction - "
+                      "build with -DZPP_CENSUS_EXITS=ON to ask")
+        # A read that failed and a base that is wrong produce different
+        # bytes, and saying so is the whole value of this check.
+        #
+        # **It cried wolf, and that is why this distinction exists.** The
+        # payload came back all `0xff`, the guard blamed the base, and the
+        # base was provably right: the module base matched the two
+        # `allocate_rwx` lines on serial, `reader proven` passed, and
+        # reading `base + 0x2020` by hand from the monitor returned
+        # `zpp switches: nested=1 ...` exactly as it should. All-`0xff` is
+        # what the monitor returns when a read does not land - most often
+        # because something else already holds the one connection it
+        # allows - and it is not evidence about the base at all.
+        #
+        # A guard that fires falsely is worse than no guard, because the
+        # next time it fires truthfully nobody will believe it. That is
+        # exactly the failure this file's own notes warn about with stale
+        # caches and proxy metrics.
+        elif not raw.strip(b"\xff") or not raw.strip(b"\x00"):
+            print(f"manifest unread at 0x{manifest_va:x}: all "
+                  f"0x{raw[0]:02x} bytes. **This is a failed read, not a "
+                  f"wrong base** - check nothing else is holding the "
+                  f"monitor connection. Compare `reader proven` above: if "
+                  f"that passed, the base is fine.")
+        else:
+            print(f"BASE SUSPECT: {raw!r} at 0x{manifest_va:x} is not the "
+                  f"manifest - the module base is probably wrong, and "
+                  f"every number above it is fiction")
+    except Exception as failure:
+        print(f"base unproven: {failure}")
+
+    # Straight after the two proofs, because it is the section most
+    # likely to be the only one wanted: it is what a separate reader
+    # needs before it can look at the screen at all, and it costs one
+    # monitor connection.
+    dump_framebuffer(args, args.elf, instance)
+
+    # Immediately after it, because on an application-processor run this
+    # is the section wanted and everything else is context.  It names
+    # the CPUID leaves each processor asked for - which the exit ring
+    # cannot, since it records that a CPUID happened and not which leaf
+    # - and prints the true exit count beside the ring's slot count.
+    try:
+        dump_ap_census(args, args.elf, instance)
+    except SystemExit as failure:
+        print(f"\n[dump_ap_census skipped: {failure}]")
+
+    # Which hypervisor-range CPUID leaves the guest actually asks for.
+    # The question the exit trace cannot answer: it records that a cpuid
+    # happened, not which leaf.
+    asked = read('cpuid_hypervisor_leaves_asked', 0)
+    count = read('cpuid_trace_count', 0) or 0
+    if count:
+        print(f"\ncpuid leaves recorded ({count} entries, "
+              f"{asked} in the hypervisor range)")
+        leaves = {}
+        for i in range(min(count, 512)):
+            word = read('cpuid_trace', i * 2)
+            if word is None:
+                continue
+            leaf = word & 0xffffffff
+            leaves[leaf] = leaves.get(leaf, 0) + 1
+        for leaf in sorted(leaves):
+            print(f"  0x{leaf:08x}  {leaves[leaf]}")
+
+    seen = read('hypercalls_seen', 0)
+    if seen:
+        print(f"\nhypercalls seen: {seen}")
+        print("  code    count   (which calls the guest hypervisor makes)")
+        for i in range(16):
+            count = read('hypercall_code_counts', i)
+            if not count:
+                continue
+            print(f"  0x{read('hypercall_codes', i):04x}  {count:-6d}")
+
+    print("\ncpu  rec  vp-assist-writes  evmcs-reads  evmcs-writes")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('evmcs_recommended', cpu):-4d}  "
+              f"{read('hyperv_vp_assist_writes', cpu):-16d}  "
+              f"{read('evmcs_reads', cpu):-11d}  "
+              f"{read('evmcs_writes', cpu):-12d}")
+
+    print("\ncpu  replayed-leaves  faulted-leaves")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('shadow_ept_replayed', cpu):-15d}  "
+              f"{read('shadow_ept_leaves_filled', cpu):-14d}")
+
+    # `generation-discards` is slots dropped on the entry path because
+    # this VMM's own tables moved under them - see
+    # `discard_stale_shadow_ept`. It is zero on a boot that arms every
+    # watch before launch and never changes one, which is every boot so
+    # far; non-zero is the only evidence that a runtime permission change
+    # reached the composed shadows rather than being left to be noticed.
+    print("\ncpu  rebuild-new-root  rebuild-stale-generation  "
+          "generation-discards")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('shadow_ept_rebuild_new_root', cpu):-16d}  "
+              f"{read('shadow_ept_rebuild_stale', cpu):-24d}  "
+              f"{read('shadow_ept_generation_discards', cpu):-19d}")
+
+    # Which invept type arrives decides whether the all-context discard
+    # is costing anything - single-context already releases only the
+    # slot naming that root. Printed beside the rebuild split because
+    # the two are read together or not at all.
+    print("\ncpu  invept-single-context  invept-all-context")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('l2_invept_single_context', cpu):-21d}  "
+              f"{read('l2_invept_all_context', cpu):-18d}")
+
+    # The five the processor saves into vmcs02 on exit, written back
+    # only when they differ from what it saved. Zero skipped means the
+    # elision did not compile in - a switch is not on until a counter
+    # says the code ran.
+    # The only figures denominated in the guest's work rather than
+    # ours. Four changes worth 1.9x of handler cycles moved no
+    # guest-facing indicator, so this is the quantity that matters.
+    print("\ncpu  l2-run%  l1-run%  vmm%   (share of wall clock)")
+    for cpu in range(args.cpus):
+        first = read('handler_first_tsc', cpu) or 0
+        last = read('handler_last_tsc', cpu) or 0
+        span = last - first
+        if span <= 0:
+            continue
+        l2 = read('l2_run_cycles', cpu) or 0
+        l1 = read('l1_run_cycles', cpu) or 0
+        vmm = read('handler_cycles', cpu) or 0
+        print(f"{cpu:3d}  {100.0*l2/span:6.2f}  {100.0*l1/span:7.2f}  "
+              f"{100.0*vmm/span:5.2f}")
+
+    # `uncached` splits `done` into its two populations, which need
+    # opposite work and were one number until now: a write taken because
+    # the *value* moved - the guest, unfixable - against one taken
+    # because there was no record to compare against, which is a
+    # precondition failing and is reachable. `changed` is the
+    # subtraction, printed rather than left to be done by hand from two
+    # columns, because that is the number that says whether the write
+    # avenue is closed.
+    print("\ncpu  hot-state skipped/done  uncached  changed")
+    for cpu in range(args.cpus):
+        done = read('hot_state_writes_done', cpu) or 0
+        uncached = read('hot_state_writes_uncached', cpu) or 0
+        print(f"{cpu:3d}  {read('hot_state_writes_skipped', cpu):-12d}/"
+              f"{done:-10d}  {uncached:8d}  {done - uncached:7d}")
+
+    print("\ncpu  shadow-loads  shadow-stores")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('vmcs_shadow_loads', cpu):-12d}  "
+              f"{read('vmcs_shadow_stores', cpu):-13d}")
+
+    # Where the nested round trip's time actually goes.
+    #
+    # **Read the `cyc/RT` column, not `cyc/call`, and never sum
+    # `cyc/call`.** They have different denominators: `build_vmcs02`
+    # runs once a round trip, `copy_shadow_to_vmcs12` about four times,
+    # and `guest read: map_window` about twenty. A column of cycles a
+    # call is a column of prices for different quantities, and summing
+    # it is how this project came to believe half the round trip was
+    # unattributed when part of that half was one cost counted twice.
+    #
+    # `cyc/RT` is cycles divided by second-level entries, so it is
+    # additive across siblings, and `self` is a phase minus its own
+    # children - which is where a cost hides when a container is large
+    # and everything named inside it is small.
+    for cpu in range(args.cpus):
+        dump_phase_tree(cpu, phase_count,
+                        lambda member, index:
+                        words.get(instance + off[member]
+                                  + (cpu * phase_count + index) * 8, 0),
+                        read("l2_entries", cpu) or 0,
+                        read("handler_cycles", cpu) or 0)
+
+    # Each section separately, because `gdb_offsets` exits the process
+    # when a member is missing and the reader routinely runs ahead of
+    # the deployed binary - a member renamed in the tree but not yet on
+    # the rig killed every section after it, silently, and the dump just
+    # looked short. One section failing must not cost the others.
+    for section in (dump_entry_rips, dump_priority,
+                    dump_interrupt_window, dump_dropped_requests,
+                    dump_synthetic_msrs, dump_reference_tsc,
+                    dump_tick_account, dump_l1_host_audit,
+                    dump_guest_state_shadow, dump_regions,
+                    dump_vtl, dump_vtl_steps):
+        try:
+            section(args, args.elf, instance)
+        except SystemExit as failure:
+            print(f"\n[{section.__name__} skipped: {failure}]")
+
+    # `unlicensed` is the subset of the guest-state `done` column taken
+    # on the `!may_defer_guest_state` branch - 44 VMWRITEs landing
+    # together on one call, with no comparison made at all, because
+    # `guest_state_cache` is stale for exactly those indices. Divide it
+    # by 44 for the number of builds that lost the deferral's licence.
+    #
+    # `dirty` is the third population and had **no reader anywhere in
+    # this tree**: a field the level above wrote since the last entry,
+    # written back because its value is owed. It is not in `done` at
+    # all, so a guest-state write budget formed from `done` alone was
+    # missing it.
+    print("\ncpu  guest-state skipped/done   unlicensed  dirty"
+          "   control skipped/done  uncached")
+    for cpu in range(args.cpus):
+        print(f"{cpu:3d}  {read('guest_state_writes_skipped', cpu):11d}/"
+              f"{read('guest_state_writes_done', cpu):-11d}  "
+              f"{read('guest_state_writes_unlicensed', cpu):10d}  "
+              f"{read('guest_state_dirty_writes', cpu):5d}  "
+              f"{read('control_writes_skipped', cpu):11d}/"
+              f"{read('control_writes_done', cpu):-11d}  "
+              f"{read('control_writes_uncached', cpu):8d}")
+
+    print("\nvmcs fields the guest hypervisor uses")
+    dump_field_use(args, instance, off)
+
+    # Is `hypervisor::this_processor()` right?  The watched-page
+    # callbacks index per-processor state by it because their signature
+    # cannot carry an index, and a wrong index there is silent - one
+    # processor's timer armings land in another's row and every number
+    # still reads plausibly.  `on_vm_exit` compares it against the index
+    # it was handed on every exit, so this is a measurement rather than
+    # an argument.
+    gs = Monitor(args.rig, args.port)
+    gs.queue(instance + off["gs_processor_index_disagreements"], 1)
+    gs.queue(instance + off["gs_processor_index_checked"], 1)
+    got = gs.run()
+    bad = got.get(instance + off["gs_processor_index_disagreements"], 0)
+    seen = got.get(instance + off["gs_processor_index_checked"], 0)
+    if bad:
+        print(f"\nGS PROCESSOR INDEX WRONG: {bad:,} of {seen:,} exits "
+              f"disagreed with the index the exit path was handed - "
+              f"anything indexed by this_processor() is misattributed")
+    else:
+        print(f"\ngs processor index agreed on all {seen:,} exits checked")
+
+    try:
+        dump_own_field_use(args, args.elf, base)
+    except SystemExit as failure:
+        print(f"\n[dump_own_field_use skipped: {failure}]")
+
+    # Beside the field tables, because they answer three halves of one
+    # question - which fields, which callers, and how many in total - and
+    # all three are addressed as `module base + symbol` rather than
+    # through the singleton.  See VMCS_GLOBAL_COUNTERS for why the third
+    # of them had never been printed by anything.
+    #
+    # `exit_total` summed over the processors read, because
+    # `vmcs_reads_taken` is one shared counter across all of them and
+    # dividing a machine-wide numerator by one processor's exits is the
+    # mislabelling this mode exists to end.
+    #
+    # `Exception` and not just `SystemExit`, unlike the sections above:
+    # these two shell out to gdb for symbols rather than for offsets, and
+    # a gdb that is absent raises `FileNotFoundError` instead of exiting.
+    # Losing two sections is right; losing the rest of the dump to them
+    # is not.
+    try:
+        exits = sum((read('exit_total', cpu) or 0)
+                    for cpu in range(args.cpus))
+        dump_vmcs_globals(args, args.elf, base, exits)
+    except Exception as failure:
+        print(f"\n[dump_vmcs_globals skipped: {failure}]")
+
+    try:
+        dump_vmcs_caller_use(args, args.elf, base)
+    except Exception as failure:
+        print(f"\n[dump_vmcs_caller_use skipped: {failure}]")
+
+    # Before the per-handler breakdowns, because it answers a different
+    # and prior question: those say what this VMM spent its time on, and
+    # this says whether the guest is waiting or working. A cost
+    # breakdown of a guest that is blocked is a breakdown of its idle
+    # loop.
+    try:
+        dump_guest_threads(args, args.elf, instance)
+    except SystemExit as failure:
+        print(f"\n[dump_guest_threads skipped: {failure}]")
+
+    dump_handler_by_reason(args, args.elf, instance)
+    dump_vmcs02_split(args, args.elf, instance)
+    dump_reflect_buckets(args, args.elf, instance)
+    dump_profile(args, args.elf, instance)
+
+    # Every processor, not only the boot processor.  The application
+    # processors are where "did this one participate at all" is decided,
+    # and a per-processor histogram answers it in one line each - cpu 0
+    # busy and the rest holding a few thousand cpuid exits is a different
+    # machine from all eight holding the same shape.
+    for cpu in range(args.cpus):
+        counts = monitor_reasons(monitor, instance, off, args, cpu,
+                                 reason_capacity)
+        total = sum(counts.values()) or 1
+        print(f"\ncpu {cpu} exit reasons (total {total:,})")
+        for reason, value in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {EXIT_REASON.get(reason, reason):<18} {value:>10}  "
+                  f"{100.0 * value / total:5.1f}%")
+
+    for cpu in range(args.cpus):
+        for member, what in (
+                ("external_interrupt_vector_counts",
+                 "interrupt vectors acknowledged"),
+                ("l2_injected_vector",
+                 "vectors injected into the second level"),
+                # What the *processor* reported for each external
+                # interrupt reflected upward. This is the one census
+                # that separates "device interrupts never arrive" from
+                # "they arrive and are mis-dispatched" - see the
+                # declaration. A run whose vectors are all timer and
+                # inter-processor and none belongs to a device says the
+                # devices are silent, which is a different fault.
+                # What the entry **actually carried**, read from
+                # vmcs02 at the last instant it could still change.
+                # `l2_injected_vector` above records what was *staged*;
+                # this records what was still there on entry, and the
+                # two are different questions. Its own declaration
+                # records 0xd1 staged 52,799 times into a guest that
+                # never vectored once, and until now **nothing in this
+                # script printed it** - it was listed only under
+                # "deliberately left out". A counter that is recorded
+                # on the machine and never read answers nothing.
+                ("l2_entry_vector",
+                 "vectors the entry actually CARRIED into the second "
+                 "level"),
+                ("l2_external_vector",
+                 "external interrupt vectors reflected upward")):
+            vectors = monitor_vector_counts(monitor, instance, off, cpu,
+                                            member)
+            if not vectors:
+                continue
+            total = sum(vectors.values())
+            print(f"\ncpu {cpu} {what} "
+                  f"({total:,} over {len(vectors)} distinct)")
+            for vector, value in sorted(vectors.items(),
+                                        key=lambda kv: -kv[1]):
+                print(f"  0x{vector:02x}  {value:>10}  "
+                      f"{100.0 * value / total:5.1f}%")
+
+    # The lazy tick's own account, and specifically whether its window
+    # was still open when the guest stopped.
+    #
+    # Three interventions in one session could not report whether they
+    # had run - the injection reconciliation read an unresolved member
+    # and called it a drop, `hold_clock_in_vtl1` never fired, and the
+    # expiring gap could not say whether it expired. The first two are
+    # fixed; this is the third. "Froze before the window closed" and
+    # "froze after it closed" are opposite diagnoses - one says try a
+    # shorter window, the other says the window is not the mechanism -
+    # and only `lazy_tick_after_expiry` separates them.
+    for cpu in range(args.cpus):
+        if "lazy_tick_withheld" not in off:
+            break
+        withheld = read("lazy_tick_withheld", cpu) or 0
+        first = read("lazy_tick_first_tsc", cpu) or 0
+        expired = (read("lazy_tick_after_expiry", cpu) or 0
+                   if "lazy_tick_after_expiry" in off else 0)
+        owed = read("lazy_tick_owed", cpu) or 0
+        again = (read("lazy_tick_redelivered", cpu) or 0
+                 if "lazy_tick_redelivered" in off else 0)
+        not_yet = (read("lazy_tick_not_yet", cpu) or 0
+                   if "lazy_tick_not_yet" in off else 0)
+        if not (withheld or first or expired):
+            continue
+        print(f"\ncpu {cpu} lazy tick")
+        print(f"  withheld {withheld:,}   re-delivered {again:,}   "
+              f"not yet interruptible {not_yet:,}")
+        print(f"  owed now 0x{owed:x}")
+        if 0 == withheld:
+            print("  *** THE GAP NEVER FIRED - nothing was withheld, so "
+                  "this boot tested nothing about it")
+        elif expired:
+            print(f"  window CLOSED: {expired:,} ticks passed through "
+                  f"after expiry")
+            print("     so the guest ran on with the gap no longer "
+                  "applied, and a shorter window would not change that")
+        else:
+            print("  window STILL OPEN at this sample - the gap was in "
+                  "force the whole run")
+            print("     so if the guest is wedged, it wedged with the "
+                  "gap applied and a SHORTER window is the thing to try")
+
+    # Staged against carried, which is the functional question the two
+    # censuses exist to answer and neither answers alone. A vector the
+    # level above asked to inject and that the entry did not carry was
+    # dropped by this VMM; equal counts mean the injection survived to
+    # the guest, and whether the guest then *vectored* is a question for
+    # the guest's own state, not for these.
+    for cpu in range(args.cpus):
+        # Resolution is checked BEFORE reading, because an unresolved
+        # member reads back as an empty dict and an empty dict renders
+        # as "carried 0" - which is exactly what a real drop looks
+        # like. That is not hypothetical: this reconciliation's first
+        # run reported all 266,419 injections staged and none carried,
+        # with `l2_entry_vector` simply absent from the offset table,
+        # and it was nearly reported as a finding. An instrument that
+        # cannot separate "I did not read it" from "it is zero" will
+        # state the most dramatic of the two.
+        missing = [m for m in ("l2_injected_vector", "l2_entry_vector")
+                   if m not in off]
+        if missing:
+            print(f"\ncpu {cpu} injection reconciliation: NOT AVAILABLE")
+            print(f"  {', '.join(missing)} did not resolve in this ELF, "
+                  f"so there is nothing to compare. This is an absence "
+                  f"of measurement, NOT a count of zero - do not read "
+                  f"it as injections being dropped.")
+            continue
+
+        staged = monitor_vector_counts(monitor, instance, off, cpu,
+                                       "l2_injected_vector")
+        carried = monitor_vector_counts(monitor, instance, off, cpu,
+                                        "l2_entry_vector")
+        if not staged and not carried:
+            continue
+        nothing = (read("l2_entries_carrying_nothing", cpu)
+                   if "l2_entries_carrying_nothing" in off else None)
+        print(f"\ncpu {cpu} injection reconciliation: staged vs carried")
+        vectors = sorted(set(staged) | set(carried))
+        for vector in vectors:
+            a, b = staged.get(vector, 0), carried.get(vector, 0)
+            if a == b:
+                note = "carried what was staged"
+            elif b < a:
+                note = f"** {a - b:,} STAGED AND NOT CARRIED - dropped here"
+            else:
+                note = f"** {b - a:,} carried and never staged"
+            print(f"  0x{vector:02x}  staged {a:>10,}  carried {b:>10,}"
+                  f"   {note}")
+        if nothing is not None:
+            print(f"  entries carrying no injection at all: {nothing:,}")
+        if not staged and carried:
+            print("  NOTE nothing staged but entries carried vectors - "
+                  "l2_injected_vector may not be recorded in this build")
+        if staged and not carried:
+            print("  NOTE vectors staged and NONE carried. Either the "
+                  "census is off (needs census=1 in the manifest) or "
+                  "every injection is being lost before entry.")
+
+    for cpu in range(args.cpus):
+        count = read("exit_trace_count", cpu)
+        if not count:
+            continue
+        print(f"\n--- cpu {cpu}: last exits (count {count}) ---")
+        start = max(0, count - ring)
+        for i in range(start, count):
+            slot = i % ring
+            a = instance + off["exit_trace"] + (cpu * ring + slot) * entry_size
+            reason, qual, activity, cs, rip, phys, repeat, value, \
+                detail, rip_owner = (words.get(a + 8 * k, 0)
+                                     for k in range(10))
+            # A zero detail is printed for the reasons that always carry
+            # one, and suppressed for the rest. Without this, CPUID leaf
+            # 0 - a common leaf - is indistinguishable from "no leaf was
+            # recorded", which is the two-meanings-for-zero trap that
+            # has cost this tree several readings.
+            basic = reason & 0xffff
+            carries_detail = basic in (10, 18, 31, 32)   # cpuid vmcall
+            carries_value = basic in (10, 31, 32)        # rdmsr wrmsr
+            extra = f" phys=0x{phys:x}" if phys else ""
+            extra += (f" detail=0x{detail:x}"
+                      if (detail or carries_detail) else "")
+            extra += (f" value=0x{value:x}"
+                      if (value or carries_value) else "")
+            # CPUID packs all four answered registers; split them, and
+            # name the two that identify a processor, since that is what
+            # a starting AP polls for.
+            if basic == 10:
+                eax, ebx = detail & 0xffffffff, detail >> 32
+                ecx, edx = value & 0xffffffff, value >> 32
+                extra = (f" eax=0x{eax:x} ebx=0x{ebx:x}"
+                         f" ecx=0x{ecx:x} edx=0x{edx:x}"
+                         f" apicid={ebx >> 24}")
+            extra += RIP_OWNER.get(rip_owner, "")
+            times = f" x{repeat}" if repeat > 1 else ""
+            print(f"  [{i:6d}] {name_reason(reason):<16} "
+                  f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
+                  f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
+
+    def dump_ring(cpu, member, capacity, counter, title):
+        """One second-level ring, newest `--l2-entries` records last.
+
+        Both rings hold the same record type and differ only in what
+        reaches them, so they print through the same code - which also
+        means the working ring cannot drift into a second, subtly
+        different reader.
+
+        **The activity state and the `cs=` column are behind
+        `census=` in `zpp switches`, as they are for the first-level
+        ring.**  Off - which is the default - both read zero, and zero
+        is a legal value for both: `active` is activity state 0 and a
+        null selector is 0.  So a ring full of `active cs=0x0000` says
+        nothing about the guest until the manifest has been read.  The
+        `rip=` and `reason` columns are never gated and are what the
+        ring is read for.
+        """
+        count = read(counter, cpu)
+        show = min(args.l2_entries, count, capacity)
+        print(f"\n--- cpu {cpu}: last {show} {title} (count {count}) ---")
+
+        reader = Monitor(args.rig, args.port)
+        for i in range(count - show, count):
+            slot = i % capacity
+            reader.queue(
+                instance + off[member]
+                + (cpu * capacity + slot) * entry_size, entry_size // 8)
+        got = reader.run()
+
+        for i in range(count - show, count):
+            slot = i % capacity
+            a = (instance + off[member]
+                 + (cpu * capacity + slot) * entry_size)
+            reason, qual, activity, cs, rip, phys, repeat, value, \
+                detail, rip_owner = (got.get(a + 8 * k, 0)
+                                     for k in range(10))
+            times = f" x{repeat}" if repeat > 1 else ""
+            # A zero detail is printed for the reasons that always carry
+            # one, and suppressed for the rest. Without this, CPUID leaf
+            # 0 - a common leaf - is indistinguishable from "no leaf was
+            # recorded", which is the two-meanings-for-zero trap that
+            # has cost this tree several readings.
+            basic = reason & 0xffff
+            carries_detail = basic in (10, 18, 31, 32)   # cpuid vmcall
+            carries_value = basic in (10, 31, 32)        # rdmsr wrmsr
+            extra = f" phys=0x{phys:x}" if phys else ""
+            extra += (f" detail=0x{detail:x}"
+                      if (detail or carries_detail) else "")
+            extra += (f" value=0x{value:x}"
+                      if (value or carries_value) else "")
+            # CPUID packs all four answered registers; split them, and
+            # name the two that identify a processor, since that is what
+            # a starting AP polls for.
+            if basic == 10:
+                eax, ebx = detail & 0xffffffff, detail >> 32
+                ecx, edx = value & 0xffffffff, value >> 32
+                extra = (f" eax=0x{eax:x} ebx=0x{ebx:x}"
+                         f" ecx=0x{ecx:x} edx=0x{edx:x}"
+                         f" apicid={ebx >> 24}")
+            extra += RIP_OWNER.get(rip_owner, "")
+            print(f"  [{i:6d}] {name_reason(reason):<16} "
+                  f"qual=0x{qual:<12x} {ACTIVITY.get(activity, activity)} "
+                  f"cs=0x{cs:04x} rip=0x{rip:x}{extra}{times}")
+
+    if args.l2 is not None:
+        dump_ring(args.l2, "l2_exit_trace", l2ring, "l2_exit_trace_count",
+                  "second-level exits")
+
+        # The same ring with the idle loop removed, and the one worth
+        # reading first.
+        #
+        # A blocked guest spins its reference-counter poll, its
+        # end-of-interrupt and its timer re-arm at about a hundred exits a
+        # second, so the ring above holds two or three seconds of that and
+        # nothing else - whatever the guest last *did* was evicted long
+        # before anybody attached. This one drops exactly those and keeps
+        # 4096 of the rest, which is minutes of work rather than seconds
+        # of waiting.
+        #
+        # Its count against the other's is also the measurement that says
+        # which failure this is: both climbing is a guest making progress,
+        # the working count frozen while the other climbs is a guest that
+        # has stopped working and is only waiting.
+        dump_ring(args.l2, "l2_working_trace", working_ring,
+                  "l2_working_trace_count", "working second-level exits")
+
+    if args.log is not None:
+        dump_log(monitor, args.elf, base, args.log)
+
+
+if __name__ == "__main__":
+    main()

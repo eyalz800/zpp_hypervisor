@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Walk the guest's `PsActiveProcessHead` and print each process name.
+
+Answers "what is Windows actually running", which on this rig has no
+other answer: the display is a passed-through GPU and `screendump`
+returns "There is no console to take a screendump from", so the only way
+to tell a machine sitting at the logon UI from one still starting
+services is to read its process list.
+
+Offsets are taken from the PDB rather than guessed - `--types` gives
+`_EPROCESS.ActiveProcessLinks` at 472 and `ImageFileName` at 824, and
+`--publics` gives `PsActiveProcessHead` as segment 26 (.data, VA
+0xE00000) offset 1072224 decimal. Pass a different --links/--name if the
+guest build changes; a wrong offset prints plausible garbage, so the
+walk cross-checks that the first entry is `System`.
+
+usage: guest-processes.py <kernel_base_hex> <cr3_hex> [--head-rva 0xf05c60]
+"""
+import sys
+from qemu_monitor import read_physical
+LINKS, NAME = 472, 824
+# `_EPROCESS.UniqueProcessId` and `InheritedFromUniqueProcessId`, both
+# `void*`, both from `llvm-pdbutil dump --types`. Printing the parent is
+# what turns "WerFault.exe is running" into "WerFault.exe was started by
+# X" - Windows Error Reporting is spawned by the process that faulted (or
+# by the service host on its behalf), so the parent names the casualty.
+# Note there are two `UniqueProcessId` members in this PDB and only the
+# `void*` one at 464 is _EPROCESS's; the `unsigned long` at 40 belongs to
+# another struct and reads as garbage here.
+PID, PPID = 464, 720
+
+def xp_q(phys, n=1):
+    return read_physical(phys, n, 8)
+
+
+def xp_b(phys, n):
+    return read_physical(phys, n, 1)
+
+
+BASE = int(sys.argv[1], 16)
+CR3 = int(sys.argv[2], 16) & 0x000ffffffffff000
+HEAD_RVA = int(sys.argv[3], 16) if len(sys.argv) > 3 else 0xf05c60
+_E = {}
+
+def v2p(va):
+    t = CR3
+    for lvl, sh in ((0, 39), (1, 30), (2, 21), (3, 12)):
+        key = (t, (va >> sh) & 0x1ff)
+        e0 = _E.get(key)
+        if e0 is None:
+            e = xp_q(t + ((va >> sh) & 0x1ff) * 8)
+            if not e: return None
+            e0 = e[0]; _E[key] = e0
+        if not (e0 & 1): return None
+        if lvl < 3 and (e0 & 0x80):
+            m = (1 << sh) - 1
+            return (e0 & ~m & 0x000fffffffffffff) | (va & m)
+        t = e0 & 0x000ffffffffff000
+    return t | (va & 0xfff)
+
+def rq(va):
+    p = v2p(va)
+    if p is None: return None
+    v = xp_q(p)
+    return v[0] if v else None
+
+def rname(va):
+    p = v2p(va)
+    if p is None: return ''
+    bs = xp_b(p, 15)
+    return ''.join(chr(c) for c in bs if 32 <= c < 127)
+
+head = BASE + HEAD_RVA
+cur = rq(head)
+seen, names, why = set(), [], 'ran out of iterations'
+by_pid, parents = {}, []
+for _ in range(400):
+    if cur is None: why = 'READ FAILED - the walk is truncated, not the list'; break
+    if cur == head: why = 'reached the list head - complete'; break
+    if cur in seen: why = 'LOOP - corrupt or torn read'; break
+    seen.add(cur)
+    eproc = cur - LINKS
+    nm = rname(eproc + NAME) or '<unreadable>'
+    pid = rq(eproc + PID)
+    ppid = rq(eproc + PPID)
+    names.append(nm)
+    by_pid[pid if pid is not None else -1] = nm
+    parents.append((nm, pid, ppid))
+    print(f'  {nm:20s} pid {pid}  parent {ppid}', flush=True)
+    cur = rq(cur)
+
+print(f'{len(names)} processes; walk ended because: {why}')
+# A wrong head or offset does not fail loudly, it prints garbage that
+# looks like a short process list. `System` is always the first entry of
+# this list on Windows, so its absence means the offsets are wrong and
+# nothing above should be believed.
+if names and names[0] == 'System':
+    print('cross-check: first entry is `System` - offsets are right')
+    # Resolve each parent id to a name now that the whole list is known.
+    # A parent that is not in the list is not an error - it is a process
+    # that has already exited, which is the normal case for a spawner.
+    # **PID reuse makes this lie, and it lies plausibly.** Windows
+    # recycles process ids, so a parent id belonging to a process that
+    # has exited can match a *different* live process that was later
+    # given the same id. Measured here: `csrss.exe` and `winlogon.exe`
+    # both resolved to "started by fontdrvhost.ex (pid 936)", and both
+    # are started by `smss.exe` - which had exited, freeing 936 for
+    # fontdrvhost. The resolution is only trustworthy when the named
+    # parent is one that plausibly spawns the child, so it is printed
+    # with a warning rather than as fact.
+    for nm, pid, ppid in parents:
+        who = by_pid.get(ppid)
+        if who:
+            print(f'    {nm} <- parent id {ppid} is currently {who} '
+                  f'(CHECK: ids are reused, so this is only the parent '
+                  f'if that process plausibly spawns this one)')
+else:
+    print(f'cross-check FAILED: first entry is {names[:1]}, expected '
+          f'`System`. Offsets or head RVA are wrong - do not believe '
+          f'the list above.')
+
+# A partial list can contain System and still miss LogonUI. Do not let
+# the watcher turn a transport failure or a torn walk into a process count.
+if (why != 'reached the list head - complete' or not names
+        or names[0] != 'System' or '<unreadable>' in names
+        or any(pid is None or ppid is None for _, pid, ppid in parents)):
+    sys.exit(1)

@@ -1,0 +1,18 @@
+# Container providing a kernel build tree for kbuild.
+#
+# Debian rather than Alpine on purpose: Alpine's linux-headers package is only
+# sanitized UAPI headers and never creates /lib/modules/<version>/build, so
+# kbuild cannot run against it at all. Debian's linux-headers-amd64 pulls the
+# full build tree and creates that symlink.
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    linux-headers-amd64 \
+    build-essential \
+    bc \
+    flex \
+    bison \
+    libelf-dev \
+    libssl-dev \
+    perl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

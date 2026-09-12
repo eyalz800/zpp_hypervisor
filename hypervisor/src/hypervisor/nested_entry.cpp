@@ -1,0 +1,13913 @@
+#include "zpp/arch/x86_64/asm.h"
+#include "zpp/arch/x86_64/memory_type.h"
+#include "zpp/arch/x86_64/msr.h"
+#include "zpp/arch/x86_64/vmx/ept_pointer.h"
+#include "zpp/arch/x86_64/vmx/nested_ept.h"
+#include "zpp/hypervisor/guest_windows.h"
+#include "zpp/hypervisor/hypervisor.h"
+#include "zpp/diag/config.h"
+#include "zpp/diag/log.h"
+#include "zpp/hypervisor/nested_vmx.h"
+#include "zpp/hypervisor/reference_tsc.h"
+#include "zpp/hypervisor/user_rip_census.h"
+#include "zpp/scope_exit.h"
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <span>
+
+namespace zpp::hypervisor
+{
+namespace
+{
+using arch::x86_64::vmx::vmcs12;
+using arch::x86_64::vmx::vmcs_field_encoding;
+using basic_reason = arch::x86_64::vmx::exit_reason::basic_reason;
+using field = arch::x86_64::vmx::vmcs::field;
+
+/**
+ * The slot field the entry stubs read is the VPID, and the table they
+ * index has room for every processor. asm.h spells both literally,
+ * because inline assembly cannot see a constant expression; this is what
+ * keeps the spellings honest.
+ * @{
+ */
+static_assert(arch::x86_64::vmx::nested_entry_slot_field == field::vpid,
+              "The nested entry stubs and the VMCS field disagree.");
+
+static_assert(hypervisor::max_cpus <=
+                  arch::x86_64::vmx::nested_entry_recovery_slots,
+              "The nested entry recovery table is too small for the "
+              "processors this VMM adopts.");
+/**
+ * @}
+ */
+
+/**
+ * The two fields the TPR shadow is carried in, checked against what a
+ * shadow VMCS has storage for.
+ *
+ * Offering primary bit 21 is a promise a guest hypervisor can *write*
+ * these, and `vmcs_field_encoding::valid` is what decides that - a field
+ * whose index is past `index_capacity` is answered with error 12 and the
+ * control becomes unusable. Both are 64-bit and 32-bit control fields at
+ * indices 9 and 14, comfortably inside it, but the pairing is checked here
+ * rather than worked out by hand again: advertising a control whose fields
+ * cannot be written would be the same half-answered interface withholding
+ * it was.
+ * @{
+ */
+static_assert(vmcs_field_encoding(
+                  static_cast<std::uint64_t>(field::virtual_apic_address))
+                  .valid(),
+              "A guest hypervisor could not write the virtual-APIC "
+              "address the TPR shadow needs.");
+
+static_assert(
+    vmcs_field_encoding(static_cast<std::uint64_t>(field::tpr_threshold))
+        .valid(),
+    "A guest hypervisor could not write the TPR threshold.");
+/**
+ * @}
+ */
+
+/**
+ * The pin-based controls this code names, from SDM Table 25-5.
+ * @{
+ */
+constexpr std::uint64_t pin_external_interrupt = 1ull << 0;
+constexpr std::uint64_t pin_preemption_timer = 1ull << 6;
+constexpr std::uint64_t pin_posted_interrupts = 1ull << 7;
+/**
+ * @}
+ */
+
+/**
+ * The primary processor-based controls this code names, from SDM Table
+ * 25-6.
+ * @{
+ */
+constexpr std::uint64_t primary_interrupt_window = 1ull << 2;
+constexpr std::uint64_t primary_tsc_offsetting = 1ull << 3;
+constexpr std::uint64_t primary_hlt_exiting = 1ull << 7;
+constexpr std::uint64_t primary_invlpg_exiting = 1ull << 9;
+constexpr std::uint64_t primary_mwait_exiting = 1ull << 10;
+constexpr std::uint64_t primary_rdpmc_exiting = 1ull << 11;
+constexpr std::uint64_t primary_rdtsc_exiting = 1ull << 12;
+constexpr std::uint64_t primary_cr3_load_exiting = 1ull << 15;
+constexpr std::uint64_t primary_cr3_store_exiting = 1ull << 16;
+constexpr std::uint64_t primary_cr8_load_exiting = 1ull << 19;
+constexpr std::uint64_t primary_cr8_store_exiting = 1ull << 20;
+constexpr std::uint64_t primary_tpr_shadow = 1ull << 21;
+constexpr std::uint64_t primary_nmi_window = 1ull << 22;
+constexpr std::uint64_t primary_mov_dr_exiting = 1ull << 23;
+constexpr std::uint64_t primary_unconditional_io = 1ull << 24;
+constexpr std::uint64_t primary_io_bitmaps = 1ull << 25;
+constexpr std::uint64_t primary_monitor_trap_flag = 1ull << 27;
+constexpr std::uint64_t primary_msr_bitmaps = 1ull << 28;
+constexpr std::uint64_t primary_monitor_exiting = 1ull << 29;
+constexpr std::uint64_t primary_pause_exiting = 1ull << 30;
+constexpr std::uint64_t primary_secondary_controls = 1ull << 31;
+/**
+ * @}
+ */
+
+/**
+ * The secondary processor-based controls this code names, from SDM Table
+ * 25-7.
+ *
+ * The table is **27-7** in the edition under `.references/`
+ * (`.references/sdm.txt:199591`); the numbering moved when Volume 3's
+ * chapters were renumbered, and the older number is left as written
+ * everywhere it already appears rather than swept. Cite the line number
+ * beside it when adding one, which is what settles which table was
+ * actually read - `secondary_conceal_vmx_from_pt` was declared as bit 18
+ * for a whole investigation and bit 18 is EPT-violation #VE.
+ * @{
+ */
+constexpr std::uint64_t secondary_enable_ept = 1ull << 1;
+constexpr std::uint64_t secondary_descriptor_table_exiting = 1ull << 2;
+constexpr std::uint64_t secondary_enable_vpid = 1ull << 5;
+constexpr std::uint64_t secondary_wbinvd_exiting = 1ull << 6;
+constexpr std::uint64_t secondary_unrestricted_guest = 1ull << 7;
+constexpr std::uint64_t secondary_pause_loop_exiting = 1ull << 10;
+constexpr std::uint64_t secondary_rdrand_exiting = 1ull << 11;
+constexpr std::uint64_t secondary_enable_invpcid = 1ull << 12;
+
+// SDM Table 25-7 bit 3 and bit 14. Named here because `build_vmcs02`
+// must be able to *remove* them from this VMM's own copy before the
+// union - see `secondary_not_inherited`.
+constexpr std::uint64_t secondary_enable_rdtscp = 1ull << 3;
+constexpr std::uint64_t secondary_vmcs_shadowing = 1ull << 14;
+constexpr std::uint64_t secondary_rdseed_exiting = 1ull << 16;
+constexpr std::uint64_t secondary_enable_xsaves = 1ull << 20;
+constexpr std::uint64_t secondary_tsc_scaling = 1ull << 25;
+
+/**
+ * The product of two values shifted right by the time-stamp counter's
+ * scaling fraction, which SDM 27.6.5 fixes at 48 bits: "It then shifts
+ * the value of the product right 48 bits and returns the sum of that
+ * shifted value and the value of the TSC offset."
+ *
+ * A 64 by 64 product needs 128 bits before the shift or it is simply
+ * wrong, and there is no standard 128-bit integer to say that in. The
+ * builtin is the only spelling available and it generates no call - a
+ * `mul` and a `shrd` - which matters on a path taken by every entry.
+ *
+ * Signed for the offset and unsigned for the multiplier, which is KVM's
+ * split too: `mul_s64_u64_shr` in `kvm_calc_nested_tsc_offset` against
+ * `mul_u64_u64_shr` in `kvm_calc_nested_tsc_multiplier`. The offset is a
+ * two's complement quantity and shifting it as unsigned turns a guest
+ * hypervisor's negative offset into an enormous positive one.
+ * @{
+ */
+constexpr std::uint64_t tsc_scaling_fraction = 48;
+constexpr std::uint64_t tsc_scaling_default = 1ull << tsc_scaling_fraction;
+
+constexpr std::uint64_t scaled_product(std::uint64_t left,
+                                       std::uint64_t right)
+{
+    return static_cast<std::uint64_t>(
+        (static_cast<unsigned __int128>(left) * right) >>
+        tsc_scaling_fraction);
+}
+
+constexpr std::uint64_t signed_scaled_product(std::uint64_t left,
+                                              std::uint64_t right)
+{
+    return static_cast<std::uint64_t>(
+        (static_cast<__int128>(static_cast<std::int64_t>(left)) *
+         static_cast<__int128>(right)) >>
+        tsc_scaling_fraction);
+}
+/** @} */
+constexpr std::uint64_t secondary_mode_based_execute = 1ull << 22;
+constexpr std::uint64_t secondary_virtual_interrupt_delivery =
+    1ull << 9;
+constexpr std::uint64_t secondary_enable_vmfunc = 1ull << 13;
+/**
+ * @}
+ */
+
+/**
+ * The VM-exit controls this code names, from SDM Table 25-13.
+ * @{
+ */
+constexpr std::uint64_t exit_save_debug_controls = 1ull << 2;
+constexpr std::uint64_t exit_host_address_space_size = 1ull << 9;
+constexpr std::uint64_t exit_acknowledge_interrupt = 1ull << 15;
+constexpr std::uint64_t exit_save_ia32_pat = 1ull << 18;
+constexpr std::uint64_t exit_load_ia32_pat = 1ull << 19;
+constexpr std::uint64_t exit_save_ia32_efer = 1ull << 20;
+constexpr std::uint64_t exit_load_ia32_efer = 1ull << 21;
+/**
+ * @}
+ */
+
+/**
+ * The VM-entry controls this code names, from SDM Table 25-16.
+ * @{
+ */
+constexpr std::uint64_t entry_ia32e_mode_guest = 1ull << 9;
+/**
+ * @}
+ */
+
+/**
+ * CR4.VMXE, which a guest of any level must have set in the real register
+ * because IA32_VMX_CR4_FIXED0 requires it in VMX operation, and must not
+ * see set unless it put it there itself.
+ */
+constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+constexpr std::uint64_t cr4_smxe = 1ull << 14;
+
+/**
+ * The valid bit of an interruption-information field, SDM Table 25-19.
+ */
+constexpr std::uint64_t interruption_valid = 1ull << 31;
+
+/**
+ * The interruption type field of one, bits 10:8, and the value that means
+ * a non-maskable interrupt. SDM Table 25-19.
+ * @{
+ */
+constexpr std::uint64_t interruption_type_shift = 8;
+constexpr std::uint64_t interruption_type_mask = 0x7;
+constexpr std::uint64_t interruption_type_nmi = 2;
+constexpr std::uint64_t interruption_vector_mask = 0xff;
+constexpr std::uint64_t interruption_information_valid = 1ull << 31;
+/**
+ * @}
+ */
+
+/**
+ * One entry of a VM-entry or VM-exit MSR area, SDM 27.7.2, Figure 27-1:
+ * bits 31:0 the MSR index, bits 63:32 reserved and required to be zero,
+ * bits 127:64 the value.
+ */
+struct msr_area_entry
+{
+    std::uint32_t index{};
+    std::uint32_t reserved{};
+    std::uint64_t value{};
+};
+
+static_assert(sizeof(msr_area_entry) == 16);
+
+/**
+ * How many entries an MSR area may name.
+ *
+ * SDM A.6 puts the limit in IA32_VMX_MISC bits 27:25, as "(N+1)*512" - so
+ * zero there is 512, which is what `nested_vmx_capability_msr` narrows the
+ * field to. Reported rather than assumed, so a guest hypervisor building a
+ * longer list is told rather than surprised.
+ */
+constexpr std::uint64_t msr_area_capacity = 512;
+
+/**
+ * How many entries to fetch per read of guest memory.
+ *
+ * The three functions below used to read one 16-byte entry at a time,
+ * and `read_guest_physical` repoints the mapping window for every call
+ * it is given - so a 40-entry area cost forty window repoints, each of
+ * which is a page-table write and an INVLPG.
+ *
+ * That was **the** cost of an exit. Phase 11 measured `map_window_at`
+ * at 131.4 calls per exit and 1,088 cycles each - about 143,000 of the
+ * 423,565 cycles an exit spent inside this VMM - and the MSR areas are
+ * where the calls came from: three of them, checked on every entry
+ * (SDM 29.2.1.1 and `check_nested_msr_area`'s own comment on why the
+ * check is up front and stateless), then loaded and stored.
+ *
+ * A chunk is 512 bytes, so it is one window repoint rather than 32, and
+ * it is small enough to sit on a stack this VMM shares with everything
+ * else - a whole area would be 8 KB.
+ *
+ * The re-check before WRMSR is not weakened by reading ahead. It was
+ * never a defence against the area changing under us, which it cannot
+ * be: the value validated and the value written both come from the same
+ * local copy, before and after, so what reaches WRMSR is still exactly
+ * what was checked.
+ */
+constexpr std::uint64_t msr_area_chunk = 32;
+
+/**
+ * Whether an MSR area may name this index at all.
+ *
+ * The three rules SDM 29.4 and SDM 30.4 share, and KVM's
+ * `nested_vmx_msr_check_common` applies:
+ *
+ * - bits 31:8 equal to 000008H, which is the x2APIC register range. A
+ *   local APIC in x2APIC mode is reached through those, and this VMM
+ *   intercepts the interrupt command register among them.
+ * - the microcode update registers, IA32_BIOS_UPDT_TRIG and
+ *   IA32_BIOS_SIGN_ID.
+ * - the reserved dword, which must be zero.
+ */
+constexpr bool msr_area_index_allowed(const msr_area_entry & entry)
+{
+    constexpr std::uint32_t x2apic_page = 0x8;
+    constexpr std::uint32_t bios_update_trigger = 0x79;
+    constexpr std::uint32_t bios_signature = 0x8b;
+
+    if (0 != entry.reserved) {
+        return false;
+    }
+
+    if (x2apic_page == (entry.index >> 8)) {
+        return false;
+    }
+
+    return (bios_update_trigger != entry.index) &&
+           (bios_signature != entry.index);
+}
+
+/**
+ * Whether this VMM will read or write the named MSR on a guest
+ * hypervisor's behalf.
+ *
+ * **A list rather than a rule, and the direction is the safe one.** SDM
+ * 29.4's last failure condition is "an attempt to write bits 127:64 to the
+ * MSR indexed by bits 31:0 of the entry would cause a general-protection
+ * exception if executed via WRMSR with CPL = 0", and SDM 30.4 says the
+ * same of RDMSR. Answering that question in general needs a WRMSR that can
+ * fault and recover, and this VMM has no such thing: the host exception
+ * recovery point is a single shared context that `main` disarms before the
+ * guest ever runs, so a #GP in root operation stops the processor. A guest
+ * hypervisor's VM entry is a guest instruction, and no guest instruction
+ * may do that.
+ *
+ * So an index outside this list fails the entry rather than being
+ * attempted, which is an outcome the architecture already has a name for -
+ * the same failure a processor reports for an MSR it will not load. A
+ * guest hypervisor is told; nothing is silently skipped.
+ *
+ * The list is what a hypervisor actually puts in these areas: the two
+ * memory-typing and paging-mode MSRs, the system-call set, the two base
+ * registers a context switch needs, the speculation controls, and the time
+ * stamp counter.
+ *
+ * Removing the restriction needs a fault-tolerant WRMSR, which needs a
+ * per-processor host exception recovery point. BACKLOG.md records that as
+ * the change, since it touches the exception path every processor shares.
+ */
+constexpr bool msr_area_index_handled(std::uint32_t index)
+{
+    switch (index) {
+    case 0x10:       // IA32_TIME_STAMP_COUNTER.
+    case 0x48:       // IA32_SPEC_CTRL.
+    case 0x49:       // IA32_PRED_CMD.
+    case 0x10b:      // IA32_FLUSH_CMD.
+    case 0x174:      // IA32_SYSENTER_CS.
+    case 0x175:      // IA32_SYSENTER_ESP.
+    case 0x176:      // IA32_SYSENTER_EIP.
+    case 0x1d9:      // IA32_DEBUGCTL.
+    case 0x277:      // IA32_PAT.
+    case 0xd90:      // IA32_BNDCFGS.
+    case 0xda0:      // IA32_XSS.
+    case 0xc0000080: // IA32_EFER.
+    case 0xc0000081: // IA32_STAR.
+    case 0xc0000082: // IA32_LSTAR.
+    case 0xc0000083: // IA32_CSTAR.
+    case 0xc0000084: // IA32_FMASK.
+    case 0xc0000102: // IA32_KERNEL_GS_BASE.
+    case 0xc0000103: // IA32_TSC_AUX.
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
+ * Whether writing this value to this MSR would fault, for the two in the
+ * list above whose *value* can fault rather than only their index.
+ *
+ * IA32_EFER is the one the SDM calls out itself, in the footnote to SDM
+ * 29.4: "If CR0.PG = 1, WRMSR to the IA32_EFER MSR causes a
+ * general-protection exception if it would modify the LME bit". Root
+ * operation always has CR0.PG = 1 here, so a guest hypervisor asking to
+ * change LME is asking for a fault. Its reserved bits fault too - SCE,
+ * LME, LMA and NXE are the whole of it.
+ *
+ * IA32_PAT faults on a byte that is not one of the six defined memory
+ * types, SDM Table 13-11: 0, 1, 4, 5, 6 and 7, with 2 and 3 reserved.
+ */
+inline bool msr_area_value_writable(std::uint32_t index,
+                                    std::uint64_t value)
+{
+    constexpr std::uint32_t ia32_efer = 0xc0000080;
+    constexpr std::uint32_t ia32_pat = 0x277;
+
+    if (ia32_efer == index) {
+        constexpr std::uint64_t efer_defined =
+            (1ull << 0) | (1ull << 8) | (1ull << 10) | (1ull << 11);
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+
+        if (0 != (value & ~efer_defined)) {
+            return false;
+        }
+
+        auto current = arch::x86_64::rdmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable);
+
+        return (value & efer_lme) == (current & efer_lme);
+    }
+
+    if (ia32_pat == index) {
+        for (auto byte = 0; byte < 8; ++byte) {
+            auto type = (value >> (byte * 8)) & 0xff;
+
+            if ((2 == type) || (3 == type) || (type > 7)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
+ * The host-state area, which vmcs02 takes unchanged from the VMCS that
+ * runs the guest hypervisor.
+ *
+ * It is this VMM's rather than the guest hypervisor's because the VM exit
+ * a second-level guest takes comes *here*: the processor knows one host
+ * and it is this one. The guest hypervisor's own host state is loaded into
+ * the guest-state area of vmcs01 instead, and only when an exit is
+ * actually reflected to it. KVM says the same of the exit controls in
+ * `prepare_vmcs02_early`: "L2->L1 exit controls are emulated - the
+ * hardware exit is to L0 so we should use its exit controls".
+ *
+ * IA32_PAT, IA32_EFER and IA32_PERF_GLOBAL_CTRL are absent because the
+ * exit controls copied alongside do not load them, so the processor never
+ * reads those fields. They are host state that does not apply.
+ */
+constexpr field host_state_fields[] = {
+    field::host_es_selector,
+    field::host_cs_selector,
+    field::host_ss_selector,
+    field::host_ds_selector,
+    field::host_fs_selector,
+    field::host_gs_selector,
+    field::host_tr_selector,
+    field::host_ia32_sysenter_cs,
+    field::host_cr0,
+    field::host_cr3,
+    field::host_cr4,
+    field::host_fs_base,
+    field::host_gs_base,
+    field::host_tr_base,
+    field::host_gdtr_base,
+    field::host_idtr_base,
+    field::host_ia32_sysenter_esp,
+    field::host_ia32_sysenter_eip,
+    field::host_rsp,
+    field::host_rip,
+};
+
+/**
+ * The guest-state fields carried in both directions between the guest
+ * hypervisor's VMCS and the one that runs its guest.
+ *
+ * One list rather than two, because the two directions must agree: a field
+ * loaded on the way in and not saved on the way out is a field the
+ * second-level guest's changes to are silently discarded, which is exactly
+ * the class of bug that shows up somewhere unrelated. SDM 27.4 defines the
+ * guest-state area and SDM 30.3 defines what a VM exit saves back into it;
+ * everything unconditional in the second list is here.
+ *
+ * What is deliberately absent, and handled by name instead: CR0, CR4 and
+ * their read shadows, because the masks make them a computation rather
+ * than a copy; RIP, RSP and RFLAGS, which are saved back but loaded from
+ * the guest hypervisor's own values; DR7, IA32_PAT and IA32_EFER, whose
+ * save-back is conditional on the guest hypervisor's exit controls; the
+ * interruptibility state, which the entry-event path also writes; and the
+ * activity state, which is not a copy in either direction because vmcs02
+ * is not entered in every state vmcs12 may name - see `enter_or_park_l2`.
+ */
+constexpr field guest_state_fields[] = {
+    field::guest_es_selector,
+    field::guest_cs_selector,
+    field::guest_ss_selector,
+    field::guest_ds_selector,
+    field::guest_fs_selector,
+    field::guest_gs_selector,
+    field::guest_ldtr_selector,
+    field::guest_tr_selector,
+    field::guest_es_limit,
+    field::guest_cs_limit,
+    field::guest_ss_limit,
+    field::guest_ds_limit,
+    field::guest_fs_limit,
+    field::guest_gs_limit,
+    field::guest_ldtr_limit,
+    field::guest_tr_limit,
+    field::guest_gdtr_limit,
+    field::guest_idtr_limit,
+    field::guest_es_access_rights,
+    field::guest_cs_access_rights,
+    field::guest_ss_access_rights,
+    field::guest_ds_access_rights,
+    field::guest_fs_access_rights,
+    field::guest_gs_access_rights,
+    field::guest_ldtr_access_rights,
+    field::guest_tr_access_rights,
+    field::guest_es_base,
+    field::guest_cs_base,
+    field::guest_ss_base,
+    field::guest_ds_base,
+    field::guest_fs_base,
+    field::guest_gs_base,
+    field::guest_ldtr_base,
+    field::guest_tr_base,
+    field::guest_gdtr_base,
+    field::guest_idtr_base,
+    field::guest_cr3,
+    field::guest_pending_debug_exceptions,
+    field::guest_ia32_sysenter_esp,
+    field::guest_ia32_sysenter_eip,
+    field::guest_ia32_sysenter_cs,
+    field::guest_ia32_debugctl,
+    field::guest_pdpte_0,
+    field::guest_pdpte_1,
+    field::guest_pdpte_2,
+    field::guest_pdpte_3,
+};
+
+/**
+ * vmcs02's control fields, which `write_vmcs02_control` may elide.
+ *
+ * Two properties are required of every field here, and the second is
+ * the one that is easy to lose.
+ *
+ * The processor never saves over a VM-execution, VM-exit or VM-entry
+ * control, so what was last written is still there - unlike the guest
+ * state fields next door, which it overwrites on every exit.
+ *
+ * And nothing writes them but `build_vmcs02` and `on_l2_exit`'s
+ * threshold disarm, both of which run with vmcs02 current by
+ * construction and both of which go through `write_vmcs02_control`, so
+ * the cache follows what they wrote. That is why the pin-based and primary
+ * controls are **not** here even though they are controls: `resume.cpp`
+ * and `local_apic.cpp` write them too, and the CR-access handler in
+ * `exit_dispatch.cpp` writes the CR0 and CR4 read shadows, so for those
+ * four the cache would describe a field somebody else had moved. The
+ * primary controls are also the one entry in the list that genuinely
+ * changes almost every entry - the interrupt window is armed and
+ * disarmed constantly - so caching them was worth very little anyway.
+ * Everything remaining is written on vmcs01 only during one-time
+ * initialisation, or in `set_vmcs_shadowing`, which runs while the
+ * guest hypervisor's own instruction is being handled and vmcs01 is
+ * current.
+ *
+ * See `control_cache` for the three fields that look like controls and
+ * are not - the entry interruption-information field, the preemption
+ * timer value, and the two that accompany an injection.
+ *
+ * `tests/nested_exit` is what enforces the second property: it pokes a
+ * field directly and rebuilds, which is exactly the shape of a caller
+ * that has moved vmcs02 out from under the cache.
+ */
+constexpr field control_fields[] = {
+    field::secondary_processor_based_vm_execution_controls,
+    field::vm_exit_controls,
+
+    // **`vm_entry_controls` is deliberately absent, for the second
+    // property this list's note demands and does not check.** SDM 30.2:
+    // "If bit 5 of the IA32_VMX_MISC MSR is read as 1 ... the value of
+    // IA32_EFER.LMA is stored into the 'IA-32e mode guest' VM-entry
+    // control." Bit 5 reads 1 here - the capability dump answers MISC as
+    // 0x165 - so **the processor rewrites bit 9 of this field on every
+    // single VM exit.** It is the one entry the list ever had that
+    // somebody else moves constantly, which is exactly the hazard the
+    // note above describes and the reason the primary controls were
+    // taken out.
+    //
+    // The unsoundness is structural: the cache records what we wrote,
+    // hardware then rewrites bit 9 underneath it, and a later build that
+    // finds vmcs12's value equal to the recorded one skips the write and
+    // leaves vmcs02 holding hardware's bit rather than the one vmcs12
+    // asked for.
+    //
+    // **Removing it did not fix the boot this was found chasing, and the
+    // record says so.** With the elision gone, a three-processor boot
+    // still ends with vmcs12 and vmcs02 agreeing exactly on
+    // `entry_ctls 0x11ff`, bit 9 clear, beside `cr0 0x80050033` (PG set)
+    // and a 64-bit `rip` - which fails SDM 29.3.1.4's requirement that
+    // RIP bits 63:32 be 0 when the IA-32e-mode-guest control is 0, and
+    // is where every three-processor boot still ends. So the zero in
+    // vmcs12 arrives by some route other than this one, and the entry
+    // failure is not explained yet.
+    //
+    // Kept regardless, because eliding a write to a field the processor
+    // rewrites on every exit is wrong on its own terms and cannot be
+    // reasoned about correctly the next time somebody reads this list.
+
+    field::exception_bitmap,
+    field::page_fault_error_code_mask,
+    field::page_fault_error_code_match,
+    field::cr0_guest_host_mask,
+    field::cr4_guest_host_mask,
+    field::ept_pointer,
+    field::vpid,
+    field::vmcs_link_pointer,
+    field::msr_bitmap,
+    field::io_bitmap_a,
+    field::io_bitmap_b,
+    field::virtual_apic_address,
+    field::tpr_threshold,
+
+    // **`cr3_target_value_0` is deliberately absent, and so is the write
+    // that used to put the entry-failure recovery pointer there.** The
+    // field does not exist under the layer this VMM runs on - see
+    // `nested_entry_slot_field` in `asm.h` - so the write failed with
+    // VMfailValid every time and this list recorded it as done, which is
+    // what made it permanent. Nothing needs it now.
+
+    field::cr3_target_count,
+    field::tsc_offset,
+    field::tsc_multiplier,
+    field::vm_entry_msr_load_count,
+    field::vm_exit_msr_load_count,
+    field::vm_exit_msr_store_count,
+};
+
+/**
+ * The effective CR0 and CR4 a second-level guest reads, which is what its
+ * read shadow under this VMM has to answer with.
+ *
+ * A guest reads `(shadow & mask) | (register & ~mask)`. Under the guest
+ * hypervisor alone that is vmcs12's own three fields; under this VMM the
+ * mask is wider - it includes the bits this VMM owns - so the shadow has
+ * to carry the whole answer rather than half of it. Writing the effective
+ * value into the shadow does that for every bit the wider mask covers,
+ * and the bits it does not cover are outside vmcs12's mask too, where the
+ * real register already agrees. KVM computes the same value in
+ * `nested_read_cr0` and `nested_read_cr4`.
+ * @{
+ */
+constexpr std::uint64_t effective_control_register(std::uint64_t value,
+                                                   std::uint64_t shadow,
+                                                   std::uint64_t mask)
+{
+    return (value & ~mask) | (shadow & mask);
+}
+/**
+ * @}
+ */
+
+} // namespace
+
+std::expected<void, zpp::error> hypervisor::check_nested_msr_area(
+    std::uint64_t address, std::uint64_t count, bool loading)
+{
+    if (0 == count) {
+        return {};
+    }
+
+    // SDM 29.2.1.1 checks the address itself as a control: 16-byte aligned
+    // and the last byte within the processor's physical-address width.
+    // That part is the architecture's and applies whether or not the
+    // contents are looked at.
+    auto bytes = count * sizeof(msr_area_entry);
+    auto limit = 1ull << physical_address_bits();
+
+    if ((0 != (address & 0xf)) || (count > msr_area_capacity) ||
+        (address >= limit) || (bytes > (limit - address))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    // The contents, which is where this diverges from a processor and does
+    // so deliberately. A processor checks each entry as it processes it -
+    // at VM entry for the entry area, and at VM *exit* for the two exit
+    // areas, where a failure is a VMX abort and a VMX abort is a shutdown.
+    // There is no shutdown available here that does not take the whole
+    // machine with it, so all three are checked up front instead, and a
+    // guest hypervisor is refused before its guest runs rather than after.
+    //
+    // What that costs is precision about which failure it was; what it
+    // buys is that the exit path cannot fail on anything but memory that
+    // stopped being readable, which is the one case left for the abort
+    // below.
+    msr_area_entry chunk[msr_area_chunk]{};
+    std::uint64_t chunk_first{};
+    std::uint64_t chunk_count{};
+
+    for (std::uint64_t i{}; i < count; ++i) {
+        if (i >= (chunk_first + chunk_count)) {
+            chunk_first = i;
+            chunk_count = ((count - i) < msr_area_chunk) ? (count - i)
+                                                         : msr_area_chunk;
+
+            auto read = read_guest_physical(
+                address + (i * sizeof(msr_area_entry)),
+                std::span(reinterpret_cast<std::byte *>(chunk),
+                          chunk_count * sizeof(msr_area_entry)));
+            if (!read) {
+                return std::unexpected(
+                    zpp::error{error::nested_msr_area_unsupported});
+            }
+        }
+
+        auto & entry = chunk[i - chunk_first];
+
+        if (!msr_area_index_allowed(entry) ||
+            !msr_area_index_handled(entry.index) ||
+            (loading &&
+             !msr_area_value_writable(entry.index, entry.value))) {
+            // Which MSR, because the caller only gets an error code.
+            //
+            // The list this checks against is closed, the areas are guest
+            // memory a guest hypervisor rewrites with no exit, and the
+            // check is stateless and runs on every entry - so the first
+            // index it does not know refuses that virtual processor's
+            // every subsequent entry, permanently and silently. Without
+            // this line the refusal names no MSR and the next boot
+            // answers nothing; with it, the fix is to add whatever it
+            // names to msr_area_index_handled.
+            log("msr area at {} ({}) refuses index {}, value {}",
+                address,
+                loading ? "load" : "store",
+                entry.index,
+                entry.value);
+
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+    }
+
+    return {};
+}
+
+std::expected<void, zpp::error> hypervisor::load_nested_msrs(
+    std::size_t cpu, std::uint64_t address, std::uint64_t count)
+{
+    msr_area_entry chunk[msr_area_chunk]{};
+    std::uint64_t chunk_first{};
+    std::uint64_t chunk_count{};
+
+    for (std::uint64_t i{}; i < count; ++i) {
+        // SDM 29.8: the exit qualification of an MSR-loading failure is
+        // "the number of the entry that caused the problem (1 for the
+        // first entry, 2 for the second, etc.)".
+        this->nested_msr_failure_entry[cpu] = i + 1;
+
+        if (i >= (chunk_first + chunk_count)) {
+            chunk_first = i;
+            chunk_count = ((count - i) < msr_area_chunk) ? (count - i)
+                                                         : msr_area_chunk;
+
+            auto read = read_guest_physical(
+                address + (i * sizeof(msr_area_entry)),
+                std::span(reinterpret_cast<std::byte *>(chunk),
+                          chunk_count * sizeof(msr_area_entry)));
+            if (!read) {
+                return std::unexpected(
+                    zpp::error{error::guest_memory_unreachable});
+            }
+        }
+
+        auto & entry = chunk[i - chunk_first];
+
+        // Re-checked rather than trusted, because the area is guest memory
+        // and nothing stops a guest hypervisor rewriting it between the
+        // check and here. The check exists to give a good answer early;
+        // this exists so that a bad one cannot reach WRMSR.
+        if (!msr_area_index_allowed(entry) ||
+            !msr_area_index_handled(entry.index) ||
+            !msr_area_value_writable(entry.index, entry.value)) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+
+        arch::x86_64::wrmsr(entry.index, entry.value);
+    }
+
+    return {};
+}
+
+std::expected<void, zpp::error>
+hypervisor::store_nested_msrs(std::uint64_t address, std::uint64_t count)
+{
+    for (std::uint64_t first{}; first < count; first += msr_area_chunk) {
+        auto chunk_count = ((count - first) < msr_area_chunk)
+                               ? (count - first)
+                               : msr_area_chunk;
+        auto at = address + (first * sizeof(msr_area_entry));
+
+        msr_area_entry chunk[msr_area_chunk]{};
+
+        auto read = read_guest_physical(
+            at,
+            std::span(reinterpret_cast<std::byte *>(chunk),
+                      chunk_count * sizeof(msr_area_entry)));
+        if (!read) {
+            return std::unexpected(
+                zpp::error{error::guest_memory_unreachable});
+        }
+
+        // Filled first, written back once. A refusal part way through
+        // still writes back the entries already read, which is what
+        // one-entry-at-a-time did: those stores had happened by the time
+        // the bad entry was reached, and a guest hypervisor reading the
+        // area afterwards must see them.
+        std::uint64_t done{};
+        auto refused = false;
+
+        for (; done < chunk_count; ++done) {
+            auto & entry = chunk[done];
+
+            if (!msr_area_index_allowed(entry) ||
+                !msr_area_index_handled(entry.index)) {
+                refused = true;
+                break;
+            }
+
+            entry.value = arch::x86_64::rdmsr(entry.index);
+        }
+
+        if (0 != done) {
+            auto written = write_guest_physical(
+                at,
+                std::span(reinterpret_cast<const std::byte *>(chunk),
+                          done * sizeof(msr_area_entry)));
+            if (!written) {
+                return std::unexpected(
+                    zpp::error{error::guest_memory_unreachable});
+            }
+        }
+
+        if (refused) {
+            return std::unexpected(
+                zpp::error{error::nested_msr_area_unsupported});
+        }
+    }
+
+    return {};
+}
+
+bool hypervisor::own_msr_intercepted(std::uint32_t index, bool write) const
+{
+    // The same four 1024-byte bitmaps intercept_msr writes, read back.
+    // SDM 27.6.9, "MSR-Bitmap Address".
+    std::size_t base{};
+    std::uint32_t bit{};
+
+    if (index < 0x2000) {
+        base = write ? 0x800 : 0x000;
+        bit = index;
+    } else if ((index >= 0xc0000000) && (index < 0xc0002000)) {
+        base = write ? 0xc00 : 0x400;
+        bit = index - 0xc0000000;
+    } else {
+        // Outside both ranges no bitmap is consulted and the access exits
+        // unconditionally (SDM 28.1.3), so this VMM's bitmap did not ask
+        // for it and the answer here is no.
+        //
+        // That matters more than it looks. This VMM answers an
+        // out-of-range MSR with a general protection fault, which is what
+        // bare hardware gives - but for a *second-level* guest the machine
+        // is the guest hypervisor, and the synthetic MSR ranges a
+        // hypervisor presents to its guest live exactly there: Hyper-V's
+        // are at 40000000H upwards. Claiming those would have this VMM
+        // fault an interface the guest hypervisor implements.
+        return false;
+    }
+
+    return 0 != (this->msr_bitmap[base + (bit / 8)] & (1u << (bit % 8)));
+}
+
+bool hypervisor::own_io_port_intercepted(std::uint16_t port) const
+{
+    // Bitmap A covers ports 0000H-7FFFH and bitmap B 8000H-FFFFH. SDM
+    // 27.6.4, "I/O-Bitmap Addresses".
+    const auto & bitmap =
+        (port < 0x8000) ? this->io_bitmap_a : this->io_bitmap_b;
+    auto bit = static_cast<std::size_t>(port & 0x7fff);
+
+    return 0 != (bitmap[bit / 8] & (1u << (bit % 8)));
+}
+
+std::expected<void, zpp::error>
+hypervisor::merge_nested_bitmaps(std::size_t cpu)
+{
+    // Phase timing; see `phase_cycles`. Timed because `build_vmcs02`
+    // costs 220,653 cycles a call while issuing fifteen VMCS writes and
+    // one 5,127 cycle VMPTRLD, and this is the only other thing in it
+    // big enough to hold the rest.
+    auto merge_start = arch::x86_64::rdtsc();
+    auto merge_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][8] +=
+                arch::x86_64::rdtsc() - merge_start;
+            this->phase_calls[cpu][8] += 1;
+        }
+    });
+
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto msr_source = shadow.read(field::msr_bitmap);
+
+    // Kept so the guest hypervisor's own bitmap can be read from
+    // outside, which is the one thing that says whether this VMM's
+    // forty merged bits over 0x480-0x491 add anything at all.
+    //
+    // If it already intercepts that range - and it must, since it
+    // presents nested VMX to its own guest and cannot do that without
+    // seeing those reads - then the merge is a no-op there and the
+    // asymmetry is only apparent. If it does not, clearing our bits
+    // would send the second-level guest straight to the hardware MSR,
+    // which is worse than the extra exit, so this has to be measured
+    // before anything is changed either way.
+    if (cpu < max_cpus) {
+        this->nested_guest_msr_bitmap[cpu] = msr_source;
+    }
+    auto io_a_source = shadow.read(field::io_bitmap_a);
+    auto io_b_source = shadow.read(field::io_bitmap_b);
+
+    // Every VM entry, with no cache on the bitmap addresses.
+    //
+    // A cache on the addresses was written first and is wrong, which is
+    // worth recording because it looks obviously right: the addresses are
+    // VMCS fields and a guest hypervisor changes them rarely, so caching
+    // on them seems free. But the *contents* live in guest memory the
+    // guest hypervisor writes directly, with no VMWRITE and no exit - a
+    // hypervisor that stops intercepting an MSR clears a bit in the page
+    // it already named. Cached on the address, this VMM would have gone on
+    // trapping what the guest hypervisor stopped asking for and, worse,
+    // gone on *not* trapping what it started asking for.
+    //
+    // **"KVM re-merges on every entry too" is half right, and the other
+    // half is the whole answer.** `nested_vmx_prepare_msr_bitmap`
+    // (.references/kvm/nested.c:619-720) opens with
+    // `if (!vmx->nested.force_msr_bitmap_recalc)` and skips the merge
+    // outright - but only when the guest hypervisor is using an
+    // enlightened VMCS and has set `HV_VMX_ENLIGHTENED_CLEAN_FIELD_MSR_
+    // BITMAP`. So the exemption is not an optimisation KVM found; it is
+    // a *protocol*, in which L1 states that its bitmap has not changed.
+    // Without it KVM merges every entry, exactly as this does.
+    //
+    // And when it does merge, it does not do what this does. KVM keeps
+    // vmcs02's bitmap as a persistent structure and patches the handful
+    // of MSRs L0 cares about - the x2APIC block, FS/GS base, SPEC_CTRL,
+    // PRED_CMD, FLUSH_CMD - into it. It never copies four kilobytes and
+    // never ORs four kilobytes, because its own intercept set is static
+    // and small. So is this VMM's: IA32_APIC_BASE, IA32_FEATURE_CONTROL
+    // and 0x480-0x491. The union is only necessary because it is written
+    // as a union; the same result is a copy of the guest hypervisor's
+    // page plus twenty-two bit sets, and `nested_guest_msr_bitmap` was
+    // recorded to find out whether even those are needed - a guest
+    // hypervisor presenting VMX to its own guest must already intercept
+    // 0x480-0x491.
+    //
+    // Sized before anything is built on it: this phase is 18,063 cycles
+    // a round trip against the ~610,000 a round trip spends inside this
+    // VMM, so **removing the whole of it is 3.0%**. Worth having and not
+    // a lever.
+    //
+    // What it costs is one guest page read per area the guest hypervisor
+    // actually uses, per entry - four kilobytes for a hypervisor that uses
+    // MSR bitmaps and no I/O bitmaps, which is the usual shape. Caching it
+    // correctly needs a way to notice a write to those pages, and this VMM
+    // has one: `watch_guest_page_writes`. That is the optimisation, and
+    // the measurement that would justify it is the entry rate of a real
+    // guest hypervisor, which nothing has yet run.
+
+    // The guest hypervisor's page is read straight into the destination
+    // and this VMM's own is then or'd on top, rather than the other way
+    // round with a scratch page in between. There is nowhere to put a
+    // scratch page: the host stack a VM exit runs on is under four
+    // kilobytes, so a page-sized local would run off the end of it, and a
+    // per-processor scratch member would cost what it saves.
+    //
+    // Reading into the destination means a failed read leaves a
+    // half-merged bitmap behind. Harmless, because a failure refuses the
+    // VM entry and the next attempt merges again from scratch - so the
+    // half-merged state is never entered with.
+    //
+    // The merge itself is the union. A bit set on either side is an exit,
+    // which is what makes it safe: every exit that happens is one of the
+    // two asked for, and whichever asked for it knows how to answer it.
+    auto merge_page =
+        [&](std::uint64_t from,
+            const void * ours,
+            std::uint8_t * into,
+            bool read_theirs,
+            std::size_t which) -> std::expected<void, zpp::error> {
+        // The union with nothing is this VMM's own page, unchanged.
+        //
+        // Worth the flag rather than the memset-and-or it replaces,
+        // because it is the *usual* case and it was being recomputed
+        // from scratch on every entry: a guest hypervisor that uses MSR
+        // bitmaps and no I/O bitmaps - which is Hyper-V's shape, and
+        // the shape the comment above predicted - took two of these
+        // three pages down this branch every time, so two thirds of the
+        // work produced a value that could not have changed.
+        //
+        // What invalidates it is a write to *this VMM's* own bitmap,
+        // which happens outside this function: `forget_nested_bitmaps`
+        // exists for that and `intercept_interrupt_command` calls it.
+        if (!read_theirs) {
+            if (this->nested_bitmap_is_ours[cpu][which]) {
+                return {};
+            }
+
+            std::memcpy(into, ours, page_size);
+            this->nested_bitmap_is_ours[cpu][which] = true;
+            return {};
+        }
+
+        this->nested_bitmap_is_ours[cpu][which] = false;
+
+        // Phase 10 is the guest page read alone, so it can be told apart
+        // from the union that follows it. The proposed fix - keeping the
+        // mapping across entries - only removes `map_window_at`, and the
+        // copy through it is cold-cache traffic that the fix would not
+        // touch. Sizing the change off the merge total would repeat a
+        // mistake made twice already in this file.
+        auto read_start = arch::x86_64::rdtsc();
+        auto read = read_guest_physical(
+            from,
+            std::span(reinterpret_cast<std::byte *>(into), page_size));
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][10] +=
+                arch::x86_64::rdtsc() - read_start;
+            this->phase_calls[cpu][10] += 1;
+        }
+
+        if (!read) {
+            return std::unexpected(read.error());
+        }
+
+        // Quadwords rather than bytes: the same union in an eighth of
+        // the iterations. Both sides are whole VMCS-referenced pages and
+        // so are page aligned by construction, which is what makes the
+        // wider access well defined here.
+        // Saved before the merge, because the merge is in place: the
+        // guest hypervisor's own page has already been read into
+        // `into`, and the OR below is about to cover it.
+        constexpr std::size_t vmx_capability_first = 0x480 / 8;
+        constexpr std::size_t vmx_capability_bytes = 3;
+
+        std::uint8_t theirs_over_vmx[vmx_capability_bytes]{};
+
+        std::memcpy(theirs_over_vmx,
+                    static_cast<const std::uint8_t *>(into) +
+                        vmx_capability_first,
+                    sizeof(theirs_over_vmx));
+
+        auto mine = static_cast<const std::uint64_t *>(ours);
+        auto target = reinterpret_cast<std::uint64_t *>(into);
+
+        for (std::size_t i{}; i < page_size / sizeof(std::uint64_t); ++i) {
+            target[i] |= mine[i];
+        }
+
+        // Except the VMX capability range, where this VMM's bits are
+        // for its *own* guest and must not be imposed on that guest's
+        // guest.
+        //
+        // Measured: the guest hypervisor's own bitmap intercepts every
+        // MSR from 0x480 to 0x491 **except 0x491**,
+        // `IA32_VMX_VMFUNC` - its read-low word over that block is
+        // 0xfffffffffffdffff, one bit clear. This VMM covers the range
+        // whole, because it must answer those MSRs for the guest
+        // hypervisor itself, so the merge added exactly that one bit
+        // and made the second-level guest exit on a read its own
+        // hypervisor deliberately left alone.
+        //
+        // Deliberate on its side: it does not offer VMFUNC to its guest,
+        // so a guest reading the capability cannot act on it, and the
+        // read costs it nothing unintercepted. It therefore has no
+        // reason to expect that exit to arrive, and this VMM reflects it
+        // - `l0_wants_l2_exit` claims no MSR exits - to a level that
+        // never asked.
+        //
+        // Restoring the guest hypervisor's own bytes over 0x480-0x497
+        // rather than clearing one bit, because the whole range is its
+        // business for its own guest and none of it is this VMM's: no
+        // MSR exit from the second level is answered here.
+        if (0 == which) {
+            std::memcpy(static_cast<std::uint8_t *>(into) +
+                            vmx_capability_first,
+                        theirs_over_vmx,
+                        sizeof(theirs_over_vmx));
+        }
+
+        return {};
+    };
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+
+    auto their_msr_bitmap = 0 != (primary12 & primary_msr_bitmaps);
+    auto their_io_bitmaps = 0 != (primary12 & primary_io_bitmaps);
+
+    if (auto merged = merge_page(msr_source,
+                                 this->msr_bitmap,
+                                 this->nested_msr_bitmap[cpu],
+                                 their_msr_bitmap,
+                                 0);
+        !merged) {
+        return merged;
+    }
+
+    if (auto merged = merge_page(io_a_source,
+                                 this->io_bitmap_a,
+                                 this->nested_io_bitmap[cpu],
+                                 their_io_bitmaps,
+                                 1);
+        !merged) {
+        return merged;
+    }
+
+    if (auto merged = merge_page(io_b_source,
+                                 this->io_bitmap_b,
+                                 this->nested_io_bitmap[cpu] + page_size,
+                                 their_io_bitmaps,
+                                 2);
+        !merged) {
+        return merged;
+    }
+
+    // Once, not per entry. These name fixed per-processor buffers, so
+    // the answer cannot change, and asking for it walks the host page
+    // table - which is the same kind of work this function was already
+    // doing three times over for no reason.
+    if (0 == this->nested_msr_bitmap_physical[cpu]) {
+        this->nested_msr_bitmap_physical[cpu] =
+            this->host_page_table.virtual_to_physical(
+                this->nested_msr_bitmap[cpu]);
+        this->nested_io_bitmap_physical[cpu] =
+            this->host_page_table.virtual_to_physical(
+                this->nested_io_bitmap[cpu]);
+    }
+
+    return {};
+}
+
+void hypervisor::forget_vmcs02_contents(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    this->vmcs02_host_written[cpu] = false;
+
+    // And the deferred guest state, which describes contents this call
+    // is about to invalidate. See `guest_state_deferred_vmcs`.
+    this->guest_state_deferred[cpu] = false;
+
+    // And the five the processor saves, for the same reason: the
+    // recording says what vmcs02 holds, and after this it holds
+    // nothing. `vmcs02_launched` is cleared beside the VMCLEAR that
+    // calls this and would refuse the elision on its own, so this is
+    // the belt to that braces - but the recording is the thing being
+    // invalidated, so it is invalidated here.
+    this->hot_state_valid[cpu] = false;
+    this->hot_state_slot_valid[cpu] = 0;
+
+    for (auto & valid : this->control_cache_valid[cpu]) {
+        valid = false;
+    }
+}
+
+void hypervisor::write_vmcs02_control(std::size_t cpu,
+                                      field control,
+                                      std::uint64_t value)
+{
+    static_assert(std::size(control_fields) <= control_cache_capacity,
+                  "control_cache is too small for the field list");
+
+    if (cpu >= max_cpus) {
+        this->vmcs.write(control, value);
+        return;
+    }
+
+    // A linear scan over twenty-seven constants, against a VMWRITE that
+    // costs about 4,500 cycles here because this VMM is itself KVM's
+    // guest and the instruction traps. The comparison is free by
+    // comparison, so there is nothing to gain from a smarter index and a
+    // table to keep in step with the list.
+    for (std::size_t i{}; i < std::size(control_fields); ++i) {
+        if (control_fields[i] != control) {
+            continue;
+        }
+
+        if (this->control_cache_valid[cpu][i] &&
+            (this->control_cache[cpu][i] == value)) {
+            this->control_writes_skipped[cpu] += 1;
+            return;
+        }
+
+        // **Only cache what was actually written.** A VMWRITE the layer
+        // below refuses is now reported rather than swallowed - see
+        // `vmcs_write_failures` - and caching a refused write is what
+        // made the entry-failure recovery pointer permanently absent
+        // instead of merely absent: the first attempt failed, the cache
+        // recorded it as done, and no later build ever tried again.
+        auto failures = arch::x86_64::vmx::vmcs_write_failures;
+
+        // Read before the write, since the write sets it. See
+        // `control_writes_uncached`: "there was no record" and "the
+        // record disagreed" are the two reasons this line is reached
+        // and they need opposite work.
+        auto uncached = !this->control_cache_valid[cpu][i];
+
+        this->vmcs.write(control, value);
+
+        if (failures != arch::x86_64::vmx::vmcs_write_failures) {
+            return;
+        }
+
+        this->control_cache[cpu][i] = value;
+        this->control_cache_valid[cpu][i] = true;
+        this->control_writes_done[cpu] += 1;
+
+        if (uncached) {
+            this->control_writes_uncached[cpu] += 1;
+        }
+        return;
+    }
+
+    // Not on the list, so not argued for. Written straight through
+    // rather than added to the cache by accident.
+    this->vmcs.write(control, value);
+}
+
+void hypervisor::forget_vmcs02_control(std::size_t cpu, field control)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    for (std::size_t i{}; i < std::size(control_fields); ++i) {
+        if (control_fields[i] == control) {
+            this->control_cache_valid[cpu][i] = false;
+            return;
+        }
+    }
+}
+
+std::expected<void, zpp::error> hypervisor::build_vmcs02(std::size_t cpu)
+{
+    // Phase timing; see `phase_cycles`.
+    auto phase_start = arch::x86_64::rdtsc();
+    auto phase_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][2] +=
+                arch::x86_64::rdtsc() - phase_start;
+            this->phase_calls[cpu][2] += 1;
+        }
+    });
+
+    // The split; see `vmcs02_split_cycles`. Adjacent intervals rather
+    // than nested brackets, so the slots cannot fail to sum to the whole.
+    //
+    // VMCS accesses beside the cycles, because 49,269 cycles over forty
+    // guest-state fields is 1,230 a field and **that is not a memory
+    // read**: `vmcs12::read` is a three-dimensional subscript and a
+    // load, and comparing the result against a cache is a load and a
+    // compare. So the block is doing something else per field, and
+    // there are only two candidates - it is still touching the hardware
+    // VMCS on some fraction of fields, or it is 1,230 cycles of pure
+    // software and that is its own bug. Those demand opposite work,
+    // which is why the counters are sampled here rather than either
+    // being assumed.
+    //
+    // `vmcs_reads_taken` and `vmcs_writes_taken` are free-standing and
+    // already incremented inside `vmcs::read` and `vmcs::write`, so this
+    // is a difference of two counters and costs nothing but the loads.
+    auto split_mark = phase_start;
+    auto split_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto split_writes = arch::x86_64::vmx::vmcs_writes_taken;
+
+    auto stamp = [&](std::size_t slot) {
+        auto now = arch::x86_64::rdtsc();
+        auto reads = arch::x86_64::vmx::vmcs_reads_taken;
+        auto writes = arch::x86_64::vmx::vmcs_writes_taken;
+
+        this->vmcs02_split_cycles[slot] =
+            this->vmcs02_split_cycles[slot] + (now - split_mark);
+        this->vmcs02_split_reads[slot] =
+            this->vmcs02_split_reads[slot] + (reads - split_reads);
+        this->vmcs02_split_writes[slot] =
+            this->vmcs02_split_writes[slot] + (writes - split_writes);
+
+        split_mark = now;
+        split_reads = reads;
+        split_writes = writes;
+    };
+
+    // Everything before the VMPTRLD, as its own phase. `merge_nested_
+    // bitmaps`, `copy_vmcs12_to_shadow` and `shadow_ept_pointer_for` are
+    // nested inside it and timed separately, so what this minus those
+    // three shows is the reading and validation of vmcs12 that nothing
+    // has ever measured.
+    auto before_start = arch::x86_64::rdtsc();
+    auto before_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][14] +=
+                arch::x86_64::rdtsc() - before_start;
+            this->phase_calls[cpu][14] += 1;
+        }
+    });
+
+    namespace vmx_msr = arch::x86_64::vmx::msr;
+
+    if constexpr (!nested_vmx::enabled) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto pin12 = shadow.read(field::pin_based_vm_execution_controls);
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+    auto exit12 = shadow.read(field::vm_exit_controls);
+    auto entry12 = shadow.read(field::vm_entry_controls);
+
+    // What the guest hypervisor actually asked for, recorded once.
+    //
+    // Only the first entry's values are kept: a hypervisor that runs
+    // many second-level guests would otherwise leave the last one's
+    // controls here, and the question this answers is what it needs at
+    // all, which the first launch already settles.
+    if (0 == this->vmcs12_controls_captured) {
+        this->vmcs12_pin_controls = pin12;
+        this->vmcs12_primary_controls = primary12;
+        this->vmcs12_secondary_controls = shadow.read(
+            field::secondary_processor_based_vm_execution_controls);
+        this->vmcs12_exit_controls = exit12;
+        this->vmcs12_entry_controls = entry12;
+        this->vmcs12_controls_captured = 1;
+    }
+
+    // Every control the guest hypervisor set has to be one the capability
+    // MSRs told it it could set, and every control they said must be 1 has
+    // to be 1. SDM 29.2.1.1 makes that the first check on the VM-execution
+    // controls, and adjust_msr applied to the narrowed MSR is exactly it:
+    // a value that already satisfies both halves is its own fixed point.
+    //
+    // Checked against the *narrowed* MSRs rather than the hardware's,
+    // which is the point of narrowing them. Without this a guest
+    // hypervisor could set a control this VMM never offered - virtualized
+    // APIC accesses, say - and the union below would hand it to the
+    // processor with nothing here maintaining the state it needs.
+    auto within_capability = [&](std::size_t msr, std::uint64_t value) {
+        return value == arch::x86_64::vmx::adjust_msr(
+                            nested_vmx_capability_msr(msr), value);
+    };
+
+    if (!within_capability(vmx_msr::true_pin_based_controls, pin12) ||
+        !within_capability(vmx_msr::true_processor_based_controls,
+                           primary12) ||
+        !within_capability(vmx_msr::true_exit_controls, exit12) ||
+        !within_capability(vmx_msr::true_entry_controls, entry12) ||
+        ((0 != (primary12 & primary_secondary_controls)) &&
+         !within_capability(vmx_msr::processor_based_contorls_2,
+                            secondary12))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    // The two consistency rules SDM 29.2.1.1 states about NMIs, which are
+    // the only control combinations reachable here that a union of the two
+    // sides cannot repair. Both are also KVM's
+    // `nested_vmx_check_nmi_controls`.
+    constexpr std::uint64_t pin_nmi_exiting = 1ull << 3;
+    constexpr std::uint64_t pin_virtual_nmis = 1ull << 5;
+
+    if (((0 == (pin12 & pin_nmi_exiting)) &&
+         (0 != (pin12 & pin_virtual_nmis))) ||
+        ((0 == (pin12 & pin_virtual_nmis)) &&
+         (0 != (primary12 & primary_nmi_window)))) {
+        return std::unexpected(
+            zpp::error{error::nested_controls_unsupported});
+    }
+
+    stamp(0);   // controls read out of vmcs12 and validated
+
+    // All three MSR areas are checked here, up front, rather than each
+    // where a processor would look at it. See check_nested_msr_area for
+    // why: a failure in either exit area is a VMX abort, and a VMX abort
+    // is a shutdown there is no way to perform on one guest's behalf.
+    auto entry_load_address =
+        shadow.read(field::vm_entry_msr_load_address);
+    auto entry_load_count = shadow.read(field::vm_entry_msr_load_count);
+    auto exit_load_address = shadow.read(field::vm_exit_msr_load_address);
+    auto exit_load_count = shadow.read(field::vm_exit_msr_load_count);
+    auto exit_store_address =
+        shadow.read(field::vm_exit_msr_store_address);
+    auto exit_store_count = shadow.read(field::vm_exit_msr_store_count);
+
+    if (auto checked = check_nested_msr_area(
+            entry_load_address, entry_load_count, true);
+        !checked) {
+        return checked;
+    }
+
+    if (auto checked = check_nested_msr_area(
+            exit_load_address, exit_load_count, true);
+        !checked) {
+        return checked;
+    }
+
+    if (auto checked = check_nested_msr_area(
+            exit_store_address, exit_store_count, false);
+        !checked) {
+        return checked;
+    }
+
+    // A 64-bit host is the only shape this can put back, since the exit
+    // comes here and the guest hypervisor is resumed in whatever mode its
+    // own host-state area describes. SDM 29.2.4 (.references/sdm.txt:
+    // 202330), "Checks Related to Address-Space Size", makes this an
+    // error 8 condition on its own terms - it and 29.2.2 and 29.2.3 are
+    // the three subsections of 29.2 that fail the same way.
+    //
+    // **The section number used to read 29.2.2 and that was wrong.**
+    // 29.2.2 (sdm.txt:202276) is "Checks on Host Control Registers,
+    // MSRs, and SSP" - the CR0 and CR4 pair checked immediately below -
+    // and the CS selector this comment appealed to is 29.2.3. The class
+    // was right and the citation was not, which is the failure mode
+    // CLAUDE.md warns about: a wrong section number stops the next
+    // person checking.
+    if (0 == (exit12 & exit_host_address_space_size)) {
+        return std::unexpected(
+            zpp::error{error::nested_host_state_unsupported});
+    }
+
+    // **The host-state area's control registers, and the second way a
+    // guest could stop a physical core.**
+    //
+    // `load_l1_host_state` puts vmcs12's `host_cr0` and `host_cr4`
+    // straight into vmcs01's *guest* fields on the first reflection out
+    // of a second-level guest, unchecked. An illegal one therefore
+    // reached the same place a bad `mov cr4` did: VM entry fails SDM
+    // 29.3.1.1 and `on_vm_entry_failure` halts the processor, with
+    // nothing recorded and the guest hypervisor's own VMCS as the cause.
+    //
+    // A processor answers this at VM entry instead, before anything has
+    // moved. SDM 29.2.2 (.references/sdm.txt:202276): "The CR0 field must
+    // not set any bit to a value not supported in VMX operation (see
+    // Section 26.8)" and the same sentence for CR4. Failing 29.2 is
+    // VMfailValid with error 8, which is what
+    // `nested_host_state_unsupported` maps to in the caller - so this is
+    // exactly KVM's `nested_vmx_check_host_state`
+    // (.references/kvm/nested.c:3013), whose first line is
+    // `CC(!nested_host_cr0_valid(...)) || CC(!nested_host_cr4_valid(...))`
+    // (nested.c:3019) and whose caller answers
+    // `VMXERR_ENTRY_INVALID_HOST_STATE_FIELD` (nested.c:3730-3731).
+    //
+    // Judged against the *capability MSRs the guest hypervisor was
+    // told*, which for this pair is the hardware's own value -
+    // `nested_vmx_capability_msr` passes all four through unchanged,
+    // because they describe the processor the guest really runs on. That
+    // is also what makes this safe to add under a running guest: the
+    // entry it protects is judged against the same two values, by the
+    // processor on bare metal and by KVM's `nested_host_cr4_valid`
+    // (.references/kvm/nested.h:296) when this VMM is itself nested. A
+    // host CR4 that passes today therefore still passes.
+    //
+    // The exemptions differ from the `mov cr4` case, and the difference
+    // is the point. Here the *host* state is being checked, so:
+    //
+    // - CR0's NW and CD are exempt, and by the architecture rather than
+    //   by choice: 29.2.2 footnote 1 says they "are never checked because
+    //   the values of these bits are not changed by VM exit".
+    // - CR0's PE and PG are *not* exempt. "Unrestricted guest" relaxes
+    //   them for a guest (29.3.1.1) and says nothing about a host, and
+    //   KVM draws the line in the same place - `nested_guest_cr0_valid`
+    //   clears them from `fixed0` and `nested_host_cr0_valid`
+    //   (.references/kvm/nested.h:277) does not.
+    // - CR4's VMXE is exempt only because `load_l1_host_state` forces it
+    //   on regardless (`host_cr4_12 | cr4_vmxe`), so the value reaching
+    //   the register always has it. SMXE is not exempt: nothing here
+    //   forces it either way on this path, so the honest answer is the
+    //   processor's.
+    {
+        constexpr std::uint64_t cr0_never_checked =
+            arch::x86_64::cr0_bits::not_write_through |
+            arch::x86_64::cr0_bits::cache_disable;
+
+        constexpr std::uint64_t cr4_vmxe = 1ull << 13;
+
+        auto host_cr0_12 = shadow.read(field::host_cr0);
+        auto host_cr4_12 = shadow.read(field::host_cr4);
+
+        if (!arch::x86_64::vmx::fixed_bits_valid(
+                host_cr0_12,
+                nested_vmx_capability_msr(vmx_msr::cr0_fixed_0),
+                nested_vmx_capability_msr(vmx_msr::cr0_fixed_1),
+                cr0_never_checked) ||
+            !arch::x86_64::vmx::fixed_bits_valid(
+                host_cr4_12,
+                nested_vmx_capability_msr(vmx_msr::cr4_fixed_0),
+                nested_vmx_capability_msr(vmx_msr::cr4_fixed_1),
+                cr4_vmxe)) {
+            log("cpu {} vmcs12 host cr0 {} cr4 {} outside what the "
+                "processor allows in vmx operation - refused",
+                cpu,
+                host_cr0_12,
+                host_cr4_12);
+
+            return std::unexpected(
+                zpp::error{error::nested_host_state_unsupported});
+        }
+    }
+
+    stamp(1);   // the three MSR areas checked
+
+    // The second level of address translation, which is either a shadow
+    // composed out of the guest hypervisor's tables or - when it uses
+    // none - this VMM's own.
+    //
+    // The second case is not a shortcut. Without extended page tables of
+    // its own a guest hypervisor shadow-pages instead, so its guest's
+    // physical addresses *are* its own, and its own are what this VMM's
+    // identity map already translates with the module and every watched
+    // page removed. So the protections are still in force, which is the
+    // whole reason BACKLOG.md rejects handing the guest hypervisor's EPT
+    // pointer straight to the processor.
+    std::uint64_t eptp02{};
+
+    if (0 != (secondary12 & secondary_enable_ept)) {
+        auto eptp12 = shadow.read(field::ept_pointer);
+
+        // The checks SDM 29.2.1.1 puts on the pointer, in the same order
+        // as KVM's `nested_vmx_check_eptp`: a memory type this VMM
+        // reports, a page-walk length it reports, the accessed-and-dirty
+        // bit only where that capability is reported, and no bit set
+        // above what the processor can address. Bits 5:3 hold the walk
+        // length minus one, bit 6 enables accessed and dirty flags, and
+        // bits 11:7 are reserved.
+        constexpr std::uint64_t eptp_memory_type_mask = 0x7;
+        constexpr std::uint64_t eptp_walk_length_mask = 0x38;
+        constexpr std::uint64_t eptp_walk_length_4 = 3ull << 3;
+        constexpr std::uint64_t eptp_access_and_dirty = 0x40;
+        constexpr std::uint64_t eptp_reserved = 0xf80;
+
+        // IA32_VMX_EPT_VPID_CAP bit 21, from SDM A.10. The shadow never
+        // sets accessed or dirty in an entry it writes, so a guest
+        // hypervisor asking for them here would poll its own tables and
+        // find nothing ever touched. The capability MSR withholds the
+        // bit; this is the other half of withholding it, and without it
+        // the pointer is accepted and the promise quietly broken. KVM
+        // pairs the two the same way, in `nested_vmx_check_eptp`'s "AD,
+        // if set, should be supported".
+        constexpr std::uint64_t ept_cap_access_and_dirty = 1ull << 21;
+
+        // The other three capability bits, from the same appendix, and
+        // they were the asymmetry left beside the one above: the memory
+        // type and the walk length were checked against constants while
+        // accessed-and-dirty was checked against the capability.
+        //
+        // SDM 29.2.1.1 (.references/sdm.txt:202156): "The EPT memory type
+        // (bits 2:0) must be a value supported by the processor as
+        // indicated in the IA32_VMX_EPT_VPID_CAP MSR", and the line below
+        // says the same of the walk length. Appendix A.10 gives the bits:
+        // 8 for uncacheable (.references/sdm.txt:223503), 14 for
+        // write-back (:223505), 6 for a page-walk length of 4 (:223501).
+        //
+        // It is a promise broken in the direction that matters. What this
+        // VMM reports is `hardware & supported_ept_vpid_capabilities`, so
+        // on a processor that does not report uncacheable paging
+        // structures it told a guest hypervisor exactly that and then
+        // accepted a pointer asking for them - the capability MSR and the
+        // check disagreeing about the same machine.
+        //
+        // KVM tests the reported bits: VMX_EPTP_UC_BIT, VMX_EPTP_WB_BIT
+        // and VMX_EPT_PAGE_WALK_4_BIT in `nested_vmx_check_eptp`
+        // (.references/kvm/nested.c:2794, v6.12).
+        constexpr std::uint64_t ept_cap_walk_length_4 = 1ull << 6;
+        constexpr std::uint64_t ept_cap_uncachable = 1ull << 8;
+        constexpr std::uint64_t ept_cap_write_back = 1ull << 14;
+
+        auto capability =
+            nested_vmx_capability_msr(vmx_msr::vpid_ept_capability);
+
+        auto memory_type = eptp12 & eptp_memory_type_mask;
+        auto is_uncachable =
+            (memory_type == static_cast<std::uint64_t>(
+                                arch::x86_64::memory_type::uncachable)) &&
+            (0 != (capability & ept_cap_uncachable));
+        auto is_write_back =
+            (memory_type == static_cast<std::uint64_t>(
+                                arch::x86_64::memory_type::write_back)) &&
+            (0 != (capability & ept_cap_write_back));
+        auto walk_length_supported =
+            0 != (capability & ept_cap_walk_length_4);
+
+        auto address_mask =
+            ((1ull << physical_address_bits()) - 1) & ~0xfffull;
+
+        auto access_and_dirty_offered =
+            0 != (capability & ept_cap_access_and_dirty);
+
+        if ((!is_uncachable && !is_write_back) || !walk_length_supported ||
+            (eptp_walk_length_4 != (eptp12 & eptp_walk_length_mask)) ||
+            (!access_and_dirty_offered &&
+             (0 != (eptp12 & eptp_access_and_dirty))) ||
+            (0 != (eptp12 & eptp_reserved)) ||
+            (0 != (eptp12 & ~(address_mask | 0xfffull)))) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+
+        auto shadow_pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!shadow_pointer) {
+            return std::unexpected(shadow_pointer.error());
+        }
+
+        eptp02 = *shadow_pointer;
+    } else {
+        arch::x86_64::vmx::ept_pointer pointer;
+        pointer.memory_type(arch::x86_64::memory_type::write_back);
+        pointer.page_walk_length(4);
+        pointer.page_number(this->epml4_physical >> 12);
+        eptp02 = pointer;
+    }
+
+    // The TPR shadow, which a real guest hypervisor was measured setting -
+    // primary 0xa4206dfa, bit 21 - and which withholding cost seventeen
+    // second-level entries and then a boot loop. nested_vmx.h carries the
+    // whole capture. Three outcomes here: honoured, replaced, or refused.
+    auto tpr_shadow12 = 0 != (primary12 & primary_tpr_shadow);
+    auto honour_tpr_shadow = false;
+    std::uint64_t virtual_apic12{};
+    std::uint64_t tpr_threshold12{};
+
+    if (tpr_shadow12) {
+        virtual_apic12 = shadow.read(field::virtual_apic_address);
+        tpr_threshold12 = shadow.read(field::tpr_threshold);
+
+        // SDM 29.2.1.1 puts one check on the threshold that always
+        // applies here: "If the 'use TPR shadow' VM-execution control is 1
+        // and the 'virtual-interrupt delivery' VM-execution control is 0,
+        // bits 31:4 of the TPR threshold VM-execution control field must
+        // be 0." Virtual-interrupt delivery is not offered, so the second
+        // half of that condition is always true.
+        //
+        // The same paragraph has a second rule about the threshold - that
+        // its bits 3:0 "should not be greater than the value of bits 7:4
+        // of VTPR" - which is deliberately not checked. It says *should*
+        // rather than *must*, it would cost a guest page read on every
+        // entry, and KVM does not check it either.
+        if (0 != (tpr_threshold12 & ~0xfull)) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+
+        // The address, which is the part that has to be got right. SDM
+        // 29.2.1.1 lists the virtual-APIC address among the fields whose
+        // "bits 11:0 must be 0, and the fields are also subject to the
+        // checks on physical-address width described above in Section
+        // 28.2.1". KVM checks exactly those two, in
+        // `nested_vmx_check_tpr_shadow_controls` through
+        // `page_address_valid`.
+        //
+        // Two checks are added to them, and both are this VMM's rather
+        // than the architecture's.
+        //
+        // Zero is refused. A processor would accept it - page zero is 4 KB
+        // aligned and within any width - but a guest hypervisor that set
+        // the control and never wrote the field leaves exactly zero
+        // behind, since a shadow VMCS starts zeroed, and page zero holds
+        // the real-mode interrupt vector table. Accepting it would have
+        // the processor write VTPR over the guest's own IVT.
+        //
+        // Then the one that matters. **The processor reads and writes this
+        // page in root operation, where extended page tables do not
+        // apply** - so none of this VMM's protections cover those
+        // accesses. The module's own pages, the log queue storage and
+        // every watched page are hidden from the guest by extended
+        // page-table permissions and by nothing else, so a guest
+        // hypervisor naming one of them here would have the processor
+        // write into it on its behalf. That is the same hazard the MSR
+        // areas carry, and the reason their addresses are never handed to
+        // the processor at all; this one has to be, because the whole
+        // point of the control is that the processor uses the page.
+        //
+        // host_ept_lookup answers it directly and without allocating: it
+        // is this VMM's own translation for the address with the
+        // permissions accumulated down the walk. The test is therefore the
+        // right one rather than a list that can drift - may the guest
+        // itself read and write this page? If it may not, the processor
+        // may not either. The extended page tables are an identity map of
+        // the first 512 GB (see initialize_ept), so the L1-physical
+        // address vmcs12 names is also the host-physical address vmcs02
+        // gets, and a lookup that returns anything but `mapped` is already
+        // an address outside that map.
+        auto address_limit = 1ull << physical_address_bits();
+        auto ours = host_ept_lookup(virtual_apic12);
+
+        auto usable =
+            (0 != virtual_apic12) && (0 == (virtual_apic12 & 0xfff)) &&
+            (virtual_apic12 < address_limit) &&
+            (arch::x86_64::vmx::ept_walk_status::mapped == ours.status) &&
+            ours.permissions.read() && ours.permissions.write();
+
+        // A page this VMM will not let the processor touch does not have
+        // to refuse the entry, and refusing it is the worse of the two
+        // answers where the guest hypervisor also asked for CR8-load and
+        // CR8-store exiting. With both of those set the processor never
+        // consults the virtual-APIC page at all - SDM 27.6.8 makes MOV CR8
+        // the only operation that reads it here, since the other two need
+        // controls this VMM withholds, and CR8 exiting means MOV CR8
+        // never completes - so the control can be dropped with nothing
+        // lost, and the exits it would have replaced go to the guest
+        // hypervisor, which asked for them. That is KVM's fallback in
+        // `nested_get_vmcs12_pages`, under the comment "the processor will
+        // never use the TPR shadow, simply clear the bit from the
+        // execution control"; the same function calls failing the entry
+        // for any other configuration "_not_ what the processor does but
+        // it's basically the only possibility we have", which is the case
+        // below.
+        //
+        // Both controls, not either: a guest hypervisor that intercepts
+        // the load and not the store still expects `mov rax, cr8` to read
+        // VTPR out of the page.
+        constexpr std::uint64_t cr8_exiting =
+            primary_cr8_load_exiting | primary_cr8_store_exiting;
+
+        // Switched off deliberately, which is not the same as refusing a
+        // page. `nested_vmx::tpr_shadow_offered` is the one variable
+        // between two boots, and the branch below forces CR8 exiting and
+        // answers those exits here - so the entry must not be failed for
+        // want of a control the guest hypervisor was never going to set.
+        if (!nested_vmx::tpr_shadow_offered) {
+            honour_tpr_shadow = false;
+        } else if (usable) {
+            honour_tpr_shadow = true;
+        } else if (cr8_exiting != (primary12 & cr8_exiting)) {
+            return std::unexpected(
+                zpp::error{error::nested_controls_unsupported});
+        }
+    }
+
+    stamp(2);   // extended-page-table pointer and TPR shadow decided
+
+    if (auto merged = merge_nested_bitmaps(cpu); !merged) {
+        return merged;
+    }
+
+    // Everything that is this VMM's, read out of the VMCS that runs the
+    // guest hypervisor before that one stops being current - and read
+    // **once**, not on every entry. See `host_state_cache`: this is
+    // twenty-eight VMCS reads of state that is fixed for the life of the
+    // processor, and a VMREAD costs 1.76 microseconds here.
+    static_assert(std::size(host_state_fields) <= 24,
+                  "host_state_cache is too small for the field list");
+
+    if (!this->host_state_cached[cpu]) {
+        for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+            this->host_state_cache[cpu][i] =
+                vmcs.read(host_state_fields[i]);
+        }
+
+        this->host_controls_cache[cpu][0] =
+            vmcs.pin_based_vm_execution_controls();
+        this->host_controls_cache[cpu][1] =
+            vmcs.primary_processor_based_vm_execution_controls();
+        this->host_controls_cache[cpu][2] =
+            vmcs.secondary_processor_based_vm_execution_controls();
+        this->host_controls_cache[cpu][3] = vmcs.vm_exit_controls();
+        this->host_controls_cache[cpu][4] =
+            vmcs.read(field::exception_bitmap);
+        this->host_controls_cache[cpu][5] =
+            vmcs.read(field::cr0_guest_host_mask);
+        this->host_controls_cache[cpu][6] =
+            vmcs.read(field::cr4_guest_host_mask);
+        // `cpu + 1` rather than a VMREAD of the field holding it. This
+        // is inside the once-per-processor cache fill, so it is not hot -
+        // it goes with the rest because leaving one of these behind is
+        // how the last sweep left twenty-two.
+        this->host_controls_cache[cpu][7] = cpu + 1;
+
+        // vmcs01's own TSC multiplier, read **here** because here is the
+        // only place in `build_vmcs02` where vmcs01 is still current.
+        // See the declaration: the composition below runs after the
+        // VMPTRLD, so reading the field there returns vmcs02's composed
+        // product and squares the guest hypervisor's half every entry.
+        //
+        // Guarded by the control, because the field does not exist on a
+        // processor that does not offer TSC scaling and a VMREAD of it
+        // would fail there rather than answer.
+        this->host_controls_cache[cpu][8] =
+            (0 !=
+             (this->host_controls_cache[cpu][2] & secondary_tsc_scaling))
+                ? vmcs.read(field::tsc_multiplier)
+                : tsc_scaling_default;
+
+        this->host_state_cached[cpu] = true;
+    }
+
+    auto * host_values = this->host_state_cache[cpu];
+    auto pin01 = this->host_controls_cache[cpu][0];
+    auto primary01 = this->host_controls_cache[cpu][1];
+    auto secondary01 = this->host_controls_cache[cpu][2];
+    auto exit01 = this->host_controls_cache[cpu][3];
+    auto exception_bitmap01 = this->host_controls_cache[cpu][4];
+    auto cr0_mask01 = this->host_controls_cache[cpu][5];
+    auto cr4_mask01 = this->host_controls_cache[cpu][6];
+    auto vpid01 = this->host_controls_cache[cpu][7];
+
+    // From here nothing may fail: vmcs02 is about to become current, and a
+    // caller that answered VMfail with it current would resume the guest
+    // hypervisor on the wrong VMCS.
+    // Phase timing; see `phase_cycles`. Timed on its own because the
+    // rest of this function is now nearly free and the phase is not.
+    // The first half ends here, before the VMPTRLD rather than after, so
+    // the switch itself stays in its own phase 6 and is not counted twice.
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][14] += arch::x86_64::rdtsc() - before_start;
+        this->phase_calls[cpu][14] += 1;
+    }
+    before_stop.release();
+
+    stamp(3);   // bitmaps merged, this VMM's own controls in hand
+
+    auto switch_start = arch::x86_64::rdtsc();
+
+    // **With the enlightened VMCS there is nothing to load.** The
+    // second-level VMCS is a page shared with the layer below, so making
+    // it current is pointing this processor's cache row at it; the layer
+    // below is told which page to use through the assist page, and every
+    // field access after this becomes a store instead of a VMWRITE.
+    //
+    // `enlighten_vmentry` and `current_nested_vmcs` are set here rather
+    // than once at setup because the layer below reads them at the entry
+    // itself, and this VMM runs its own VMCS in between - see KVM's
+    // `nested_vmx_handle_enlightened_vmptrld`, which reads the assist
+    // page on every launch and resume. Their offsets are fixed by
+    // `struct hv_vp_assist_page`: the control word is eight bytes at 32,
+    // the flag one byte at 40, the pointer eight bytes at 48.
+    auto switch_failed = point_at_vmcs(cpu, true);
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][6] += arch::x86_64::rdtsc() - switch_start;
+        this->phase_calls[cpu][6] += 1;
+    }
+
+    // And everything after it: the control writes and the guest-state
+    // writes, both of which are elided against a cache, so this is
+    // expected to be small and is measured rather than assumed.
+    auto after_start = arch::x86_64::rdtsc();
+    auto after_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][15] +=
+                arch::x86_64::rdtsc() - after_start;
+            this->phase_calls[cpu][15] += 1;
+        }
+    });
+
+    if (switch_failed) {
+        return std::unexpected(zpp::error{error::vmptrld_failed});
+    }
+
+    // Once per vmcs02, not once per entry. See `vmcs02_host_written`:
+    // the region is cleared where it is created and never again, so what
+    // was written the first time is still there.
+    stamp(4);   // the VMPTRLD itself
+
+    if (!this->vmcs02_host_written[cpu]) {
+        for (std::size_t i{}; i < std::size(host_state_fields); ++i) {
+            vmcs.write(host_state_fields[i], host_values[i]);
+        }
+        this->vmcs02_host_written[cpu] = true;
+    }
+
+    // Pin-based controls: the union, less the preemption timer, which is
+    // this VMM's alone. The capability MSRs do not offer it to a guest
+    // hypervisor, and this VMM arms it to drive its own log - so a guest
+    // hypervisor's copy of the bit means nothing and its exits are not
+    // reflected.
+    // External-interrupt exiting is masked out for the same reason the
+    // preemption timer is: with `ZPP_VIRTUALIZE_APIC` on it is **this
+    // VMM's**, set in vmcs01 so that interrupts can be taken and injected
+    // into the guest hypervisor. A guest hypervisor's guest must not
+    // inherit it.
+    //
+    // Inheriting it livelocks, and did: with the bit in vmcs02 every
+    // external interrupt arriving while a second-level guest runs exits
+    // here, `l1_wants_l2_exit` declines it because pin12 never asked, and
+    // the interrupt is deferred rather than delivered - so it is still
+    // pending, and the entry that follows exits again immediately.
+    // Measured on the rig as a solid run of one hypercall from one
+    // address, two hundred of two hundred working exits.
+    //
+    // The tree predicted this. The comment on the acknowledge-interrupt
+    // composition below says "this VMM never sets that control itself...
+    // If pin01 ever sets it, this needs a third: and not pin01's." This
+    // is that third condition.
+    auto pin02 =
+        (pin01 | pin12) & ~(pin_preemption_timer | pin_posted_interrupts |
+                            pin_external_interrupt);
+
+    // Put back only where the guest hypervisor asked for it, which is
+    // what makes the exit its own to handle.
+    pin02 |= pin12 & pin_external_interrupt;
+
+    // With ZPP_DELIVER_EXTERNAL, also intercept as **this VMM's own**,
+    // whatever vmcs12 says - so a VTL0-destined device interrupt that
+    // arrives while VTL1 (the secure kernel) is the running second-level
+    // guest, which VTL1's pin12 did not ask to see, is taken here rather
+    // than delivered into VTL1's IDT or lost. pin01 carries external-
+    // interrupt exiting under the same switch (see the vmcs01 setup), and
+    // exit02 inherits the acknowledge from exit01, so the exit reports a
+    // valid vector. An interrupt pin12 *did* ask for still reflects
+    // (`l1_wants_l2_exit`); one it did not is queued for the first-level
+    // guest by `deliver_pending_external_interrupt`, never put into the
+    // second-level guest. The measured phase-1 blocker this addresses:
+    // the VINA return never fires when such an interrupt is lost. See
+    // `nested_vmx::deliver_external` - it requires `suppress_vina` off so
+    // the held-interrupt priority-pin is bounded by the VINA.
+    if constexpr (nested_vmx::deliver_external) {
+        pin02 |= pin01 & pin_external_interrupt;
+    }
+
+    // The profiler's clock, which is the timer put back. See
+    // `nested_vmx::profile_l2` for why this is the only instrument that
+    // can see a guest spinning on memory.
+    if constexpr (nested_vmx::profile_l2) {
+        pin02 |= pin_preemption_timer;
+    }
+
+    // The lazy tick's wake-up, and the whole reason it is not a
+    // deadlock. See `nested_vmx::lazy_tick_timer_value`: withholding a
+    // clock interrupt from a guest that is spinning *for that
+    // interrupt* removes the only entry on which it could be put back.
+    // The timer guarantees an exit once the gap has elapsed and the
+    // owed path below delivers on the entry after it.
+    //
+    // Armed on every entry rather than only when one is owed, because
+    // the withhold decision is taken further down this same function -
+    // after this control has been written - so an entry that decides to
+    // withhold would otherwise be exactly the entry with no timer. The
+    // cost is one exit per gap on a guest that has stopped exiting by
+    // itself, and none at all on a guest that has not: with "save
+    // VMX-preemption timer value" clear in the exit controls the
+    // counter reloads from the field on every entry (SDM 26.6.4), so a
+    // guest exiting more often than the gap never reaches zero.
+    if constexpr (!nested_vmx::profile_l2 &&
+                  (0 != nested_vmx::lazy_tick_microseconds)) {
+        pin02 |= pin_preemption_timer;
+    }
+
+    write_vmcs02_control(
+        cpu,
+        field::pin_based_vm_execution_controls,
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_pin_based_controls),
+            pin02));
+
+    if constexpr (nested_vmx::profile_l2) {
+        // Reloaded from this field on every entry, because "save
+        // VMX-preemption timer value" stays clear in the exit controls -
+        // SDM 26.6.4 - so one write here keeps producing exits at the
+        // same interval.
+        vmcs.write(field::vmx_preemption_timer_value,
+                   nested_vmx::profile_timer_value);
+    } else if constexpr (0 != nested_vmx::lazy_tick_microseconds) {
+        // The gap itself. The profiler wins when both are on, since it
+        // is a diagnostic and wants the shorter interval; its exits
+        // serve this purpose too, being exits.
+        vmcs.write(field::vmx_preemption_timer_value,
+                   nested_vmx::lazy_tick_timer_value);
+    }
+
+    // Primary controls: the union, with the two window controls taken from
+    // the guest hypervisor alone. A window exit says "the guest can take
+    // an interrupt now", which is an answer to a question only whoever
+    // asked it can act on - so inheriting this VMM's would produce exits
+    // with nothing to do, and inheriting the guest hypervisor's produces
+    // exits it is waiting for. KVM does the same in
+    // `prepare_vmcs02_early`.
+    auto primary =
+        (primary01 & ~(primary_interrupt_window | primary_nmi_window)) |
+        primary12;
+
+    // **Withhold the interrupt window while the task priority blocks the
+    // vector, and let the priority drop be what reports it.**
+    //
+    // Interrupt-window exiting fires on RFLAGS.IF and says nothing about
+    // the task priority, so a level above holding a vector the guest
+    // blocks is woken constantly and can deliver nothing. Measured:
+    // 3,055,183 window requests with `int_window_stale` zero - the
+    // requests are real - while the guest sits at a priority that blocks
+    // the dispatch vector 75% of the time. The wakeup is uncorrelated
+    // with the event it needs.
+    //
+    // The TPR threshold is the mechanism for this and the level above
+    // leaves it at zero, so this VMM arms it instead: the processor
+    // reports the drop, and the window is given at that moment.
+    //
+    // `l2_entry_priority` is the priority sampled at the previous entry,
+    // which is what this VMM already reads; using it costs nothing.
+    // **The test below is on the pending vector, not on the priority
+    // alone, and that is the correction that makes this switch worth
+    // another boot.** It used to read
+    //
+    //     } else if (this->l2_entry_priority[cpu] >= dispatch_class) {
+    //
+    // which withholds the window at any priority at or above DISPATCH
+    // *whatever vector is waiting*, and that is measurably wrong. SDM
+    // 13.8.3.1 admits a vector when its priority class strictly exceeds
+    // the inhibiting class, so at a task priority of 0x20 - class
+    // 2, and 22.0% of one measured processor's entries - the clock
+    // vector 0xd1 at class 13 is perfectly deliverable. The old test
+    // withheld the window there anyway, and the window is this VMM's
+    // delivery mechanism for *every* vector. That is the mechanism
+    // behind the measurement in this switch's own option text: it "took
+    // vector 0x2f from 9,627 to 11 and the CLOCK from 388,241 to 5,550
+    // in the same run". It did not merely fail to help the vector being
+    // chased - it stopped the one that was working.
+    //
+    // So withhold only when there is a known outstanding vector *and*
+    // the current priority actually masks it. Every other case gives
+    // the window exactly as the default build does, which makes this
+    // strictly less aggressive than the version that was measured
+    // harmful, and cannot starve a vector the guest could have taken.
+    //
+    // `pending_vector_now` is zero unless `count_dropped_requests` is
+    // building the census that fills it, so a build with `dropcnt=0`
+    // degrades to never withholding - the default behaviour - rather
+    // than to withholding blindly. That is the safe direction and it is
+    // deliberate; check `dropcnt=` in the manifest before reading a run.
+    //
+    // NOT yet measured on the rig. Boot 138 measured the storm this is
+    // aimed at - 118,695 interrupt-window exits on cpu 1, tracking the
+    // guest's ICR loop at 1.02 to 1 and running 23.8 times per timer
+    // arm - but this switch is still OFF by default and no boot has
+    // carried this version of the test.
+    if constexpr (nested_vmx::window_on_tpr) {
+        if ((cpu < max_cpus) &&
+            (0 != (primary & primary_interrupt_window))) {
+            auto pending = this->pending_vector_now[cpu];
+
+            // **SAFE on VTPR, and it must stay on VTPR.** The true
+            // branch withholds, and PPR >= TPR (SDM 13.8.3.1), so a
+            // vector whose class is not above the task priority's is
+            // not above the processor priority's either: everything
+            // withheld here really was masked. It errs towards
+            // withholding too little, which is the default build's
+            // behaviour. The threshold that re-opens the window is also
+            // compared against VTPR alone (SDM 29.2.1.1), so there is
+            // no other field this could be keyed on coherently.
+            auto masked =
+                (0 != pending) &&
+                ((pending >> 4) <= (this->l2_entry_priority[cpu] >> 4));
+
+            if (this->window_armed_on_drop[cpu]) {
+                // The priority came down since it was withheld, so this
+                // entry carries it. One-shot: cleared here so the next
+                // rise withholds again, rather than latching open after
+                // the first drop and leaving the poll exactly as it was.
+                this->window_armed_on_drop[cpu] = false;
+            } else if (masked) {
+                primary &= ~primary_interrupt_window;
+                this->window_deferred_count[cpu] += 1;
+
+                // **And ask the processor to report the drop.** Without
+                // this the withholding never ends: the priority is only
+                // sampled at an exit, and a guest that lowers it and
+                // then runs takes none. See `window_threshold_armed`.
+                //
+                // Only where the level above set the TPR shadow, since
+                // SDM 27.6.8 makes the threshold exist only with that
+                // control, and only where it left the threshold at zero
+                // so nothing of its own is being overwritten.
+                if ((0 != (primary & primary_tpr_shadow)) &&
+                    (0 == this->nested_tpr_threshold[cpu])) {
+                    this->window_threshold_armed[cpu] = true;
+                }
+            }
+        }
+    }
+
+    // A step in progress survives the rebuild.
+    //
+    // The monitor trap flag is armed on whichever VMCS is current, and
+    // with no second-level extended page tables a watched-page violation
+    // taken by a second-level guest is handled with **vmcs02** current -
+    // so that is where the bit lands. It is not in `primary01`, and a
+    // guest hypervisor has no reason to set it in `primary12`, so this
+    // recomputation drops it. Anything reflected to the guest hypervisor
+    // before the step completes rebuilds these controls, and then:
+    //
+    // - the trap exit never arrives, so `on_monitor_trap_flag` never
+    //   runs and never closes the page;
+    // - `stepping_watch[cpu]` stays set for ever, so `l0_wants_l2_exit`
+    //   claims every later trap exit;
+    // - and the watched page - the local APIC's - is left **writable for
+    //   every processor**, because that is what opening it did. No
+    //   further violation is taken on it and nothing re-closes it, so
+    //   this VMM stops seeing local APIC writes entirely: every
+    //   interrupt command, INIT and start-up IPI after that point is
+    //   invisible, with nothing recorded anywhere.
+    //
+    // KVM does not lose it either: `vmx_update_emulated_instruction`
+    // records `nested.mtf_pending` and `vmx_check_nested_events`
+    // delivers it as a monitor-trap-flag VM exit, so it survives round
+    // trips through L1 and is even part of migration state.
+    // The protection-answer step is a **one shot**: the request is
+    // consumed here, when the bit is actually set, rather than in the
+    // exit handler. The first version cleared it only on the branch that
+    // records, so any exit taken by the watch stepper or a trace left it
+    // armed - and the trap flag then stayed on for every instruction.
+    // Measured: the guest reached two protection calls instead of 39,275.
+    auto protect_step = (cpu < max_cpus) &&
+                        (0 != this->vtl_protect_step_armed[cpu]);
+
+    if (protect_step) {
+        this->vtl_protect_step_armed[cpu] = 0;
+        this->vtl_protect_step_pending[cpu] = 1;
+    }
+
+    // Arm the trust-level trace here, on the **vmcs12 that is about to
+    // run**, rather than at the hypercall.
+    //
+    // `arm_vtl_step` fires on `HvCallVtlCall`, and at that moment the
+    // guest hypervisor has not yet made VTL1's vmcs12 current - so every
+    // trace taken that way recorded VTL0 finishing its own side. It was
+    // symbolised against `securekernel` for a whole session and resolved
+    // into plausible secure-kernel names that were nearest-symbol noise;
+    // byte-matching the same instructions found them in `ntoskrnl`, 1,688
+    // of 2,048 steps.
+    //
+    // The vmcs12 pointer is the thing that actually identifies the trust
+    // level, and it is known to move on every switch - 24,925 of 24,925,
+    // measured. VTL1's is the one current when it issues its
+    // `HvCallVtlReturn`, which `vtl_return_vmcs12` records, so an entry
+    // whose current vmcs12 equals it is the secure kernel and nothing
+    // else.
+    if constexpr (nested_vmx::step_vtl) {
+        if ((cpu < max_cpus) && (0 == this->vtl_step_active[cpu]) &&
+            (0 != this->vtl_return_vmcs12[cpu]) &&
+            (this->guest_current_vmcs[cpu] ==
+             this->vtl_return_vmcs12[cpu]) &&
+            (this->vtl_protect_count[cpu] >= 39250) &&
+            (0 == this->vtl_step_pin_taken[cpu])) {
+            this->vtl_step_pin_taken[cpu] = 1;
+
+            this->vtl_step_count[0] = 0;
+            this->vtl_step_other[0] = 0;
+            this->vtl_step_other_reason[0] = 0;
+            this->vtl_step_at[0] = this->vtl_switches[cpu][0];
+            this->vtl_step_active[cpu] = 1;
+        }
+    }
+
+    if (this->stepping_watch[cpu] || (0 != this->vtl_step_active[cpu]) ||
+        protect_step) {
+        primary |= primary_monitor_trap_flag;
+    }
+
+    // A second user of this bit was added here to single step the guest
+    // after an injected event, and **removed again**. It answered the
+    // question it was written for - the first landing after every
+    // injection of 0xd1 was an EPT violation with the instruction
+    // pointer unmoved, which named the boot bug - and then it kept
+    // firing: 30,968 times on the boot processor in one boot, against
+    // the sixteen it was meant to take.
+    //
+    // At that rate it is not a measurement, it is a behaviour change in
+    // the shipped path, and it landed in the same window that took
+    // `guest vmxon` from eight processors of eight to one. Diagnostics
+    // that perturb what they measure belong behind a switch or not at
+    // all; this one is not needed again, so it is gone rather than
+    // switched. The passive counters it came with stay.
+
+    // The TPR shadow, decided above. Three branches, and the difference
+    // between them is which of them is allowed to leave the second-level
+    // guest's `mov cr8` reaching the physical control register.
+    if (honour_tpr_shadow) {
+        this->tpr_shadow_honoured[cpu] =
+            this->tpr_shadow_honoured[cpu] + 1;
+
+        // Honoured. The control stays set - it is already in `primary`
+        // from the union - and the two fields behind it are written from
+        // vmcs12: the page the processor will virtualize VTPR in, and the
+        // threshold below which it exits. KVM copies the same pair, in
+        // `nested_get_vmcs12_pages` for the address and
+        // `prepare_vmcs02_early` for the threshold.
+        //
+        // The address is written unchanged because the extended page
+        // tables are an identity map, so vmcs12's L1-physical address is
+        // the host-physical one this field takes. Nothing pins the page:
+        // there is no paging here and no memory hot-unplug, and the
+        // validation above is what stands in for KVM's kvm_vcpu_map.
+        write_vmcs02_control(
+            cpu, field::virtual_apic_address, virtual_apic12);
+
+        // **The virtual task priority this entry will actually see, read
+        // before anything decides a threshold against it.** It used to be
+        // sampled thirty lines below, after the threshold was written,
+        // and that ordering is what killed the processor under
+        // `window_on_tpr`: see the arming just below.
+        constexpr std::uint64_t virtual_task_priority = 0x80;
+        std::uint8_t entry_vtpr{};
+        auto entry_vtpr_read =
+            (cpu < max_cpus) && (0 != virtual_apic12) &&
+            read_guest_physical(
+                virtual_apic12 + virtual_task_priority,
+                std::span(reinterpret_cast<std::byte *>(&entry_vtpr),
+                          sizeof(entry_vtpr)));
+
+        // The threshold this VMM armed for itself takes precedence
+        // while it is armed; see `window_threshold_armed`. `2` is the
+        // dispatch class, so the processor reports the moment the guest
+        // drops below it.
+        //
+        // **And only while the priority this entry will see still admits
+        // it, which is a VM-entry check and not a nicety.** SDM 29.2.1.1,
+        // `.references/sdm.txt:202124`: "The following check is performed
+        // if the 'use TPR shadow' VM-execution control is 1 and the
+        // 'virtualize APIC accesses' and 'virtual-interrupt delivery'
+        // VM-execution controls are both 0: the value of bits 3:0 of the
+        // TPR threshold VM-execution control field should not be greater
+        // than the value of bits 7:4 of VTPR." Neither of those two
+        // controls is offered here - the note on `l2_entry_ppr` below
+        // establishes that for virtual-interrupt delivery - so the check
+        // applies, and SDM 29.7.7 (`.references/sdm.txt:203257`) does not
+        // rescue it: the immediate TPR-below-threshold exit it describes
+        // needs "virtualize APIC accesses" set.
+        //
+        // The armed threshold of 2 stays in vmcs02 across every entry
+        // that does not rebuild it, so the dangerous moment is the entry
+        // *after* the drop is reported - the guest is then below 0x20 by
+        // construction, which is why the exit fired. `on_l2_exit` takes
+        // the threshold back down there; this guard covers the other
+        // route, a rebuild while the flag is still set and the priority
+        // has already fallen.
+        //
+        // Under KVM this is not even a hardware fault to read afterwards:
+        // `nested.c:5074` turns a consistency check hardware caught on
+        // its merged VMCS into `nested_vmx_fail(vcpu,
+        // VMXERR_ENTRY_INVALID_CONTROL_FIELD)` for L1, which is a plain
+        // VMfail at the instruction after our VMLAUNCH.
+        auto threshold02 = tpr_threshold12;
+
+        if constexpr (nested_vmx::window_on_tpr) {
+            constexpr std::uint8_t dispatch_class = 0x20;
+
+            if ((cpu < max_cpus) && this->window_threshold_armed[cpu]) {
+                if (entry_vtpr_read && (dispatch_class <= entry_vtpr)) {
+                    threshold02 = 2;
+                } else {
+                    this->window_threshold_withheld[cpu] += 1;
+                }
+            }
+        }
+
+        // **Arm a threshold where the level above left none, and take
+        // nothing away.** See `nested_vmx::deliver_on_drop`.
+        //
+        // `primary` is deliberately not touched here. The first version
+        // of this switch withheld the interrupt window while the
+        // priority blocked the vector, exactly as `window_on_tpr` above
+        // does, and that is the move that has now been measured twice
+        // and is wrong both times. One processor, one boot, against the
+        // same binary with the switch off:
+        //
+        //     switch   0x2f     0xd1      all vectors   guest asks
+        //     off      9,627    388,241   404,029       411,669
+        //     on          11      5,550     5,938            12
+        //
+        // The clock collapsed with everything else, and the ask count
+        // collapsed *because* of it - a guest that receives no clock
+        // queues no deferred calls and asks for nothing. `window
+        // withheld 460,323` is the harmful line. **In this VMM the
+        // interrupt window is the primary delivery mechanism for every
+        // vector**, wasteful as its 1,500,914 exits are, and the TPR
+        // threshold is an addition to it and not a replacement for it.
+        //
+        // What is added: a threshold at the dispatch class, on entries
+        // where the level above is holding something it cannot deliver
+        // and has left the threshold at zero. A threshold of zero can
+        // never fire - SDM 32.1.2's TPR virtualization is
+        // `IF VTPR[7:4] < TPR threshold THEN cause VM exit`
+        // (`.references/sdm.txt:206566`), and nothing is less than zero
+        // - so this replaces an impossible condition with a possible
+        // one and removes no exit that was happening before.
+        //
+        // The class is the vector's own, which is the quantity KVM
+        // writes in `vmx_update_cr8_intercept`
+        // (`.references/kvm/vmx.c:6728`, `tpr_threshold = (irr == -1 ||
+        // tpr < irr) ? 0 : irr`, over an `irr` that
+        // `update_cr8_intercept` has already shifted down by four,
+        // `.references/kvm/x86.c:10193`).
+        if constexpr (nested_vmx::deliver_on_drop) {
+            constexpr std::uint8_t dispatch_class = 0x20;
+            constexpr std::uint64_t dispatch_threshold = 0x2f >> 4;
+
+            if (cpu < max_cpus) {
+                // The level above asks for an interrupt window exactly
+                // when it is holding something, so this is the only
+                // reading available here of "is there anything to
+                // deliver". It is the same discriminator
+                // `l2_no_event_window_asked` already uses.
+                auto holding =
+                    0 != (primary & primary_interrupt_window);
+
+                // A priority this VMM could not read admits
+                // everything, so an unreadable page arms nothing -
+                // failing safe here means leaving the machine exactly
+                // as the default build leaves it.
+                //
+                // **VTPR is the right field here twice over, and this
+                // test must NOT be changed to a processor priority.**
+                // Once because the threshold the arming below writes is
+                // checked against VTPR and nothing else - SDM 29.2.1.1,
+                // quoted just under this - so any other field would arm
+                // against a quantity the processor does not compare.
+                // And once because the true branch is "inhibited":
+                // PPR = max(TPR class, ISRV class) (SDM 13.8.3.1) gives
+                // PPR >= TPR, so `dispatch_class <= entry_vtpr` implies
+                // the same of PPR and every arming is over a genuinely
+                // blocked vector. The error is one-sided towards arming
+                // too rarely, which costs an exit and never an
+                // interrupt.
+                auto blocked =
+                    entry_vtpr_read && (dispatch_class <= entry_vtpr);
+
+                // Only over a priority known to be at or above the
+                // class, so SDM 29.2.1.1's entry check - bits 3:0 of
+                // the threshold not greater than bits 7:4 of VTPR,
+                // `.references/sdm.txt:202124` - holds by construction
+                // and needs no second test. And only where the level
+                // above set the TPR shadow and left the threshold at
+                // zero, so nothing of its own is overwritten; KVM
+                // refuses the same case outright in
+                // `vmx_update_cr8_intercept`, which returns early when
+                // `is_guest_mode(vcpu) && nested_cpu_has(vmcs12,
+                // CPU_BASED_TPR_SHADOW)` (`.references/kvm/vmx.c:6723`).
+                if (holding && blocked &&
+                    (0 != (primary & primary_tpr_shadow)) &&
+                    (0 == tpr_threshold12)) {
+                    threshold02 = dispatch_threshold;
+                    this->window_threshold_armed[cpu] = true;
+                    this->window_threshold_arm_entries[cpu] += 1;
+                } else {
+                    // Nothing to report, or nothing this VMM may
+                    // report it with. `threshold02` still holds
+                    // vmcs12's own value, so this entry is byte for
+                    // byte the one the default build would have made.
+                    //
+                    // **An arming that never fired.** The flag is
+                    // re-derived on every entry, so a threshold armed
+                    // for one entry and cleared on the next was a
+                    // promise the guest was never given a chance to
+                    // collect. Measured on a wedged guest: 1,080,221
+                    // armings against 998 grants, with
+                    // `window_threshold_refused` at zero - so the gate
+                    // never declined, and the missing million went
+                    // somewhere this branch could not report. Counted
+                    // here so "the drop landed on a later entry" stops
+                    // being a hypothesis and becomes a reading.
+                    if (this->window_threshold_armed[cpu]) {
+                        this->window_threshold_cleared_unfired[cpu] += 1;
+                    }
+
+                    this->window_threshold_armed[cpu] = false;
+
+                    if (holding && blocked) {
+                        this->window_threshold_refused[cpu] += 1;
+                    }
+                }
+            }
+        }
+
+        write_vmcs02_control(cpu, field::tpr_threshold, threshold02);
+
+        // A histogram of what the guest hypervisor arms, because the
+        // whole interrupt question turns on it and nothing recorded it.
+        //
+        // Vector 0x2f is asked for 297,465 times in a boot and delivered
+        // 1,116, and the guest hypervisor's own way of being told it may
+        // now deliver is the TPR-below-threshold exit - which fires
+        // 1,141 times, so every one that fires does produce a delivery.
+        // Either it never arms the notification, in which case the
+        // interrupt is its business and not ours, or it arms it and the
+        // exit does not fire, in which case the fault is here. An
+        // all-zero histogram says the first outright.
+        if (cpu < max_cpus) {
+            this->l2_tpr_threshold_seen[cpu][tpr_threshold12 & 0xf] += 1;
+
+            // Carried across rather than compared here: from
+            // build_vmcs02 the read of the virtual task priority is
+            // not available, and the same read of the same offset of
+            // the same page works unconditionally from save_l2_state.
+            this->nested_tpr_threshold[cpu] = tpr_threshold12;
+        }
+
+        // Kept so the task priority behind it can be read back. See
+        // `interrupt_request_vtpr`.
+        this->nested_virtual_apic_address[cpu] = virtual_apic12;
+
+        // And recorded here, from the sample the threshold decision
+        // above already took on the page about to be entered - which is
+        // the only place that is the right page. See `l2_entry_vtpr`.
+        if ((cpu < max_cpus) && (0 != virtual_apic12)) {
+            if (entry_vtpr_read) {
+                this->l2_entry_vtpr[cpu][entry_vtpr] += 1;
+            }
+
+            // Carried to where the event this entry will actually
+            // carry is in hand. See `l2_low_priority_no_event`.
+            this->l2_entry_priority[cpu] = entry_vtpr;
+
+            // And the *processor* priority beside it, which is
+            // **dead in this configuration** and is sampled to prove
+            // it rather than to be read.
+            //
+            // SDM 13.8.3.1 makes PPR the maximum of the task priority
+            // and the highest in-service vector's class, and it is PPR
+            // that an arriving interrupt's class must exceed - so it
+            // is the reading this investigation wants and TPR is a
+            // proxy for it. But SDM 32.1.1
+            // (`.references/sdm.txt:206556`) says which fields the
+            // processor maintains: "The VTPR field virtualizes the TPR
+            // whenever the 'use TPR shadow' VM-execution control is 1.
+            // The other fields indicated above virtualize the
+            // corresponding APIC registers whenever the
+            // **'virtual-interrupt delivery'** VM-execution control is
+            // 1." VPPR at offset 0A0H is one of those other fields,
+            // virtual-interrupt delivery is not offered here - and the
+            // layer below does not permit it to this VMM either, since
+            // its own PROCBASED_CTLS2 allowed-1 mask of `0x1378ff` has
+            // no bit 9 - so nothing ever writes that offset and it
+            // reads as whatever the guest hypervisor left there.
+            //
+            // Measured before it was believed: 100% of 15,812 entries
+            // read `0x00` while VTPR on the same entries read 0x00,
+            // 0x10, 0x20 and 0x40. A field that is constant while the
+            // one it is defined as the maximum of is not is a field
+            // nobody maintains.
+            //
+            // Kept, because a zero here is now *evidence* and a
+            // non-zero would mean the configuration changed under this
+            // comment. The real PPR lives in the guest hypervisor's own
+            // emulation of its guest's local APIC and is not reachable
+            // from here at all.
+            constexpr std::uint64_t processor_priority = 0xa0;
+            std::uint8_t ppr{};
+
+            if (read_guest_physical(
+                    virtual_apic12 + processor_priority,
+                    std::span(reinterpret_cast<std::byte *>(&ppr),
+                              sizeof(ppr)))) {
+                this->l2_entry_ppr[cpu][ppr] += 1;
+            }
+        }
+    } else if (tpr_shadow12) {
+        // Asked for and not honoured, which the branch above only reaches
+        // for a virtual-APIC page this VMM refuses to let the processor
+        // touch *and* a guest hypervisor that intercepts both CR8
+        // accesses. Removing the control alone would be the bug this
+        // whole change exists to fix, so the intercepts it relies on are
+        // forced rather than assumed - redundant today, since they came
+        // out of vmcs12 through the union above, and load bearing the
+        // moment anything narrows that union. KVM forces the same pair in
+        // `prepare_vmcs02_early`: "else exec_control |=
+        // CPU_BASED_CR8_LOAD_EXITING | CPU_BASED_CR8_STORE_EXITING".
+        //
+        // Both exits reflect to the guest hypervisor, because
+        // `l1_wants_l2_exit` answers CR8 accesses against exactly these
+        // two controls and this branch requires both of them set.
+        this->tpr_shadow_refused[cpu] = this->tpr_shadow_refused[cpu] + 1;
+        primary &= ~primary_tpr_shadow;
+        primary |= primary_cr8_load_exiting | primary_cr8_store_exiting;
+
+        // Kept so `on_nested_cr8_access` can answer against the same page
+        // and the same threshold the processor would have used. Without
+        // the threshold the emulation would be silently one-way: the
+        // guest's priority would fall and the guest hypervisor would
+        // never be told it may deliver.
+        this->nested_virtual_apic_address[cpu] = virtual_apic12;
+        this->nested_tpr_threshold[cpu] = tpr_threshold12;
+    } else {
+        // Never asked for, so the bit can only be here from this VMM's
+        // own controls - which do not set it today, making this a guard
+        // rather than a case. It is removed and *nothing* is forced in its
+        // place, which is the opposite of the branch above and is
+        // deliberate: a guest hypervisor that did not ask for the TPR
+        // shadow does not believe its guest's CR8 is virtualized, so the
+        // architecture's answer is that the second-level guest owns the
+        // physical register, exactly as it would on bare hardware.
+        // Forcing CR8 exiting here would manufacture exits neither side
+        // asked for, which `l1_wants_l2_exit` would decline and the
+        // ordinary control-register handler would stop the processor on -
+        // it answers MOV to CR4 and nothing else.
+        this->tpr_shadow_absent[cpu] = this->tpr_shadow_absent[cpu] + 1;
+        primary &= ~primary_tpr_shadow;
+
+        // **And forget the other trust level's page and threshold.**
+        // These two are per-processor while everything they describe is
+        // per-vmcs12, and this is the one branch that leaves them
+        // describing a vmcs12 that is no longer current. With two trust
+        // levels alternating on one processor - VTL0 asking for the TPR
+        // shadow and VTL1 not - `on_nested_cr8_access` would then read
+        // and write one level's virtual-APIC page while the other is
+        // running, and every VTPR instrument in this tree
+        // (`l2_entry_vtpr`, `vtl_call_vtpr`, `l2_tpr_would_fire`) would
+        // be reporting the wrong level's priority.
+        //
+        // Zero rather than stale: `on_nested_cr8_access` already refuses
+        // a zero address, so a lost update is loud instead of silent.
+        // Xen re-derives both per virtual VMCS and writes zero when the
+        // control is clear (`vvmx.c`, `nvmx_update_tpr_threshold` and
+        // `nvmx_update_virtual_apic_address`); KVM re-derives them on
+        // every entry.
+        this->nested_virtual_apic_address[cpu] = 0;
+        this->nested_tpr_threshold[cpu] = 0;
+    }
+
+    // The bitmaps, whose controls follow the merge rather than either
+    // side. "Use MSR bitmaps" clear means *every* MSR access exits, which
+    // is what a guest hypervisor that set no bitmap asked for - so the
+    // control is the guest hypervisor's, and the bitmap behind it is the
+    // union.
+    if (0 != (primary12 & primary_msr_bitmaps)) {
+        primary |= primary_msr_bitmaps;
+        write_vmcs02_control(
+            cpu, field::msr_bitmap, this->nested_msr_bitmap_physical[cpu]);
+    } else {
+        primary &= ~primary_msr_bitmaps;
+    }
+
+    // I/O the same way, with one asymmetry: this VMM always uses bitmaps
+    // and has ports of its own in them, so a guest hypervisor that uses
+    // neither still gets bitmap-driven exits - its own guest's I/O reaches
+    // it only for the ports this VMM watches, which is exactly right,
+    // since it asked for none.
+    if (0 != (primary12 & primary_unconditional_io)) {
+        primary |= primary_unconditional_io;
+        primary &= ~primary_io_bitmaps;
+    } else {
+        primary &= ~primary_unconditional_io;
+        primary |= primary_io_bitmaps;
+        write_vmcs02_control(
+            cpu, field::io_bitmap_a, this->nested_io_bitmap_physical[cpu]);
+        write_vmcs02_control(cpu,
+                             field::io_bitmap_b,
+                             this->nested_io_bitmap_physical[cpu] +
+                                 page_size);
+    }
+
+    // Extended page tables are always in use for a second-level guest, so
+    // the secondary controls are always activated whatever the guest
+    // hypervisor asked.
+    primary |= primary_secondary_controls;
+
+    write_vmcs02_control(
+        cpu,
+        field::primary_processor_based_vm_execution_controls,
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_processor_based_controls),
+            primary));
+
+    // Secondary controls: the union, with three corrections.
+    //
+    // Unrestricted guest comes from the guest hypervisor alone. With it
+    // on, a guest may run with CR0.PE clear, and the guest-state checks
+    // SDM 29.3.1 applies are relaxed accordingly - so inheriting this
+    // VMM's copy would accept a second-level guest state its own
+    // hypervisor's VMCS says is invalid. KVM clears it for the same
+    // reason.
+    //
+    // Mode-based execute control now comes from the guest hypervisor
+    // alone, for the same reason unrestricted guest does, and the
+    // reasoning that used to clear it unconditionally has expired with
+    // the capability being advertised.
+    //
+    // The old argument was sound while it held: the capability MSRs did
+    // not offer the control, so bit 10 of the guest hypervisor's own
+    // extended page-table entries meant nothing it had chosen, and
+    // composing it would have left every shadow leaf denying user-mode
+    // execute - the second-level guest faulting on its first user-mode
+    // instruction. With the control advertised that is no longer true.
+    // A guest hypervisor that sets it means bit 10, and one that does
+    // not still gets the old behaviour exactly, because the bit is taken
+    // from *its* controls and not from this VMM's.
+    //
+    // Why it matters: splitting execute in two is how a secure kernel
+    // expresses code integrity through the extended page tables. Without
+    // it there is no way to say "the kernel may not execute this page",
+    // which is the whole of what hypervisor-enforced code integrity
+    // does - and it explains the measurement nothing else did, that
+    // `HvCallModifyVtlProtectionMask` is issued repeatedly and
+    // `reflected_permission` stays 0 of 448,441.
+    //
+    // Extended page tables and VPIDs are always on, because the pointer
+    // written below is always a real one and the VPID always non-zero.
+    // **Controls that must not be carried in from this VMM's own copy.**
+    //
+    // The union below exists so vmcs02 keeps the things this VMM needs
+    // regardless of what the guest hypervisor asked for. But four of them
+    // are statements about *its* guest rather than about this VMM, and
+    // carrying them in gives the second-level guest a capability the
+    // level above never granted - where the architecture promises `#UD`.
+    //
+    // Measured, and the reason this list exists: the asked-versus-given
+    // difference `0x1010ae` against `0x1050ae` is `0x4000`, **bit 14,
+    // VMCS shadowing** - not bit 18 as an earlier entry in `BACKLOG.md`
+    // concluded. `set_vmcs_shadowing(cpu, true)` sets it in vmcs01 at the
+    // guest hypervisor's first VMPTRLD, `host_controls_cache` snapshots
+    // vmcs01's secondary controls **once** per processor, and nothing
+    // cleared it afterwards - so it was live in vmcs02 for the life of
+    // every boot. vmcs02's VMREAD/VMWRITE bitmap fields are never
+    // written, so they name host-physical page zero, and whether an L2
+    // VMREAD exits or silently VMfails would be decided by whatever the
+    // firmware left there.
+    //
+    // **Re-checked 2026-08-27, and this paragraph is right - the block
+    // further down that quoted the same two numbers is the wrong one.**
+    // `0x1010ae` is bits 1, 2, 3, 5, 7, 12 and 20; `0x1050ae` is those
+    // plus bit 14; the difference is `0x4000` and nothing else. The
+    // decomposition is worth having written down because the hex reads
+    // as though the difference were in the 16-19 nibble and it is not,
+    // which is how a re-derivation of it went wrong once more before
+    // this line existed.
+    //
+    // KVM clears the same class explicitly in `prepare_vmcs02_early`
+    // (`nested.c`, "VMCS shadowing for L2 is emulated for now"), and Xen
+    // clears shadowing in `nvmx_update_secondary_exec_control`. This is
+    // their list, restricted to the bits this VMM actually sets in
+    // vmcs01.
+    constexpr std::uint64_t secondary_not_inherited =
+        secondary_vmcs_shadowing | secondary_enable_rdtscp |
+        secondary_enable_invpcid | secondary_enable_xsaves;
+
+    auto secondary =
+        ((secondary01 & ~secondary_not_inherited) | secondary12) &
+        ~(secondary_mode_based_execute | secondary_unrestricted_guest);
+
+    secondary |= secondary12 &
+                 (secondary_unrestricted_guest |
+                  secondary_mode_based_execute | secondary_enable_vmfunc);
+
+    // **This block was named for the wrong bit.** It declared
+    // `secondary_conceal_vmx_from_pt = 1ull << 18` and argued about
+    // Intel Processor Trace. SDM Table 27-7, "Definitions of Secondary
+    // Processor-Based VM-Execution Controls"
+    // (`.references/sdm.txt:199591`), gives
+    //
+    //     18  EPT-violation #VE
+    //     19  Conceal VMX from PT
+    //     20  Enable XSAVES/XRSTORS
+    //
+    // so every word of the old reasoning applied to a bit it was not
+    // operating on, and the actual conceal bit - 19 - was inherited from
+    // `secondary01` unasked, being in neither `secondary_not_inherited`
+    // nor here.
+    //
+    // **The evidence it cited was not its own.** It read "requested
+    // 0x1010ae against granted 0x1050ae, the difference being exactly
+    // this bit". Those are the two numbers the `secondary_not_inherited`
+    // block above quotes, and their difference is `0x4000` - bit 14,
+    // VMCS shadowing - which that block already accounts for. Nothing
+    // was ever measured carrying bit 18 or bit 19 into vmcs02; the
+    // measurement was borrowed and relabelled. Do not restore it here.
+    //
+    // Both are cleared today whatever this does, because neither is in
+    // `nested_vmx::supported_secondary_controls`, so `within_capability`
+    // refuses a vmcs12 naming either and `setup_vmcs` asks for neither -
+    // and `adjust_msr` cannot add them, since SDM A.3.3 reserves
+    // IA32_VMX_PROCBASED_CTLS2's allowed-0 half to zero. So this is a
+    // correction of the reasoning and a guard for the day one of them is
+    // offered, not a change of behaviour. The test beside it in
+    // `tests/nested_exit` drives vmcs01 with each bit set and asserts
+    // vmcs02 comes out without it, which is the part that would silently
+    // stop being true.
+    constexpr std::uint64_t secondary_ept_violation_ve = 1ull << 18;
+    constexpr std::uint64_t secondary_conceal_vmx_from_pt = 1ull << 19;
+
+    // Concealing VMX from Intel Processor Trace comes from the guest
+    // hypervisor alone, for the same reason as the three above: it is a
+    // statement about *its* guest and not about this VMM's, and SDM
+    // Table 27-7 bit 19 scopes it to VMX non-root operation - which
+    // under vmcs02 is the second-level guest.
+    secondary &= ~secondary_conceal_vmx_from_pt;
+    secondary |= secondary12 & secondary_conceal_vmx_from_pt;
+
+    // EPT-violation #VE is **not** taken from vmcs12, which is the one
+    // behavioural difference from the block this replaces - it used to
+    // re-add bit 18 whenever vmcs12 named it.
+    //
+    // SDM Table 27-7 bit 18: an EPT violation "may cause virtualization
+    // exceptions (#VE) instead of VM exits". vmcs02 runs against the
+    // *shadow* extended page tables this VMM builds, not against
+    // vmcs12's, and an incomplete shadow is the ordinary case - it is
+    // what `on_l2_ept_fault` exists to fill in. Granting the control
+    // would convert those faults into a #VE injected straight into the
+    // second-level guest and the shadow would never be built, with no
+    // exit anywhere to notice. It also needs a virtualization-exception
+    // information address in vmcs02, and nothing here writes that field.
+    //
+    // This is the same rule as `xss_exiting_bitmap` below and as
+    // virtualize-APIC-accesses in `nested_vmx.h`: a control whose
+    // backing state this VMM does not maintain is not passed through.
+    // CLAUDE.md states it as "answer the whole of whatever it is, or
+    // fault".
+    secondary &= ~secondary_ept_violation_ve;
+
+    secondary |= secondary_enable_ept | secondary_enable_vpid;
+
+    // And the VM-function controls, which are **always zero** in vmcs02
+    // however the guest hypervisor sets its own.
+    //
+    // This is the safety property the whole feature rests on. With the
+    // enabling control set and the function controls clear, every VMFUNC
+    // the second-level guest executes takes an exit - SDM 26.5.5, a
+    // function whose bit is clear in the VM-function controls causes a
+    // VM exit - and `on_l2_exit` translates the guest hypervisor's
+    // pointer into the shadow built from it. Let the bit through
+    // instead and the processor loads an entry from the guest
+    // hypervisor's own list straight into the real pointer, running a
+    // guest against unshadowed tables: not a stall to debug, a machine
+    // that stops.
+    write_vmcs02_control(cpu, field::vm_function_controls, 0);
+
+    auto secondary02 = arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::processor_based_contorls_2),
+        secondary);
+
+    write_vmcs02_control(
+        cpu,
+        field::secondary_processor_based_vm_execution_controls,
+        secondary02);
+
+    // The state virtual-interrupt delivery runs on, carried through from
+    // vmcs12 whole. See `nested_vmx::virtual_interrupt_delivery_offered`.
+    //
+    // The guest interrupt status is the requesting and servicing vectors
+    // the processor maintains itself, so it has to arrive as the guest
+    // hypervisor left it and leave as the processor leaves it - the
+    // matching save is in `reflect_l2_exit`. The four EOI-exit bitmaps
+    // say which vectors' end-of-interrupt the level above wants to see,
+    // and are its statement about its own guest, so they pass through
+    // unaltered. KVM does the same, `nested.c:2437-2439` for the status
+    // and the bitmaps beside it.
+    //
+    // Written only when the control is actually on, so a build without
+    // the offer touches neither field and costs nothing.
+    if (0 != (secondary02 & secondary_virtual_interrupt_delivery)) {
+        write_vmcs02_control(cpu,
+                             field::guest_interrupt_status,
+                             shadow.read(field::guest_interrupt_status));
+
+        for (auto entry : {field::eio_exit_bitmap_0,
+                           field::eio_exit_bitmap_1,
+                           field::eio_exit_bitmap_2,
+                           field::eio_exit_bitmap_3}) {
+            write_vmcs02_control(cpu, entry, shadow.read(entry));
+        }
+    }
+
+    // The XSS-exiting bitmap, which the control above it has no meaning
+    // without.
+    //
+    // `nested_vmx::supported_secondary_controls` offers bit 20, "enable
+    // XSAVES/XRSTORS", `secondary_enable_xsaves` is in
+    // `secondary_not_inherited` so vmcs02 carries it only where vmcs12
+    // asked, and `l1_wants_l2_exit` is ready to reflect the `xsaves` and
+    // `xrstors` exits - and **the field that decides whether either exit
+    // can happen at all was never written**. SDM Table 28-1 reasons 63
+    // and 64 (`.references/sdm.txt:224385`): the exit occurs when a bit
+    // is set in "the logical-AND of the following three values: EDX:EAX,
+    // the IA32_XSS MSR, and the XSS-exiting bitmap". An unwritten
+    // bitmap is zero, the AND is empty, and no execution of XSAVES in
+    // the second-level guest can ever exit - so a guest hypervisor that
+    // set the bitmap to intercept a state component silently does not
+    // intercept it. IA32_XSS is on the MSR-area list, so the other two
+    // terms of that AND are live.
+    //
+    // Written only where the control is on, which is KVM exactly:
+    // `if (nested_cpu_has_xsaves(vmcs12)) vmcs_write64(XSS_EXIT_BITMAP,
+    // vmcs12->xss_exit_bitmap);` (`.references/kvm/nested.c:2578`).
+    // With the control off the field has no effect, and not writing it
+    // keeps a build that offers nothing here byte-identical.
+    if (0 != (secondary02 & secondary_enable_xsaves)) {
+        write_vmcs02_control(cpu,
+                             field::xss_exiting_bitmap,
+                             shadow.read(field::xss_exiting_bitmap));
+    }
+
+    // What the guest hypervisor asked for against what it got. See
+    // `control_pin_requested` - the machine boots under KVM and not here,
+    // so a control it set and did not get back is exactly the shape of
+    // difference worth looking for.
+    // Whether the guest hypervisor is still waiting to deliver
+    // something. See `l2_int_window_armed`.
+    if (cpu < max_cpus) {
+        if (0 != (primary12 & primary_interrupt_window)) {
+            this->l2_int_window_armed[cpu] =
+                this->l2_int_window_armed[cpu] + 1;
+        } else {
+            this->l2_int_window_clear[cpu] =
+                this->l2_int_window_clear[cpu] + 1;
+        }
+    }
+
+    // **The two read-backs are behind `nested_vmx::census_closed`, off
+    // by default; the four free members are not.**
+    //
+    // The `requested` three are vmcs12 words already in hand and
+    // `control_secondary_granted` is the composed local, so those four
+    // cost nothing and stay unconditional - which also keeps the one
+    // member of the set `rig-dump-state.py` actually reads
+    // (`control_secondary_granted`, beside `control_secondary_-
+    // requested`) available in every build.
+    //
+    // The pin and primary words are two VMREADs on **every second-level
+    // entry**, at 1.4-1.8 microseconds each on a host with no VMCS
+    // shadowing, and nothing in `scripts/` has ever read either. The
+    // comparison they were built for - "a control the guest hypervisor
+    // set and did not get back is a promise broken silently" - was made
+    // and closed; `tpr_shadow_honoured` / `refused` / `absent` beside
+    // them carry what it found.
+    //
+    // Rejected: taking them from the composed locals a few lines up,
+    // which would be free. `adjust_msr(msr, pin02)` is what this VMM
+    // *asked* for; the point of the pair is what the field ended up
+    // holding, and a "granted" recorded from the request agrees with it
+    // by construction and can never report the layer below refusing a
+    // write. A cheap instrument that cannot fail is the failure mode
+    // this file has a section about.
+    if (cpu < max_cpus) {
+        this->control_pin_requested[cpu] = pin12;
+        this->control_primary_requested[cpu] = primary12;
+        this->control_secondary_requested[cpu] = secondary12;
+        this->control_secondary_granted[cpu] = secondary02;
+
+        if constexpr (nested_vmx::census_closed) {
+            this->control_pin_granted[cpu] =
+                vmcs.pin_based_vm_execution_controls();
+            this->control_primary_granted[cpu] =
+                vmcs.primary_processor_based_vm_execution_controls();
+        }
+    }
+
+    // Every control either side has *ever* asked for, and every one this
+    // VMM ever actually wrote, accumulated rather than sampled.
+    //
+    // `vmcs12_secondary_controls` beside them records the first entry
+    // only, and the first entry is too early to mean anything: it comes
+    // back zero while the primary controls have bit 31 set to activate
+    // the secondary ones and the shadow extended page tables are
+    // demonstrably in use, so the guest hypervisor had not written the
+    // field yet at the moment it was read. A record that is empty for a
+    // reason unrelated to the question invites exactly one wrong
+    // conclusion, which is that nothing was asked for.
+    //
+    // The difference between the two words below is the whole point. A
+    // control set in `asked` and clear in `written` is one this VMM took
+    // away - `adjust_msr` clears anything the hardware does not offer,
+    // and the composition above removes two deliberately - and a guest
+    // hypervisor that asked for a capability, was not told it was
+    // refused, and then relied on it is this project's recurring failure
+    // stated exactly. The ones being looked for are virtual-interrupt
+    // delivery, APIC-register virtualization and virtualize-APIC-
+    // accesses, because a guest hypervisor delivering interrupts to its
+    // guest through a virtual APIC this VMM does not maintain would stop
+    // exactly the way the rig stops.
+    this->vmcs12_secondary_asked =
+        this->vmcs12_secondary_asked | secondary12;
+    this->vmcs02_secondary_written =
+        this->vmcs02_secondary_written | secondary02;
+    this->vmcs12_primary_asked = this->vmcs12_primary_asked | primary12;
+    this->vmcs12_pin_asked = this->vmcs12_pin_asked | pin12;
+
+    // Exit controls are this VMM's, because the exit comes here - with
+    // one exception, and the exception is the point.
+    //
+    // The controls divide into three groups and only one of them can be
+    // delegated. The *load* group - host address-space size, load
+    // IA32_PAT, load IA32_EFER - describes what a VM exit loads into
+    // host state, and vmcs02's host state is this VMM's, so composing
+    // them would load the guest hypervisor's host state into this VMM on
+    // an exit that is not going there. The *save* group is emulated
+    // instead of delegated: `save_l2_state` reads exit12 itself and
+    // writes the guest hypervisor's guest-state area conditionally, so
+    // the hardware does not need to be told.
+    //
+    // "Acknowledge interrupt on exit" is in neither group, and it is the
+    // one thing here that cannot be emulated at all. SDM 30.2: "An
+    // external interrupt does not acknowledge the interrupt controller
+    // and the interrupt remains pending, unless the 'acknowledge
+    // interrupt on exit' VM-exit control is 1. In such a case, the
+    // interrupt controller is acknowledged and the interrupt is no
+    // longer pending." SDM 27.9.2 adds the other half: the exiting-event
+    // identification field - the vector, in bits 7:0 - is provided for
+    // external interrupts only while that control is 1.
+    //
+    // Only the processor can take a vector from the interrupt
+    // controller. So a guest hypervisor that asked for the control and
+    // was given an exit without it learns nothing: the reason says an
+    // external interrupt arrived, the vector field is not valid, and the
+    // interrupt is still pending behind it. It cannot dispatch the
+    // interrupt, and this VMM is not going to either.
+    //
+    // KVM makes the same control mandatory for itself -
+    // KVM_REQUIRED_VMX_VM_EXIT_CONTROLS in vmx-internal.h - and reads
+    // vmcs12's copy in `nested_exit_intr_ack_set`.
+    //
+    // Conditioned on the exit being one that will be reflected, because
+    // acknowledging *consumes* the interrupt and an acknowledgement on
+    // an exit this VMM keeps would drop it. `l1_wants_l2_exit` decides
+    // that for an external interrupt on pin12's external-interrupt
+    // exiting alone, so the two conditions below are the whole of what
+    // this composition adds.
+    //
+    // With `ZPP_VIRTUALIZE_APIC` on, pin01 sets external-interrupt
+    // exiting too and exit01 already carries the acknowledge - so vmcs02
+    // inherits it here whatever vmcs12 says, and an exit this VMM keeps
+    // *is* acknowledged. That used to be the reason for the warning this
+    // paragraph replaces. It is answered rather than avoided now:
+    // `queue_external_interrupt` records the vector in a per-processor
+    // bitmap and `deliver_pending_external_interrupt` refuses to put it
+    // into a second-level guest, holding it until vmcs01 is current
+    // again. Withholding the acknowledge instead would be worse - the
+    // exit would report an external interrupt with no vector, and this
+    // VMM could neither dispatch it nor give it back.
+    auto exit02 = exit01;
+
+    if ((0 != (exit12 & exit_acknowledge_interrupt)) &&
+        (0 != (pin12 & pin_external_interrupt))) {
+        exit02 = exit02 | exit_acknowledge_interrupt;
+    }
+
+    exit02 = arch::x86_64::vmx::adjust_msr(
+        this->cached_vmx_msr(vmx_msr::true_exit_controls), exit02);
+
+    write_vmcs02_control(cpu, field::vm_exit_controls, exit02);
+
+    // Same comparison as the execution controls above, for the group
+    // that has never had one. A bit set in `asked` and clear in
+    // `written` is an exit control the guest hypervisor requested and
+    // did not get.
+    this->vmcs12_exit_asked = this->vmcs12_exit_asked | exit12;
+    this->vmcs02_exit_written = this->vmcs02_exit_written | exit02;
+
+    // Entry controls are the guest hypervisor's, unchanged. They describe
+    // what VM entry loads into *its* guest, which is a decision it owns
+    // completely - including "IA-32e mode guest", which has to agree with
+    // the CR0 and CR4 it wrote beside them or the entry fails its own
+    // consistency check and is reflected as such.
+    write_vmcs02_control(
+        cpu,
+        field::vm_entry_controls,
+        arch::x86_64::vmx::adjust_msr(
+            this->cached_vmx_msr(vmx_msr::true_entry_controls), entry12));
+
+    write_vmcs02_control(cpu, field::ept_pointer, eptp02);
+    write_vmcs02_control(cpu, field::vpid, vpid01);
+
+    // All ones is "no linked VMCS". VMCS shadowing is not offered, so the
+    // guest hypervisor's own link pointer is not consulted.
+    write_vmcs02_control(cpu, field::vmcs_link_pointer, ~std::uint64_t{});
+
+    // Where a refused entry unwinds to used to be written here, into
+    // CR3-target value 0. It is not any more: the stubs find it through
+    // the VPID below and a table in `asm.h`, because that field does not
+    // exist under the layer this VMM runs on and the write silently did
+    // nothing. See `nested_entry_slot_field`.
+    write_vmcs02_control(cpu, field::cr3_target_count, 0);
+
+    // **The probe that says whether the old mechanism could ever have
+    // worked, once per processor.** It costs one VMWRITE and one VMREAD
+    // of a field nothing consults, on the first build only, and it is
+    // here rather than in a comment because the argument for that field
+    // read correctly for a year and was false on this machine.
+    //
+    // `recovery_field_usable` reading 0 with `recovery_field_probed` set
+    // is the finding; reading 1 falsifies it and the entry-failure fault
+    // this replaced has another cause.
+    if ((cpu < max_cpus) && !this->recovery_field_probed[cpu]) {
+        constexpr std::uint64_t probe = 0x5a5a'1234'5a5a'1234;
+        constexpr auto encoding =
+            static_cast<std::uint64_t>(field::cr3_target_value_0);
+
+        this->recovery_field_probed[cpu] = true;
+
+        // **The bare instructions, not `vmcs.write`/`vmcs.read`.** The
+        // VMCS field cache is write-through, so a cached read would
+        // answer with the value this probe just handed it and report
+        // success on a machine that discards the field - which is the
+        // exact shape of instrument this whole investigation was misled
+        // by. Going around the cache also leaves no entry behind for a
+        // field nothing else reads.
+        std::uint64_t back{};
+
+        auto wrote = arch::x86_64::vmx::vmwrite(encoding, probe);
+        auto read = arch::x86_64::vmx::vmread(encoding, &back);
+
+        this->recovery_field_readback[cpu] = back;
+        this->recovery_field_usable[cpu] =
+            (0 == wrote) && (0 == read) && (probe == back);
+
+        log("cpu {} cr3-target value 0 probe: vmwrite {} vmread {} read "
+            "back {} - the layer below {} the field",
+            cpu,
+            wrote,
+            read,
+            back,
+            this->recovery_field_usable[cpu] ? "keeps"
+                                             : "DISCARDS");
+
+        // Left as it was found, so nothing downstream inherits the
+        // probe's value on a machine that does keep it.
+        arch::x86_64::vmx::vmwrite(encoding, 0);
+    }
+
+    // The exception bitmap is the bitwise or of what the guest hypervisor
+    // wants to trap and what this VMM does, which is the merge KVM
+    // describes on `vmx_update_exception_bitmap`. The page-fault
+    // error-code mask and match come from the guest hypervisor unchanged,
+    // because this VMM traps no page faults of its own - if it ever does,
+    // both must go to zero so that every page fault exits and the
+    // filtering moves into the reflect decision.
+    write_vmcs02_control(cpu,
+                         field::exception_bitmap,
+                         exception_bitmap01 |
+                             shadow.read(field::exception_bitmap));
+    write_vmcs02_control(cpu,
+                         field::page_fault_error_code_mask,
+                         shadow.read(field::page_fault_error_code_mask));
+    write_vmcs02_control(cpu,
+                         field::page_fault_error_code_match,
+                         shadow.read(field::page_fault_error_code_match));
+
+    // The control-register masks are the union too, and the read shadows
+    // then have to carry the whole answer rather than half of it - see
+    // effective_control_register.
+    auto cr0_mask12 = shadow.read(field::cr0_guest_host_mask);
+    auto cr4_mask12 = shadow.read(field::cr4_guest_host_mask);
+    auto cr0_12 = shadow.read(field::guest_cr0);
+    auto cr4_12 = shadow.read(field::guest_cr4);
+
+    write_vmcs02_control(
+        cpu, field::cr0_guest_host_mask, cr0_mask01 | cr0_mask12);
+    write_vmcs02_control(
+        cpu, field::cr4_guest_host_mask, cr4_mask01 | cr4_mask12);
+
+    write_vmcs02_control(
+        cpu,
+        field::cr0_read_shadow,
+        effective_control_register(
+            cr0_12, shadow.read(field::cr0_read_shadow), cr0_mask12));
+    write_vmcs02_control(
+        cpu,
+        field::cr4_read_shadow,
+        effective_control_register(
+            cr4_12, shadow.read(field::cr4_read_shadow), cr4_mask12));
+
+    // The fields the processor itself saves into vmcs02 on every VM
+    // exit, written back only when they differ from what it saved. See
+    // `hot_state_saved`: the comparison is against the value, so it
+    // covers the guest hypervisor's VMWRITEs, this VMM's own RIP
+    // advance, and the injection path alike, and vmcs02 provably still
+    // holds the recorded value because `save_l2_state` read it out of
+    // vmcs02 on the reflection that let the level above run at all.
+    //
+    // Measured before this existed: the ten writes after the VMPTRLD
+    // that never went through any elision were most of `build_vmcs02`'s
+    // post-switch 79,687 cycles a call, which was 20% of the whole exit
+    // - while the elision that does exist covered only the cold fields,
+    // the segments and bases that never change.
+    //
+    // Declared here rather than beside the RIP/RSP/RFLAGS calls further
+    // down so that the two control-register writes below can go through
+    // it without moving, which would have moved them across `stamp(5)`
+    // and made every phase-split reading before this commit
+    // incomparable with every one after it.
+    auto reuse_hot_state = (cpu < max_cpus) && this->hot_state_valid[cpu] &&
+                           this->vmcs02_launched[cpu] &&
+                           (this->hot_state_vmcs[cpu] ==
+                            this->guest_current_vmcs[cpu]);
+
+    auto put_hot = [&](std::size_t slot,
+                       std::uint64_t value,
+                       auto && write) {
+        // The slot's own bit, which is not the same question as
+        // `reuse_hot_state`. That one asks whether *this vmcs02* was
+        // ever saved from; this one asks whether *this field* was read
+        // back on that save. Three of them are read under vmcs12's exit
+        // controls while the processor writes them under vmcs02's, so
+        // the answer differs per field - see `hot_state_slot_valid`.
+        auto recorded =
+            (cpu < max_cpus) &&
+            (0 != (this->hot_state_slot_valid[cpu] & (1ull << slot)));
+
+        if (reuse_hot_state && recorded &&
+            (this->hot_state_saved[cpu][slot] == value)) {
+            this->hot_state_writes_skipped[cpu] += 1;
+            return;
+        }
+
+        // Which of the two reasons this write is happening. See
+        // `hot_state_writes_uncached`: a value that moved is the guest,
+        // and nothing here can help it; a record that was not there is
+        // a precondition failing, and that is reachable.
+        if ((cpu < max_cpus) && !(reuse_hot_state && recorded)) {
+            this->hot_state_writes_uncached[cpu] += 1;
+        }
+
+        write(value);
+
+        // Kept in step so a second build without an intervening entry -
+        // an entry that fails, and is retried - compares against what
+        // vmcs02 now holds rather than against what it held before. SDM
+        // 29.8 is what makes that sound: an entry failure leaves the
+        // guest-state area unmodified.
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][slot] = value;
+            this->hot_state_slot_valid[cpu] |= 1ull << slot;
+            this->hot_state_writes_done[cpu] += 1;
+        }
+    };
+
+    // VMXE is forced into the real register for the same reason it is for
+    // the guest hypervisor: IA32_VMX_CR4_FIXED0 requires it in VMX
+    // operation, so a guest-state area without it fails VM entry. The read
+    // shadow above answers for the bit, so nothing sees it.
+    //
+    // Elided against slot 5, whose record is the *raw* value
+    // `save_l2_state` read out of vmcs02 - not the masked composition it
+    // wrote into vmcs12. The two are different quantities and only the
+    // first answers "does this VMWRITE change anything": the write puts
+    // `cr0_12` there, so it is a no-op exactly when vmcs02 already holds
+    // `cr0_12`. In steady state it does, because the bits vmcs12's mask
+    // owns are the ones a second-level guest cannot change without
+    // exiting, and the bits it does not own are read straight back out
+    // of vmcs02 into vmcs12 by `save_l2_state`.
+    put_hot(5, cr0_12, [&](std::uint64_t value) {
+        vmcs.guest_cr0(value);
+    });
+
+    // VMXE forced in, SMXE forced out, for the two reasons stated where
+    // vmcs01 does the same: a processor in VMX operation must have VMXE
+    // (IA32_VMX_CR4_FIXED0), and nothing here implements SMX. A
+    // second-level guest running with CR4.SMXE set would exit on GETSEC -
+    // SDM 28.1.2 - and that exit belongs to neither level: this VMM does
+    // not offer the feature and a guest hypervisor was never told its
+    // guest had it either, since the CPUID concealment applies to every
+    // level below this one.
+    //
+    // The value compared is the composed one, VMXE and SMXE included,
+    // because that is what the VMWRITE would put there. Comparing
+    // `cr4_12` instead would elide a write that does change vmcs02
+    // whenever the guest has managed to set SMXE.
+    put_hot(6, (cr4_12 | cr4_vmxe) & ~cr4_smxe, [&](std::uint64_t value) {
+        vmcs.guest_cr4(value);
+    });
+
+    {
+        stamp(5);   // host state written once, then every control
+
+        auto fresh = this->guest_state_fresh[cpu];
+        std::size_t index{};
+
+        auto dirty = (cpu < max_cpus) ? this->guest_state_dirty[cpu]
+                                      : ~std::uint64_t{};
+
+        // What licenses skipping a deferred field's write-back: vmcs02
+        // has run at least once, and what it last saved was an exit
+        // from the guest about to be entered. See
+        // `guest_state_deferred_vmcs` - the first attempt checked
+        // neither and launched the guest with a zeroed guest state.
+        auto may_defer = may_defer_guest_state(cpu);
+
+        for (auto guest_field : guest_state_fields) {
+            // A deferred field is left exactly as the processor saved
+            // it, unless the guest hypervisor has written one - in which
+            // case its value is owed. Writing the rest back would push
+            // whatever vmcs12 happens to hold over the state vmcs02
+            // already has, which is the dependency the census missed.
+            if (guest_state_deferrable(index)) {
+                // Shadow mode: what the deferral *would* leave in
+                // vmcs02 against what the eager path is about to put
+                // there. Reads only - see
+                // `nested_vmx::shadow_guest_state`.
+                if constexpr (nested_vmx::shadow_guest_state) {
+                    if (guest_state_deferral_licensed(cpu) &&
+                        (0 == (dirty & (1ull << index)))) {
+                        record_guest_state_divergence(
+                            cpu,
+                            index,
+                            vmcs.read(guest_field),
+                            shadow.read(guest_field));
+                    }
+                }
+
+                if (!may_defer) {
+                    // Unconditionally, not merely un-elided:
+                    // `guest_state_cache` is stale for exactly these
+                    // indices, so comparing against it could skip a
+                    // write that is owed.
+                    auto value = shadow.read(guest_field);
+                    vmcs.write(guest_field, value);
+                    this->guest_state_cache[cpu][index] = value;
+                    this->guest_state_writes_done[cpu] += 1;
+
+                    // The write that had nothing to compare against, as
+                    // opposed to a comparison that failed. See
+                    // `guest_state_writes_unlicensed`: 44 of these land
+                    // together on one call, so the two populations are
+                    // very different shapes and one counter over both
+                    // reports neither.
+                    this->guest_state_writes_unlicensed[cpu] += 1;
+                } else if (0 != (dirty & (1ull << index))) {
+                    auto value = shadow.read(guest_field);
+                    vmcs.write(guest_field, value);
+                    this->guest_state_cache[cpu][index] = value;
+                    this->guest_state_dirty_writes[cpu] += 1;
+                } else {
+                    this->guest_state_writes_skipped[cpu] += 1;
+                }
+                ++index;
+                continue;
+            }
+
+            auto value = shadow.read(guest_field);
+
+            if (fresh && (this->guest_state_cache[cpu][index] == value)) {
+                this->guest_state_writes_skipped[cpu] += 1;
+                ++index;
+                continue;
+            }
+
+            vmcs.write(guest_field, value);
+            this->guest_state_cache[cpu][index] = value;
+            this->guest_state_writes_done[cpu] += 1;
+            ++index;
+        }
+
+        // Consumed: the next elision needs its own save to justify it.
+        this->guest_state_fresh[cpu] = false;
+
+        if (cpu < max_cpus) {
+            this->guest_state_dirty[cpu] = 0;
+        }
+    }
+
+    // The activity state is decided, never copied.
+    //
+    // Active until `enter_or_park_l2` says otherwise, so that vmcs02 is
+    // never left holding a state nothing here chose. That matters because
+    // this function runs on every entry attempt while the decision below
+    // it may end in the entry not happening at all: a leftover
+    // wait-for-SIPI here would be entered by any later resume that skipped
+    // the decision, and a processor entered in that state blocks external
+    // interrupts, NMIs, INIT and SMIs (SDM 29.7.2) with nothing in vmcs02
+    // able to end it - not even this VMM's preemption timer, which
+    // build_vmcs02 strips.
+    put_hot(4,
+            arch::x86_64::vmx::activity_state::active,
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_activity_state, value);
+            });
+
+    put_hot(0, shadow.read(field::guest_rip), [&](std::uint64_t value) {
+        vmcs.guest_rip(value);
+    });
+    put_hot(1, shadow.read(field::guest_rsp), [&](std::uint64_t value) {
+        vmcs.guest_rsp(value);
+    });
+    put_hot(2, shadow.read(field::guest_rflags), [&](std::uint64_t value) {
+        vmcs.guest_rflags(value);
+    });
+    // The three whose record is conditional. `put_hot` writes whenever
+    // the slot's bit is clear, which is what happens on every reflection
+    // where vmcs12's exit controls did not ask for the save - so a guest
+    // hypervisor that does not save DR7 back pays exactly what it paid
+    // before this commit, and one that does gets the write elided. The
+    // value is still copied unconditionally either way: what changed is
+    // whether the VMWRITE is performed, never what vmcs02 ends up
+    // holding.
+    put_hot(7, shadow.read(field::guest_dr7), [&](std::uint64_t value) {
+        vmcs.guest_dr7(value);
+    });
+    put_hot(8,
+            shadow.read(field::guest_ia32_pat),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_pat, value);
+            });
+    put_hot(9,
+            shadow.read(field::guest_ia32_efer),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_efer, value);
+            });
+
+    // Carried because the entry control that loads it is now offered.
+    //
+    // A guest hypervisor that sets "load IA32_BNDCFGS" expects the value
+    // in its own VMCS to be the one its guest runs with, so leaving this
+    // field at whatever the entered VMCS happened to hold would honour
+    // the control's presence and not its meaning. Copied unconditionally
+    // rather than under the control bit, exactly as IA32_PAT and
+    // IA32_EFER above are: the processor ignores the field when the
+    // control is clear, so there is nothing to gate and a gate would
+    // only be another thing to get wrong.
+    //
+    // Its slot is the one of the six that has no gate at all, because
+    // `save_l2_state`'s read of it has none either.
+    put_hot(10,
+            shadow.read(field::guest_ia32_bndcfgs),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_ia32_bndcfgs, value);
+            });
+    put_hot(3,
+            shadow.read(field::guest_interruptibility_state),
+            [&](std::uint64_t value) {
+                vmcs.write(field::guest_interruptibility_state, value);
+            });
+
+    // The time stamp counter offset composes across levels: what this VMM
+    // applies to the guest hypervisor, plus what the guest hypervisor
+    // applies to its own guest. KVM's `kvm_calc_nested_tsc_offset` is the
+    // same sum. This VMM applied none until `ZPP_TIME_DILATION`, and
+    // writing it as a sum is what kept it correct when that changed.
+    //
+    // **Taken from `dilation_offset` rather than read back out of
+    // vmcs01, and that is correctness rather than a saving.** This
+    // function has already done its VMPTRLD by the time it gets here, so
+    // the current VMCS is vmcs02 - a read of `tsc_offset` now returns
+    // *vmcs02's* field, which is the last entry's composed sum, and
+    // composing that again would double the guest hypervisor's half on
+    // every entry. The value was harmlessly zero for as long as this VMM
+    // applied no offset of its own, which is exactly how a latent bug of
+    // this shape survives being read.
+    auto tsc_offset01 = (0 != (primary01 & primary_tsc_offsetting))
+                            ? this->dilation_offset[cpu]
+                            : std::uint64_t{};
+    auto tsc_offset12 = (0 != (primary12 & primary_tsc_offsetting))
+                            ? shadow.read(field::tsc_offset)
+                            : std::uint64_t{};
+
+    // The multiplier, which has to be composed before the offset because
+    // the offset is scaled by it. SDM 27.6.5 orders the two: "the
+    // contents of the time-stamp counter is first multiplied by the TSC
+    // multiplier before adding the TSC offset", so what the second-level
+    // guest must see is
+    //
+    //     ((tsc * m01 >> 48) + o01) * m12 >> 48 + o12
+    //
+    // and multiplying that out gives the pair below - the multipliers
+    // composed, and *this VMM's* offset scaled by the guest
+    // hypervisor's before its own is added. KVM reaches the same two in
+    // `kvm_calc_nested_tsc_multiplier` and `kvm_calc_nested_tsc_offset`,
+    // and gates the guest hypervisor's multiplier on both controls
+    // exactly as `vmx_get_l2_tsc_multiplier` does - scaling means
+    // nothing without offsetting, which SDM 27.6.5 also says: the field
+    // applies "if this control is 1 (and the 'RDTSC exiting' control is
+    // 0 and the 'use TSC offsetting' control is 1)".
+    //
+    // Both levels default to 1.0 in 48-bit fixed point when they are not
+    // scaling, so a machine where neither does composes to exactly the
+    // sum this used to be.
+    auto scaling12 = (0 != (secondary12 & secondary_tsc_scaling)) &&
+                     (0 != (primary12 & primary_tsc_offsetting));
+
+    // **Not a VMREAD.** vmcs02 is current by now, so reading
+    // `tsc_multiplier` here would return the last entry's composed
+    // product rather than vmcs01's own - the same shape of mistake the
+    // offset above avoids by taking `dilation_offset`, and the reason
+    // this is cached from vmcs01 in the fill above. KVM reaches for
+    // `vcpu->arch.l1_tsc_scaling_ratio` in `kvm_calc_nested_tsc_
+    // multiplier` for exactly this reason and never reads the VMCS.
+    auto multiplier01 = this->host_controls_cache[cpu][8];
+    auto multiplier12 = scaling12 ? shadow.read(field::tsc_multiplier)
+                                  : tsc_scaling_default;
+
+    auto scaled = tsc_scaling_default != multiplier12;
+
+    // What the guest hypervisor contributes, kept so that
+    // `apply_time_dilation` can refresh the sum on an entry that does
+    // not come through here at all - which most entries into a
+    // second-level guest do not, since the controls and the guest state
+    // are elided against their caches. Without it the offset would only
+    // advance on a rebuild, and the dilation would be applied at
+    // whatever rate rebuilds happen to occur.
+    this->tsc_offset_from_guest[cpu] = tsc_offset12;
+
+    write_vmcs02_control(
+        cpu,
+        field::tsc_offset,
+        (scaled ? signed_scaled_product(tsc_offset01, multiplier12)
+                : tsc_offset01) +
+            tsc_offset12);
+
+    // Written only when the control that reads it is set, since the
+    // field does not exist on a processor that does not offer the
+    // control and a VMWRITE to it would fail there.
+    if (0 != (secondary02 & secondary_tsc_scaling)) {
+        write_vmcs02_control(
+            cpu,
+            field::tsc_multiplier,
+            scaled ? scaled_product(multiplier01, multiplier12)
+                   : multiplier01);
+    }
+
+    stamp(6);   // every guest-state field, hot and cold, and the counter
+
+    // The event the guest hypervisor asked to inject, taken from its VMCS
+    // on the entry that starts its guest running. SDM 27.8.3 makes the
+    // three fields a set: the information field's valid bit decides
+    // whether the other two are read at all.
+    auto injection =
+        shadow.read(field::vm_entry_interruption_information_field);
+
+    // Nothing staged, and the guest is asking for something its own
+    // priority allows: deliver it. The guest hypervisor's own injection
+    // always wins, because this only runs when it made none.
+    if constexpr (nested_vmx::self_ipi_delivery) {
+        constexpr std::uint64_t valid = 1ull << 31;
+        constexpr std::uint64_t external = 0ull << 8;
+        constexpr std::uint64_t priority_class = 4;
+
+        if ((cpu < max_cpus) && (0 == (injection & valid)) &&
+            (0 != this->l2_self_ipi_pending[cpu]) &&
+            (0 != this->nested_virtual_apic_address[cpu])) {
+            constexpr std::uint64_t virtual_task_priority = 0x80;
+            std::uint8_t vtpr{};
+
+            auto read = read_guest_physical(
+                this->nested_virtual_apic_address[cpu] +
+                    virtual_task_priority,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)));
+
+            auto vector = this->l2_self_ipi_pending[cpu];
+
+            // The task priority is not the whole of "may this be
+            // delivered". An external interrupt injected while the guest
+            // has RFLAGS.IF clear, or while it is inside the
+            // one-instruction shadow after STI or a MOV to SS, arrives
+            // in a critical section that had disabled interrupts to keep
+            // one - and the VM entry does **not** refuse it, so nothing
+            // catches the mistake. SDM 27.2.1.3 lists the checks on an
+            // injected event and RFLAGS.IF is not among them for an
+            // external interrupt; KVM's own equivalent is the
+            // `vmx_interrupt_allowed` test it makes before injecting,
+            // rather than anything the processor does.
+            //
+            // Read out of vmcs12 rather than the VMCS, which is free:
+            // `build_vmcs02` has these two values in hand from the guest
+            // hypervisor's own guest-state area, and they are what the
+            // entry below is about to load.
+            constexpr std::uint64_t rflags_interrupt_enable = 1ull << 9;
+            constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+            constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+            auto blocking =
+                shadow.read(field::guest_interruptibility_state);
+
+            auto interruptible =
+                (0 != (shadow.read(field::guest_rflags) &
+                       rflags_interrupt_enable)) &&
+                (0 == (blocking & (blocking_by_sti | blocking_by_mov_ss)));
+
+            // **This is the one place in the tree where the VTPR
+            // bound decides whether an interrupt goes into a guest, and
+            // it is over-permissive.** The architecture inhibits on
+            // PPR = max(TPR class, ISRV class) (SDM 13.8.3.1,
+            // `.references/sdm.txt:171709`), and PPR >= TPR, so
+            // `admitted` is true on a superset of the moments the
+            // processor would have delivered on. Where the level above
+            // has an unacknowledged in-service vector - which zpp
+            // cannot see, SDM 32.1.1 gives VISR only under
+            // "virtual-interrupt delivery" - this injects into a guest
+            // that a real local APIC would have kept waiting.
+            //
+            // Recorded, not repaired: the exact test needs ISRV and
+            // there is no path to it in this configuration. It is one
+            // more reason the switch is off by default, alongside the
+            // two boots recorded on `intercept_self_ipi`. The
+            // consequence for the counters is that
+            // `l2_self_ipi_delivered` is an UPPER BOUND on
+            // architecturally deliverable moments and
+            // `l2_self_ipi_held` a lower bound on the inhibited ones.
+            auto admitted = (vector >> priority_class) >
+                            (std::uint64_t{vtpr} >> priority_class);
+
+            // The one-shot diagnostic. See
+            // `nested_vmx::force_dispatch_once` for why this violation
+            // is worth one boot and for the three guest readings taken
+            // before it was armed.
+            //
+            // `interruptible` is deliberately still required: RFLAGS.IF
+            // and the STI/MOV-SS shadow are the guest protecting a
+            // critical section, which is a different claim from a task
+            // priority and is not the one being tested.
+            //
+            // The `0x20` test does two jobs - it is DISPATCH_LEVEL, the
+            // priority the vector's own handler runs at, and it excludes
+            // the other trust level, which enters at `0x40`. `0xd0` is
+            // the guest inside its clock interrupt and is excluded too.
+            auto forced = false;
+
+            if constexpr (nested_vmx::force_dispatch_once) {
+                constexpr std::uint8_t dispatch_priority = 0x20;
+
+                forced = (0 == this->l2_forced_dispatch[cpu]) &&
+                         (dispatch_priority == vtpr) && !admitted;
+            }
+
+            if (read && interruptible && (admitted || forced)) {
+                injection = valid | external | vector;
+                this->l2_self_ipi_pending[cpu] = 0;
+                this->l2_self_ipi_delivered[cpu] =
+                    this->l2_self_ipi_delivered[cpu] + 1;
+
+                if (forced) {
+                    this->l2_forced_dispatch[cpu] =
+                        this->l2_forced_dispatch[cpu] + 1;
+                    log("cpu {} forced dispatch vector {} at task "
+                        "priority {} - one shot, architectural rule "
+                        "deliberately relaxed",
+                        cpu,
+                        vector,
+                        std::uint64_t{vtpr});
+                }
+            } else {
+                this->l2_self_ipi_held[cpu] =
+                    this->l2_self_ipi_held[cpu] + 1;
+            }
+        }
+    }
+
+    // Withhold a clock interrupt that crowds the previous one. See
+    // `nested_vmx::lazy_tick_microseconds` for what this is for and why
+    // it is expected to fail; the short version is that the guest is
+    // preempted two instructions short of draining its deferred-call
+    // queue and this is the only remaining way to give it a gap.
+    //
+    // Only the clock vector, and only when a gap has not already
+    // elapsed. Nothing else is touched, so an exception or any other
+    // vector the level above staged goes through untouched.
+    //
+    // **Withheld means deferred, not dropped.** It used to clear the
+    // valid bit and stop there, which destroys an interrupt the level
+    // above staged and was never told about. Measured, and it is not
+    // subtle: at 10 ms the guest got *further* than any other build in
+    // this tree - it passed the 20,996 ceiling and started its
+    // application processors, so `KeStartAllProcessors` ran - and then
+    // stopped dead, zero exits across a whole minute on all eight
+    // processors. A guest waiting on the tick that was discarded waits
+    // for ever. This tree has already been here once: the
+    // interrupted-event re-queue exists because destroying a staged
+    // event "stopped Hyper-V's synthetic timer dead".
+    //
+    // So the withheld injection is kept whole - vector, type and valid
+    // bit exactly as the level above wrote them - and put back on the
+    // first later entry that has the gap behind it and nothing else
+    // staged. Nothing is invented: the only interrupt delivered is one
+    // the level above asked for.
+    if constexpr (0 != nested_vmx::lazy_tick_microseconds) {
+        constexpr std::uint64_t clock_vector = 0xd1;
+        constexpr std::uint64_t gap = nested_vmx::lazy_tick_microseconds *
+                                      nested_vmx::ticks_per_microsecond;
+
+        if (cpu < max_cpus) {
+            auto now = arch::x86_64::rdtsc();
+            auto last = this->lazy_tick_last_tsc[cpu];
+
+            // The window, and it is the whole difference from every
+            // previous run of this switch. See
+            // `nested_vmx::lazy_tick_seconds`: the deadlock the gap
+            // prevents is entered ONCE, so the gap is needed only
+            // until the call that would miss its deadline has retired,
+            // and is harmful from then on - it is what leaves the
+            // level above waiting for an acknowledgement for ever.
+            //
+            // Expired means "behave as if the gap were zero": nothing
+            // is withheld, and anything already owed is delivered by
+            // the path below, which is reached because `elapsed` is
+            // forced true here.
+            auto expired = false;
+
+            if constexpr (0 != nested_vmx::lazy_tick_seconds) {
+                constexpr std::uint64_t ticks_per_second =
+                    nested_vmx::ticks_per_microsecond * 1000ull * 1000ull;
+                constexpr std::uint64_t window =
+                    nested_vmx::lazy_tick_seconds * ticks_per_second;
+
+                auto first = this->lazy_tick_first_tsc[cpu];
+
+                if ((0 != first) && ((now - first) >= window)) {
+                    expired = true;
+                    this->lazy_tick_after_expiry[cpu] =
+                        this->lazy_tick_after_expiry[cpu] + 1;
+                }
+            }
+
+            auto elapsed =
+                expired || (0 == last) || ((now - last) >= gap);
+
+            if ((0 != (injection & interruption_valid)) &&
+                (clock_vector ==
+                 (injection & interruption_vector_mask))) {
+                // The cap. See `nested_vmx::lazy_tick_max`: the
+                // deadlock is entered once, so one hold is close to
+                // the whole requirement, and every hold beyond it is
+                // latency the level above has been measured not to
+                // tolerate.
+                auto capped = false;
+
+                // VTL1 still owes a message. See
+                // `nested_vmx::keep_tick_while_vtl1_owes`: an occupied
+                // synthetic-message slot stops the level above posting
+                // any more, so withholding here is the first step of a
+                // cycle that ends with everything halted. Read the
+                // secure kernel's own message page and pass the tick
+                // through if any slot is taken.
+                if constexpr (nested_vmx::keep_tick_while_vtl1_owes) {
+                    constexpr std::uint64_t simp_enabled = 1;
+                    constexpr std::uint64_t simp_page = ~0xfffull;
+                    constexpr std::size_t message_slots = 16;
+                    constexpr std::size_t message_stride = 256;
+
+                    auto simp = this->l2_simp_msr[cpu][1];
+
+                    if (0 != (simp & simp_enabled)) {
+                        auto page = simp & simp_page;
+
+                        for (std::size_t slot{}; slot < message_slots;
+                             ++slot) {
+                            std::uint32_t type{};
+
+                            if (!read_guest_physical(
+                                    page + (slot * message_stride),
+                                    std::as_writable_bytes(
+                                        std::span{&type, 1}))) {
+                                break;
+                            }
+
+                            if (0 != type) {
+                                capped = true;
+                                this->lazy_tick_vtl1_owed[cpu] =
+                                    this->lazy_tick_vtl1_owed[cpu] + 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Not yet in the window. See
+                // `nested_vmx::lazy_tick_after_protect`: the call that
+                // has to be protected is at the END of the protection
+                // sequence, and that sequence is deterministic, so this
+                // is a precise trigger rather than a wall-clock guess.
+                if constexpr (0 != nested_vmx::lazy_tick_after_protect) {
+                    capped = capped ||
+                             (this->vtl_protect_count[cpu] <
+                              nested_vmx::lazy_tick_after_protect);
+                }
+
+                if constexpr (0 != nested_vmx::lazy_tick_max) {
+                    capped = this->lazy_tick_withheld[cpu] >=
+                             nested_vmx::lazy_tick_max;
+                }
+
+                if (!elapsed && !capped) {
+                    // Held, not lost. A tick already owed is not
+                    // replaced - one interrupt is owed, however many
+                    // arrive while it is, which is what a level-
+                    // triggered periodic timer means.
+                    if (0 == this->lazy_tick_owed[cpu]) {
+                        this->lazy_tick_owed[cpu] = injection;
+                    }
+
+                    // The window starts at the first withhold, not at
+                    // launch. See `lazy_tick_first_tsc`.
+                    if (0 == this->lazy_tick_first_tsc[cpu]) {
+                        this->lazy_tick_first_tsc[cpu] = now;
+                    }
+
+                    injection &= ~interruption_valid;
+                    this->lazy_tick_withheld[cpu] =
+                        this->lazy_tick_withheld[cpu] + 1;
+                } else {
+                    this->lazy_tick_last_tsc[cpu] = now;
+                    this->lazy_tick_owed[cpu] = 0;
+                    this->lazy_tick_delivered[cpu] =
+                        this->lazy_tick_delivered[cpu] + 1;
+                }
+            } else if (elapsed && (0 != this->lazy_tick_owed[cpu]) &&
+                       (0 == (injection & interruption_valid))) {
+                // The gap has passed and the level above has staged
+                // nothing of its own, so the tick it is owed goes in
+                // now - **if the guest can take one.**
+                //
+                // The entry will not refuse it. SDM 27.2.1.3 does not
+                // list RFLAGS.IF among the checks on an injected
+                // external interrupt, so putting one in while the guest
+                // has interrupts disabled delivers it into a critical
+                // section that disabled them precisely to keep it out,
+                // and nothing faults. The self-IPI path a few lines
+                // above makes exactly this test for exactly this
+                // reason, and KVM's equivalent is `vmx_interrupt_allowed`
+                // rather than anything the processor does.
+                //
+                // Measured: without this the guest stopped at 20,319
+                // protection calls, earlier than any build that had no
+                // lazy tick at all, with the application processors
+                // never reaching the second level.
+                //
+                // Read out of vmcs12, which is free - `build_vmcs02`
+                // already has both values in hand and they are what this
+                // entry is about to load.
+                constexpr std::uint64_t rflags_interrupt_enable = 1ull
+                                                                  << 9;
+                constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+                constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+                auto blocking =
+                    shadow.read(field::guest_interruptibility_state);
+
+                auto interruptible =
+                    (0 != (shadow.read(field::guest_rflags) &
+                           rflags_interrupt_enable)) &&
+                    (0 == (blocking &
+                           (blocking_by_sti | blocking_by_mov_ss)));
+
+                if (interruptible) {
+                    injection = this->lazy_tick_owed[cpu];
+
+                    this->lazy_tick_owed[cpu] = 0;
+                    this->lazy_tick_last_tsc[cpu] = now;
+                    this->lazy_tick_redelivered[cpu] =
+                        this->lazy_tick_redelivered[cpu] + 1;
+                } else {
+                    // Still owed. Counted, because an owed tick that
+                    // never finds an interruptible entry is the same
+                    // failure as dropping it, just slower.
+                    this->lazy_tick_not_yet[cpu] =
+                        this->lazy_tick_not_yet[cpu] + 1;
+                }
+            }
+        }
+    }
+
+    // Hold the clock across ONE trust-level turn. See
+    // `nested_vmx::hold_clock_in_vtl1`: the stall is a single missed
+    // deadline that latches, so what has to be protected is the turn
+    // `MakeGdtReadOnly` makes - not the tick rate, which six earlier
+    // interventions moved to no effect and two of them fatally.
+    //
+    // The hold ends at the next entry with VTL0 current, so the level
+    // above waits one turn - about a millisecond - for the
+    // acknowledgement it expects, rather than a fixed gap it never
+    // reaches the end of. That is the whole difference from
+    // `ZPP_LAZY_TICK`, which froze the machine at 10,000 us and at
+    // 2,500 us alike.
+    // **`in_vtl1` has the same defect as `vtl_half_mark_kind` and is
+    // deliberately not gated the same way.** It is set from the
+    // hypercall latch too (`nested_entry.cpp:10780-10784`, the
+    // `HvCallVtlCall`/`HvCallVtlReturn` pair), so it means "the last
+    // trust-level hypercall was a call", not "VTL1's address space is
+    // current" - and on the wedged boot the `vtl_switches` sign says
+    // the latch was left reading VTL0. `record_l2_entry_event` re-gates
+    // its two consumers on vmcs12's extended-page-table pointer; this
+    // consumer, and `hold_self_ipi_in_vtl1`'s below, do not, for two
+    // reasons worth writing down so the omission is not read as an
+    // oversight:
+    //
+    // - **Nothing here dereferences a guest pointer.** The two gated
+    //   blocks walk `[[gs:0] + 0x10]` and *write* a byte through the
+    //   result, so a wrong answer there rewrites a byte of an unrelated
+    //   guest page. A wrong answer here holds a staged clock interrupt
+    //   for one extra turn, or re-stages it one turn early, and
+    //   `vtl1_clock_owed` plus `lazy_tick_not_yet` already count both.
+    // - **It would change a guest-visible injection under a switch
+    //   whose outcome is already recorded.** `hold_clock_in_vtl1` has
+    //   been run (`BACKLOG.md`: third arm, identical to `novina=0`
+    //   alone, `vtl_fresh_calls` frozen), and moving when it fires
+    //   makes that measurement incomparable for no diagnostic gain.
+    //
+    // The gate is available here if that changes - `shadow` is vmcs12,
+    // so `shadow.read(field::ept_pointer)` against
+    // `vtl_latest[cpu][1][vtl_eptp_slot]` is the same one-read test.
+    if constexpr (nested_vmx::hold_clock_in_vtl1) {
+        constexpr std::uint64_t vtl1_clock_vector = 0xd1;
+
+        if (cpu < max_cpus) {
+            auto staged = (0 != (injection & interruption_valid));
+            auto is_clock =
+                staged && (vtl1_clock_vector ==
+                           (injection & interruption_vector_mask));
+
+            if (is_clock && (0 != this->in_vtl1[cpu])) {
+                // Kept whole - vector, type and valid bit as the level
+                // above wrote them. Destroying a staged event has
+                // already been shown here to stop the synthetic timer
+                // dead, and one tick owed is one tick, however many
+                // arrive while it is owed.
+                if (0 == this->vtl1_clock_owed[cpu]) {
+                    this->vtl1_clock_owed[cpu] = injection;
+                }
+
+                injection &= ~interruption_valid;
+                this->vtl1_clock_withheld[cpu] =
+                    this->vtl1_clock_withheld[cpu] + 1;
+            } else if ((0 == this->in_vtl1[cpu]) &&
+                       (0 != this->vtl1_clock_owed[cpu]) && !staged) {
+                // The same interruptibility test the lazy tick's
+                // re-delivery makes, and for the same measured reason:
+                // SDM 27.2.1.3 does not list RFLAGS.IF among the checks
+                // on an injected external interrupt, so putting one in
+                // while the guest has them disabled delivers it into a
+                // critical section and nothing faults.
+                constexpr std::uint64_t rflags_interrupt_enable = 1ull
+                                                                  << 9;
+                constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+                constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+                auto blocking =
+                    shadow.read(field::guest_interruptibility_state);
+
+                auto interruptible =
+                    (0 != (shadow.read(field::guest_rflags) &
+                           rflags_interrupt_enable)) &&
+                    (0 == (blocking &
+                           (blocking_by_sti | blocking_by_mov_ss)));
+
+                if (interruptible) {
+                    injection = this->vtl1_clock_owed[cpu];
+
+                    this->vtl1_clock_owed[cpu] = 0;
+                    this->vtl1_clock_delivered[cpu] =
+                        this->vtl1_clock_delivered[cpu] + 1;
+                }
+            }
+        }
+    }
+
+    // **Deliberately not elided, and this is the record of why.** It is
+    // the seventh unconditional write after the VMPTRLD and the only one
+    // of the seven left performing on every entry; the other six went
+    // into `hot_state_saved` in the same commit that wrote this comment.
+    //
+    // It fails both of the two tests that admitted those six.
+    //
+    // The processor moves it. SDM 27.8.3
+    // (`.references/sdm.txt:200260-200261` and `:200271`): "The valid bit
+    // in this field is cleared on every VM exit", and again "VM exits
+    // clear the valid bit (bit 31) in the injected-event identification
+    // field" - except after a VM-entry failure, where SDM 29.8
+    // (`:203333`) lists "The valid bit in the injected-event
+    // identification field is not cleared" among the steps that do not
+    // happen. So predicting what vmcs02 holds means modelling hardware
+    // *and* branching on whether the entry succeeded, which is the
+    // `vm_entry_controls` mistake with an extra case.
+    //
+    // And others write it. With vmcs02 current, on an L2 exit this VMM
+    // answers itself, the field is written by `hypervisor.cpp`'s three
+    // injection helpers, by `exit_dispatch.cpp`'s NMI injection and by
+    // `record_l2_entry_event`'s VINA drop and restage in this file -
+    // none of which goes through any elision family. That is the
+    // `control_cache` hazard verbatim: "the cache would describe a field
+    // somebody else had moved."
+    //
+    // Neither is unfixable. `save_l2_state` could read the field back
+    // the way it reads CR0, which would put it in this family properly -
+    // but that trades a 2,876-cycle VMREAD on every reflection for a
+    // 2,131-cycle VMWRITE on the entries where the value repeats, and at
+    // roughly two exits per second-level entry that is a loss before the
+    // hit rate is even argued. Left alone until somebody has a reason
+    // that is not arithmetic.
+    vmcs.write(field::vm_entry_interruption_information_field, injection);
+
+    if (0 != (injection & interruption_valid)) {
+        vmcs.write(field::vm_entry_exception_error_code,
+                   shadow.read(field::vm_entry_exception_error_code));
+        vmcs.write(field::vm_entry_instruction_length,
+                   shadow.read(field::vm_entry_instruction_length));
+
+        // Counted by vector, the same shape as `l2_external_vector` and
+        // for the same reason: to name what is arriving rather than
+        // infer it. See the declaration - the one vector this is here
+        // to look for is `0xd1`, the synthetic interrupt the root
+        // partition's timer messages are delivered on.
+        if (cpu < max_cpus) {
+            auto vector = injection & interruption_vector_mask;
+            this->l2_injected_vector[cpu][vector] =
+                this->l2_injected_vector[cpu][vector] + 1;
+
+            // Where the guest was when the event was injected, and a
+            // flag for the exit handler to fill in where it went. See
+            // the declarations: this is the first thing in the
+            // investigation that observes the guest rather than the
+            // hand-over, and it is the only way to tell a handler that
+            // ran and failed from a vector that was never taken.
+            constexpr std::uint64_t synthetic_interrupt_3 = 0xd1;
+
+            // One reading for both records below, which is not merely a
+            // saving: they time the same event, and two `rdtsc`s
+            // straddling the intervening work would put a few hundred
+            // cycles of this VMM between the clock gap and the tick
+            // account and leave the two disagreeing about when the same
+            // injection happened.
+            //
+            // Taken for either vector rather than for `clock_gap_vector`
+            // alone, even though the two constants are the same number
+            // today: the tick account below is keyed on the other one,
+            // and a reading conditional on a constant it does not use is
+            // a zero waiting to happen.
+            auto now = ((clock_gap_vector == vector) ||
+                        (synthetic_interrupt_3 == vector))
+                           ? arch::x86_64::rdtsc()
+                           : std::uint64_t{};
+
+            // And how long the guest was given since the last one. See
+            // `clock_gap_buckets`: the instruction trace ends on this
+            // question and cannot answer it.
+            if (clock_gap_vector == vector) {
+                auto previous = this->clock_gap_last[cpu];
+
+                this->clock_gap_last[cpu] = now;
+
+                if (0 != previous) {
+                    auto delta = now - previous;
+                    std::size_t bucket{};
+
+                    while ((delta >>= 1) && (bucket < 63)) {
+                        ++bucket;
+                    }
+
+                    this->clock_gap_buckets[cpu][bucket] += 1;
+                }
+            }
+
+            if (synthetic_interrupt_3 == vector) {
+                auto slot = this->injection_landing_count[cpu] %
+                            injection_landing_capacity;
+                this->injection_from_rip[cpu][slot] =
+                    shadow.read(field::guest_rip);
+                this->injection_to_rip[cpu][slot] = 0;
+                this->injection_landing_armed[cpu] = 1;
+
+                // The given half of the tick account, closed against the
+                // arm that is waiting for it. See the members for what
+                // the pair is for; the short version is that this is the
+                // only place both halves of "asked 1.74 ms, given 0.926
+                // ms" are measured on one clock rather than divided out
+                // of two rates.
+                //
+                // Note what is *not* claimed here: nothing in this VMM
+                // decides this vector. `injection` came out of vmcs12's
+                // own entry-interruption field a few lines above, so the
+                // level above staged it and this only times it.
+                auto armed = this->stimer_arm_pending_tsc[cpu];
+
+                if ((0 != armed) && (now > armed)) {
+                    this->stimer_given_cycles[cpu] =
+                        this->stimer_given_cycles[cpu] + (now - armed);
+                    this->stimer_given_arms[cpu] =
+                        this->stimer_given_arms[cpu] + 1;
+                }
+
+                this->stimer_arm_pending_tsc[cpu] = 0;
+
+                // And into the arm ring as a third kind, so the ordered
+                // timeline of "guest armed, level above expired it" is
+                // readable rather than having to be reassembled from two
+                // rings with two different capacities.
+                auto ring = this->stimer_arm_count[cpu] %
+                            reference_sample_capacity;
+                this->stimer_arm_value[cpu][ring] = vector;
+                this->stimer_arm_tsc[cpu][ring] = now;
+                this->stimer_arm_kind[cpu][ring] = 3;
+                this->stimer_arm_count[cpu] =
+                    this->stimer_arm_count[cpu] + 1;
+            }
+        }
+    }
+
+    // The processor is given no MSR areas of its own. The three the guest
+    // hypervisor named are processed here instead, in software, and
+    // handing its addresses to the processor is what must not happen: the
+    // processor reads and *writes* those lists in root operation, where
+    // extended page tables do not apply - so a guest hypervisor could name
+    // this module's own physical pages as its VM-exit MSR-store area and
+    // have the processor write MSR values into them. Every other
+    // protection this VMM has is an extended page-table permission, and
+    // none of them would apply.
+    write_vmcs02_control(cpu, field::vm_entry_msr_load_count, 0);
+    write_vmcs02_control(cpu, field::vm_exit_msr_load_count, 0);
+    write_vmcs02_control(cpu, field::vm_exit_msr_store_count, 0);
+
+    // SDM 29, step 4: the MSR loads are the last thing a VM entry does
+    // before the launch state changes. Done here, at the end, for the same
+    // reason - and after the guest state is in vmcs02, so that a failure
+    // leaves the same thing behind a processor's would.
+    this->nested_msr_load_failed[cpu] = false;
+
+    if (auto loaded =
+            load_nested_msrs(cpu, entry_load_address, entry_load_count);
+        !loaded) {
+        this->nested_msr_load_failed[cpu] = true;
+        return std::unexpected(
+            zpp::error{error::nested_msr_area_unsupported});
+    }
+
+    // The transition itself. A guest hypervisor without VPIDs of its own
+    // expects VM entry to flush, and a second-level guest shares this
+    // VMM's VPID - so the flush has to be performed rather than left to
+    // hardware, which will not do it for a non-zero VPID.
+    nested_transition_flush(cpu);
+
+    // The last slot, and the counter that says how many calls the split
+    // saw whole. Against `phase_calls[2]` it names the early returns:
+    // every refusal above leaves this function without reaching here,
+    // so a shortfall is failures rather than a hole in the split.
+    stamp(7);   // the event to inject, and the transition flush
+    this->vmcs02_split_calls = this->vmcs02_split_calls + 1;
+
+    return {};
+}
+
+void hypervisor::nested_transition_flush(std::size_t cpu)
+{
+    // Single-context, on this VMM's own VPID, which SDM 31.4.3.1 makes
+    // invalidate "linear mappings and combined mappings associated with
+    // that VPID ... for all PCIDs and, for combined mappings, all
+    // EPTRTAs". That covers both levels at once: the guest hypervisor's
+    // mappings and its guest's differ only in the extended page-table
+    // root, and this invalidates every root.
+    //
+    // Over-invalidation rather than precision, deliberately. The
+    // alternative is a VPID of its own for the second level, which buys
+    // back the mappings this throws away and costs a second identifier per
+    // processor plus the bookkeeping to keep it in step with the guest
+    // hypervisor's own. The measurement that would justify it is the exit
+    // rate of a real guest hypervisor, which nothing has yet run.
+    constexpr std::uint64_t single_context = 1;
+
+    struct alignas(0x10) invvpid_descriptor
+    {
+        std::uint64_t vpid{};
+        std::uint64_t linear_address{};
+    };
+
+    // `cpu + 1` and not `vmcs.vpid()`, which this read twice - once for
+    // the descriptor and once for the log line. `setup_vmcs` writes
+    // `vpid(cpu + 1)` and `build_vmcs02` copies that same value into
+    // vmcs02, so the field holds this number whichever VMCS is current
+    // and has done since before the processor ran a guest instruction.
+    // Reading it is a VMREAD, which is an exit to the layer below at
+    // 1.4-1.8 microseconds, and this runs on every transition between the
+    // two levels.
+    invvpid_descriptor descriptor{cpu + 1, 0};
+
+    if (arch::x86_64::vmx::invvpid(single_context, &descriptor)) {
+        log("invvpid failed on a nested transition, cpu {}", cpu);
+    }
+}
+
+// The captured context is no longer read - the two cases that needed a
+// guest register, the MSR number in ECX and the I/O port, are gone. It
+// stays in the signature because this and `l1_wants_l2_exit` are a pair
+// called from one place with one set of arguments, and because the next
+// case to need it will.
+bool hypervisor::l0_wants_l2_exit(std::size_t cpu,
+                                  arch::x86_64::vmx::exit_reason reason,
+                                  const arch::x86_64::context &)
+{
+    auto & vmcs = this->vmcs;
+
+    // The question this answers is narrow on purpose: not "can this VMM
+    // handle it" but "must it", whatever the guest hypervisor asked. KVM
+    // splits the decision the same way in `nested_vmx_l0_wants_exit`, and
+    // asks it first, because an exit this VMM needs is one no reflection
+    // may take away.
+    switch (reason.basic()) {
+    case basic_reason::exception_or_nmi: {
+        // A non-maskable interrupt is this VMM's whoever is running: NMI
+        // exiting is set in its own pin controls and the handler hands the
+        // interrupt back to the guest's world. Everything else in this
+        // exit is an exception, and exceptions belong to whoever put the
+        // vector in the exception bitmap.
+        auto information =
+            vmcs.read(field::vm_exit_interruption_information);
+        auto type = (information >> interruption_type_shift) &
+                    interruption_type_mask;
+
+        return interruption_type_nmi == type;
+    }
+
+    case basic_reason::ept_violation:
+    case basic_reason::ept_misconfiguration:
+        // Always, and the composition decides afterwards whose fault it
+        // was. The processor walked the *shadow*, which is neither side's
+        // table, so nothing about the exit as delivered describes what the
+        // guest hypervisor's tables say - that has to be worked out here.
+        // KVM reaches the same conclusion in `nested_vmx_l0_wants_exit`.
+        return true;
+
+    case basic_reason::vmx_preemption_timer:
+        // This VMM's clock. The capability MSRs do not offer the timer, so
+        // a guest hypervisor cannot have armed it.
+        return true;
+
+    case basic_reason::tpr_below_threshold:
+        // Only the one this VMM armed for itself to learn that the task
+        // priority came down. See `window_threshold_armed`; without this
+        // the exit would be reflected to a level above that never set a
+        // threshold and cannot account for it.
+        if constexpr (nested_vmx::window_on_tpr ||
+                      nested_vmx::deliver_on_drop) {
+            return (cpu < max_cpus) && this->window_threshold_armed[cpu];
+        } else {
+            return false;
+        }
+
+    case basic_reason::monitor_trap_flag:
+        // Only while this VMM is stepping a watched write. A guest
+        // hypervisor may set the flag itself - it is in the primary
+        // controls it is offered - and then the exit is its own.
+        return this->stepping_watch[cpu];
+
+        // MSR accesses and I/O are deliberately absent, and that is a
+        // change from what this used to do.
+        //
+        // They used to be claimed here whenever *this VMM's* bitmap named
+        // them, which took them away from a guest hypervisor that had
+        // asked for them too. The ones this VMM arms are exactly the set a
+        // guest hypervisor presenting VMX to its own guest also arms:
+        // IA32_APIC_BASE unconditionally, and IA32_FEATURE_CONTROL with
+        // the whole VMX capability range when nested VMX is on. So a
+        // second-level guest touching one of those was answered here and
+        // its own hypervisor never learned it had - which is the shape of
+        // a guest hypervisor that stops making progress with nothing
+        // faulting.
+        //
+        // KVM names neither in `nested_vmx_l0_wants_exit`; the decision is
+        // `nested_vmx_l1_wants_exit`'s and the exit is reflected. L0's own
+        // interest is served a moment later, when the guest hypervisor
+        // performs the access itself and exits from *its* context - which
+        // is the right order, because the machine the second-level guest
+        // sees is the guest hypervisor's, not this one's.
+        //
+        // Nothing else is needed to keep this VMM's own interest:
+        // `on_l2_exit` already routes an exit neither side asked for to
+        // the ordinary handler, so an access only this VMM wanted still
+        // lands there.
+        //
+        // Both were found by tests/nested_exit, which exercises this
+        // decision against KVM's for every exit reason.
+
+    default:
+        return false;
+    }
+}
+
+bool hypervisor::l1_wants_l2_exit(std::size_t cpu,
+                                  arch::x86_64::vmx::exit_reason reason,
+                                  const arch::x86_64::context & context)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+    auto pin12 = shadow.read(field::pin_based_vm_execution_controls);
+
+    auto primary_set = [&](std::uint64_t control) {
+        return 0 != (primary12 & control);
+    };
+
+    auto secondary_set = [&](std::uint64_t control) {
+        return 0 != (secondary12 & control);
+    };
+
+    switch (reason.basic()) {
+    case basic_reason::exception_or_nmi: {
+        // Filtered through the guest hypervisor's own exception bitmap,
+        // with the page-fault error-code mask and match applied to vector
+        // 14. SDM 27.6.3: a page fault exits if
+        // "(error_code & mask) == match" agrees with the bitmap bit.
+        auto information =
+            vmcs.read(field::vm_exit_interruption_information);
+        auto vector = information & interruption_vector_mask;
+        auto bitmap = shadow.read(field::exception_bitmap);
+
+        constexpr std::uint64_t page_fault_vector = 14;
+
+        if (page_fault_vector == vector) {
+            auto error_code =
+                vmcs.read(field::vm_exit_interruption_error_code);
+            auto mask = shadow.read(field::page_fault_error_code_mask);
+            auto match = shadow.read(field::page_fault_error_code_match);
+            auto in_bitmap = 0 != (bitmap & (1ull << page_fault_vector));
+
+            return in_bitmap == ((error_code & mask) == match);
+        }
+
+        return 0 != (bitmap & (1ull << vector));
+    }
+
+    case basic_reason::external_interrupt:
+        // Unlike KVM, which always takes this for itself because its host
+        // has interrupt handlers to run, this VMM does not set
+        // external-interrupt exiting by default - interrupts are the
+        // guest's, which owns the interrupt controller. So ordinarily the
+        // control can only be set because the guest hypervisor asked, and
+        // the exit can only be its own.
+        //
+        // With `ZPP_VIRTUALIZE_APIC` on, pin01 sets it as well, and this
+        // answer stays right: an interrupt the guest hypervisor asked to
+        // see is still its own, and one it did not ask to see is kept
+        // here and queued for the *first-level* guest rather than put
+        // into the second-level one.
+        return 0 != (pin12 & pin_external_interrupt);
+
+    case basic_reason::interrupt_window: {
+        // Whether the guest hypervisor still wants this, and the guest's
+        // priority when it happened. See `int_window_asked`: a `stale`
+        // count that climbs means vmcs02 kept a control vmcs12 had
+        // cleared, and the exit storm is ours rather than its.
+        auto wanted = primary_set(primary_interrupt_window);
+
+        if (cpu < max_cpus) {
+            if (wanted) {
+                this->int_window_asked[cpu] += 1;
+            } else {
+                this->int_window_stale[cpu] += 1;
+            }
+
+            if (auto page = this->nested_virtual_apic_address[cpu];
+                nested_vmx::census_exits && 0 != page) {
+                constexpr std::uint64_t virtual_task_priority = 0x80;
+                std::uint8_t vtpr{};
+
+                if (read_guest_physical(
+                        page + virtual_task_priority,
+                        std::span(reinterpret_cast<std::byte *>(&vtpr),
+                                  sizeof(vtpr)))) {
+                    this->int_window_vtpr[cpu][vtpr >> 4] += 1;
+                }
+            }
+        }
+
+        return wanted;
+    }
+    case basic_reason::nmi_window:
+        return primary_set(primary_nmi_window);
+
+    // `virtualized_eoi` and `apic_write` are deliberately **not** listed
+    // here. They can only occur because the guest hypervisor asked for
+    // virtual-interrupt delivery, so they are unconditionally its own,
+    // and this function's `default:` already answers `true`. Gating them
+    // on the control instead was written, and `tests/nested_exit` caught
+    // it the same minute: with the knob off it answered `false`, which
+    // would have dropped an exit only the level above can handle. The
+    // test asserts `true` for both in either position, which is the
+    // stronger and simpler rule.
+    case basic_reason::hlt:
+        return primary_set(primary_hlt_exiting);
+    case basic_reason::invlpg:
+        return primary_set(primary_invlpg_exiting);
+    case basic_reason::rdpmc:
+        return primary_set(primary_rdpmc_exiting);
+    case basic_reason::rdtsc:
+    case basic_reason::rdtscp:
+        return primary_set(primary_rdtsc_exiting);
+    case basic_reason::mov_debug_register:
+        return primary_set(primary_mov_dr_exiting);
+    case basic_reason::mwait:
+        return primary_set(primary_mwait_exiting);
+    case basic_reason::monitor:
+        return primary_set(primary_monitor_exiting);
+    case basic_reason::monitor_trap_flag:
+        return primary_set(primary_monitor_trap_flag);
+    case basic_reason::pause:
+        return primary_set(primary_pause_exiting) ||
+               secondary_set(secondary_pause_loop_exiting);
+    case basic_reason::rdrand:
+        return secondary_set(secondary_rdrand_exiting);
+    case basic_reason::rdseed:
+        return secondary_set(secondary_rdseed_exiting);
+    case basic_reason::wbinvd:
+        return secondary_set(secondary_wbinvd_exiting);
+    case basic_reason::gdtr_or_idtr:
+    case basic_reason::ldtr_or_tr:
+        return secondary_set(secondary_descriptor_table_exiting);
+    case basic_reason::xsaves:
+    case basic_reason::xrstors:
+        return secondary_set(secondary_enable_xsaves);
+    case basic_reason::invpcid:
+        return secondary_set(secondary_enable_invpcid) &&
+               primary_set(primary_invlpg_exiting);
+    case basic_reason::tpr_below_threshold:
+        // Correct without qualification now that the control is honoured,
+        // and it was correct before only because the exit could not
+        // happen. The exit exists only where vmcs02 has the TPR shadow set
+        // (SDM 27.6.8: the threshold "exists only on processors that
+        // support the 1-setting of the 'use TPR shadow' VM-execution
+        // control"), `build_vmcs02` sets it in vmcs02 only where vmcs12
+        // set it, and this VMM never sets it for itself - so the exit is
+        // always the guest hypervisor's, never shared. `l0_wants_l2_exit`
+        // therefore does not name it.
+        return primary_set(primary_tpr_shadow);
+
+    case basic_reason::control_register_access: {
+        // SDM Table 28-3, "Exit Qualification for Control-Register
+        // Accesses": bits 3:0 the register number, bits 5:4 the access
+        // type, bits 11:8 the general purpose register. Same shape as
+        // KVM's `nested_vmx_exit_handled_cr`.
+        auto qualification = vmcs.exit_qualification();
+        auto number = qualification & 0xf;
+        auto access = (qualification >> 4) & 0x3;
+
+        constexpr std::uint64_t access_move_to = 0;
+        constexpr std::uint64_t access_move_from = 1;
+        constexpr std::uint64_t access_clts = 2;
+        constexpr std::uint64_t access_lmsw = 3;
+
+        auto cr0_mask = shadow.read(field::cr0_guest_host_mask);
+        auto cr4_mask = shadow.read(field::cr4_guest_host_mask);
+
+        switch (access) {
+        case access_move_to:
+            switch (number) {
+            case 0:
+            case 4: {
+                // A write exits to the guest hypervisor only if it changes
+                // a bit the guest hypervisor owns, which is what SDM
+                // 26.1.3 makes the guest/host mask mean - so the decision
+                // needs the value being written, not just the mask.
+                //
+                // Comparing rather than testing the mask matters here, and
+                // for CR4 specifically. This VMM masks VMXE for itself, so
+                // *every* CR4 write by a second-level guest exits whether
+                // or not the guest hypervisor asked. Reflecting all of
+                // them because its mask happens to be non-empty would hand
+                // it exits for bits it does not own, and a hypervisor that
+                // trusts the architecture will act on the ones it sees.
+                //
+                // The register the value is in is named by bits 11:8, and
+                // it is a *second-level* register - so it is in the
+                // captured context, not in the VMCS. guest_register knows
+                // that RSP is the exception.
+                auto gpr = (qualification >> 8) & 0xf;
+                auto written = guest_register(context, gpr);
+
+                auto mask = (0 == number) ? cr0_mask : cr4_mask;
+
+                // Against the *read shadow*, which is what the guest
+                // hypervisor decided its guest should believe the
+                // register holds - not against the register itself.
+                //
+                // SDM 28.1.3: "MOV to CR0 ... causes a VM exit unless the
+                // value of its source operand matches, for the position
+                // of each bit set in the CR0 guest/host mask, the
+                // corresponding bit in the CR0 read shadow", and the same
+                // sentence for CR4. KVM's nested_vmx_exit_handled_cr
+                // spells it `vmcs12->cr0_guest_host_mask & (val ^
+                // vmcs12->cr0_read_shadow)`.
+                //
+                // This used to compare against vmcs02's guest CR0, which
+                // build_vmcs02 writes from vmcs12's *guest* field. The two
+                // are different fields and are meant to differ - a guest
+                // hypervisor owns a bit precisely so it can show its guest
+                // something other than what the register holds. Wherever
+                // they differed the decision was made on the wrong
+                // operand, in both directions: an exit reflected that was
+                // never wanted, and - the one that costs a boot - an exit
+                // swallowed that the guest hypervisor was waiting for.
+                auto shadow_value =
+                    (0 == number) ? shadow.read(field::cr0_read_shadow)
+                                  : shadow.read(field::cr4_read_shadow);
+
+                return 0 != ((written ^ shadow_value) & mask);
+            }
+            case 3:
+                return primary_set(primary_cr3_load_exiting);
+            case 8:
+                return primary_set(primary_cr8_load_exiting);
+            default:
+                return true;
+            }
+        case access_move_from:
+            switch (number) {
+            case 3:
+                return primary_set(primary_cr3_store_exiting);
+            case 8:
+                return primary_set(primary_cr8_store_exiting);
+            default:
+                return true;
+            }
+        case access_clts: {
+            // CLTS clears CR0.TS, so it exits to the guest hypervisor only
+            // if that bit is one it owns *and* one it is showing as set.
+            //
+            // SDM 28.1.3: "The CLTS instruction causes a VM exit if the
+            // bits in position 3 (corresponding to CR0.TS) are set in both
+            // the CR0 guest/host mask and the CR0 read shadow." 28.3
+            // gives the other half: mask set and shadow clear means CLTS
+            // "completes but does not change the contents of CR0.TS" - no
+            // exit. Testing the mask alone reflected that case too. KVM:
+            // nested.c case 2, `(mask & X86_CR0_TS) && (read_shadow &
+            // X86_CR0_TS)`.
+            constexpr std::uint64_t task_switched = 1ull << 3;
+            auto shadow_value = shadow.read(field::cr0_read_shadow);
+
+            return (0 != (cr0_mask & task_switched)) &&
+                   (0 != (shadow_value & task_switched));
+        }
+        case access_lmsw:
+        default: {
+            // LMSW writes CR0's low four bits, and whether that exits
+            // depends on the value it would write - which is in the
+            // qualification, not in a register.
+            //
+            // SDM 28.1.3 splits it in two, because "LMSW never clears bit
+            // 0 of CR0 (CR0.PE)":
+            //
+            //   - PE exits only if the bit is set in both the mask and the
+            //     source operand while clear in the read shadow. A source
+            //     with PE clear cannot clear it, so it is not a change.
+            //   - bits 3:1 exit if the mask owns the bit and the source
+            //     and the read shadow disagree about it.
+            //
+            // SDM Table 28-3 puts the source data in bits 31:16 of the
+            // exit qualification. KVM builds the same two-part test in
+            // nested_vmx_exit_handled_cr's LMSW case.
+            //
+            // This used to return "any of the low four bits is owned",
+            // which reflects every LMSW a second-level guest executes
+            // whatever it writes.
+            constexpr std::uint64_t protection_enable = 1ull << 0;
+            constexpr std::uint64_t lmsw_upper_bits = 0xeull;
+
+            auto source = (qualification >> 16) & 0xffff;
+            auto shadow_value = shadow.read(field::cr0_read_shadow);
+
+            if ((0 != (cr0_mask & protection_enable)) &&
+                (0 != (source & protection_enable)) &&
+                (0 == (shadow_value & protection_enable))) {
+                return true;
+            }
+
+            return 0 !=
+                   (cr0_mask & lmsw_upper_bits & (source ^ shadow_value));
+        }
+        }
+    }
+
+    case basic_reason::io_instruction: {
+        // SDM Table 28-5: bits 2:0 the size, bit 3 the direction, bit 4
+        // string, bit 5 REP, bit 6 operand encoding, bits 31:16 the port.
+        // The bitmaps win when both are set. SDM 28.1.3
+        // (.references/sdm.txt:200725) puts it in parentheses: "the
+        // 'unconditional I/O exiting' VM-execution control is ignored if
+        // the 'use I/O bitmaps' VM-execution control is 1". Testing
+        // unconditional first reflected every I/O instruction to a guest
+        // hypervisor that had set both - including the ports it had
+        // explicitly cleared in its own bitmap - and both controls are
+        // offered, so that is a configuration it can reach.
+        if (!primary_set(primary_io_bitmaps)) {
+            return primary_set(primary_unconditional_io);
+        }
+
+        auto qualification = vmcs.exit_qualification();
+        auto port = static_cast<std::uint32_t>(qualification >> 16);
+        auto size = static_cast<std::uint32_t>((qualification & 0x7) + 1);
+
+        // Every byte of the access is checked, because a wide access whose
+        // first port is not intercepted may still touch one that is. KVM's
+        // `nested_vmx_exit_handled_io` walks the same range.
+        for (std::uint32_t i{}; i < size; ++i) {
+            auto at = port + i;
+
+            // A wrapping access exits, it does not stop being checked.
+            // SDM 28.1.3 (.references/sdm.txt:200724): "If an I/O
+            // operation 'wraps around' the 16-bit I/O-port space
+            // (accesses ports FFFFH and 0000H), the I/O instruction
+            // causes a VM exit." Breaking out of the loop answered
+            // "not intercepted" for a four-byte access at port 0xffff
+            // against an empty bitmap; KVM returns true the moment the
+            // port reaches 0x10000.
+            if (at > 0xffff) {
+                return true;
+            }
+
+            auto base = (at < 0x8000) ? shadow.read(field::io_bitmap_a)
+                                      : shadow.read(field::io_bitmap_b);
+            auto bit = at & 0x7fff;
+
+            std::uint8_t byte{};
+            auto read = read_guest_physical(
+                base + (bit / 8),
+                std::span(reinterpret_cast<std::byte *>(&byte), 1));
+
+            // A bitmap this VMM cannot read is treated as intercepting.
+            // The guest hypervisor named the page; if it is unreadable
+            // that is its problem to see, and reflecting shows it.
+            if (!read || (0 != (byte & (1u << (bit % 8))))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    case basic_reason::rdmsr:
+    case basic_reason::wrmsr: {
+        // Censused here rather than only in the dispatcher, because a
+        // write the level above intercepts is reflected from this
+        // function and never reaches the dispatcher's `wrmsr` case.
+        // See `l2_msr_write_codes` - one census read zero against an
+        // exit profile that was a third MSR writes.
+        auto census = [&](bool reflected) {
+            if (basic_reason::wrmsr != reason.basic()) {
+                return reflected;
+            }
+
+            auto code = static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(context.rcx));
+
+            for (std::size_t slot{}; slot < msr_write_slots; ++slot) {
+                if (0 == this->l2_msr_write_counts[slot]) {
+                    this->l2_msr_write_codes[slot] = code;
+                }
+
+                if (this->l2_msr_write_codes[slot] == code) {
+                    this->l2_msr_write_counts[slot] += 1;
+                    this->l2_msr_write_last_value[slot] =
+                        (context.rax & 0xffffffff) |
+                        ((context.rdx & 0xffffffff) << 32);
+
+                    if (reflected) {
+                        this->l2_msr_write_reflected[slot] += 1;
+                    }
+                    break;
+                }
+            }
+
+            return reflected;
+        };
+
+        if (!primary_set(primary_msr_bitmaps)) {
+            // No bitmap means every MSR access exits, which is what the
+            // guest hypervisor asked for.
+            return census(true);
+        }
+
+        auto index = static_cast<std::uint32_t>(context.rcx);
+        auto write = basic_reason::wrmsr == reason.basic();
+
+        std::size_t base{};
+        std::uint32_t bit{};
+
+        if (index < 0x2000) {
+            base = write ? 0x800 : 0x000;
+            bit = index;
+        } else if ((index >= 0xc0000000) && (index < 0xc0002000)) {
+            base = write ? 0xc00 : 0x400;
+            bit = index - 0xc0000000;
+        } else {
+            // Outside both ranges the bitmap is not consulted and the
+            // access exits unconditionally, so it is the guest
+            // hypervisor's. SDM 28.1.3.
+            return census(true);
+        }
+
+        std::uint8_t byte{};
+        auto read = read_guest_physical(
+            shadow.read(field::msr_bitmap) + base + (bit / 8),
+            std::span(reinterpret_cast<std::byte *>(&byte), 1));
+
+        return census(!read || (0 != (byte & (1u << (bit % 8)))));
+    }
+
+    default:
+        // Everything else is the guest hypervisor's, which is KVM's
+        // default in `nested_vmx_l1_wants_exit` and is the safe direction:
+        // the exits that reach here unconditionally - triple fault, task
+        // switch, CPUID, INVD, XSETBV, every VMX instruction, invalid
+        // guest state - are all ones it must see, and reflecting one it
+        // did not expect is an error it can report where absorbing one it
+        // was waiting for is a hang.
+        //
+        // The VMX instructions being reflected is what makes three levels
+        // of nesting work: a guest hypervisor emulating them for its own
+        // guest gets them, exactly as this VMM gets them from the level
+        // above.
+        return true;
+    }
+}
+
+void hypervisor::save_l2_state(std::size_t cpu)
+{
+    // The key to reading the guest's own kernel image from outside.
+    // See `l2_exit_cr3`; vmcs02 is current here, so this is Windows'
+    // page-table root and not the level above's.
+    //
+    // Behind `census_exits`: this is a diagnostic VMREAD on every exit,
+    // and the DPC watchdog is a real-cycles-at-DISPATCH wall, so a
+    // per-exit read that only feeds a member nobody reads on a fast
+    // boot is exactly the cost to shed. The KVM review measured the
+    // three hot-path samplers (this, `l2_vtpr_class_seen`,
+    // `int_window_vtpr`) as most of what turning instrumentation off
+    // already bought.
+    if constexpr (nested_vmx::census_exits) {
+        if (cpu < max_cpus) {
+            this->l2_exit_cr3[cpu] = this->vmcs.guest_cr3();
+        }
+    }
+
+    // Two histograms, sampled on every second-level exit, because the
+    // whole investigation so far has read one value at one instruction
+    // and generalised from it.
+    //
+    // `interrupt_request_vtpr` samples the task priority only when the
+    // guest writes the synthetic interrupt command, which is a request
+    // made *at* DISPATCH_LEVEL - so of course every sample said
+    // DISPATCH_LEVEL. It cannot say what the distribution is, and the
+    // distribution is the question: a guest that never returns to
+    // PASSIVE_LEVEL and a guest that returns constantly look identical
+    // through that keyhole.
+    //
+    // The privilege level is here for a blunter reason. The condition
+    // this VMM is being built to meet is a guest that reaches user
+    // mode, and nothing in the tree has ever counted whether it does.
+    // Ring 3 entries appearing at all is the difference between "slow"
+    // and "never got there".
+    if (nested_vmx::census_exits && cpu < max_cpus) {
+        auto selector = this->vmcs.guest_cs_selector();
+        this->l2_cpl_seen[cpu][selector & 3] += 1;
+
+        constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+        auto page = this->nested_virtual_apic_address[cpu];
+
+        if (0 != page) {
+            std::uint8_t vtpr{};
+            static_cast<void>(read_guest_physical(
+                page + virtual_task_priority_offset,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr))));
+            this->l2_vtpr_class_seen[cpu][vtpr >> 4] += 1;
+
+            // SDM 27.6.7 and 30.1.2: a TPR-below-threshold exit is
+            // owed when bits 3:0 of the threshold **exceed** bits 7:4
+            // of the virtual task priority - exceed, not reach, so a
+            // threshold of 2 against 0x20 is false. Here, because this
+            // is the one place the read is known to work.
+            //
+            // Often true with no reason-43 exit following means what
+            // reaches vmcs02 is not doing what the VMCS says, and the
+            // fault is here. Never true means the guest hypervisor
+            // only arms the threshold while its guest is already above
+            // it, the check is correctly silent, and delivery can only
+            // come from TPR virtualization during execution.
+            if (auto threshold = this->nested_tpr_threshold[cpu];
+                0 != threshold) {
+                if ((threshold & 0xf) > (std::uint64_t{vtpr} >> 4)) {
+                    this->l2_tpr_would_fire[cpu] =
+                        this->l2_tpr_would_fire[cpu] + 1;
+                } else {
+                    this->l2_tpr_armed_above[cpu] =
+                        this->l2_tpr_armed_above[cpu] + 1;
+                }
+            }
+        }
+    }
+
+    // Phase timing; see `phase_cycles`.
+    auto phase_start = arch::x86_64::rdtsc();
+    auto phase_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto phase_writes = arch::x86_64::vmx::vmcs_writes_taken;
+    auto phase_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][0] +=
+                arch::x86_64::rdtsc() - phase_start;
+            this->phase_calls[cpu][0] += 1;
+        }
+        note_reflect_phase(cpu, 0, phase_start, phase_reads, phase_writes);
+    });
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Everything unconditional first, in the same order it was loaded, so
+    // that the two lists cannot drift apart.
+    static_assert(std::size(guest_state_fields) <= 48,
+                  "guest_state_cache is too small for the field list");
+
+    {
+        std::size_t index{};
+        for (auto guest_field : guest_state_fields) {
+            // Deferred: the processor has already saved this into
+            // vmcs02 and nothing reads it from vmcs12 unless it asks.
+            // See `guest_state_deferred`.
+            if (nested_vmx::defer_guest_state &&
+                guest_state_deferrable(index)) {
+                // Counted, because "the skip never happened" and "the
+                // skip happened and cost nothing" are otherwise the
+                // same reading - and the second is what the numbers
+                // currently say, which cannot be right.
+                if (cpu < max_cpus) {
+                    this->guest_state_reads_skipped[cpu] += 1;
+                }
+                ++index;
+                continue;
+            }
+
+            if (cpu < max_cpus) {
+                this->guest_state_reads_done[cpu] += 1;
+            }
+
+            auto value = vmcs.read(guest_field);
+            shadow.write(guest_field, value);
+
+            // What vmcs02 actually holds, which is the only thing the
+            // elision in build_vmcs02 may compare against. See
+            // `guest_state_cache`.
+            if (cpu < max_cpus) {
+                this->guest_state_cache[cpu][index] = value;
+            }
+            ++index;
+        }
+        if (cpu < max_cpus) {
+            this->guest_state_fresh[cpu] = true;
+
+            // **Gated, so the switch is a control.** This block used to
+            // run whatever `ZPP_DEFER_GUEST_STATE` said, and only the
+            // read-skip above was conditional - so with the switch off,
+            // `guest_state_deferred` was still set, and
+            // `materialise_l2_guest_state` still borrowed vmcs02 and
+            // rewrote 44 of vmcs12's guest-state fields on every flush
+            // and every intercepted VMREAD.
+            //
+            // That made "it reproduces with the deferral off" mean far
+            // less than it appeared to: the one function that reads
+            // vmcs02 under a borrowed pointer and writes vmcs12 ran
+            // identically in both configurations. A switch that does not
+            // switch the mechanism off cannot exonerate it.
+            if constexpr (nested_vmx::defer_guest_state) {
+                this->guest_state_deferred[cpu] = true;
+                this->guest_state_deferred_vmcs[cpu] =
+                    this->guest_current_vmcs[cpu];
+                this->guest_state_dirty[cpu] = 0;
+                this->guest_state_defers[cpu] =
+                    this->guest_state_defers[cpu] + 1;
+            }
+        }
+    }
+
+    shadow.write(field::guest_rip, vmcs.guest_rip());
+    shadow.write(field::guest_rsp, vmcs.guest_rsp());
+    shadow.write(field::guest_rflags, vmcs.guest_rflags());
+    auto interruptibility12 =
+        vmcs.read(field::guest_interruptibility_state);
+
+    // The activity state is reconstructed rather than read back, for the
+    // states this VMM holds outside the VMCS.
+    //
+    // A second-level guest that ran is described by the field, and SDM
+    // 30.3 saves it there; one that never ran is described only by
+    // `l2_activity_state`, because `enter_or_park_l2` held it in root
+    // operation instead of entering. `running_l2` is exactly that
+    // distinction: it is set by the entry and cleared below.
+    //
+    // KVM composes the same field the same way and from the same kind of
+    // record - `sync_vmcs02_to_vmcs12` writes HLT or wait-for-SIPI out of
+    // `mp_state` and active otherwise
+    // (.references/kvm/nested.c:4539-4544) - never out of hardware. It
+    // can afford to: the only values it ever writes into the real field
+    // are active, at reset and to undo a HLT hardware entered on its own
+    // (.references/kvm/vmx.c:4922 and 1827, which are the only writes in
+    // the tree).
+    auto activity12 = this->running_l2[cpu]
+                          ? vmcs.read(field::guest_activity_state)
+                          : this->l2_activity_state[cpu];
+
+    // The two fields above are a pair, and until this they were composed
+    // as though they were not.
+    //
+    // SDM 29.3.1.5: "The activity-state field must indicate the active
+    // state if the interruptibility-state field indicates blocking by
+    // either MOV-SS or by STI (if either bit 0 or bit 1 in that field is
+    // 1)" (.references/sdm.txt:202605). It is a check on VM *entry*, and
+    // the entry that would fail it is the guest hypervisor's own next
+    // VMRESUME of the vmcs12 being written here - so the cost of getting
+    // it wrong lands one layer up, on an entry whose state the guest
+    // hypervisor did not compose and cannot diagnose. That is the worst
+    // shape a fault can have in this tree, and it is why this is a guard
+    // rather than an analysis.
+    //
+    // The two came from unrelated places. Interruptibility is always
+    // hardware's. Activity is hardware's only while `running_l2`, and
+    // `l2_activity_state`'s otherwise - and that one is written by
+    // `enter_or_park_l2` *before* it decides whether to enter, so a pass
+    // that records a state and then holds the processor in root operation
+    // leaves the two free to disagree. Hardware alone cannot produce the
+    // forbidden pair, since VM entry applied this same rule and a
+    // processor that is halted or waiting for a start-up IPI executes
+    // nothing that could raise a shadow.
+    //
+    // Resolved by clearing the blocking bits rather than by forcing the
+    // activity state to active, because only one of those is true: a
+    // processor in HLT or wait-for-SIPI has retired no instruction, so it
+    // has no shadow, and the stale value read out of vmcs02 is the half
+    // that is wrong. Forcing activity to active would instead tell the
+    // guest hypervisor its processor was running, which is the thing
+    // `enter_or_park_l2` exists to avoid saying.
+    constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+    // What vmcs02 holds, kept before the mask below changes the copy
+    // bound for vmcs12. See the `hot_state_saved` recording further
+    // down: its declared invariant is "what vmcs02's guest-state fields
+    // actually hold", and only the vmcs12 copy is masked here - vmcs02
+    // keeps the blocking bits.
+    auto interruptibility02 = interruptibility12;
+
+    if (arch::x86_64::vmx::activity_state::active != activity12) {
+        interruptibility12 &= ~blocking_by_sti_or_mov_ss;
+    }
+
+    shadow.write(field::guest_interruptibility_state, interruptibility12);
+    shadow.write(field::guest_activity_state, activity12);
+
+    // Recorded here, where vmcs02 is current and these five values came
+    // straight out of it, so `build_vmcs02` can skip writing back what
+    // vmcs02 already holds. See `hot_state_saved` for why comparing the
+    // value rather than tracking a writer is what makes this safe.
+    //
+    // The activity state is the one that is *composed* rather than read
+    // - `enter_or_park_l2` holds it outside the VMCS for a guest that
+    // never ran - so what is recorded is what was written to vmcs12,
+    // which is the value the comparison will be made against. Recording
+    // the composed value rather than a re-read keeps the two sides of
+    // the comparison the same quantity.
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][0] = shadow.read(field::guest_rip);
+        this->hot_state_saved[cpu][1] = shadow.read(field::guest_rsp);
+        this->hot_state_saved[cpu][2] = shadow.read(field::guest_rflags);
+        // **The one field here that is not what was written to
+        // vmcs12.** The mask above clears blocking-by-STI/MOV-SS from
+        // the vmcs12 copy and leaves vmcs02 holding them, so recording
+        // the masked value would break this array's invariant in the
+        // one way that matters: `build_vmcs02` compares vmcs12's masked
+        // value against the record, finds them equal, and **skips the
+        // write** - leaving vmcs02 with an interrupt shadow while
+        // `put_hot(4, ...)` forces its activity state to active. The
+        // second-level guest is then entered blocked for one
+        // instruction for no reason.
+        //
+        // Recording what vmcs02 holds makes the comparison differ, so
+        // the masked value is written and vmcs02 and vmcs12 agree.
+        // Reachable only from an exit in HLT or wait-for-SIPI, which is
+        // why it has not been seen - not because it cannot happen.
+        this->hot_state_saved[cpu][3] = interruptibility02;
+        this->hot_state_saved[cpu][4] = activity12;
+        this->hot_state_vmcs[cpu] = this->guest_current_vmcs[cpu];
+        this->hot_state_valid[cpu] = true;
+
+        // Slots 5 to 10 are filled below, as each field is read back.
+        // Started empty rather than carried, because a slot this call
+        // does not read is a slot whose previous record may describe a
+        // value the processor has since saved over - see
+        // `hot_state_slot_valid`.
+        this->hot_state_slot_valid[cpu] = 0x1f;
+    }
+
+    // The control registers, put back through the same masks they were
+    // built with. What the second-level guest owns is the real register;
+    // what its hypervisor owns is what it last wrote into vmcs12, and
+    // saving the real value over that would tell it its own masked bits
+    // had changed underneath it. KVM's `vmcs12_guest_cr0` and
+    // `vmcs12_guest_cr4` compose the same two halves.
+    auto cr0_mask12 = shadow.read(field::cr0_guest_host_mask);
+    auto cr4_mask12 = shadow.read(field::cr4_guest_host_mask);
+
+    // **Read into locals, and recorded, because this is the read-back
+    // that licenses eliding the write.** SDM 30.3.1 has every VM exit
+    // save CR0 and CR4 into the guest-state area unconditionally, so
+    // what vmcs02 holds now is the processor's value and not this VMM's
+    // - and it is the only quantity `build_vmcs02`'s elision may compare
+    // against. No extra VMREAD: both were already read here, once each,
+    // inside the two expressions below.
+    auto cr0_02 = vmcs.guest_cr0();
+    auto cr4_02 = vmcs.guest_cr4();
+
+    shadow.write(field::guest_cr0,
+                 (cr0_02 & ~cr0_mask12) |
+                     (shadow.read(field::guest_cr0) & cr0_mask12));
+
+    // VMXE is removed on the way back for the same reason it was forced in
+    // on the way out: the bit is this VMM's, and a guest hypervisor that
+    // never set it in its own guest's CR4 must not find it there.
+    shadow.write(field::guest_cr4,
+                 ((cr4_02 & ~cr4_vmxe) & ~cr4_mask12) |
+                     (shadow.read(field::guest_cr4) & cr4_mask12));
+
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][5] = cr0_02;
+        this->hot_state_saved[cpu][6] = cr4_02;
+        this->hot_state_slot_valid[cpu] |= (1ull << 5) | (1ull << 6);
+    }
+
+    // "IA-32e mode guest" is a guest state bit wearing a control's
+    // clothing, and SDM 30.3 has a VM exit update it. KVM says the same
+    // in `sync_vmcs02_to_vmcs12`.
+    //
+    // **Read once into a local, because the census below wanted the
+    // same field.** It read it a second time, unconditionally, on every
+    // reflection - and a VMREAD is an exit to the layer below at 1.4-1.8
+    // microseconds here. Nothing between the two writes vmcs02's entry
+    // controls: `shadow.write` is a store into the guest's own vmcs12
+    // region in module memory, not a VMWRITE, so the field the
+    // processor holds is untouched between them.
+    auto entry_controls02 = vmcs.vm_entry_controls();
+
+    shadow.write(
+        field::vm_entry_controls,
+        (shadow.read(field::vm_entry_controls) & ~entry_ia32e_mode_guest) |
+            (entry_controls02 & entry_ia32e_mode_guest));
+
+    // Whether bit 9 is *ever* seen set on this processor. The failing
+    // boot ends with it clear in both VMCSes, and the store above is the
+    // only thing that can ever set it in vmcs12 - so "who cleared it"
+    // and "it was never set" are different bugs with the same symptom,
+    // and one sample at the failure cannot tell them apart. Once per
+    // processor per value, so a boot reports at most six lines.
+    if (cpu < max_cpus) {
+        auto set = 0 != (entry_controls02 & entry_ia32e_mode_guest);
+        auto & reported =
+            set ? this->ia32e_set_seen[cpu] : this->ia32e_clear_seen[cpu];
+
+        if (!reported) {
+            reported = true;
+            log("cpu {} second level ia32e bit first seen {} at l2 entry "
+                "{}, guest cr0 {} rip {}",
+                cpu,
+                static_cast<std::uint64_t>(set),
+                this->l2_entries[cpu],
+                vmcs.guest_cr0(),
+                vmcs.guest_rip());
+        }
+    }
+
+    // The three saved conditionally, on the guest hypervisor's own exit
+    // controls. SDM 30.4, "Saving MSRs", and SDM 30.3 for DR7.
+    auto exit12 = shadow.read(field::vm_exit_controls);
+
+    // **Each of the three records its slot only where it read the
+    // field.** The gate here is vmcs12's exit controls; the gate on the
+    // processor's own save into vmcs02 is *vmcs02's* (SDM 30.3.1), and
+    // `build_vmcs02` composes those from vmcs01 rather than from vmcs12
+    // - so the two can disagree in either direction, and a record made
+    // from a read that did not happen would describe a field hardware
+    // may have replaced. See `hot_state_slot_valid`: not recording is
+    // the safe direction, and costs only the elision.
+    if (0 != (exit12 & exit_save_debug_controls)) {
+        auto dr7_02 = vmcs.guest_dr7();
+
+        shadow.write(field::guest_dr7, dr7_02);
+        shadow.write(field::guest_ia32_debugctl,
+                     vmcs.read(field::guest_ia32_debugctl));
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][7] = dr7_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 7;
+        }
+    }
+
+    if (0 != (exit12 & exit_save_ia32_pat)) {
+        auto pat_02 = vmcs.read(field::guest_ia32_pat);
+
+        shadow.write(field::guest_ia32_pat, pat_02);
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][8] = pat_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 8;
+        }
+    }
+
+    if (0 != (exit12 & exit_save_ia32_efer)) {
+        auto efer_02 = vmcs.read(field::guest_ia32_efer);
+
+        shadow.write(field::guest_ia32_efer, efer_02);
+
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][9] = efer_02;
+            this->hot_state_slot_valid[cpu] |= 1ull << 9;
+        }
+    }
+
+    // The other half of carrying it in. Unconditional for the same
+    // reason the load above is: there is no "save IA32_BNDCFGS" exit
+    // control to test - the processor always writes the field on exit -
+    // so a guest hypervisor reading it back expects what its guest left
+    // there, and anything else silently loses the guest's bounds
+    // configuration across every exit.
+    //
+    // Which is also why its slot needs no gate: SDM 30.3.1 saves it on
+    // any processor offering either BNDCFGS control, and this read is
+    // taken on every reflection, so the record is always the value
+    // vmcs02 holds.
+    auto bndcfgs_02 = vmcs.read(field::guest_ia32_bndcfgs);
+
+    shadow.write(field::guest_ia32_bndcfgs, bndcfgs_02);
+
+    if (cpu < max_cpus) {
+        this->hot_state_saved[cpu][10] = bndcfgs_02;
+        this->hot_state_slot_valid[cpu] |= 1ull << 10;
+    }
+}
+
+void hypervisor::host_write(std::size_t cpu,
+                            field which,
+                            std::uint64_t value)
+{
+    // Recorded in call order, which is what makes the index stable: the
+    // sequence of writes below is fixed by the code and not by the
+    // guest, so slot N is the same field on every call and the audit
+    // above can compare across reflections without carrying a lookup.
+    if (cpu >= max_cpus) {
+        this->vmcs.write(which, value);
+        return;
+    }
+
+    auto index = this->l1_host_written[cpu];
+    this->l1_host_written[cpu] = index + 1;
+
+    if (index >= l1_host_field_count) {
+        this->vmcs.write(which, value);
+        return;
+    }
+
+    // Three conditions, and none of them is optional.
+    //
+    // The same field in the same slot, because the index is call order
+    // and a changed code path would otherwise compare against another
+    // field's value. The same value, because vmcs12's host state is the
+    // guest hypervisor's to change and a new value is always owed. And
+    // the audit's verdict, because "the processor left our write alone"
+    // is the only thing that makes not repeating it a no-op rather than
+    // a skipped write.
+    //
+    // SDM 30.3.2 is why the first two are not enough on their own: every
+    // VM exit saves the guest hypervisor's own state over these fields,
+    // so a cache of what was last written describes something the
+    // processor may have overwritten. What the audit adds is the
+    // measurement that, for these particular fields, what it writes back
+    // is the identical value. See `l1_host_samples`.
+    if ((this->l1_host_field[cpu][index] ==
+         static_cast<std::uint64_t>(which)) &&
+        (this->l1_host_value[cpu][index] == value) &&
+        host_field_elidable(cpu, index)) {
+        this->l1_host_elided[cpu] = this->l1_host_elided[cpu] + 1;
+        return;
+    }
+
+    this->l1_host_field[cpu][index] = static_cast<std::uint64_t>(which);
+    this->l1_host_value[cpu][index] = value;
+
+    this->vmcs.write(which, value);
+}
+
+bool hypervisor::host_field_elidable(std::size_t cpu,
+                                     std::size_t index) const
+{
+    // Checked often enough, and never once wrong. Both halves matter:
+    // a slot nobody has audited yet is not stable, it is unmeasured.
+    return (this->l1_host_samples[cpu][index] >= l1_host_stable_after) &&
+           (0 == this->l1_host_changed[cpu][index]);
+}
+
+void hypervisor::load_l1_host_state(std::size_t cpu)
+{
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // One field of the previous call's table, checked against what
+    // vmcs01 holds now, before anything below overwrites it.
+    //
+    // This function is 14.1% of the wall clock in fifty-two VMWRITEs
+    // that almost all restate a constant or an unchanged vmcs12 host
+    // field, and it cannot be elided against a cache of what was last
+    // written: SDM 30.3.2 has every VM exit save the guest hypervisor's
+    // own segment bases, limits and access rights over them, so the
+    // cache describes something the processor has since overwritten.
+    // That is exactly what killed `ZPP_LAZY_GUEST_STATE` one VMCS over.
+    //
+    // What *would* justify eliding a particular field is knowing the
+    // processor never actually changes it - and that is a measurement,
+    // not an assumption about what Hyper-V's exit path does to its own
+    // registers. This tree has been wrong three times running about what
+    // may be assumed of that guest, so it is measured instead.
+    //
+    // One field per reflection, round robin, rather than the whole table
+    // every few thousand. It costs a single VMREAD on a path that makes
+    // a hundred - about 1% - and it samples each field at ten thousand
+    // different moments over a boot instead of at a handful, which is
+    // the difference between "stable when I looked" and "stable".
+    // The audit is a divergence check on the 37k-cycle host-load phase:
+    // `l1_host_audit_batch` VMREADs a call at the maintenance rate, all
+    // 52 during the 4,096-call warm-up.
+    //
+    // **It used to sit behind `census_exits`, on the reasoning that it
+    // is diagnostic and that "the host elision it validates
+    // (`host_field_elidable`) is unaffected and stays live". That
+    // reasoning was wrong, and the cost of it was the whole elision.**
+    // `host_field_elidable` demands `l1_host_stable_after` samples in a
+    // slot, and this loop is the *only* thing that ever takes a sample -
+    // so behind that gate the evidence is never gathered, every slot
+    // stays unmeasured, and the elision below can never fire. It is not
+    // a diagnostic that also happens to feed the elision; it is the
+    // elision's evidence, with a diagnostic attached.
+    //
+    // Measured on the rig with `ZPP_CENSUS_EXITS=OFF`, which is how the
+    // guest is built now that the census's three VMREADs an exit were
+    // found to cost the boot: `l1_host_audits` **0**, `l1_host_elided`
+    // **0**, every `l1_host_samples` slot **0**, against
+    // `l1_host_written` **53,706,900**. Not one write elided in a boot,
+    // where the phase this exists for had measured 80.7%.
+    //
+    // What that was worth, from the same run: a reflected `wrmsr` cost
+    // 85.6 VMCS accesses, 54 of them writes, and this function is 26% of
+    // the wall clock. The audit's price at the maintenance rate is
+    // `l1_host_audit_batch` reads a call - four, against the forty-odd
+    // writes a warmed-up slot table skips. Turning the census off must
+    // not turn the elision off with it, so the gate is on the processor
+    // index alone and the sampling runs unconditionally.
+    if (cpu < max_cpus) {
+        if (auto recorded = this->l1_host_count[cpu]; 0 != recorded) {
+            // A batch rather than a single slot, because the elision
+            // below is live between one check of a slot and the next.
+            // See `l1_host_audit_batch`.
+            //
+            // **Swept in full until every slot is measured, then at the
+            // maintenance rate.** The two constants answer different
+            // questions and only one of them is about safety:
+            // `l1_host_stable_after` is how much evidence is demanded
+            // before a slot may be elided - raised to 4096 after a real
+            // divergence, and untouched here. The batch is only how fast
+            // that evidence is gathered, and it has no safety content.
+            //
+            // At four a call over 52 fields a slot was sampled once every
+            // thirteen calls and needed 53,248 calls - 52 seconds at the
+            // clean phase's rate, against a guest that stalls at 53. So
+            // the elision reached its ceiling exactly as the phase it
+            // exists for ended: measured 1.9% of writes elided before the
+            // transition against 80.7% after it. A full sweep needs 4,096
+            // calls instead, about four seconds.
+            //
+            // The warm-up costs 48 extra reads a call for those 4,096
+            // calls, roughly 0.3 seconds of work once. It is not left on:
+            // this audit is also the *ongoing* divergence check, so a
+            // permanent full sweep would cost more reads for ever than
+            // the writes it lets us skip - which is why the rate drops
+            // back rather than the constant simply being raised.
+            auto batch = (this->l1_host_stable_count[cpu] >= recorded)
+                             ? l1_host_audit_batch
+                             : recorded;
+
+            for (std::size_t taken{}; taken < batch; ++taken) {
+                auto index = this->l1_host_audits[cpu] % recorded;
+                this->l1_host_audits[cpu] = this->l1_host_audits[cpu] + 1;
+
+                auto now = vmcs.read(
+                    static_cast<field>(this->l1_host_field[cpu][index]));
+
+                if (now != this->l1_host_value[cpu][index]) {
+                    // Loudly, and once: a slot that diverges after
+                    // being elided means the reasoning that licensed
+                    // the elision was wrong, and that is worth a line
+                    // in the log rather than a counter nobody reads.
+                    if ((0 == this->l1_host_changed[cpu][index]) &&
+                        (this->l1_host_samples[cpu][index] >=
+                         l1_host_stable_after)) {
+                        this->l1_host_diverged[cpu] =
+                            this->l1_host_diverged[cpu] + 1;
+
+                        // Put it back, here, before the guest
+                        // hypervisor is resumed.
+                        //
+                        // No threshold makes the elision safe on its
+                        // own - a rare enough event beats any of them,
+                        // and one did on the first boot with the
+                        // threshold at 64. What makes it safe is that
+                        // the check which notices also repairs: vmcs01
+                        // is current, nothing has resumed yet, and
+                        // writing the value back costs one VMWRITE on
+                        // the only path where it was ever owed.
+                        //
+                        // The slot stops being elidable for ever
+                        // immediately below, so this fires at most once
+                        // per slot per boot.
+                        vmcs.write(
+                            static_cast<field>(
+                                this->l1_host_field[cpu][index]),
+                            this->l1_host_value[cpu][index]);
+
+                        log("cpu {} host field {} diverged after being "
+                            "elided: wrote {}, found {} - repaired, "
+                            "slot retired",
+                            cpu,
+                            this->l1_host_field[cpu][index],
+                            this->l1_host_value[cpu][index],
+                            now);
+                    }
+
+                    this->l1_host_changed[cpu][index] += 1;
+                }
+
+                this->l1_host_samples[cpu][index] += 1;
+
+                // Counted on the crossing, so the sweep ends exactly once
+                // every slot is measured.
+                if (l1_host_stable_after ==
+                    this->l1_host_samples[cpu][index]) {
+                    this->l1_host_stable_count[cpu] =
+                        this->l1_host_stable_count[cpu] + 1;
+                }
+            }
+        }
+
+        this->l1_host_written[cpu] = 0;
+    }
+
+    auto exit12 = shadow.read(field::vm_exit_controls);
+
+    auto host_cr0_12 = shadow.read(field::host_cr0);
+    auto host_cr4_12 = shadow.read(field::host_cr4);
+
+    host_write(cpu, field::guest_cr0, host_cr0_12);
+    // The control for `l2_exit_cr3`. See `l1_own_cr3`: one value decides
+    // whether the two-processor crash is an empty second-level root or
+    // the level above's own root read from the wrong place.
+    auto host_cr3_12 = shadow.read(field::host_cr3);
+
+    if (cpu < max_cpus) {
+        this->l1_own_cr3[cpu] = host_cr3_12;
+    }
+
+    host_write(cpu, field::guest_cr3, host_cr3_12);
+    host_write(cpu, field::guest_cr4, host_cr4_12 | cr4_vmxe);
+
+    // The read shadows have to follow, or the guest hypervisor reads back
+    // the state of its own guest. CR4's is the one that matters: VMXE is
+    // in this VMM's mask and forced into the register above, so without
+    // this the guest hypervisor would read a CR4 it never wrote.
+    host_write(cpu, field::cr0_read_shadow, host_cr0_12);
+    host_write(cpu, field::cr4_read_shadow, host_cr4_12);
+
+    host_write(cpu, field::guest_rip, shadow.read(field::host_rip));
+    host_write(cpu, field::guest_rsp, shadow.read(field::host_rsp));
+
+    // SDM 30.5.3 (.references/sdm.txt:204918): "RFLAGS is cleared,
+    // except bit 1, which is always set".
+    constexpr std::uint64_t rflags_reserved_one = 1ull << 1;
+    host_write(cpu, field::guest_rflags, rflags_reserved_one);
+
+    // SDM 30.5.5 (.references/sdm.txt:204944): "There is no blocking by
+    // STI or by MOV SS after a VM exit", and the activity state is
+    // active. A hypervisor arriving at its own exit handler is running.
+    host_write(cpu, field::guest_interruptibility_state, 0);
+    host_write(cpu,
+               field::guest_activity_state,
+               arch::x86_64::vmx::activity_state::active);
+    host_write(cpu, field::guest_pending_debug_exceptions, 0);
+
+    // SDM 30.5.2, "Loading Host Segment and Descriptor-Table Registers"
+    // (.references/sdm.txt:204861).
+    // The selectors come from the host-state area; everything else about
+    // each segment is fixed by the architecture rather than stored, which
+    // is why these are constants rather than copies.
+    //
+    // Access-rights encoding, SDM Table 25-2: bits 3:0 type, bit 4 S, bits
+    // 6:5 DPL, bit 7 P, bit 13 L, bit 14 D/B, bit 15 G, bit 16 unusable.
+    constexpr std::uint64_t code_access_long = 0xa09b;
+    constexpr std::uint64_t code_access_legacy = 0xc09b;
+    constexpr std::uint64_t data_access = 0xc093;
+    constexpr std::uint64_t task_access = 0x008b;
+    constexpr std::uint64_t unusable_access = 0x10000;
+    constexpr std::uint64_t flat_limit = 0xffffffff;
+    constexpr std::uint64_t task_limit = 0x67;
+    constexpr std::uint64_t descriptor_table_limit = 0xffff;
+
+    auto in_ia32e_mode = 0 != (exit12 & exit_host_address_space_size);
+
+    host_write(cpu,
+               field::guest_cs_selector,
+               shadow.read(field::host_cs_selector));
+    host_write(cpu, field::guest_cs_base, 0);
+    host_write(cpu, field::guest_cs_limit, flat_limit);
+    host_write(cpu,
+               field::guest_cs_access_rights,
+               in_ia32e_mode ? code_access_long : code_access_legacy);
+
+    // The five data segments, all with the same fixed shape. FS and GS
+    // are the two exceptions and only in the base, which the host-state
+    // area has to carry because a long-mode descriptor cannot.
+    struct data_segment
+    {
+        field selector;
+        field vmcs_selector;
+        field vmcs_base;
+        field vmcs_limit;
+        field vmcs_access;
+        std::uint64_t base;
+    };
+
+    const data_segment data_segments[] = {
+        {field::host_ss_selector,
+         field::guest_ss_selector,
+         field::guest_ss_base,
+         field::guest_ss_limit,
+         field::guest_ss_access_rights,
+         0},
+        {field::host_ds_selector,
+         field::guest_ds_selector,
+         field::guest_ds_base,
+         field::guest_ds_limit,
+         field::guest_ds_access_rights,
+         0},
+        {field::host_es_selector,
+         field::guest_es_selector,
+         field::guest_es_base,
+         field::guest_es_limit,
+         field::guest_es_access_rights,
+         0},
+        {field::host_fs_selector,
+         field::guest_fs_selector,
+         field::guest_fs_base,
+         field::guest_fs_limit,
+         field::guest_fs_access_rights,
+         shadow.read(field::host_fs_base)},
+        {field::host_gs_selector,
+         field::guest_gs_selector,
+         field::guest_gs_base,
+         field::guest_gs_limit,
+         field::guest_gs_access_rights,
+         shadow.read(field::host_gs_base)},
+    };
+
+    for (const auto & segment : data_segments) {
+        host_write(
+            cpu, segment.vmcs_selector, shadow.read(segment.selector));
+        host_write(cpu, segment.vmcs_base, segment.base);
+        host_write(cpu, segment.vmcs_limit, flat_limit);
+        host_write(cpu, segment.vmcs_access, data_access);
+    }
+
+    host_write(cpu,
+               field::guest_tr_selector,
+               shadow.read(field::host_tr_selector));
+    host_write(
+        cpu, field::guest_tr_base, shadow.read(field::host_tr_base));
+    host_write(cpu, field::guest_tr_limit, task_limit);
+    host_write(cpu, field::guest_tr_access_rights, task_access);
+
+    // LDTR is unusable after a VM exit, whatever it was.
+    host_write(cpu, field::guest_ldtr_selector, 0);
+    host_write(cpu, field::guest_ldtr_base, 0);
+    host_write(cpu, field::guest_ldtr_limit, 0);
+    host_write(cpu, field::guest_ldtr_access_rights, unusable_access);
+
+    host_write(
+        cpu, field::guest_gdtr_base, shadow.read(field::host_gdtr_base));
+    host_write(cpu, field::guest_gdtr_limit, descriptor_table_limit);
+    host_write(
+        cpu, field::guest_idtr_base, shadow.read(field::host_idtr_base));
+    host_write(cpu, field::guest_idtr_limit, descriptor_table_limit);
+
+    host_write(cpu,
+               field::guest_ia32_sysenter_cs,
+               shadow.read(field::host_ia32_sysenter_cs));
+    host_write(cpu,
+               field::guest_ia32_sysenter_esp,
+               shadow.read(field::host_ia32_sysenter_esp));
+    host_write(cpu,
+               field::guest_ia32_sysenter_eip,
+               shadow.read(field::host_ia32_sysenter_eip));
+
+    // SDM 30.5.1 (.references/sdm.txt:204807): "DR7 is set to 400H", and
+    // IA32_DEBUGCTL to 0 two lines below it.
+    constexpr std::uint64_t dr7_after_exit = 0x400;
+    host_write(cpu, field::guest_dr7, dr7_after_exit);
+    host_write(cpu, field::guest_ia32_debugctl, 0);
+
+    // IA32_PAT and IA32_EFER are written to the *registers* rather than to
+    // the guest-state area, and that is not a shortcut - it is the only
+    // thing that works here. This VMM's own VM-entry controls do not load
+    // either, so a value put in the field would never be read; the
+    // architecture's "load IA32_PAT on VM exit" means the register, and
+    // the register is what the guest hypervisor will be running with.
+    //
+    // The alternative - adding the two load controls to this VMM's own
+    // VMCS - was rejected because it changes the VMCS that runs the
+    // ordinary guest, which is the code path a working Windows boot
+    // depends on, for the sake of a path that only exists with nested VMX
+    // switched on.
+    // The table is complete from here, so a reader that sees a non-zero
+    // count sees a table whose every entry was filled by this call.
+    if (cpu < max_cpus) {
+        this->l1_host_count[cpu] = this->l1_host_written[cpu];
+    }
+
+    // **Both values are the guest hypervisor's, and both go to a real
+    // MSR, so both are checked before they are written.**
+    //
+    // A reserved memory type in IA32_PAT or a bit outside the defined
+    // set in IA32_EFER is `#GP` on any processor. Taken *here* it is
+    // `#GP` in root operation, where `on_host_exception` has no recovery
+    // point once the guest is running - so a malformed vmcs12 field
+    // would stop the processor silently, with no exit record and no log
+    // line, on the hottest path this engine has. That is the same shape
+    // the XSETBV handler was just fixed for, one VMCS over.
+    //
+    // `msr_area_value_writable` is the check the MSR-area loader in this
+    // same file already applies to exactly these two indices, so this is
+    // reusing a decision rather than inventing one. Refusing leaves the
+    // register as it was: wrong for a guest hypervisor that asked for
+    // something impossible, against a dead machine for the same input.
+    // Counted, because a silent refusal is how the next investigation
+    // gets misled.
+    auto write_host_msr = [&](std::uint32_t index, std::uint64_t value) {
+        if (!msr_area_value_writable(index, value)) {
+            this->refused_host_msr_count =
+                this->refused_host_msr_count + 1;
+            this->refused_host_msr_index = index;
+            this->refused_host_msr_value = value;
+            return;
+        }
+
+        arch::x86_64::wrmsr(index, value);
+    };
+
+    if (0 != (exit12 & exit_load_ia32_pat)) {
+        write_host_msr(arch::x86_64::msr::ia32_pat,
+                       shadow.read(field::host_ia32_pat));
+    }
+
+    if (0 != (exit12 & exit_load_ia32_efer)) {
+        write_host_msr(arch::x86_64::msr::ia32_extended_feature_enable,
+                       shadow.read(field::host_ia32_efer));
+    } else {
+        // LMA and LME are not part of that control's remit. SDM 30.5.1,
+        // ".references/sdm.txt:204822": "The LMA and LME bits in the
+        // IA32_EFER MSR are each loaded with the setting of the 'host
+        // address-space size' VM-exit control" - unconditionally, on
+        // every VM exit, whether or not the whole MSR is being loaded.
+        //
+        // Today this is masked by an accident: vmcs02 inherits this
+        // VMM's own exit controls, which do carry host address-space
+        // size, so the hardware exit has already put both bits back to
+        // one before this runs. It breaks for a 32-bit guest hypervisor
+        // - one whose vmcs12 clears the control - which would be
+        // resumed in long mode with a host state that says otherwise.
+        //
+        // KVM writes the same three ways round in load_vmcs12_host_state:
+        // the load control if set, otherwise LMA|LME from the
+        // host-address-space-size bit, otherwise cleared.
+        constexpr std::uint64_t efer_lme = 1ull << 8;
+        constexpr std::uint64_t efer_lma = 1ull << 10;
+
+        auto efer = arch::x86_64::rdmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable);
+
+        if (0 != (exit12 & exit_host_address_space_size)) {
+            efer |= (efer_lme | efer_lma);
+        } else {
+            efer &= ~(efer_lme | efer_lma);
+        }
+
+        arch::x86_64::wrmsr(
+            arch::x86_64::msr::ia32_extended_feature_enable, efer);
+    }
+}
+
+hypervisor::l2_entry_outcome hypervisor::enter_or_park_l2(std::size_t cpu)
+{
+    // Phase timing; see `phase_cycles`. Everything between
+    // `build_vmcs02` returning and the second-level guest running is
+    // here and in `record_l2_entry_event` below it, and neither had ever
+    // been timed - "after the build" was simply not in the table.
+    auto enter_start = arch::x86_64::rdtsc();
+    auto enter_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][35] +=
+                arch::x86_64::rdtsc() - enter_start;
+            this->phase_calls[cpu][35] += 1;
+        }
+    });
+
+    namespace activity = arch::x86_64::vmx::activity_state;
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // SDM 29.8 gives 33 for "VM-entry failure due to invalid guest state"
+    // and sets bit 31 of the exit reason to say a VM entry failed. The
+    // qualification is zero: 29.8 lists the four non-zero values and none
+    // of them is the activity state, so "In most cases, the exit
+    // qualification is cleared to 0" applies. KVM writes the same pair -
+    // EXIT_REASON_INVALID_STATE with ENTRY_FAIL_DEFAULT, which is 0
+    // (.references/kvm/nested.c:3568-3572).
+    constexpr std::uint64_t entry_failure = 1ull << 31;
+    auto refuse = [&](const char * why, std::uint64_t what) {
+        log("cpu {} second level entry refused: {} ({})", cpu, why, what);
+        reflect_l2_exit(cpu,
+                        entry_failure |
+                            static_cast<std::uint64_t>(
+                                basic_reason::entry_invalid_guest_state),
+                        0);
+
+        // After the reflection, never before it: save_l2_state writes
+        // this into vmcs12, and the record has to describe what the
+        // processor is doing *now*, which is running the guest
+        // hypervisor's own code.
+        this->l2_activity_state[cpu] = activity::active;
+        return l2_entry_outcome::reflected;
+    };
+
+    auto activity12 = shadow.read(field::guest_activity_state);
+
+    // The first check of SDM 29.3.1.5, "Checks on Guest Non-Register
+    // State": the field must name an activity state the implementation
+    // supports, and IA32_VMX_MISC is where software is told which those
+    // are. This VMM reports HLT and wait-for-SIPI and not shutdown - see
+    // nested_vmx_capability_msr - so those three plus active are the
+    // whole of what may be accepted. KVM's set is identical, in
+    // `nested_check_guest_non_reg_state`
+    // (.references/kvm/nested.c:3117-3119).
+    if ((activity::active != activity12) &&
+        (activity::hlt != activity12) &&
+        (activity::wait_for_start_up_ipi != activity12)) {
+        return refuse("activity state not supported", activity12);
+    }
+
+    this->l2_activity_state[cpu] = activity12;
+
+    if (activity::wait_for_start_up_ipi != activity12) {
+        // Active and HLT are entered in hardware, and HLT deliberately so.
+        //
+        // Forcing HLT to active would be worse than wrong, it would be
+        // loud: a halted second-level guest would start executing
+        // instructions at whatever RIP its hypervisor left in vmcs12.
+        // KVM can force it because it has somewhere to put the vCPU -
+        // `kvm_emulate_halt_noskip` blocks the thread until an event
+        // arrives (.references/kvm/nested.c:3766-3779). This VMM has no
+        // scheduler and nothing to block on: the event that ends a halt
+        // is a physical interrupt or NMI, its host runs with interrupts
+        // disabled and sets no "external-interrupt exiting", so root
+        // operation can neither observe one nor deliver it.
+        //
+        // Nothing is lost by letting the processor sit there, and SDM
+        // 29.7.2's own list is why: the active state and the HLT state
+        // block exactly the same events - start-up IPIs and nothing else.
+        // A processor in HLT still takes external interrupts and NMIs,
+        // which is precisely how its hypervisor gets it back. That is not
+        // true of the other two inactive states, which is why only they
+        // are refused or held.
+        vmcs.write(field::guest_activity_state, activity12);
+
+        // **And the record of what vmcs02 holds, or the next elision
+        // compares against a value nothing ever wrote.**
+        //
+        // `hot_state_saved` is documented as "what vmcs02's guest-state
+        // fields actually hold", and `build_vmcs02`'s `put_hot(4, ...)`
+        // skips its write whenever slot 4 already reads `active`. That
+        // put `active` into the record a few hundred instructions ago;
+        // the line above then wrote `hlt` into the field and left the
+        // record still saying `active`. The two outcomes that follow a
+        // build without reaching this line - a refusal and a
+        // wait-for-SIPI park - leave that disagreement standing.
+        //
+        // Benign today only because this same line rewrites the field on
+        // every entered path, so an elided write is always followed by a
+        // correct one. That is a property of the call order rather than
+        // of the record, and the record is what the next reader trusts.
+        // The identical break for slot 3 is argued at length in
+        // `save_l2_state`, where it was reachable and wrong.
+        if (cpu < max_cpus) {
+            this->hot_state_saved[cpu][4] = activity12;
+        }
+
+        record_l2_entry_event(cpu);
+        return l2_entry_outcome::entered;
+    }
+
+    // Wait-for-SIPI, which is the one this VMM must not hand to hardware.
+    //
+    // SDM 29.7.2: it "blocks external interrupts, non-maskable interrupts
+    // (NMIs), INIT signals, and system-management interrupts (SMIs). Such
+    // events do not cause VM exits if they arrive while a logical
+    // processor is in the wait-for-SIPI state and in VMX non-root
+    // operation" (.references/sdm.txt:203152). Only a start-up IPI ends
+    // it. So a processor entered in it is gone as far as this VMM is
+    // concerned - and unlike bare metal there is no guarantee it will
+    // ever be sent one, because this VMM intercepts the guest's write to
+    // the interrupt command register and may answer it itself.
+    //
+    // Two checks first, and they exist *because* the state is not handed
+    // to hardware: the processor would have made them, and forcing the
+    // field means it no longer does. Both are SDM 29.3.1.5 - "The
+    // activity-state field must indicate the active state if the
+    // interruptibility-state field indicates blocking by either MOV-SS or
+    // by STI", and, for an entry that is injecting, "Wait-for-SIPI. No
+    // events are allowed."
+    constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+    if (0 != (shadow.read(field::guest_interruptibility_state) &
+              blocking_by_sti_or_mov_ss)) {
+        return refuse("wait-for-sipi with blocking by sti or mov ss",
+                      shadow.read(field::guest_interruptibility_state));
+    }
+
+    if (0 != (shadow.read(field::vm_entry_interruption_information_field) &
+              interruption_valid)) {
+        return refuse(
+            "wait-for-sipi with an event to inject",
+            shadow.read(field::vm_entry_interruption_information_field));
+    }
+
+    // Waited for in root operation instead, on the hand-off this VMM
+    // already uses for its own processors coming out of an INIT. Reusing
+    // it is the point: a sender that sees a target listening there
+    // swallows the guest's write and hands the vector over, which is the
+    // only delivery that works while the target is in root mode.
+    if (auto vector = wait_for_l2_start_up_ipi(cpu)) {
+        // What the hardware would have given the guest hypervisor: SDM
+        // 28.2 makes a start-up IPI arriving in the wait-for-SIPI state a
+        // VM exit, with the vector in the exit qualification. KVM
+        // synthesises the identical exit from its own record of the same
+        // state - `vmx_check_nested_events` reflects
+        // EXIT_REASON_SIPI_SIGNAL with `apic->sipi_vector & 0xFF` when
+        // mp_state is KVM_MP_STATE_INIT_RECEIVED
+        // (.references/kvm/nested.c:4240-4243).
+        //
+        // vmcs12's activity state stays at wait-for-SIPI across it, which
+        // save_l2_state does out of l2_activity_state above - and is what
+        // KVM saves too, since the exit does not clear mp_state.
+        log("cpu {} second level start-up ipi, vector {}", cpu, *vector);
+
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::start_up_ipi),
+            *vector);
+
+        // And the record goes back to describing this processor rather
+        // than the guest it was holding, again after the reflection so
+        // that vmcs12 keeps the wait-for-SIPI above. It is read by
+        // start_up_processor, which must not hand a second vector to a
+        // mailbox nobody is spinning on any more - the processor is
+        // running the guest hypervisor's exit handler now.
+        this->l2_activity_state[cpu] = activity::active;
+        return l2_entry_outcome::reflected;
+    }
+
+    // Nothing yet. Back to the guest hypervisor with its own VMCS current
+    // and RIP still on the VMLAUNCH, so it executes it again and this
+    // decision is taken afresh.
+    //
+    // Not a spin that goes nowhere. It is what keeps this processor
+    // reachable: every pass runs the exit handler, so the diagnostic
+    // channel is fed, the poll is re-armed and the log records that this
+    // processor is parked rather than lost. The alternative - waiting
+    // here for ever - is the same darkness the hardware state produces,
+    // only in root mode.
+    if (point_at_vmcs(cpu, false)) {
+        // Same reasoning as reflect_l2_exit: without its own VMCS there is
+        // no guest hypervisor left to go back to.
+        __builtin_trap();
+    }
+
+    // Counted rather than logged. A log line per pass would be thousands
+    // a second and would evict everything else in the ring; a count says
+    // the same thing and says it about every pass. See the declaration
+    // for what reading it settles.
+    this->l2_start_up_waits[cpu] = this->l2_start_up_waits[cpu] + 1;
+
+    // Every 64th, so the rate is readable without a line per pass. A
+    // count rising at about six a second is the throttle described in
+    // `nested_vmx::l2_startup_spin`; a still count means this park is
+    // not where the processor is spending its time.
+    if (0 == (this->l2_start_up_waits[cpu] % 64)) {
+        log("cpu {} second-level start-up waits {}",
+            cpu,
+            this->l2_start_up_waits[cpu]);
+    }
+
+    return l2_entry_outcome::retry;
+}
+
+void hypervisor::reflect_l2_exit(std::size_t cpu,
+                                 arch::x86_64::vmx::exit_reason reason,
+                                 std::uint64_t qualification)
+{
+    // Phase timing; see `phase_cycles`.
+    auto reflect_start = arch::x86_64::rdtsc();
+    auto reflect_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto reflect_writes = arch::x86_64::vmx::vmcs_writes_taken;
+    auto reflect_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][1] +=
+                arch::x86_64::rdtsc() - reflect_start;
+            this->phase_calls[cpu][1] += 1;
+        }
+        note_reflect_phase(
+            cpu, 1, reflect_start, reflect_reads, reflect_writes);
+    });
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // The four brackets below are this function's residue, named.
+    //
+    // Its three children - `save_l2_state`, `load_l1_host_state` and the
+    // exit-information block - came to 126,553 of 181,679 cycles a call,
+    // and the ~55,000 left over was the largest unnamed term in the
+    // handler. It is not one thing: the ring below reads four VMCS
+    // fields, the two MSR areas read two shadow fields each and walk
+    // guest memory when they are non-empty, and the transition flush is
+    // an INVVPID that exits to the layer below. All four were invisible.
+    auto residue = [&](std::size_t slot, std::uint64_t since) {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][slot] += arch::x86_64::rdtsc() - since;
+            this->phase_calls[cpu][slot] += 1;
+        }
+    };
+
+    auto ring_start = arch::x86_64::rdtsc();
+
+    // Recorded here, first, and for the same reason the guest state is
+    // read here: this is the last moment the VMCS that ran the
+    // second-level guest is current, so the instruction pointer below is
+    // that guest's own and not the guest hypervisor's.
+    //
+    // A separate ring from the one every exit goes into, because that one
+    // cannot answer this. The guest hypervisor's own traffic drowns it -
+    // at the freeze on the rig every one of the boot processor's newest
+    // sixteen entries was a write to its local APIC page - so what the
+    // root partition was doing has always been evicted by the time there
+    // is anything to read.
+    if (cpu < max_cpus) {
+        auto msr_index = this->l2_exit_detail[cpu];
+        auto & count = this->l2_exit_trace_count[cpu];
+        auto & slot =
+            this->l2_exit_trace[cpu][count % l2_exit_trace_capacity];
+
+        // The field means what its name says for the two reasons that
+        // report an address, and the register number for everything else.
+        //
+        // It used to mean the register number for all of them, which made
+        // the ring's account of a reflected extended-page-table fault
+        // read `0x0` - the second-level guest's RCX, which is not
+        // interesting and is not what the field is documented to hold.
+        // A whole boot's worth of faults at one instruction pointer was
+        // read that way before it was noticed that the one datum needed to
+        // identify the page was being overwritten with a register.
+        auto reports_an_address =
+            (basic_reason::ept_violation == reason.basic()) ||
+            (basic_reason::ept_misconfiguration == reason.basic());
+
+        // The same two fields `record_exit` gates, gated by the same
+        // switch and for the same measured reason.
+        //
+        // `nested_vmx::census_exits` was added for the vmcs01 ring and
+        // named the three fields that cost a VMCS read there - the exit
+        // qualification, the guest activity state and the guest CS
+        // selector, at 6.1, 7.9 and 9.1 accesses per round trip. This
+        // ring reads two of the same three on **every reflection** and
+        // was never gated with it, so `census=0` described only half of
+        // what it claims to describe. A manifest field that is true of
+        // one ring and not the other is worse than none: it is the
+        // thing the manifest exists to prevent.
+        //
+        // The qualification is free here, unlike in `record_exit` - it
+        // is a parameter of `reflect_l2_exit`, already read by the
+        // dispatch - so it stays ungated.
+        //
+        // **`.rip` stays ungated, and that is deliberate.** It is the
+        // one observable success test this rig has: `f8e5435` records
+        // that a user-mode second-level instruction pointer in this ring
+        // is how "did it reach the login screen" is answered on a
+        // machine whose display is a passed-through GPU and where
+        // `screendump` is impossible. The address alone distinguishes
+        // user mode from kernel mode; the CS selector only corroborates
+        // it.
+        std::uint64_t activity_state{};
+        std::uint64_t cs_selector{};
+
+        if constexpr (nested_vmx::census_exits) {
+            activity_state = vmcs.guest_activity_state();
+            cs_selector = vmcs.guest_cs_selector();
+        }
+
+        slot = exit_trace_entry{
+            .reason = reason.value(),
+            .qualification = qualification,
+            .activity_state = activity_state,
+            .cs_selector = cs_selector,
+            .rip = vmcs.guest_rip(),
+            .guest_physical = reports_an_address
+                                  ? vmcs.guest_physical_address()
+                                  : this->l2_exit_detail[cpu],
+            .repeated = 1,
+            .detail_value = this->l2_exit_detail_value[cpu],
+            .detail = this->l2_entries[cpu],
+        };
+
+        count = count + 1;
+
+        // The same record again, in a ring the idle loop cannot reach.
+        //
+        // The ring above is 256 deep and that is not deep enough for the
+        // question that matters now. A second-level guest waiting for
+        // something spins its idle loop at about a hundred exits a
+        // second - the reference-clock read, the end-of-interrupt, the
+        // end-of-message, the timer re-arm - so whatever it did *before*
+        // it started waiting is evicted within seconds, and the failure
+        // being chased is minutes old by the time anything reads it.
+        //
+        // Filtered by what the loop is made of rather than by where it
+        // is: the addresses move with every boot, the synthetic MSR
+        // indices do not. What is left is the work.
+        //
+        // The timer *config* register belongs in this list beside the
+        // count, and leaving it out cost this ring its whole purpose.
+        // Measured: 4096 slots holding nothing but
+        // `wrmsr 0x400000b0 value=0x3000a` alternating with `0x30008` at
+        // one instruction pointer - the guest toggling the periodic bit
+        // on a timer it re-arms every tick. So the ring built to hold
+        // "minutes of work rather than seconds of waiting" was holding
+        // seconds of waiting, and the last thing the guest actually did
+        // before it stopped had been evicted by the same idle loop this
+        // list exists to exclude. An incomplete filter on a filtered ring
+        // does not degrade it, it silently converts it back into the
+        // unfiltered one it was built to replace.
+        constexpr std::uint32_t reference_count_msr = 0x40000020;
+        constexpr std::uint32_t synthetic_eoi_msr = 0x40000070;
+        constexpr std::uint32_t synthetic_icr_msr = 0x40000071;
+        constexpr std::uint32_t end_of_message_msr = 0x40000084;
+        constexpr std::uint32_t synthetic_timer_config_msr = 0x400000b0;
+        constexpr std::uint32_t synthetic_timer_count_msr = 0x400000b1;
+
+        auto index = static_cast<std::uint32_t>(msr_index);
+        auto is_idle_msr = ((basic_reason::rdmsr == reason.basic()) ||
+                            (basic_reason::wrmsr == reason.basic())) &&
+                           ((reference_count_msr == index) ||
+                            (synthetic_eoi_msr == index) ||
+                            (synthetic_icr_msr == index) ||
+                            (end_of_message_msr == index) ||
+                            (synthetic_timer_config_msr == index) ||
+                            (synthetic_timer_count_msr == index));
+
+        // External interrupts go too, and they are most of what the
+        // first version of this ring caught: the timer arrives *during*
+        // the reference-clock poll, so an idle guest produces one of
+        // these per tick and they filled 4096 slots with the same
+        // instruction pointer. Nothing is lost by dropping them here -
+        // `l2_external_vector` already counts every one by vector, which
+        // is the question they answer. This ring answers a different
+        // one: what the guest was *doing*.
+        if (!is_idle_msr &&
+            (basic_reason::external_interrupt != reason.basic()) &&
+            (basic_reason::interrupt_window != reason.basic())) {
+            auto & working = this->l2_working_trace_count[cpu];
+
+            this->l2_working_trace[cpu][working %
+                                        l2_working_trace_capacity] = slot;
+            working = working + 1;
+        }
+
+        // Cleared, so an exit that carries no register number shows zero
+        // rather than the last one that did.
+        this->l2_exit_detail[cpu] = 0;
+        this->l2_exit_detail_value[cpu] = 0;
+    }
+
+    residue(31, ring_start);
+
+    // The interrupted event becomes the guest hypervisor's, not ours.
+    //
+    // Below, this reflection copies the interrupted-event field into its
+    // VMCS, which is the architecture's way of telling it that a delivery
+    // it started did not finish - so it is the one that decides what
+    // happens next. Re-injecting it here as well would deliver the same
+    // event twice, once by each level.
+    //
+    // **And that is only true when the exit being reflected is the exit
+    // that interrupted the delivery.** When the interrupting exit was
+    // handled here instead - an EPT violation, which `l0_wants_l2_exit`
+    // claims unconditionally - and the re-queue was then refused by the
+    // entry state, the event is still held when some later and unrelated
+    // exit reflects. The copy below then gives vmcs12 the *hardware*
+    // IDT-vectoring field, which for that exit reads zero, and the held
+    // event is destroyed. See `pending_event_lost`, which is here to
+    // establish whether that happens before anything is changed about it.
+    //
+    // `held_event` carries it to the IDT-vectoring copy below, which is
+    // the only place that can still give it to the guest hypervisor.
+    // See `nested_vmx::hand_over_pending_event`.
+    std::uint64_t held_event = 0;
+
+    if (cpu < max_cpus) {
+        if (0 != this->pending_event[cpu]) {
+            auto lost = this->pending_event[cpu];
+
+            held_event = lost;
+
+            // Which of the two losses this is. See
+            // `pending_event_lost_hardware`.
+            constexpr std::uint64_t vectoring_valid_bit = 1ull << 31;
+
+            auto hardware_vectoring =
+                vmcs.read(field::idt_vectoring_information_field);
+
+            this->pending_event_lost_hardware[cpu] = hardware_vectoring;
+
+            if (0 != (hardware_vectoring & vectoring_valid_bit)) {
+                this->pending_event_lost_while_valid[cpu] += 1;
+            }
+
+            this->pending_event_lost[cpu] += 1;
+            this->pending_event_lost_last[cpu] = lost;
+            this->pending_event_lost_reason[cpu] = reason.value();
+
+            if (1 == this->pending_event_lost[cpu]) {
+                this->pending_event_lost_first[cpu] = lost;
+            }
+        }
+
+        this->pending_event[cpu] = 0;
+    }
+
+    // The guest state first, while the VMCS that ran the second-level
+    // guest is still current - unless this is a VM-entry failure, which
+    // saves none of it.
+    //
+    // SDM 29.8 lists what an entry failure does *not* do, and the third
+    // item is "The guest-state area is not modified." KVM's is the same
+    // shape: `nested_vmx_enter_non_root_mode`'s `vmentry_fail_vmexit`
+    // label calls `load_vmcs12_host_state` and writes the exit reason,
+    // and reaches no `sync_vmcs02_to_vmcs12` on that path
+    // (.references/kvm/nested.c:3640-3651).
+    //
+    // Not a tidy-up. It is what makes an entry failure reflectable from
+    // a point where the second-level guest never ran and vmcs02 may not
+    // even be the current VMCS: save_l2_state reads whichever VMCS *is*
+    // current, so on that path it would copy the guest hypervisor's own
+    // registers into its guest's state area.
+    if (!reason.entry_failure()) {
+        // What vmcs12's RIP field held before the save, kept so the one
+        // write that can put a low address there is attributable. Two
+        // subscripts into module memory, not VMREADs. See
+        // `low_rip_source`.
+        auto rip12_before = shadow.read(field::guest_rip);
+
+        save_l2_state(cpu);
+
+        // The threshold is tested here rather than inside the note, so
+        // that the VMREAD of the segment base is paid only by a
+        // reflection that has something to report. vmcs02 is still
+        // current - the switch back is further down - so the base read
+        // is the second-level guest's.
+        if (auto rip12 = shadow.read(field::guest_rip);
+            rip12 < low_rip_threshold) {
+            note_low_guest_rip(cpu,
+                               low_rip_source::saved_from_vmcs02,
+                               rip12_before,
+                               rip12,
+                               0,
+                               reason.value(),
+                               vmcs.guest_cs_base());
+        }
+    }
+
+    shadow.write(field::exit_reason, reason.value());
+    shadow.write(field::exit_qualification, qualification);
+
+    // Phase timing for the exit-information block below; see
+    // `phase_cycles`. Split out from `reflect_l2_exit` as a whole because
+    // what is left of that function after `save_l2_state` and
+    // `load_l1_host_state` is 26% of the wall clock and was attributed to
+    // nothing - and eight of the VMREADs in it are unconditional where
+    // the architecture defines only three of them for most exits.
+    auto info_start = arch::x86_64::rdtsc();
+    auto info_reads = arch::x86_64::vmx::vmcs_reads_taken;
+    auto info_writes = arch::x86_64::vmx::vmcs_writes_taken;
+
+    if (!reason.entry_failure()) {
+        // SDM 33.3, VMLAUNCH: the launch state becomes launched once an
+        // entry has completed, and an entry that failed after loading
+        // guest state never reached that step. KVM writes the same
+        // condition in `prepare_vmcs12`.
+        shadow.state(vmcs12::launch_state::launched);
+
+        // **And into the region, not only the cache.**
+        //
+        // `on_guest_vmclear` writes the *clear* state through to
+        // `launch_state_offset` and says why in its own comment: the
+        // launch state "lives in the region rather than beside the
+        // cache" so that a VMCLEAR of a VMCS this processor has never
+        // loaded still reaches it. The launched transition did not
+        // honour that, so the region only ever learned `clear`.
+        //
+        // The asymmetry is invisible on one processor, because the cache
+        // is never lost there. With more than one it is fatal and
+        // measured: the guest hypervisor re-reads the region for a
+        // vmcs12 whose cache lives on another processor, gets `clear`,
+        // and its next VMRESUME fails
+        // `vmresume_with_non_launched_vmcs`. Its own code retries
+        // sixteen times - `mov $0x10,%rax; vmresume; xor %rcx,%rcx;
+        // vmcall; dec %rax; jne` - and then executes VMCLEAR and
+        // abandons that virtual processor for good. That is why
+        // application processors take tens of second-level entries
+        // against the boot processor's tens of thousands, and it is the
+        // missing half of `IPI_WATCHDOG_TIMEOUT`: an all-processor
+        // rendezvous cannot complete when a processor has been dropped.
+        //
+        // The comment at the VMPTRLD guard already described this exact
+        // end state - "the next VMRESUME then fails
+        // vmresume_with_non_launched_vmcs, and that virtual processor
+        // can never be entered again" - as the consequence of a *stale
+        // region*. It was reached by the other road: a region that is
+        // never told.
+        if (auto pointer = this->guest_current_vmcs[cpu];
+            nested_vmx::no_current_vmcs != pointer) {
+            auto launched_state =
+                static_cast<std::uint32_t>(vmcs12::launch_state::launched);
+
+            static_cast<void>(write_guest_physical(
+                pointer + vmcs12::launch_state_offset,
+                std::span(
+                    reinterpret_cast<const std::byte *>(&launched_state),
+                    sizeof(launched_state))));
+        }
+
+        // SDM 30.2: the rest of the exit-information fields are written
+        // only for an ordinary exit. On an entry failure the architecture
+        // updates the reason and the qualification and leaves the others
+        // alone, so writing them would fabricate an account of an
+        // instruction that never ran.
+        // SDM 30.2.1 defines the guest-linear address for LMSW with a
+        // memory operand, INS/OUTS, EPT violations that set bit 7 of the
+        // qualification and SPP-related events, and closes the list with
+        // "For all other VM exits, the field is undefined."
+        // `linear_address_defined_for` carries the mapping onto basic
+        // exit reasons and the argument for the two clauses that do not
+        // reduce to a reason.
+        //
+        // **This is the one place the tree diverges from KVM, and
+        // deliberately.** `sync_vmcs02_to_vmcs12` reads the field
+        // unconditionally (`.references/kvm/nested.c:4570`), so KVM hands
+        // its guest hypervisor hardware's undefined value. Both are
+        // architecturally permitted - the field is undefined either way -
+        // so KVM's choice is evidence about cost, not about correctness,
+        // and it costs a real VMREAD on every reflection: measured at
+        // 2,876 cycles on the rig, against ~57 for a cache hit, and this
+        // read is a guaranteed miss because nothing reads the field
+        // twice in one exit.
+        //
+        // Zero rather than "leave vmcs12's field alone", which is what
+        // the `guest_physical_address` gate below does. The two are not
+        // the same situation: KVM never writes vmcs12's guest-physical
+        // address at all, so leaving it untouched *is* matching KVM,
+        // while this field is written on every ordinary exit today.
+        // Stopping the write would leave the previous reflection's
+        // address in place - a live-looking kernel address from an
+        // unrelated exit, which is the hardest shape of wrong value to
+        // attribute. Zero is the choice `honest_exit_length` already
+        // made three statements below, for the same reason, and it is a
+        // value the architecture itself writes here: SDM 30.2.5 clears
+        // the neighbouring instruction-information field on an exit in
+        // enclave mode.
+        //
+        // The guest hypervisor in front of us reads this field 129 times
+        // in a whole run (`nested_shadow_vmcs.cpp`, the shadow-list
+        // census), and it is in neither shadow list, so those reads exit
+        // and are answered out of vmcs12 - which is why the value
+        // written here is the value it sees.
+        shadow.write(field::guest_linear_address,
+                     linear_address_defined_for(
+                         static_cast<std::uint64_t>(reason.basic()))
+                         ? vmcs.read(field::guest_linear_address)
+                         : 0);
+
+        // SDM 27.2.1: `guest_physical_address` receives an address only
+        // for an EPT violation, an EPT misconfiguration or an
+        // SPP-related event; "For all other VM exits, the field is
+        // undefined." KVM writes it only in `nested_ept_inject_page_fault`
+        // (nested.c:460) and never on the normal exit path
+        // (`sync_vmcs02_to_vmcs12`), so a non-EPT reflection that copied
+        // hardware's value would hand the guest hypervisor a stale
+        // address unrelated to the exit. Write it only where it means
+        // something; leave vmcs12's field untouched otherwise, which is
+        // what the architecture and KVM both do. Also drops one VMREAD
+        // on the ~90% of exits (with eager EPT) that are not EPT faults.
+        switch (reason.basic()) {
+        case basic_reason::ept_violation:
+        case basic_reason::ept_misconfiguration:
+            shadow.write(field::guest_physical_address,
+                         vmcs.read(field::guest_physical_address));
+            break;
+        default:
+            break;
+        }
+
+        auto interruption_information =
+            vmcs.read(field::vm_exit_interruption_information);
+        shadow.write(field::vm_exit_interruption_information,
+                     interruption_information);
+
+        // SDM 27.2.2: the error code is defined only when the
+        // interruption-information field's valid bit (31) and
+        // error-code-valid bit (11) are both set; "For other VM exits,
+        // the value of this field is undefined." Read it only then - the
+        // bits are already in hand.
+        constexpr std::uint64_t valid_bit = 1ull << 31;
+        constexpr std::uint64_t error_code_valid = 1ull << 11;
+        if ((valid_bit | error_code_valid) ==
+            (interruption_information & (valid_bit | error_code_valid))) {
+            shadow.write(field::vm_exit_interruption_error_code,
+                         vmcs.read(field::vm_exit_interruption_error_code));
+        }
+        // Only where the SDM defines it. See
+        // `nested_vmx::honest_exit_length`: measured at 3,193
+        // reflections in one boot carrying a non-zero length for a
+        // reason SDM 30.2.5 leaves undefined, and a guest hypervisor
+        // advances a RIP by this number.
+        //
+        // The test now decides whether to *read*, where it used to read
+        // first and overwrite the result with zero. The value handed
+        // over is identical either way - that is what makes this the one
+        // gate here with no correctness content - and it drops a VMREAD
+        // on every reflection whose reason is in the `no` list, which the
+        // reflected mix puts at roughly a fifth of them. With
+        // `honest_exit_length` off the read stays unconditional, because
+        // then the field is copied through whatever the reason.
+        auto reported_length = std::uint64_t{};
+
+        if constexpr (nested_vmx::honest_exit_length) {
+            if (exit_length_defined::no !=
+                exit_length_defined_for(
+                    static_cast<std::uint64_t>(reason.basic()))) {
+                reported_length =
+                    vmcs.read(field::vm_exit_instruction_length);
+            }
+        } else {
+            reported_length = vmcs.read(field::vm_exit_instruction_length);
+        }
+
+        shadow.write(field::vm_exit_instruction_length, reported_length);
+
+        // SDM 30.2.5 names a closed instruction list for the
+        // instruction-information field and ends "For all other VM
+        // exits, the field is undefined, unless the VM exit occurred in
+        // enclave mode, in which case the field is cleared."
+        // `instruction_information_defined_for` carries that list.
+        //
+        // Same divergence from KVM as the guest-linear address above and
+        // for the same reason: `prepare_vmcs12` reads it unconditionally
+        // (`.references/kvm/nested.c:4628`), which is permitted but pays
+        // a guaranteed VMREAD miss on every reflection. Zero here is not
+        // merely a permitted undefined value, it is the value the
+        // processor itself writes for an exit in enclave mode, which is
+        // the only case the section defines outside its list.
+        //
+        // None of the reasons this VMM actually reflects in the settled
+        // state - `wrmsr`, `interrupt_window`, `vmcall` - is on the list,
+        // so the read goes away on essentially all of them.
+        shadow.write(
+            field::vm_exit_instruction_information,
+            instruction_information_defined_for(
+                static_cast<std::uint64_t>(reason.basic()))
+                ? vmcs.read(field::vm_exit_instruction_information)
+                : 0);
+
+        // SDM 30.2.4, "Information for VM Exits During Event Delivery".
+        // Copied from the hardware's own report rather than reconstructed,
+        // because everything the second-level guest was in the middle of
+        // delivering was put there by an entry this VMM built out of
+        // vmcs12 - so the processor's account is the guest hypervisor's
+        // account. The rule that a double or triple fault is never
+        // reported as occurring during delivery is the processor's to
+        // apply, and it applied it.
+        auto idt_vectoring_information =
+            vmcs.read(field::idt_vectoring_information_field);
+
+        // The one case the processor's account cannot cover: an event
+        // this VMM was holding, whose interrupting exit was consumed
+        // here rather than reflected, so the hardware field for *this*
+        // exit is not valid and reports nothing. Writing it through
+        // unchanged is what destroys the event; handing the held one
+        // over is what KVM's `vmcs12_save_pending_event` does by
+        // rebuilding the field from software state instead of reading
+        // the hardware one. Only ever fills in an invalid field, so a
+        // real report is never overwritten.
+        if constexpr (nested_vmx::hand_over_pending_event) {
+            constexpr std::uint64_t vectoring_valid = 1ull << 31;
+
+            if ((0 != held_event) &&
+                (0 == (idt_vectoring_information & vectoring_valid)) &&
+                (0 != (held_event & vectoring_valid))) {
+                idt_vectoring_information = held_event;
+
+                if (cpu < max_cpus) {
+                    this->pending_event_handed_over[cpu] += 1;
+                }
+            }
+        }
+
+        shadow.write(field::idt_vectoring_information_field,
+                     idt_vectoring_information);
+
+        // SDM 27.2.4: the IDT-vectoring error code is defined only when
+        // that field's valid bit (31) and error-code-valid bit (11) are
+        // both set; undefined otherwise. Same gate as the exit
+        // interruption error code above, on the word already read.
+        constexpr std::uint64_t idt_valid_bit = 1ull << 31;
+        constexpr std::uint64_t idt_error_code_valid = 1ull << 11;
+        if ((idt_valid_bit | idt_error_code_valid) ==
+            (idt_vectoring_information &
+             (idt_valid_bit | idt_error_code_valid))) {
+            shadow.write(field::idt_vectoring_error_code,
+                         vmcs.read(field::idt_vectoring_error_code));
+        }
+
+        // SDM 30.2: the valid bit of the VM-entry interruption-information
+        // field is cleared on every VM exit. Emulated rather than read
+        // back, because the field being read back is vmcs02's and the one
+        // the guest hypervisor will next look at is vmcs12's.
+        shadow.write(
+            field::vm_entry_interruption_information_field,
+            shadow.read(field::vm_entry_interruption_information_field) &
+                ~interruption_valid);
+    }
+
+    // The whole exit information block, as the guest hypervisor will
+    // find it, censused in one place because either half of it alone
+    // confirms itself. See `note_reflected_exit_info`: a low RIP here is
+    // an entry at that address a moment later, and an instruction length
+    // for an exit SDM 30.2.5 leaves it undefined for is the one number a
+    // hypervisor is entitled to add to a RIP.
+    //
+    // Read out of the cache rather than re-derived - two subscripts into
+    // module memory, no VMREAD - and after every write above, so it
+    // describes what is being handed over rather than what was intended.
+    note_reflected_exit_info(cpu,
+                             reason.value(),
+                             shadow.read(field::vm_exit_instruction_length),
+                             shadow.read(field::guest_rip),
+                             !reason.entry_failure());
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][13] += arch::x86_64::rdtsc() - info_start;
+        this->phase_calls[cpu][13] += 1;
+    }
+
+    note_reflect_phase(cpu, 2, info_start, info_reads, info_writes);
+
+    // SDM 30.4: the VM-exit MSR-store area is processed after the guest
+    // state is saved and before host state is loaded, so it reads the
+    // values the second-level guest was running with.
+    //
+    // Skipped on an entry failure for the same reason the guest state is,
+    // and from the same list: SDM 29.8's "No MSRs are saved into the
+    // VM-exit MSR-store area." The MSR-*load* area below is not on that
+    // list - 29.8 step 4 performs it - so only this half moves.
+    auto aborted = false;
+
+    auto store_start = arch::x86_64::rdtsc();
+
+    if (!reason.entry_failure()) {
+        if (auto stored = store_nested_msrs(
+                shadow.read(field::vm_exit_msr_store_address),
+                shadow.read(field::vm_exit_msr_store_count));
+            !stored) {
+            aborted = true;
+            log("cpu {} could not store the guest hypervisor's exit "
+                "msrs: {}",
+                cpu,
+                stored.error().code());
+        }
+    }
+
+    residue(32, store_start);
+
+    // Back onto the VMCS that runs the guest hypervisor.
+    //
+    // Phase timing; see `phase_cycles`. The pair with the one in
+    // build_vmcs02: together they are every VMCS switch a round trip
+    // makes, so phases 6 and 7 price the whole of it.
+    auto switch_start = arch::x86_64::rdtsc();
+    auto switch_failed = point_at_vmcs(cpu, false);
+
+    if (cpu < max_cpus) {
+        this->phase_cycles[cpu][7] += arch::x86_64::rdtsc() - switch_start;
+        this->phase_calls[cpu][7] += 1;
+    }
+
+    if (switch_failed) {
+        // Not recoverable: without its own VMCS there is no guest
+        // hypervisor to return to and nothing to resume. Same reasoning as
+        // vmcs::write.
+        __builtin_trap();
+    }
+
+    this->running_l2[cpu] = false;
+
+    // Anything queued for the second-level guest is dropped here, which
+    // vmcs02's own field holding it makes automatic: the next entry
+    // rewrites it from vmcs12, and vmcs12's valid bit was just cleared.
+    {
+        // Phase timing; see `phase_cycles`.
+        auto host_start = arch::x86_64::rdtsc();
+        zpp::scope_exit host_stop{[&] {
+            if (cpu < max_cpus) {
+                this->phase_cycles[cpu][12] +=
+                    arch::x86_64::rdtsc() - host_start;
+                this->phase_calls[cpu][12] += 1;
+            }
+        }};
+
+        load_l1_host_state(cpu);
+    }
+
+    // SDM 30.6: and the VM-exit MSR-load area after host state, which is
+    // why this is here rather than beside the store above.
+    auto load_start = arch::x86_64::rdtsc();
+
+    if (auto loaded =
+            load_nested_msrs(cpu,
+                             shadow.read(field::vm_exit_msr_load_address),
+                             shadow.read(field::vm_exit_msr_load_count));
+        !loaded) {
+        aborted = true;
+        log("cpu {} could not load the guest hypervisor's exit msrs: {}",
+            cpu,
+            loaded.error().code());
+    }
+
+    nested_transition_flush(cpu);
+
+    // The MSR-load area and the INVVPID together. Kept as one slot
+    // because they are one region of straight-line code and splitting
+    // them would cost another RDTSC to separate a load area that is
+    // almost always empty from a flush that always runs.
+    residue(33, load_start);
+
+    this->l2_exits_reflected[cpu] = this->l2_exits_reflected[cpu] + 1;
+
+    // So the ring written at the end of this exit says whose instruction
+    // pointer it holds. From here the current VMCS is vmcs01 and the
+    // guest hypervisor's host state is loaded, so `guest_rip` no longer
+    // answers about the guest that faulted.
+    this->exit_reflected[cpu] = 1;
+
+    // A failure in either exit area is a VMX abort, SDM 30.4 and SDM 30.6.
+    // A real abort is a shutdown, which is not something to do to a whole
+    // machine because one guest's hypervisor named a page that stopped
+    // being readable - so this takes KVM's answer in `nested_vmx_abort`
+    // instead and kills the *guest hypervisor's* virtual machine, by
+    // giving it the triple fault its own guest would have taken. That is
+    // reachable only through unreadable guest memory: every other reason
+    // an entry in one of those areas can fail was checked before the
+    // second-level guest ever ran.
+    if (aborted) {
+        this->guest_vmcs12[cpu].write(
+            field::exit_reason,
+            static_cast<std::uint64_t>(basic_reason::triple_fault));
+        this->guest_vmcs12[cpu].write(field::exit_qualification, 0);
+    }
+
+    // Last, after every write above. The guest hypervisor is about to run
+    // its exit handler, and the whole point of shadowing is that it reads
+    // the exit information out of the shadow region without exiting - so
+    // that region has to hold what was just written, and this is the only
+    // moment between the writes and the reads.
+    //
+    // Safe to overwrite the region rather than merge into it: the guest
+    // hypervisor has not run since on_guest_vmlaunch collected its silent
+    // writes, so the shadow's writable fields and the cache agree.
+    copy_vmcs12_to_shadow(cpu);
+
+    // And the enlightened structure, for exactly the same reason and at
+    // exactly the same moment: a guest hypervisor using an enlightened
+    // VM entry reads its exit information out of that structure rather
+    // than with VMREAD, so it has to hold what was just written. Inert
+    // unless the enlightenment is armed. See `store_enlightened_vmcs`.
+    auto evmcs_start = arch::x86_64::rdtsc();
+    store_enlightened_vmcs(cpu);
+    residue(34, evmcs_start);
+}
+
+bool hypervisor::on_nested_cr8_access(std::size_t cpu,
+                                      std::uint64_t qualification,
+                                      arch::x86_64::context & context,
+                                      bool & advance_rip)
+{
+    // SDM Table 28-3: bits 3:0 the register, bits 5:4 the access type -
+    // 0 is MOV to, 1 is MOV from - and bits 11:8 the general-purpose
+    // register.
+    constexpr std::uint64_t register_mask = 0xf;
+    constexpr std::uint64_t access_shift = 4;
+    constexpr std::uint64_t access_mask = 0x3;
+    constexpr std::uint64_t gpr_shift = 8;
+    constexpr std::uint64_t gpr_mask = 0xf;
+    constexpr std::uint64_t control_register_8 = 8;
+    constexpr std::uint64_t access_move_to = 0;
+    constexpr std::uint64_t access_move_from = 1;
+
+    // SDM 30.1.1 again: VTPR is the byte at offset 0x80 on the page.
+    constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+
+    // SDM 27.6.8: the threshold is compared against bits 7:4 of VTPR -
+    // the priority *class* - not against the whole byte.
+    constexpr std::uint64_t priority_class_shift = 4;
+
+    if ((cpu >= max_cpus) || !this->running_l2[cpu]) {
+        return false;
+    }
+
+    auto page = this->nested_virtual_apic_address[cpu];
+    if ((control_register_8 != (qualification & register_mask)) ||
+        (0 == page)) {
+        return false;
+    }
+
+    auto access = (qualification >> access_shift) & access_mask;
+    auto gpr = (qualification >> gpr_shift) & gpr_mask;
+
+    // **Encoding 4 is RSP, and RSP is not in the captured context.** This
+    // used to go through a local switch that returned `&context.rsp` for
+    // it, which is the same defect `exit_dispatch.cpp`'s control-register
+    // case carried and was fixed for - the exit stub stores the address
+    // of the context structure in that slot on purpose, because
+    // `restore_context` iretqs onto it. So `mov rsp, cr8` would have
+    // written the priority class over the frame pointer the iretq is
+    // about to use, and `mov cr8, rsp` would have read a host stack
+    // address, found reserved bits set in it and injected a #GP the
+    // guest never earned.
+    //
+    // `guest_register` / `set_guest_register` are the pair that knows
+    // this; both answer encoding 4 from `vmcs.guest_rsp()`. There is no
+    // "no such register" case left, because `gpr_mask` is four bits and
+    // all sixteen encodings name one.
+    //
+    // **This function is unreachable in the shipping build**, because
+    // `nested_vmx::tpr_shadow_offered` is 1, the shadow is honoured and
+    // CR8 therefore never exits - which is why the defect was latent and
+    // is explicitly not a reason to leave it. The switch is one `-D`
+    // away, the same one an A/B of the TPR shadow would turn, and the
+    // failure it produces is a corrupted host iretq frame - not
+    // something anybody would trace back to a register table.
+    // `tests/nested_exit` covers encoding 4 in both directions.
+
+    std::uint8_t vtpr{};
+    auto at = page + virtual_task_priority_offset;
+
+    if (access_move_from == access) {
+        if (auto read = read_guest_physical(
+                at,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)));
+            !read) {
+            return false;
+        }
+
+        // CR8 is the priority *class*, which is VTPR's high nibble. A
+        // guest reading back what it wrote depends on this being the
+        // inverse of the write below, and a guest whose CR8 reads four
+        // bits too large raises its own interrupt priority every time it
+        // saves and restores one.
+        set_guest_register(context, gpr, vtpr >> priority_class_shift);
+        this->nested_cr8_reads[cpu] = this->nested_cr8_reads[cpu] + 1;
+        return true;
+    }
+
+    if (access_move_to != access) {
+        return false;
+    }
+
+    constexpr std::uint64_t priority_class_mask = 0xf;
+
+    auto value = guest_register(context, gpr);
+
+    // SDM 2.5, CR8: "Reserved bits ... must be written with zeros.
+    // Writing a nonzero value to these bits will cause a
+    // general-protection exception." The guest is given the fault
+    // hardware would have given it rather than having the value
+    // silently truncated, which is the rule this project applies to
+    // everything else it emulates.
+    if (0 != (value & ~priority_class_mask)) {
+        inject_general_protection_fault();
+        advance_rip = false;
+        return true;
+    }
+
+    vtpr = static_cast<std::uint8_t>((value & priority_class_mask)
+                                     << priority_class_shift);
+
+    if (auto written = write_guest_physical(
+            at,
+            std::span(reinterpret_cast<const std::byte *>(&vtpr),
+                      sizeof(vtpr)));
+        !written) {
+        return false;
+    }
+
+    this->nested_cr8_writes[cpu] = this->nested_cr8_writes[cpu] + 1;
+
+    // And the exit the processor would have raised. SDM 27.6.8: the
+    // TPR-below-threshold exit occurs "if the value of bits 3:0 of the
+    // TPR threshold VM-execution control field is greater than the value
+    // of bits 7:4 of VTPR".
+    //
+    // Emulating the write and not this would be the worst of both: the
+    // guest's priority would fall, the guest hypervisor would never be
+    // told, and every interrupt it was holding would stay held. That is
+    // the failure this switch exists to test for, so producing it here by
+    // omission would make the experiment answer itself.
+    constexpr std::uint64_t threshold_mask = 0xf;
+
+    auto threshold = this->nested_tpr_threshold[cpu] & threshold_mask;
+
+    if (threshold > (vtpr >> priority_class_shift)) {
+        this->nested_cr8_below_threshold[cpu] =
+            this->nested_cr8_below_threshold[cpu] + 1;
+
+        // **The instruction pointer is advanced here, before reflecting,
+        // and the caller is told not to advance it again.**
+        //
+        // This was the other way round and it corrupted the guest
+        // hypervisor. `reflect_l2_exit` switches the current VMCS back to
+        // vmcs01 and loads that hypervisor's host state, so an advance
+        // performed afterwards lands on *its* instruction pointer rather
+        // than its guest's - it resumes a few bytes into whatever it was
+        // executing, which is a reset a moment later. Measured: four
+        // loader boots in one run, and the counter below at one.
+        //
+        // The advance itself is what the architecture requires anyway.
+        // The write has taken effect, so the exit is a trap rather than a
+        // fault and the guest hypervisor must see its guest positioned
+        // after the instruction.
+        //
+        // **The length is defined for the exit that actually happened,
+        // and it was worth checking which exit that is.** SDM 30.2.5
+        // lists MOV CR among the fault-like exits the VM-exit
+        // instruction-length field is defined for, and footnote 1 on
+        // that list takes it away again for "trap-like VM exits
+        // following executions of the MOV to CR8 instruction when the
+        // 'use TPR shadow' VM-execution control is 1"
+        // (.references/sdm.txt:204137). The exit reaching here is
+        // `control_register_access`, which is the *fault-like* one
+        // produced by CR8-load exiting with no TPR shadow handed to the
+        // processor - see the call site in `exit_dispatch.cpp` - so the
+        // footnote does not apply and the field is the MOV's own
+        // length. What is reflected below is a synthesised
+        // TPR-below-threshold, for which the field is undefined anyway.
+        auto rip_before = this->vmcs.guest_rip();
+        auto advanced_by = this->vmcs.vm_exit_instruction_length();
+
+        this->vmcs.guest_rip(rip_before + advanced_by);
+        this->vmcs.clear_instruction_interrupt_shadow();
+
+        // One of the three arithmetic writers. See `low_rip_source`:
+        // the reflection below copies vmcs02's RIP into vmcs12, so an
+        // advance that lands low here is a low address in vmcs12 a
+        // moment later, and only this record can say the sum produced
+        // it.
+        if ((rip_before + advanced_by) < low_rip_threshold) {
+            note_low_guest_rip(
+                cpu,
+                low_rip_source::advanced_for_cr8,
+                rip_before,
+                rip_before + advanced_by,
+                advanced_by,
+                static_cast<std::uint64_t>(
+                    basic_reason::control_register_access),
+                this->vmcs.guest_cs_base());
+        }
+
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::tpr_below_threshold),
+            0);
+
+        advance_rip = false;
+    }
+
+    return true;
+}
+
+bool hypervisor::is_guest_kernel_image(std::size_t cpu,
+                                       std::uint64_t base,
+                                       std::uint64_t headers)
+{
+    // **A header match is not an identification.** Every image in the
+    // address space begins with the same two signatures - the secure
+    // kernel's does, and every driver's does - and the relative address
+    // this VMM then reads a pointer from belongs to exactly one of them.
+    // Reading it from the wrong image gives a number rather than a
+    // failure, which is the shape of answer this project refuses.
+    //
+    // So the image names itself. The export directory carries the name it
+    // was linked as, which for the kernel is `ntoskrnl.exe` whichever
+    // file it was loaded from.
+    //
+    // PE32+ layout, from the specification: the optional header follows
+    // the four-byte signature and the twenty-byte file header, its data
+    // directories begin 112 bytes into it, the first is the export
+    // directory, and that directory's name is a relative address twelve
+    // bytes in.
+    constexpr std::uint64_t optional_header = 4 + 20;
+    constexpr std::uint64_t data_directories = 112;
+    constexpr std::uint64_t export_directory_name = 12;
+
+    auto read = [&](std::uint64_t linear, auto & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    std::uint32_t directory{};
+    if (!read(base + headers + optional_header + data_directories,
+              directory) ||
+        (0 == directory)) {
+        return false;
+    }
+
+    std::uint32_t name{};
+    if (!read(base + directory + export_directory_name, name) ||
+        (0 == name)) {
+        return false;
+    }
+
+    // The image's own size, which the stack scan needs to decide whether
+    // an address on the stack points into it. Offset 56 of the optional
+    // header, per the PE specification.
+    constexpr std::uint64_t size_of_image_field = 56;
+
+    std::uint32_t size{};
+    if (read(base + headers + optional_header + size_of_image_field,
+             size)) {
+        this->guest_kernel_size = size;
+    }
+
+    // "ntoskrnl", read as two words so it needs no string comparison and
+    // no assumption about what follows.
+    constexpr std::uint32_t first_half = 0x736f746e;  // "ntos"
+    constexpr std::uint32_t second_half = 0x6c6e726b; // "krnl"
+
+    std::uint32_t front{};
+    std::uint32_t back{};
+
+    return read(base + name, front) && (first_half == front) &&
+           read(base + name + sizeof(front), back) &&
+           (second_half == back);
+}
+
+std::uint64_t hypervisor::find_guest_kernel_base(std::size_t cpu)
+{
+    if (0 != this->guest_kernel_base) {
+        return this->guest_kernel_base;
+    }
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::uint64_t two_megabytes = 0x200000;
+
+    // The signatures a PE image starts with: `MZ` at the top, and `PE\0\0`
+    // at the offset the field at 0x3c names. Both are checked, because a
+    // single two-byte match over a hundred megabytes of kernel memory is
+    // not evidence of anything.
+    constexpr std::uint16_t dos_signature = 0x5a4d;
+    constexpr std::uint32_t pe_signature = 0x00004550;
+    constexpr std::uint64_t pe_offset_field = 0x3c;
+
+    auto read = [&](std::uint64_t linear, auto & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    // Started from an interrupt handler, not from the instruction
+    // pointer.
+    //
+    // The instruction pointer was the first attempt and it does not work
+    // while the guest is doing the thing worth watching: through the
+    // whole virtual-trust-level protection pass - twelve minutes, and
+    // every sample taken in it - the guest is executing its hypercall
+    // page, which is its own allocation and not part of any image. The
+    // scan then walks down from an address that has no kernel below it.
+    //
+    // The interrupt descriptor table has no such problem. Its base is in
+    // the VMCS, free to read, and every gate in it points at a handler
+    // inside the kernel image whatever the guest is doing. Entry zero is
+    // the divide-error fault, which exists on every processor and is
+    // never a driver's.
+    //
+    // SDM 7.14.1 gives the 64-bit gate: the offset is split across bits
+    // 15:0 at byte 0, 31:16 at byte 6, and 63:32 at byte 8.
+    struct interrupt_gate
+    {
+        std::uint16_t offset_low{};
+        std::uint16_t selector{};
+        std::uint16_t attributes{};
+        std::uint16_t offset_middle{};
+        std::uint32_t offset_high{};
+        std::uint32_t reserved{};
+    };
+
+    auto idt =
+        this->vmcs.read(arch::x86_64::vmx::vmcs::field::guest_idtr_base);
+
+    if (idt < kernel_address_floor) {
+        return 0;
+    }
+
+    interrupt_gate gate{};
+    if (!read(idt, gate)) {
+        return 0;
+    }
+
+    auto rip = static_cast<std::uint64_t>(gate.offset_low) |
+               (static_cast<std::uint64_t>(gate.offset_middle) << 16) |
+               (static_cast<std::uint64_t>(gate.offset_high) << 32);
+
+    if (rip < kernel_address_floor) {
+        return 0;
+    }
+
+    auto candidate = rip & ~(two_megabytes - 1);
+
+    for (std::size_t step{}; step < guest_windows::kernel_base_scan_limit;
+         ++step) {
+        std::uint16_t magic{};
+        if (read(candidate, magic) && (dos_signature == magic)) {
+            std::uint32_t at{};
+            std::uint32_t signature{};
+
+            if (read(candidate + pe_offset_field, at) &&
+                read(candidate + at, signature) &&
+                (pe_signature == signature) &&
+                is_guest_kernel_image(cpu, candidate, at)) {
+                this->guest_kernel_base = candidate;
+                // With the CR3 that reaches it. The base alone is not
+                // enough to read anything from outside: the monitor
+                // sees only the first-level guest's CR3, so a reader
+                // pointed at a second-level kernel address gets
+                // "unmapped" and cannot tell that from a wrong symbol.
+                // This is the field that makes `KiBugCheckData`
+                // readable, and the extended tables have measured
+                // identity for these pages, so the physical address a
+                // walk yields is an `xp` address directly.
+                log("second-level guest kernel image at {}, cr3 {}",
+                    candidate,
+                    this->guest_vmcs12[cpu].read(field::guest_cr3));
+                return candidate;
+            }
+        }
+
+        if (candidate < two_megabytes) {
+            break;
+        }
+
+        candidate -= two_megabytes;
+    }
+
+    return 0;
+}
+
+void hypervisor::record_profile_context(
+    std::size_t cpu,
+    std::uint64_t rip,
+    const arch::x86_64::context & context)
+{
+    auto slot = this->profile_context_count % profile_context_capacity;
+
+    this->profile_contexts[slot] = profile_context{
+        .rip = rip,
+        .rax = context.rax,
+        .rcx = context.rcx,
+        .rdx = context.rdx,
+        .rbx = context.rbx,
+        .rsi = context.rsi,
+        .rdi = context.rdi,
+        .r8 = context.r8,
+    };
+
+    // And where the *code* the guest is executing lives, in a form the
+    // reader can reach.
+    //
+    // This exists because the one address that matters is the one nothing
+    // could read. When the second-level guest spins, 96.8% of samples land
+    // on a single instruction pointer that is in **no image**: it sits
+    // about 0x6a000000 below the kernel base, and walking the guest's page
+    // tables from the monitor cannot reach it because the monitor only has
+    // the first-level guest's CR3. Two sessions have now identified the
+    // spin, failed to name it, and reasoned about it from its address
+    // alone.
+    //
+    // Nothing is read here. The linear address is translated to a physical
+    // one the *reader* can already reach with `xp`, which keeps the
+    // expensive part - a page-table walk per sample - and adds nothing to
+    // the exit path, and keeps the byte-level decode where a decoder
+    // exists rather than writing one here.
+    if (auto physical = translate_guest_linear(cpu, rip)) {
+        if (auto reachable =
+                l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
+            this->profile_code_virtual = rip;
+            this->profile_code_physical = *reachable;
+        }
+    }
+
+    // And what the polled pointer maps to.
+    //
+    // **Every sample, not every thirty-second.** Rate-limiting this was
+    // an error that produced a false conclusion: the profiler fires only
+    // when the guest runs a long time without exiting, which on a settled
+    // machine is about once a minute, so a value refreshed every
+    // thirty-two samples is refreshed every half hour. Three readings
+    // taken seconds apart thenreturned the same number and were read as
+    // three independent observations agreeing - which is what "it is a
+    // poll, not a scan" rested on. They were one observation read three
+    // times.
+    //
+    // The walk is expensive and the sample rate is what bounds it, not
+    // this counter. When the profiler is quiet this costs almost nothing;
+    // when it is loud the guest is spinning and the cost is worth paying.
+    if (true) {
+        if (auto physical = translate_guest_linear(cpu, context.rcx)) {
+            if (auto reachable =
+                    l2_physical_to_l1(this->vmcs.vpid() - 1, *physical)) {
+                this->profile_pointer_virtual = context.rcx;
+                this->profile_pointer_physical = *reachable;
+                this->profile_pointer_rip = rip;
+            }
+        }
+    }
+
+    this->profile_context_count = this->profile_context_count + 1;
+}
+
+void hypervisor::record_profile_sample(std::uint64_t rip)
+{
+    this->profile_samples = this->profile_samples + 1;
+
+    for (std::size_t i{}; i < profile_capacity; ++i) {
+        if (this->profile_rip[i] == rip) {
+            this->profile_hits[i] = this->profile_hits[i] + 1;
+            return;
+        }
+
+        if (0 == this->profile_rip[i]) {
+            this->profile_rip[i] = rip;
+            this->profile_hits[i] = 1;
+            return;
+        }
+    }
+
+    // A full table is emptied rather than left to reject everything
+    // after it.
+    //
+    // The alternative was tried and it fails at exactly the moment that
+    // matters: the guest touches hundreds of addresses while it is
+    // working, so the table fills during the boot and then has no room
+    // for the handful it spins on afterwards - measured, 143 rejections
+    // against 250 samples, and none of the rejected ones was from the
+    // stall. Emptying keeps the table describing a recent window, which
+    // is what a profile of a machine that changes behaviour is for.
+    //
+    // Counted, so a table read while it is churning is not mistaken for
+    // one that settled.
+    for (std::size_t i{}; i < profile_capacity; ++i) {
+        this->profile_rip[i] = 0;
+        this->profile_hits[i] = 0;
+    }
+
+    this->profile_rip[0] = rip;
+    this->profile_hits[0] = 1;
+    this->profile_overflow = this->profile_overflow + 1;
+}
+
+void hypervisor::sample_guest_stack(std::size_t cpu)
+{
+    // Every member this writes is `[max_cpus]` since 2026-09-05. They
+    // were single words and one shared array, and `count` is reset at
+    // the top of the walk below - so a second processor entering here
+    // sent the first one's next frame to index 0 and the printed trace
+    // was two stacks spliced. See `guest_stack_trace`.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto base = this->guest_kernel_base;
+    auto size = this->guest_kernel_size;
+
+    if ((0 == base) || (0 == size)) {
+        return;
+    }
+
+    auto stack = this->vmcs.guest_rsp();
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+
+    if (stack < kernel_address_floor) {
+        return;
+    }
+
+    this->guest_stack_pointer[cpu] = stack;
+    this->guest_stack_rip[cpu] = this->vmcs.guest_rip();
+    this->guest_stack_count[cpu] = 0;
+
+    for (std::size_t word{};
+         (word < guest_stack_words) &&
+         (this->guest_stack_count[cpu] < guest_stack_capacity);
+         ++word) {
+        auto at = stack + (word * sizeof(std::uint64_t));
+
+        auto physical = translate_guest_linear(cpu, at);
+        if (!physical) {
+            // A gap in the stack's mapping ends the scan rather than
+            // being stepped over: past an unmapped page the addresses
+            // read belong to something else entirely.
+            break;
+        }
+
+        std::uint64_t value{};
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&value),
+                          sizeof(value)))) {
+            break;
+        }
+
+        // Inside the kernel image, which is what a return address into it
+        // looks like. Nothing else about it is checked - see the
+        // declaration for why this is a candidate list and not a stack.
+        //
+        // **Or inside the image the guest is currently executing**, which
+        // is not always the kernel and was the whole reason this
+        // instrument answered the wrong question. The second-level guest
+        // parks in `securekernel.exe`, whose base is *below* the kernel's,
+        // so every frame belonging to the trust level that actually failed
+        // was discarded by the test above and the trace came back two
+        // frames deep and entirely in `ntoskrnl` - the callers, not the
+        // callee. A stack that omits the failing module is worse than no
+        // stack, because it reads as evidence about the module it does
+        // show.
+        //
+        // Bounded to a window around the sampled instruction pointer
+        // rather than opened to every canonical address: 48 slots fill
+        // with stack garbage in a few words otherwise, and a candidate
+        // list that is mostly noise is the same failure in the other
+        // direction. 64 MB comfortably spans a Windows system image and
+        // excludes the pool and the stacks either side of it.
+        constexpr std::uint64_t image_window = 64ull << 20;
+        auto here = this->profile_code_virtual;
+        auto near_here =
+            (0 != here) && (value >= (here - image_window)) &&
+            (value < (here + image_window));
+
+        if (((value >= base) && (value < (base + size))) || near_here) {
+            this->guest_stack_trace[cpu][this->guest_stack_count[cpu]] =
+                value;
+            this->guest_stack_count[cpu] =
+                this->guest_stack_count[cpu] + 1;
+        }
+    }
+
+    sample_interrupted_stack(cpu, stack, base, size);
+}
+
+void hypervisor::sample_interrupted_stack(std::size_t cpu,
+                                          std::uint64_t stack,
+                                          std::uint64_t base,
+                                          std::uint64_t size)
+{
+    // Per processor, same change and same reason as the caller's. See
+    // `guest_interrupted_trace`.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // The five quadwords hardware pushes, by their shape. SDM 7.14.2
+    // gives the order - RIP, CS, RFLAGS, RSP, SS at increasing addresses
+    // - and Windows runs its kernel at code selector 0x10 with a stack
+    // selector of 0x18 or zero.
+    constexpr std::uint64_t kernel_code_selector = 0x10;
+    constexpr std::uint64_t kernel_stack_selector = 0x18;
+    constexpr std::uint64_t rflags_always_one = 1ull << 1;
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::size_t frame_words = 5;
+
+    auto read = [&](std::uint64_t at, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, at);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&into),
+                             sizeof(into)))
+            .has_value();
+    };
+
+    this->guest_interrupted_count[cpu] = 0;
+    this->guest_interrupted_rsp[cpu] = 0;
+    this->guest_interrupted_rip[cpu] = 0;
+
+    std::uint64_t frame_at{};
+
+    for (std::size_t word{}; (word + frame_words) < guest_stack_words;
+         ++word) {
+        std::uint64_t frame[frame_words]{};
+        auto readable = true;
+
+        for (std::size_t i{}; i < frame_words; ++i) {
+            if (!read(stack + ((word + i) * sizeof(std::uint64_t)),
+                      frame[i])) {
+                readable = false;
+                break;
+            }
+        }
+
+        if (!readable) {
+            break;
+        }
+
+        // Two of the five are load bearing and the rest are not.
+        //
+        // The code selector and the stack pointer identify the frame:
+        // `0x10` is the kernel's, and a canonical kernel address is what
+        // an interrupted kernel thread's stack pointer looks like.
+        // Requiring the *interrupted instruction pointer* to be inside
+        // ntoskrnl as well was too strict - a thread interrupted in a
+        // driver, in the hypercall page or in the HAL has a perfectly
+        // valid frame this would reject - and so was pinning the stack
+        // selector, which is pushed as zero as often as `0x18`.
+        //
+        // Measured: with those two required, no frame was found at all in
+        // sixteen kilobytes of a stack that certainly contains one.
+        auto shaped = (kernel_code_selector == frame[1]) &&
+                      (0 != (frame[2] & rflags_always_one)) &&
+                      (frame[3] >= kernel_address_floor) &&
+                      (frame[0] >= kernel_address_floor);
+
+        static_cast<void>(kernel_stack_selector);
+
+        if (!shaped) {
+            continue;
+        }
+
+        this->guest_interrupted_rip[cpu] = frame[0];
+        this->guest_interrupted_rsp[cpu] = frame[3];
+
+        // The *address* of the frame, not only its contents. The
+        // enclosing `_KTRAP_FRAME` is at a fixed negative offset from
+        // it, and everything the register census wants lives there.
+        frame_at = stack + (word * sizeof(std::uint64_t));
+        break;
+    }
+
+    if (0 == this->guest_interrupted_rsp[cpu]) {
+        this->interrupted_context_not_found =
+            this->interrupted_context_not_found + 1;
+        return;
+    }
+
+    record_interrupted_context(cpu, frame_at);
+
+    // And the thread's own stack, from the pointer the frame carried.
+    for (std::size_t word{};
+         (word < guest_stack_words) &&
+         (this->guest_interrupted_count[cpu] < guest_stack_capacity);
+         ++word) {
+        std::uint64_t value{};
+        if (!read(this->guest_interrupted_rsp[cpu] +
+                      (word * sizeof(std::uint64_t)),
+                  value)) {
+            break;
+        }
+
+        if ((value >= base) && (value < (base + size))) {
+            this->guest_interrupted_trace
+                [cpu][this->guest_interrupted_count[cpu]] = value;
+            this->guest_interrupted_count[cpu] =
+                this->guest_interrupted_count[cpu] + 1;
+        }
+    }
+}
+
+void hypervisor::record_interrupted_context(std::size_t cpu,
+                                            std::uint64_t frame_at)
+{
+    // Reads `guest_interrupted_rip[cpu]` below, so it needs the same
+    // bound its caller has.
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // The hardware frame's own address, minus where `_KTRAP_FRAME` puts
+    // it, is the base of the trap frame. See `ktrap_frame_rip`: the five
+    // quadwords the shape search matched are that structure's last five
+    // fields, which is what makes this subtraction sound rather than a
+    // guess about how much the handler pushed.
+    if (frame_at < guest_windows::ktrap_frame_rip) {
+        this->interrupted_context_not_found =
+            this->interrupted_context_not_found + 1;
+        return;
+    }
+
+    auto base = frame_at - guest_windows::ktrap_frame_rip;
+
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    interrupted_context record{};
+
+    record.rip = this->guest_interrupted_rip[cpu];
+    record.rsp = this->guest_interrupted_rsp[cpu];
+    record.frame = base;
+
+    // Every one of these is a diagnostic and a failed read leaves its
+    // field zero rather than abandoning the record: a register that
+    // could not be read is still worth having beside the ones that
+    // could, and `frame` says where to go and look by hand.
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rcx, record.rcx));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rdx, record.rdx));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_r8, record.r8));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rsi, record.rsi));
+    static_cast<void>(
+        read(base + guest_windows::ktrap_frame_rdi, record.rdi));
+
+    // One byte, read as a word and masked, for the reason
+    // `sample_guest_thread` gives about the three `_KTHREAD` bytes: a
+    // shared read would tie this to the neighbours' spacing as well as
+    // to this field's own offset.
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    std::uint64_t word{};
+    if (read(base + guest_windows::ktrap_frame_previous_irql, word)) {
+        record.irql = word & byte_mask;
+    }
+
+    record.occurred = 1;
+
+    auto slot =
+        this->interrupted_context_count % interrupted_context_capacity;
+    this->interrupted_contexts[slot] = record;
+    this->interrupted_context_count =
+        this->interrupted_context_count + 1;
+    this->interrupted_context_found =
+        this->interrupted_context_found + 1;
+}
+
+void hypervisor::refresh_guest_threads(std::size_t cpu)
+{
+    if (0 == this->guest_thread_list_count) {
+        return;
+    }
+
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    for (std::size_t i{}; i < this->guest_thread_list_count; ++i) {
+        auto & entry = this->guest_thread_list[i];
+
+        std::uint64_t word{};
+        if (read(entry.thread + guest_windows::kthread_state, word)) {
+            entry.state = word & byte_mask;
+        }
+        if (read(entry.thread + guest_windows::kthread_wait_reason,
+                 word)) {
+            entry.wait_reason = word & byte_mask;
+        }
+        if (read(entry.thread + guest_windows::kthread_wait_irql, word)) {
+            entry.wait_irql = word & byte_mask;
+        }
+    }
+
+    this->guest_thread_refreshes = this->guest_thread_refreshes + 1;
+}
+
+void hypervisor::walk_guest_threads(std::size_t cpu, std::uint64_t thread)
+{
+    // Until it finds a process with more than one thread, and then never
+    // again.
+    //
+    // "Once, on the first plausible thread" was the first rule and it
+    // caught the idle process, whose list is one thread long by
+    // construction. "Only from a thread that is not the idle thread" was
+    // the second and it never fired at all: this processor alternates
+    // between two virtual trust levels, and every sample that read
+    // cleanly - that is, every sample from the level whose offsets these
+    // are - found it idle.
+    //
+    // So the condition is on the answer rather than on the question. A
+    // list of one is the idle process and worth replacing; a longer one
+    // is the system process and worth keeping. The walk stays bounded
+    // because it stops for good as soon as it succeeds.
+    constexpr std::uint64_t threads_worth_keeping = 2;
+
+    if (this->guest_thread_list_count >= threads_worth_keeping) {
+        return;
+    }
+
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    // The system process, named by a global in the image rather than
+    // reached from whatever thread happens to be running - see
+    // `ps_initial_system_process` for why the latter cannot work here.
+    auto base = find_guest_kernel_base(cpu);
+    if (0 == base) {
+        return;
+    }
+
+    std::uint64_t process{};
+    if (!read(base + guest_windows::ps_initial_system_process, process) ||
+        (process < kernel_address_floor)) {
+        return;
+    }
+
+    static_cast<void>(thread);
+
+    // The list head is inside the process object, and its first entry
+    // points at a *field* of the first thread rather than at the thread -
+    // which is what a doubly linked list of embedded links means, and
+    // what the subtraction below undoes.
+    auto head = process + guest_windows::eprocess_thread_list_head;
+
+    std::uint64_t link{};
+    if (!read(head, link)) {
+        return;
+    }
+
+    this->guest_thread_list_process = process;
+    this->guest_thread_list_walked = this->guest_thread_list_walked + 1;
+
+    std::size_t found{};
+    while ((found < guest_windows::thread_walk_limit) &&
+           (link >= kernel_address_floor) && (link != head)) {
+        auto entry = link - guest_windows::ethread_thread_list_entry;
+
+        guest_thread_entry recorded;
+        recorded.thread = entry;
+
+        static_cast<void>(
+            read(entry + guest_windows::ethread_start_address,
+                 recorded.start_address));
+
+        std::uint64_t word{};
+        if (read(entry + guest_windows::kthread_state, word)) {
+            recorded.state = word & byte_mask;
+        }
+        if (read(entry + guest_windows::kthread_wait_reason, word)) {
+            recorded.wait_reason = word & byte_mask;
+        }
+        if (read(entry + guest_windows::kthread_wait_irql, word)) {
+            recorded.wait_irql = word & byte_mask;
+        }
+
+        this->guest_thread_list[found] = recorded;
+        ++found;
+
+        if (!read(link, link)) {
+            break;
+        }
+    }
+
+    this->guest_thread_list_count = found;
+}
+
+namespace
+{
+/** What a PE image starts with, and where it keeps its headers. */
+constexpr std::uint16_t dos_signature = 0x5a4d;    // "MZ"
+constexpr std::uint32_t pe_signature = 0x00004550; // "PE\0\0"
+constexpr std::uint64_t dos_lfanew = 0x3c;
+constexpr std::uint64_t optional_header = 0x18;
+constexpr std::uint64_t magic_pe32_plus = 0x20b;
+constexpr std::uint64_t data_directory_64 = 0x70;
+constexpr std::uint64_t data_directory_32 = 0x60;
+constexpr std::uint64_t export_name_field = 0x0c;
+
+/**
+ * The debug directory, and the CodeView record it points at.
+ *
+ * Most drivers export nothing, so they have no export directory and no
+ * name in it - which is why the first attempt at this came back empty for
+ * exactly the image that mattered. What every Windows driver does carry
+ * is a CodeView record naming the symbol file it was built with, and the
+ * stem of that path is the module's name. Data directory six, entries of
+ * 28 bytes, type 2 is CodeView; the record is "RSDS", a 16 byte GUID, a
+ * four byte age, then the path.
+ */
+/** IMAGE_EXPORT_DIRECTORY, past the Name field already used above. */
+constexpr std::uint64_t export_count_names = 0x18;
+constexpr std::uint64_t export_functions = 0x1c;
+constexpr std::uint64_t export_names = 0x20;
+constexpr std::uint64_t export_ordinals = 0x24;
+
+/** LDR_DATA_TABLE_ENTRY, linked through its first member. */
+constexpr std::uint64_t ldr_dll_base = 0x30;
+constexpr std::uint64_t ldr_base_name = 0x58;
+constexpr std::uint64_t unicode_length = 0x00;
+constexpr std::uint64_t unicode_buffer = 0x08;
+constexpr std::uint64_t module_walk_limit = 512;
+
+constexpr std::uint64_t debug_directory_index = 6;
+constexpr std::uint64_t directory_entry_size = 8;
+constexpr std::uint64_t debug_entry_size = 28;
+constexpr std::uint64_t debug_type_field = 0x0c;
+constexpr std::uint64_t debug_address_field = 0x14;
+constexpr std::uint32_t debug_type_codeview = 2;
+constexpr std::uint64_t codeview_path = 24;
+
+/** How far back to look. Larger than any driver on this machine and
+ * bounded so a wrong address cannot walk the address space. */
+constexpr std::uint64_t image_search_pages = 4096;
+} // namespace
+
+std::uint64_t hypervisor::image_base_of(std::size_t cpu,
+                                        std::uint64_t address)
+{
+    constexpr std::uint64_t image_page = 0x1000;
+
+    auto at = address & ~(image_page - 1);
+
+    for (std::uint64_t i{}; i < image_search_pages;
+         ++i, at -= image_page) {
+        std::uint16_t magic{};
+
+        auto physical = translate_guest_linear(cpu, at);
+        if (!physical) {
+            continue;
+        }
+
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&magic),
+                          sizeof(magic)))) {
+            continue;
+        }
+
+        if (dos_signature != magic) {
+            continue;
+        }
+
+        // "MZ" alone is not enough - it is two common bytes. The PE
+        // signature the DOS header points at is what makes it an image.
+        std::uint32_t lfanew{};
+        auto header = translate_guest_linear(cpu, at + dos_lfanew);
+        if (!header ||
+            !read_guest_memory(
+                cpu,
+                *header,
+                std::span(reinterpret_cast<std::byte *>(&lfanew),
+                          sizeof(lfanew)))) {
+            continue;
+        }
+
+        std::uint32_t signature{};
+        auto sig = translate_guest_linear(cpu, at + lfanew);
+        if (!sig ||
+            !read_guest_memory(
+                cpu,
+                *sig,
+                std::span(reinterpret_cast<std::byte *>(&signature),
+                          sizeof(signature)))) {
+            continue;
+        }
+
+        if (pe_signature == signature) {
+            return at;
+        }
+    }
+
+    return 0;
+}
+
+void hypervisor::image_name_of(std::size_t cpu,
+                               std::uint64_t base,
+                               std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    if (0 == base) {
+        return;
+    }
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(cpu, at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if (!word(base + dos_lfanew, lfanew)) {
+        return;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return;
+    }
+
+    // The export directory is data directory zero, and where the
+    // directories start depends on the optional header's form.
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t export_rva{};
+    if (!word(directories, export_rva) || (0 == export_rva)) {
+        return;
+    }
+
+    std::uint32_t name_rva{};
+    if (!word(base + export_rva + export_name_field, name_rva) ||
+        (0 == name_rva)) {
+        return;
+    }
+
+    copy_image_string(cpu, base + name_rva, into);
+}
+
+void hypervisor::image_debug_name_of(std::size_t cpu,
+                                     std::uint64_t base,
+                                     std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    if (0 == base) {
+        return;
+    }
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(cpu, at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if (!word(base + dos_lfanew, lfanew)) {
+        return;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return;
+    }
+
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t debug_rva{};
+    std::uint32_t debug_size{};
+    auto entry =
+        directories + (debug_directory_index * directory_entry_size);
+
+    if (!word(entry, debug_rva) || !word(entry + 4, debug_size) ||
+        (0 == debug_rva)) {
+        return;
+    }
+
+    for (std::uint64_t at{}; (at + debug_entry_size) <= debug_size;
+         at += debug_entry_size) {
+        std::uint32_t type{};
+        std::uint32_t address{};
+
+        if (!word(base + debug_rva + at + debug_type_field, type) ||
+            !word(base + debug_rva + at + debug_address_field, address)) {
+            return;
+        }
+
+        if ((debug_type_codeview != type) || (0 == address)) {
+            continue;
+        }
+
+        copy_image_string(cpu, base + address + codeview_path, into);
+        return;
+    }
+}
+
+void hypervisor::copy_image_string(std::size_t cpu,
+                                   std::uint64_t at,
+                                   std::span<char> into)
+{
+    auto word = [&](std::uint64_t from, auto & value) {
+        auto physical = translate_guest_linear(cpu, from);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    for (std::size_t i{}; i < (into.size() - 1); ++i) {
+        char c{};
+        if (!word(at + i, c) || ('\0' == c)) {
+            into[i] = '\0';
+            return;
+        }
+        into[i] = c;
+    }
+
+    into[into.size() - 1] = '\0';
+}
+
+std::uint64_t hypervisor::image_export(std::size_t cpu,
+                                       std::uint64_t base,
+                                       const char * name)
+{
+    // One translation per *page*, not per access.
+    //
+    // The first version of this translated every byte, and every
+    // translation is a walk of the guest's page tables followed by the
+    // guest hypervisor's extended ones. A kernel exports thousands of
+    // names, so comparing them a byte at a time is millions of walks
+    // inside a single VM exit - it never finished, returned zero, and the
+    // caller read that as "not exported". A scan is sequential by nature
+    // and stays on a page for 4096 of those bytes.
+    constexpr std::uint64_t page_mask = 0xfff;
+
+    std::uint64_t cached_page = ~std::uint64_t{};
+    std::uint64_t cached_physical{};
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto into = std::span(reinterpret_cast<std::byte *>(&value),
+                              sizeof(value));
+
+        // A read straddling two pages cannot use one translation, and
+        // the aligned fields here never do - so it is answered the slow
+        // way rather than made a special case of.
+        if (((at & page_mask) + sizeof(value)) > (page_mask + 1)) {
+            auto physical = translate_guest_linear(cpu, at);
+            return physical &&
+                   read_guest_memory(cpu, *physical, into).has_value();
+        }
+
+        if (auto page = at & ~page_mask; page != cached_page) {
+            auto physical = translate_guest_linear(cpu, page);
+            if (!physical) {
+                return false;
+            }
+
+            cached_page = page;
+            cached_physical = *physical;
+        }
+
+        return read_guest_memory(
+                   cpu, cached_physical + (at & page_mask), into)
+            .has_value();
+    };
+
+    std::uint32_t lfanew{};
+    if ((0 == base) || !word(base + dos_lfanew, lfanew)) {
+        return 0;
+    }
+
+    auto optional = base + lfanew + optional_header;
+
+    std::uint16_t magic{};
+    if (!word(optional, magic)) {
+        return 0;
+    }
+
+    auto directories =
+        optional + ((magic_pe32_plus == magic) ? data_directory_64
+                                               : data_directory_32);
+
+    std::uint32_t exports{};
+    if (!word(directories, exports) || (0 == exports)) {
+        return 0;
+    }
+
+    std::uint32_t count{};
+    std::uint32_t names{};
+    std::uint32_t ordinals{};
+    std::uint32_t functions{};
+
+    if (!word(base + exports + export_count_names, count) ||
+        !word(base + exports + export_names, names) ||
+        !word(base + exports + export_ordinals, ordinals) ||
+        !word(base + exports + export_functions, functions)) {
+        return 0;
+    }
+
+    for (std::uint32_t i{}; i < count; ++i) {
+        std::uint32_t name_rva{};
+        if (!word(base + names + (i * 4), name_rva)) {
+            return 0;
+        }
+
+        auto matched = true;
+        for (std::size_t k{};; ++k) {
+            char c{};
+            if (!word(base + name_rva + k, c)) {
+                return 0;
+            }
+
+            if (c != name[k]) {
+                matched = false;
+                break;
+            }
+
+            if ('\0' == c) {
+                break;
+            }
+        }
+
+        if (!matched) {
+            continue;
+        }
+
+        std::uint16_t ordinal{};
+        std::uint32_t address{};
+
+        if (!word(base + ordinals + (i * 2), ordinal) ||
+            !word(base + functions + (ordinal * 4), address)) {
+            return 0;
+        }
+
+        return base + address;
+    }
+
+    return 0;
+}
+
+void hypervisor::module_name_of(std::size_t cpu,
+                                std::uint64_t kernel,
+                                std::uint64_t image,
+                                std::span<char> into)
+{
+    if (into.empty()) {
+        return;
+    }
+
+    into[0] = '\0';
+
+    auto word = [&](std::uint64_t at, auto & value) {
+        auto physical = translate_guest_linear(cpu, at);
+        return physical &&
+               read_guest_memory(
+                   cpu,
+                   *physical,
+                   std::span(reinterpret_cast<std::byte *>(&value),
+                             sizeof(value)))
+                   .has_value();
+    };
+
+    auto head = image_export(cpu, kernel, "PsLoadedModuleList");
+
+    this->l2_module_list = head;
+    this->l2_modules_walked = 0;
+    this->l2_first_module_base = 0;
+
+    if (0 == head) {
+        return;
+    }
+
+    std::uint64_t entry{};
+    if (!word(head, entry)) {
+        return;
+    }
+
+    for (std::uint64_t i{};
+         (i < module_walk_limit) && (entry != head) && (0 != entry);
+         ++i) {
+        std::uint64_t dll_base{};
+        if (!word(entry + ldr_dll_base, dll_base)) {
+            return;
+        }
+
+        this->l2_modules_walked = i + 1;
+
+        if (0 == i) {
+            this->l2_first_module_base = dll_base;
+        }
+
+        if (dll_base == image) {
+            std::uint16_t length{};
+            std::uint64_t buffer{};
+
+            if (!word(entry + ldr_base_name + unicode_length, length) ||
+                !word(entry + ldr_base_name + unicode_buffer, buffer)) {
+                return;
+            }
+
+            // UTF-16 in, and the names are ASCII, so the high byte is
+            // dropped rather than decoded.
+            auto characters = static_cast<std::size_t>(length) / 2;
+            std::size_t k{};
+
+            for (; (k < characters) && (k < (into.size() - 1)); ++k) {
+                std::uint16_t wide{};
+                if (!word(buffer + (k * 2), wide)) {
+                    break;
+                }
+                into[k] = static_cast<char>(wide & 0xff);
+            }
+
+            into[k] = '\0';
+            return;
+        }
+
+        if (!word(entry, entry)) {
+            return;
+        }
+    }
+}
+
+std::uint64_t hypervisor::nominal_tsc_frequency()
+{
+    std::uint32_t maximum[4]{};
+    arch::x86_64::cpuid(0, 0, maximum);
+
+    if (maximum[0] < 0x15) {
+        return 0;
+    }
+
+    std::uint32_t leaf_15[4]{};
+    arch::x86_64::cpuid(0x15, 0, leaf_15);
+
+    // The crystal, where the leaf declines to name it, comes from SDM
+    // Table 22-95 and that table is indexed by the *display* family and
+    // model - SDM 21.1.2's rule, not the raw fields.
+    std::uint32_t leaf_1[4]{};
+    arch::x86_64::cpuid(1, 0, leaf_1);
+
+    auto version = leaf_1[0];
+    auto family = (version >> 8) & 0xf;
+    auto model = (version >> 4) & 0xf;
+
+    if (0xf == family) {
+        family += (version >> 20) & 0xff;
+    }
+
+    if ((6 == family) || (0xf == family)) {
+        model += ((version >> 16) & 0xf) << 4;
+    }
+
+    return reference_tsc::tsc_frequency_from_leaf_15(
+        leaf_15[0],
+        leaf_15[1],
+        leaf_15[2],
+        reference_tsc::nominal_crystal_frequency(family, model));
+}
+
+void hypervisor::publish_reference_tsc_page(std::size_t cpu)
+{
+    if constexpr (!nested_vmx::publish_reference_tsc) {
+        return;
+    } else {
+        if (cpu >= max_cpus) {
+            return;
+        }
+
+        auto enabled = this->l2_reference_tsc_written[cpu];
+        if (0 == (enabled & 1)) {
+            return;
+        }
+
+        // **One publisher, partition wide.** The reference-TSC page is a
+        // property of the partition, not of a virtual processor: the
+        // guest hypervisor names one guest-physical page in
+        // `HV_X64_MSR_REFERENCE_TSC` and every processor reads that same
+        // page. Everything this function fits from, however, is
+        // per-processor - `reference_read_tsc[cpu]`,
+        // `reference_read_value[cpu]`, `reference_first_tsc[cpu]` - so
+        // with two processors enabled there are two independent fits
+        // writing the same page.
+        //
+        // That is not merely redundant, it breaks the interface. The
+        // page's protocol is a sequence counter the reader samples
+        // before and after reading the scale/offset pair, and it assumes
+        // a single writer: two processors stepping the same sequence
+        // concurrently can leave a reader with one processor's scale and
+        // the other's offset while the sequence looks stable. A guest
+        // hypervisor computing a deadline from a mismatched pair gets an
+        // arbitrary answer, and a far-future deadline reading as already
+        // expired is exactly what was measured - boot 147, cpu 0 asked
+        // for 2504.334 ms and was fired every 2.3 ms, `0.00x`, with the
+        // timer ring showing 32 clock injections against zero re-arms.
+        //
+        // It is also why this cannot happen on one processor, which is
+        // the shape the whole multicore investigation has been looking
+        // for: a single-processor guest has one fitter, no race, and its
+        // timer measures 1.05x on the same binary.
+        //
+        // The lowest-numbered processor that has the page enabled
+        // publishes; the others fit and count as before but do not
+        // write. Chosen over "cpu 0 only" because the enable is recorded
+        // per processor and nothing guarantees the boot processor is the
+        // one that wrote the MSR, and over a lock because a lock would
+        // serialise two writers that should not both exist.
+        for (std::size_t other{}; other < cpu; ++other) {
+            if (0 != (this->l2_reference_tsc_written[other] & 1)) {
+                return;
+            }
+        }
+
+        auto count = this->reference_read_count[cpu];
+        if (count < reference_sample_capacity) {
+            return;
+        }
+
+        // Nothing new to fit from. This is what keeps the work off the
+        // entry path once the guest has stopped reading the counter,
+        // which it does the moment the page becomes valid - and it is
+        // also what replaces the old `reference_published` latch. The
+        // latch meant the first fit governed the guest's clock for the
+        // rest of the boot with nothing able to revise it; this lets a
+        // later, longer-baselined fit replace it, and costs one
+        // comparison per entry when there is no later fit to make.
+        if (count == this->reference_fit_count[cpu]) {
+            return;
+        }
+        this->reference_fit_count[cpu] = count;
+
+        auto newest = (count - 1) % reference_sample_capacity;
+        auto oldest = count % reference_sample_capacity;
+
+        auto t2 = this->reference_read_tsc[cpu][newest];
+        auto r2 = this->reference_read_value[cpu][newest];
+
+        // The longest baseline available, which is the *first* answer
+        // ever seen rather than the oldest still in the ring. A pair
+        // taken from opposite ends of a 32-entry ring spans about two
+        // clock ticks, and each end carries the reflection cost - about
+        // 2.5 ms here - as error on its time-stamp axis, so the slope is
+        // fitted from a 5 ms baseline with 2.5 ms of noise on it. That
+        // is how a fit lands far from the truth and still passes a
+        // collinearity check.
+        auto t1 = this->reference_first_tsc[cpu];
+        auto r1 = this->reference_first_value[cpu];
+
+        if ((0 == t1) || (0 == r1)) {
+            t1 = this->reference_read_tsc[cpu][oldest];
+            r1 = this->reference_read_value[cpu][oldest];
+        }
+
+        if ((t2 <= t1) || (r2 <= r1)) {
+            return;
+        }
+
+        auto baseline = t2 - t1;
+        this->reference_baseline_tsc[cpu] = baseline;
+
+        // The counter is 10 MHz and the time-stamp counter is gigahertz,
+        // so the ratio is well under one and the quotient fits.
+        auto fitted = reference_tsc::shifted_quotient(r2 - r1, baseline);
+        this->reference_fitted_scale[cpu] = fitted;
+
+        // **Computed, not fitted.** Hyper-V reference time is counted in
+        // 100-nanosecond units, so the counter advances at exactly 10 MHz
+        // by specification - Xen quotes the TLFS text above `hv_scale_tsc`
+        // and derives the same `10^7 * 2^64 / tsc_hz` in
+        // `update_reference_tsc`; KVM's `compute_tsc_page_parameters`
+        // divides nanoseconds by 100 for the same reason. The scale has a
+        // closed form and the sampling apparatus was answering a question
+        // that did not need asking.
+        //
+        // Read once, and only here rather than on every entry: this point
+        // is reached a few dozen times in a boot.
+        auto tsc_hz = this->reference_tsc_frequency[cpu];
+        if (0 == tsc_hz) {
+            tsc_hz = nominal_tsc_frequency();
+            this->reference_tsc_frequency[cpu] = tsc_hz;
+        }
+
+        auto computed = reference_tsc::scale_for(tsc_hz);
+        auto scale = (0 != computed) ? computed : fitted;
+
+        if (0 == scale) {
+            return;
+        }
+
+        // The diagnostic, and the whole reason the wrong scale went
+        // unnoticed: one second of time-stamp counter through the page's
+        // own arithmetic. It must read about 10,000,000. Recorded for
+        // both candidates so they can disagree - a single-field
+        // instrument cannot tell you it is aimed at the wrong field.
+        if (0 != tsc_hz) {
+            this->reference_implied_hz[cpu] =
+                reference_tsc::implied_frequency(scale, tsc_hz);
+            this->reference_fit_implied_hz[cpu] =
+                reference_tsc::implied_frequency(fitted, tsc_hz);
+        }
+
+        // **The check that can fail on the thing it protects against**
+        // lives in `reference_fit_implied_hz` above and not here. Where
+        // the frequency is enumerable the fit is no longer what governs
+        // the guest's clock, so it is free to be an independent opinion
+        // about it - and the opinion is read as hertz against ten
+        // million, which is a quantity that disagrees.
+        //
+        // Deliberately not folded into `reference_fit_error`. That field
+        // carries the collinearity difference in hundred-nanosecond
+        // units, and a field that means hertz on one path and
+        // hundred-nanoseconds on the other is the unit slip this reader
+        // has already suffered three times.
+        if (0 == computed) {
+            // No enumerable frequency, so the fit is all there is and it
+            // has to earn its baseline. Under QEMU this is always the
+            // branch taken: `cpu_x86_cpuid` has no case for leaf 0x15 and
+            // its default returns zero, and `kvm_x86_build_cpuid` builds
+            // the guest's table from that function.
+            if (baseline < reference_minimum_baseline) {
+                return;
+            }
+
+            // Collinearity, against a sample from inside the baseline
+            // that the fit did not use. It cannot fail on a wrong slope -
+            // which is why it is no longer the only check - but it does
+            // fail on a window where the counter was not yet linear in
+            // the time-stamp counter, and that is worth keeping.
+            constexpr std::uint64_t tolerance = 1000;
+
+            auto middle = (count - (reference_sample_capacity / 2)) %
+                          reference_sample_capacity;
+            auto tm = this->reference_read_tsc[cpu][middle];
+            auto rm = this->reference_read_value[cpu][middle];
+
+            if ((0 == tm) || (tm <= t1) || (tm >= t2)) {
+                return;
+            }
+
+            auto anchor = r2 - reference_tsc::scaled_tsc(t2, scale);
+            auto predicted = reference_tsc::scaled_tsc(tm, scale) + anchor;
+            auto difference =
+                (predicted > rm) ? (predicted - rm) : (rm - predicted);
+
+            if (difference > tolerance) {
+                this->reference_fit_error[cpu] = difference;
+                return;
+            }
+        }
+
+        auto published = this->reference_published[cpu];
+
+        // Nothing would change, so nothing is written. A rewrite that
+        // carries the same numbers still steps the sequence and still
+        // makes a reader retry.
+        //
+        // **The comparison is a tolerance, not equality, and that
+        // distinction is the whole bug.** Where the frequency is not
+        // enumerable - which is *always*, under QEMU, for the reason the
+        // `0 == computed` branch above spells out - `scale` is the
+        // fitted one, and a fit is a measurement. Consecutive fits
+        // therefore differ in their low bits for ever: measured from one
+        // boot's log, 0.085 ppm between adjacent publishes and 4.4 ppm
+        // at the worst outlier. Exact equality never holds against that,
+        // so the page was rewritten every 36,000 time-stamp ticks, about
+        // 18 microseconds, for the whole life of the guest.
+        //
+        // Every rewrite steps the sequence, and the interface has the
+        // reader sample the sequence, read the pair, sample the sequence
+        // again and retry on a change. A reader slower than the rewrite
+        // interval therefore never completes a consistent read at all -
+        // and under this VMM every one of its reads is slower than 18
+        // microseconds. That is what stalled Hyper-V's own time-stamp
+        // counter calibration at `hvix64+0x255b4e`, which retries until
+        // the reference clock has advanced 1,200,000 hundred-nanosecond
+        // units and can only fail by the clock not advancing.
+        //
+        // The publisher is the boot processor and the page is
+        // partition-wide, which is why the processors that *failed* were
+        // the application processors: they were the ones still
+        // calibrating, while the boot processor had already finished.
+        //
+        // 100 ppm, which is two orders of magnitude above the observed
+        // jitter and still far tighter than anything a guest could
+        // notice. A genuine correction survives it; noise does not.
+        constexpr std::uint64_t reference_scale_tolerance = 10000;
+
+        if (0 != published) {
+            auto previous = this->reference_scale[cpu];
+            auto difference =
+                (scale > previous) ? (scale - previous) : (previous - scale);
+
+            if (difference <= (previous / reference_scale_tolerance)) {
+                return;
+            }
+        }
+
+        // The offset anchors reference time on what the guest has
+        // already been told. On a first publish that is the newest
+        // answer the level above gave; on a revision it is the value the
+        // page itself reads *now*, so replacing the scale does not step
+        // the clock - the same construction Xen uses in
+        // `time_ref_count_thaw`, `trc->off = trc->val - trc_val(d, 0)`.
+        std::uint64_t offset{};
+
+        if (0 != published) {
+            // The guest's own view, not this VMM's. See
+            // `l2_time_stamp_counter`: the page is read by the
+            // second-level guest against its `rdtsc`, which carries the
+            // guest hypervisor's offset as well as ours.
+            auto now = l2_time_stamp_counter(cpu);
+            auto current = reference_tsc::scaled_tsc(
+                               now, this->reference_scale[cpu]) +
+                           this->reference_offset[cpu];
+            offset = current - reference_tsc::scaled_tsc(now, scale);
+        } else {
+            offset = r2 - reference_tsc::scaled_tsc(t2, scale);
+        }
+
+        // The page is a second-level guest-physical address, so it needs
+        // the guest hypervisor's extended tables to reach.
+        constexpr std::uint64_t page_bits = ~std::uint64_t{0xfff};
+        auto physical = l2_physical_to_l1(cpu, enabled & page_bits);
+        if (!physical) {
+            return;
+        }
+
+        std::uint32_t sequence{};
+        auto write_sequence = [&] {
+            return write_guest_physical(
+                *physical,
+                std::span(reinterpret_cast<const std::byte *>(&sequence),
+                          sizeof(sequence)));
+        };
+
+        // Invalidate before rewriting, which matters only on a revision:
+        // a reader that samples the sequence, reads a torn scale/offset
+        // pair and samples the same sequence again would accept it. Zero
+        // is the interface's own "this page is not a reliable source",
+        // and it sends the guest to the counter MSR for as long as the
+        // rewrite takes. Skipped on a first publish, where the sequence
+        // is already zero because the level above never filled it in.
+        if (0 != published) {
+            if (!write_sequence()) {
+                return;
+            }
+        }
+
+        // Scale and offset first, sequence last. The interface has the
+        // guest read the sequence, the data, then the sequence again, so
+        // a non-zero sequence must never be visible before what it
+        // describes.
+        struct
+        {
+            std::uint32_t sequence;
+            std::uint32_t reserved;
+            std::uint64_t scale;
+            std::uint64_t offset;
+        } page{0, 0, scale, offset};
+
+        auto body = std::span(reinterpret_cast<const std::byte *>(&page) +
+                                  sizeof(std::uint64_t),
+                              sizeof(page) - sizeof(std::uint64_t));
+
+        if (!write_guest_physical(*physical + sizeof(std::uint64_t),
+                                  body)) {
+            return;
+        }
+
+        auto publishes = this->reference_publishes[cpu] + 1;
+
+        // Monotonic across revisions, and never zero - zero is the
+        // interface's invalid marker, which is what Xen's
+        // `seq ? seq : 1` is avoiding.
+        sequence = static_cast<std::uint32_t>(publishes);
+        if (0 == sequence) {
+            sequence = 1;
+        }
+
+        if (!write_sequence()) {
+            return;
+        }
+
+        this->reference_scale[cpu] = scale;
+        this->reference_offset[cpu] = offset;
+        this->reference_publishes[cpu] = publishes;
+        this->reference_published[cpu] = 1;
+
+        log("cpu {} published reference tsc page at {} scale {} offset "
+            "{} tsc_hz {} implied_hz {} fit_implied_hz {} baseline {}",
+            cpu,
+            enabled & page_bits,
+            scale,
+            offset,
+            tsc_hz,
+            this->reference_implied_hz[cpu],
+            this->reference_fit_implied_hz[cpu],
+            baseline);
+    }
+}
+
+void hypervisor::capture_poll_site(std::size_t cpu)
+{
+    auto rip = this->vmcs.guest_rip();
+    auto rsp = this->vmcs.guest_rsp();
+
+    // Backwards far enough to take in the head of the loop, since the
+    // poll itself is the bottom of it.
+    constexpr std::uint64_t behind = 0x60;
+    auto from = rip - behind;
+
+    auto fetch = [&](std::uint64_t linear, std::span<std::byte> into) {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        return read_guest_memory(cpu, *physical, into).has_value();
+    };
+
+    // Byte at a time, because the range crosses a page boundary whenever
+    // the loop does and a single translation would then read the wrong
+    // second page. Slow, and it happens once.
+    for (std::size_t i{}; i < l2_poll_code_size; ++i) {
+        if (!fetch(from + i,
+                   std::span(reinterpret_cast<std::byte *>(
+                                 &this->l2_poll_code[i]),
+                             1))) {
+            return;
+        }
+    }
+
+    for (std::size_t i{}; i < l2_poll_stack_words; ++i) {
+        if (!fetch(rsp + (i * sizeof(std::uint64_t)),
+                   std::span(reinterpret_cast<std::byte *>(
+                                 &this->l2_poll_stack[i]),
+                             sizeof(std::uint64_t)))) {
+            break;
+        }
+    }
+
+    this->l2_poll_code_base = from;
+    this->l2_poll_rip = rip;
+    this->l2_poll_rsp = rsp;
+
+    // Which images those addresses belong to. The poll is in the kernel;
+    // the interesting one is the first return address that is not.
+    this->l2_kernel_base = image_base_of(cpu, rip);
+    image_name_of(cpu, this->l2_kernel_base, this->l2_kernel_name);
+
+    constexpr std::uint64_t kernel_space = 0xffff800000000000;
+
+    for (auto entry : this->l2_poll_stack) {
+        if (entry < kernel_space) {
+            continue;
+        }
+
+        auto base = image_base_of(cpu, entry);
+        if ((0 == base) || (base == this->l2_kernel_base)) {
+            continue;
+        }
+
+        this->l2_driver_base = base;
+        this->l2_driver_address = entry;
+
+        // Exports first, then the symbol file, since most drivers export
+        // nothing and only the second names them.
+        image_name_of(cpu, base, this->l2_driver_name);
+
+        if ('\0' == this->l2_driver_name[0]) {
+            image_debug_name_of(cpu, base, this->l2_driver_name);
+        }
+
+        // And the kernel's own list last, which is the only one that
+        // works for a driver that exports nothing and whose symbol-file
+        // record is not resident - which is this one.
+        if ('\0' == this->l2_driver_name[0]) {
+            module_name_of(
+                cpu, this->l2_kernel_base, base, this->l2_driver_name);
+        }
+
+        break;
+    }
+
+    // Last, so a reader that sees this set sees everything above it.
+    this->l2_poll_captured = 1;
+}
+
+void hypervisor::on_vtl_block_write(void * context,
+                                    std::uint64_t page,
+                                    const guest_write * write)
+{
+    auto & self = *static_cast<hypervisor *>(context);
+
+    static_cast<void>(page);
+
+    self.vtl_block_writes = self.vtl_block_writes + 1;
+
+    // What was written and by whom, which is the entire question. A
+    // count alone cannot distinguish the second-level guest touching its
+    // own stack from the state actually being set - the address and the
+    // value can, and the instruction pointer says who.
+    //
+    // The RIP comes from the VMCS rather than from `guest_write`, which
+    // carries only address, value and width. Whichever VMCS is current
+    // is the one that faulted, so this is the faulting guest's own
+    // instruction pointer either way.
+    if (nullptr != write) {
+        self.vtl_block_write_address = write->address;
+        self.vtl_block_write_value = write->value;
+    }
+
+    self.vtl_block_writer_rip = self.vmcs.guest_rip();
+}
+
+void hypervisor::capture_vtl_switch(std::size_t cpu,
+                                    std::size_t kind,
+                                    arch::x86_64::context & context)
+{
+    if constexpr (!nested_vmx::trace_vtl) {
+        return;
+    }
+
+    if ((cpu >= max_cpus) || (kind >= vtl_kinds)) {
+        return;
+    }
+
+    // Arm the IUM block watch, once, on the page `rdx` lands in.
+    //
+    // `rdx` at an `HvCallVtlCall` is the register block
+    // `HvlSwitchToVsmVtl1` marshals - `movq (%rdx), %rbx` going in and
+    // `movq %rbx, (%rdx)` coming out - so it is the object whose first
+    // qword carries the state the second-level guest dispatches on and
+    // never sees change. See `nested_vmx::watch_vtl_block` for why a
+    // watch and not another read.
+    //
+    // Kind 0 only - the `HvCallVtlCall` side - because that is where
+    // `rdx` holds the block; on the return side it holds something else.
+    if constexpr (nested_vmx::watch_vtl_block) {
+        // **Not the first `HvCallVtlCall` - the first one is somebody
+        // else's.** Armed on the first switch it saw, this watched
+        // `rdx = 0x1a7280`, an identity-mapped low address holding
+        // `0x8c0`, from an early-boot use of the same hypercall. The
+        // block the loop spins on is a kernel *stack* address and its
+        // first qword is `0x100000400`, so the two are not confusable
+        // once the test is right.
+        //
+        // A canonical kernel address is the discriminator, and it is the
+        // cheapest one that cannot be fooled by boot ordering: early VSM
+        // work runs on identity-mapped memory, the IUM block does not.
+        constexpr std::uint64_t kernel_floor = 0xffff800000000000;
+
+        if ((0 == kind) && (0 == this->vtl_block_page) &&
+            this->running_l2[cpu] && (context.rdx >= kernel_floor)) {
+            if (auto physical = translate_guest_linear(cpu, context.rdx)) {
+                if (auto reachable = l2_physical_to_l1(
+                        this->vmcs.vpid() - 1, *physical)) {
+                    auto page = *reachable & ~std::uint64_t{0xfff};
+
+                    if (watch_guest_page_writes(
+                            page,
+                            &hypervisor::on_vtl_block_write,
+                            this)) {
+                        this->vtl_block_page = page;
+                        log("watching the IUM block page {} (block at {})",
+                            page,
+                            context.rdx);
+                    }
+                }
+            }
+        }
+    }
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Slot 4 is the VMCS's guest RSP and not the context's, and slots 16
+    // to 19 are not registers the exit handler holds at all. See
+    // `vtl_differed` for the layout.
+    std::uint64_t now[vtl_slot_count] = {
+        context.rax,         context.rbx,
+        context.rcx,         context.rdx,
+        vmcs.guest_rsp(),    context.rbp,
+        context.rsi,         context.rdi,
+        context.r8,          context.r9,
+        context.r10,         context.r11,
+        context.r12,         context.r13,
+        context.r14,         context.r15,
+        vmcs.guest_rip(),    vmcs.guest_cr3(),
+        vmcs.guest_rflags(), shadow.read(field::ept_pointer),
+    };
+
+    auto count = this->vtl_switches[cpu][kind];
+
+    // Against the previous switch of this kind, so the answer is about
+    // the loop rather than about how the boot reached it.
+    if (0 != count) {
+        for (std::size_t i{}; i < vtl_slot_count; ++i) {
+            if (now[i] != this->vtl_previous[cpu][kind][i]) {
+                this->vtl_differed[cpu][kind][i] += 1;
+            }
+        }
+    }
+
+    for (std::size_t i{}; i < vtl_slot_count; ++i) {
+        this->vtl_previous[cpu][kind][i] = now[i];
+        this->vtl_latest[cpu][kind][i] = now[i];
+    }
+
+    this->vtl_switches[cpu][kind] = count + 1;
+
+    // The timer arm happens eight times in a whole boot, so its one
+    // capture is the first. The trust-level sides are **re-captured**,
+    // every `vtl_recapture` switches, and that is the point of them now
+    // rather than a refinement of it.
+    //
+    // A single capture cannot answer the question the loop poses. Over
+    // ninety seconds the second-level guest executes two addresses and
+    // nothing else, so what is wanted is whether the *state* behind
+    // those two addresses advances - a stack that moves, an argument
+    // that counts, a frame that changes - or whether it is the identical
+    // call repeated for ever. One snapshot says neither. Two snapshots
+    // ninety seconds apart say it outright, and the counters beside them
+    // stay cumulative so nothing is lost by overwriting.
+    // Everything from here is the deep capture, and it is behind a
+    // switch. See `nested_vmx::capture_vtl_deeply`: the census above is
+    // cheap and unconditional, this walks guest memory and the tables
+    // behind it, and it is the last candidate for the 137.6 VMCS reads
+    // a vmcall costs over an identical reflection.
+    if constexpr (!nested_vmx::capture_vtl_deeply) {
+        return;
+    }
+
+    if (timer_arm_kind == kind) {
+        if (0 != count) {
+            return;
+        }
+    } else if ((count < vtl_capture_at) ||
+               (0 != (count % vtl_recapture))) {
+        return;
+    }
+
+    for (std::size_t i{}; i < vtl_slot_count; ++i) {
+        this->vtl_first[cpu][kind][i] = now[i];
+    }
+
+    // The stack, in this side's own address space, which is why it is
+    // taken here rather than from a reader outside: a CR3 sampled from
+    // out there is whichever trust level exited last, and half the time
+    // that is the other one.
+    auto rip = now[16];
+    auto rsp = now[4];
+
+    for (std::size_t i{}; i < vtl_stack_words; ++i) {
+        auto physical =
+            translate_guest_linear(cpu, rsp + (i * sizeof(std::uint64_t)));
+        if (!physical) {
+            break;
+        }
+
+        std::uint64_t word{};
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(&word),
+                          sizeof(word)))) {
+            break;
+        }
+
+        this->vtl_stack[kind][i] = word;
+    }
+
+    this->vtl_rip[kind] = rip;
+    this->vtl_rsp[kind] = rsp;
+    this->vtl_cr3[kind] = now[17];
+
+    // The hypercall page is its own page and belongs to no image, so
+    // this is expected to come back empty - it is recorded so that an
+    // empty answer is distinguishable from a capture that never ran.
+    this->vtl_image_base[kind] = image_base_of(cpu, rip);
+    image_name_of(
+        cpu, this->vtl_image_base[kind], this->vtl_image_name[kind]);
+
+    // The first return address above it that resolves to an image, which
+    // is the caller. Same trick as `capture_poll_site`, and the same
+    // three ways of naming what it finds.
+    constexpr std::uint64_t kernel_space = 0xffff800000000000;
+
+    for (auto entry : this->vtl_stack[kind]) {
+        if (entry < kernel_space) {
+            continue;
+        }
+
+        auto base = image_base_of(cpu, entry);
+        if (0 == base) {
+            continue;
+        }
+
+        this->vtl_caller_base[kind] = base;
+        this->vtl_caller_address[kind] = entry;
+
+        // And the instructions around it, because the loop's whole body
+        // is here and nothing else can show it.
+        //
+        // Over ninety seconds and 2,688 working exits the second-level
+        // guest executed exactly two addresses - the two hypercall stubs
+        // - alternating, with no third address appearing and none
+        // retiring. So there is no other work to find: whatever it tests
+        // between the return of one call and the start of the next is
+        // the whole of what it is waiting for, it takes no exit doing
+        // it, and it is a few instructions either side of this return
+        // address.
+        //
+        // Centred rather than forward-only: the call itself and the
+        // setup before it say what is being asked, and the test and
+        // branch after it say what answer is being refused.
+        constexpr std::uint64_t behind = vtl_code_behind;
+
+        for (std::size_t i{}; i < vtl_code_size; ++i) {
+            auto physical =
+                translate_guest_linear(cpu, entry - behind + i);
+            if (!physical) {
+                break;
+            }
+
+            if (!read_guest_memory(cpu,
+                                   *physical,
+                                   std::span(reinterpret_cast<std::byte *>(
+                                                 &this->vtl_code[kind][i]),
+                                             1))) {
+                break;
+            }
+        }
+
+        this->vtl_code_base[kind] = entry - behind;
+
+        // And whatever the page-aligned pointer on the stack refers to.
+        //
+        // Registers and stack are byte-identical every iteration, so
+        // the content of the secure call is in memory - and the only
+        // candidate the captures have turned up is slot +0x080 of the
+        // securekernel side, which holds a page-aligned address and
+        // holds the same one again at +0x098. A structure pointer
+        // passed by both levels is exactly what a call whose arguments
+        // are not in registers looks like.
+        //
+        // Guest *virtual*, so through translate_guest_linear, and the
+        // outcome recorded rather than inferred - an all-zero buffer
+        // has already been mistaken for an answer twice in this file.
+        // Any page-aligned kernel pointer on this side's stack, and -
+        // for the first trust level - the one the *second* level was
+        // holding, carried across.
+        //
+        // The second level holds `0xfffff804345dc000` at slot +0x080 and
+        // does not map it; the first level's CR3 is the one its
+        // mappings are under, so the address has to be followed from
+        // there rather than from where it was found. Slot +0x080 is
+        // empty on the first level's own stack, so the two are not the
+        // same shape and neither can be assumed of the other.
+        constexpr std::size_t pointer_slot = 0x80 / 8;
+
+        if (timer_arm_kind != kind) {
+            auto candidate = this->vtl_stack[kind][pointer_slot];
+
+            if ((0 != candidate) && (0 == (candidate & 0xfff))) {
+                this->vtl_follow_at = candidate;
+            }
+        }
+
+        auto shared = this->vtl_stack[kind][pointer_slot];
+
+        // Nothing page aligned on this side's own stack: fall back to
+        // what the other side was holding, which is the whole point of
+        // carrying it.
+        if ((0 == shared) || (0 != (shared & 0xfff))) {
+            shared = this->vtl_follow_at;
+        }
+
+        if ((0 != shared) && (0 == (shared & 0xfff))) {
+            this->vtl_shared_at[kind] = shared;
+            this->vtl_shared_read[kind] = 0;
+
+            for (std::size_t at{}; at < vtl_shared_size; at += 8) {
+                auto physical = translate_guest_linear(cpu, shared + at);
+                if (!physical) {
+                    // An optional, not an expected - the walk says only
+                    // that it found nothing, so the marker is the whole
+                    // of what can be recorded.
+                    this->vtl_shared_error[kind] = (1ull << 32);
+                    break;
+                }
+
+                if (auto got = read_guest_memory(
+                        cpu,
+                        *physical,
+                        std::span(reinterpret_cast<std::byte *>(
+                                      &this->vtl_shared[kind][at]),
+                                  8));
+                    !got) {
+                    this->vtl_shared_error[kind] =
+                        static_cast<std::uint64_t>(got.error().code()) |
+                        (2ull << 32);
+                    break;
+                }
+
+                this->vtl_shared_read[kind] = at + 8;
+            }
+        }
+
+        // The globals the secure kernel spins on, which are the only
+        // state it can be reading: between the two hypercalls it takes
+        // **zero** exits, so whatever it decides on is memory already
+        // mapped to it and already resident.
+        //
+        // Its code, captured above, tests three quadwords through
+        // rip-relative displacements of 0x73c89, 0x73c7f and 0x73c77 -
+        // one compared against zero, one decremented under lock, and
+        // one spun on with PAUSE until it reaches zero. Those
+        // displacements are from instructions about 0x30 before the
+        // return address, so the three land within a few bytes of
+        // `caller + 0x73c61`, and a 256 byte window at `+ 0x73c00`
+        // covers all of them whatever the exact encoding lengths.
+        //
+        // Module-relative, so the window is the same on every boot even
+        // though the base is not.
+        constexpr std::uint64_t spin_window = 0x73c00;
+
+        this->vtl_spin_at[kind] = entry + spin_window;
+        this->vtl_spin_read[kind] = 0;
+
+        for (std::size_t at{}; at < vtl_spin_size; at += 8) {
+            auto physical =
+                translate_guest_linear(cpu, entry + spin_window + at);
+            if (!physical) {
+                this->vtl_spin_error[kind] = (1ull << 32);
+                break;
+            }
+
+            if (auto got = read_guest_memory(
+                    cpu,
+                    *physical,
+                    std::span(reinterpret_cast<std::byte *>(
+                                  &this->vtl_spin[kind][at]),
+                              8));
+                !got) {
+                this->vtl_spin_error[kind] =
+                    static_cast<std::uint64_t>(got.error().code()) |
+                    (2ull << 32);
+                break;
+            }
+
+            this->vtl_spin_read[kind] = at + 8;
+        }
+
+        // The page the secure kernel is being asked about, and what
+        // this VMM's tables say about it.
+        //
+        // Its code builds a request out of `rbp`: `mov rax, rbp; shr
+        // rax, 12; mov r8d, 0x1000`, a single page, and stores the
+        // frame number to the stack. That store lands at slot +0x090,
+        // which holds 0x11ad2c here and 0x11ad2a and 0x11ad8f on other
+        // boots - shifted up twelve, `0x11ad2c000`, squarely in the
+        // guest-physical range everything else on this rig sits in.
+        //
+        // So the question the whole livelock reduces to is answerable
+        // in two reads: does the guest hypervisor's own walk map that
+        // page for this trust level, and does this VMM's shadow hold
+        // it with the permissions the walk asked for. A page absent
+        // from the shadow, or present with less than the walk grants,
+        // is a secure kernel answering the same way for ever because
+        // the fault it expects to change the answer never arrives.
+        constexpr std::size_t frame_slot = 0x90 / 8;
+        constexpr std::uint64_t frame_shift = 12;
+
+        if (auto frame = this->vtl_stack[kind][frame_slot];
+            (0 != frame) && (frame < (1ull << 40))) {
+            auto page = frame << frame_shift;
+
+            this->vtl_page[kind] = page;
+
+            auto first = l2_physical_to_l1(cpu, page);
+            this->vtl_page_first[kind] = first ? *first : 0;
+            this->vtl_page_mapped[kind] = first ? 1 : 0;
+
+            auto held = shadow_ept_lookup(cpu, page);
+            this->vtl_page_shadow[kind] =
+                static_cast<std::uint64_t>(held.status);
+            this->vtl_page_rights[kind] = held.permissions.bits();
+
+            // And what the guest hypervisor's *own* tables grant it.
+            //
+            // This is the twelfth question and the first one in a while
+            // worth a boot. HvCallModifyVtlProtectionMask is issued -
+            // rcx 0x1000c, and once 0x1fe0000000c with a repeat count of
+            // 510 - and `reflected_permission` is 0 of 448,441, so no
+            // permission in the tables this VMM shadows has ever refused
+            // either trust level. Those two together say the guest
+            // hypervisor accepts the protection change and never
+            // expresses it where we would see it, which is exactly the
+            // shape of the loop: the secure kernel asks for a page's
+            // protection to change, it does not take effect, it checks,
+            // and it asks again with identical state for ever.
+            //
+            // The shadow's own permissions cannot answer it, because
+            // they are the *intersection* with ours - a page we restrict
+            // for our own reasons looks the same as one the level above
+            // restricted. Walking its tables directly separates them.
+            auto eptp12 = this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+            auto walk = arch::x86_64::vmx::walk_ept(
+                eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+                page,
+                physical_address_bits(),
+                execute_only_translations_offered,
+                [&](std::uint64_t at)
+                    -> std::optional<arch::x86_64::vmx::epte> {
+                    std::uint64_t value{};
+                    if (!read_guest_physical(
+                            at,
+                            std::span(
+                                reinterpret_cast<std::byte *>(&value),
+                                sizeof(value)))) {
+                        return std::nullopt;
+                    }
+
+                    return arch::x86_64::vmx::epte(value);
+                });
+
+            this->vtl_page_guest_status[kind] =
+                static_cast<std::uint64_t>(walk.status);
+            this->vtl_page_guest_rights[kind] = walk.permissions.bits();
+        }
+
+        image_name_of(cpu, base, this->vtl_caller_name[kind]);
+
+        if ('\0' == this->vtl_caller_name[kind][0]) {
+            image_debug_name_of(cpu, base, this->vtl_caller_name[kind]);
+        }
+
+        // And the kernel's own list last, which needs a kernel base and
+        // so only answers for the side that has one. `l2_kernel_base` is
+        // whichever image `capture_poll_site` found, and that runs in
+        // the ordinary trust level - so this is the right list for kind
+        // 0 and the wrong one for kind 1, where it finds nothing rather
+        // than the wrong thing.
+        if (('\0' == this->vtl_caller_name[kind][0]) &&
+            (0 != this->l2_kernel_base)) {
+            module_name_of(cpu,
+                           this->l2_kernel_base,
+                           base,
+                           this->vtl_caller_name[kind]);
+        }
+
+        break;
+    }
+
+    // And the page the two trust levels talk through, in this side's
+    // own view of guest physical memory.
+    //
+    // The registers and the stack are byte-identical across thousands of
+    // switches, so whatever makes this call happen again is here. The
+    // interface puts the VTL control structure at offset 0x100 - the
+    // entry reason, the pending-event flags and the return registers -
+    // and the APIC assist at offset 0. Both fit in the first 512 bytes.
+    //
+    // Read through `l2_physical_to_l1` first, because the address in the
+    // register is the *second-level* guest's physical address and this
+    // VMM's own mapping window takes the first level's. Each trust level
+    // has its own page and its own extended-page-table root, so a read
+    // that skipped that step would resolve one level's address in the
+    // other's tables and answer with something plausible and wrong.
+    constexpr std::uint64_t vp_assist_enabled = 1;
+    constexpr std::uint64_t page_mask = ~0xfffull;
+
+    for (std::size_t which{}; which < 2; ++which) {
+        auto msr = this->l2_vp_assist[cpu][which];
+        if (0 == (msr & vp_assist_enabled)) {
+            continue;
+        }
+
+        // How far it got, and why it stopped. Without this an all-zero
+        // buffer is indistinguishable from a read that failed on its
+        // first quadword - and the first attempt at this *did* come back
+        // all zeroes, which is exactly the reading that would have been
+        // recorded as "the page is empty".
+        this->vtl_assist_read[kind][which] = 0;
+        this->vtl_assist_error[kind][which] = 0;
+
+        // One translation and one read for the whole area, where this
+        // used to walk and read eight bytes at a time.
+        //
+        // `vtl_assist_size` is 512 and the address is page-aligned, so
+        // every byte of it is in **one** page - which made the loop 64
+        // identical extended-page-table walks, each three or four levels
+        // deep and each level a repoint of the mapping window, to fetch
+        // 512 bytes that one map could reach. Measured: walks cost 3.33
+        // entry reads each and the whole VMM was doing 38 of those per
+        // exit at 1,088 cycles a repoint.
+        //
+        // The per-quadword progress this used to record could never
+        // distinguish anything, for the same reason: the page either
+        // maps or it does not, so a partial read was not a state that
+        // existed. What the counters are for - telling an empty page
+        // from a failed read - is preserved, and the error code still
+        // says which half failed.
+        auto first = l2_physical_to_l1(cpu, msr & page_mask);
+        if (!first) {
+            this->vtl_assist_error[kind][which] =
+                static_cast<std::uint64_t>(first.error().code()) |
+                (1ull << 32);
+            continue;
+        }
+
+        this->vtl_assist_first[kind][which] = *first;
+
+        if (auto got = read_guest_physical(
+                *first,
+                std::span(reinterpret_cast<std::byte *>(
+                              &this->vtl_assist[kind][which][0]),
+                          vtl_assist_size));
+            !got) {
+            this->vtl_assist_error[kind][which] =
+                static_cast<std::uint64_t>(got.error().code()) |
+                (2ull << 32);
+            continue;
+        }
+
+        this->vtl_assist_read[kind][which] = vtl_assist_size;
+    }
+
+    // Last, so a reader that sees this set sees everything above it.
+    this->vtl_captured[kind] = 1;
+}
+
+void hypervisor::on_vp_assist_write(void * context,
+                                    std::uint64_t page,
+                                    const guest_write *)
+{
+    auto self = static_cast<hypervisor *>(context);
+
+    self->vp_assist_writes = self->vp_assist_writes + 1;
+    self->vp_assist_write_page = page;
+}
+
+/**
+ * The synthetic interrupt controller's two pages, recorded against the
+ * trust level that named them.
+ *
+ * See `l2_simp_msr` in hypervisor.h for why this is keyed at all. The
+ * slot search is `settle_vp_assist_page`'s neighbour at the VP assist
+ * MSR, deliberately identical: the slot this level already claimed, or
+ * the first free one, and nothing when both are claimed by other
+ * levels. Overwriting one instead would put a third level's page under
+ * a second level's key, which is the failure this exists to end - and
+ * it would be invisible, since the value written is plausible either
+ * way.
+ *
+ * **An extended-page-table pointer of zero is not a key.** A guest
+ * hypervisor that has not set one yet, or a write seen before vmcs12
+ * carries one, would otherwise claim the free-slot marker and make the
+ * first real level unrecordable. Recorded in slot 0 in that case, which
+ * is where a single-level guest's writes belong anyway.
+ */
+void hypervisor::record_synic_page(std::size_t cpu,
+                                   std::uint64_t slot,
+                                   std::uint64_t written,
+                                   std::uint64_t eptp)
+{
+    constexpr std::uint64_t siefp_slot = 0x82;
+    constexpr std::uint64_t simp_slot = 0x83;
+
+    if ((simp_slot != slot) && (siefp_slot != slot)) {
+        return;
+    }
+
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    constexpr std::size_t levels = sizeof(this->l2_synic_eptp[0]) /
+                                   sizeof(this->l2_synic_eptp[0][0]);
+
+    // Slot 0 with no key, so a level that has not published a pointer is
+    // still recorded rather than being given the free-slot marker.
+    auto which = levels;
+
+    if (0 == eptp) {
+        which = 0;
+    } else {
+        for (std::size_t i{}; i < levels; ++i) {
+            if ((this->l2_synic_eptp[cpu][i] == eptp) ||
+                (0 == this->l2_synic_eptp[cpu][i])) {
+                which = i;
+                break;
+            }
+        }
+    }
+
+    if (which >= levels) {
+        return;
+    }
+
+    this->l2_synic_eptp[cpu][which] = eptp;
+
+    if (simp_slot == slot) {
+        this->l2_simp_msr[cpu][which] = written;
+    } else {
+        this->l2_siefp_msr[cpu][which] = written;
+    }
+}
+
+void hypervisor::settle_vp_assist_page(std::size_t cpu)
+{
+    constexpr std::uint64_t enabled = 1;
+    constexpr std::uint64_t page_mask = ~0xfffull;
+
+    auto value = this->vp_assist_pending[cpu];
+    if (0 == (value & enabled)) {
+        return;
+    }
+
+    auto l2_physical = value & page_mask;
+    this->vp_assist_l2_physical = l2_physical;
+
+    // Path one: the guest hypervisor's own extended page tables, which
+    // is what its guest's physical address actually means.
+    auto walked = l2_physical_to_l1(cpu, l2_physical);
+    this->vp_assist_via_ept12 = walked ? *walked : 0;
+
+    // Path two: this VMM's own map, which is an identity map of the
+    // first 512 GB - so an L1-physical address is the host-physical one.
+    // Asked of `host_ept_lookup` rather than assumed, because "it is an
+    // identity map" is the assumption under test.
+    auto ours = host_ept_lookup(walked ? *walked : l2_physical);
+    this->vp_assist_via_identity =
+        (arch::x86_64::vmx::ept_walk_status::mapped == ours.status)
+            ? ours.physical_address
+            : 0;
+
+    // Two paths agreeing is worth more than one path looking sensible.
+    this->vp_assist_paths_agree =
+        ((0 != this->vp_assist_via_ept12) &&
+         (this->vp_assist_via_ept12 == this->vp_assist_via_identity))
+            ? 1
+            : 0;
+
+    // Not mapped in the guest hypervisor's tables *yet*, which is the
+    // ordinary case at the moment the register is written: Windows
+    // allocates the page and announces it, and the level above maps it
+    // when it first touches it. Measured - the first attempt at this
+    // settled on the write and came back with the walk refusing, so no
+    // watch was armed and "nothing writes it" was said with nothing
+    // watching.
+    //
+    // So this is retried rather than done once. See the caller.
+    if (!walked) {
+        return;
+    }
+
+    // **The write-watch is off, and it is off because it wedged the
+    // guest.**
+    //
+    // Armed on this frame - the one variable in that boot, the first on
+    // which the arming succeeded - the machine stopped at 90,226 exits
+    // with the counters frozen across three reads minutes apart, the
+    // monitor still reporting `running`, and the log clean: no
+    // unhandled exit, no "which nothing here watches", nothing. A
+    // processor executing inside the guest and taking no exits at all
+    // is what a spin on memory looks like, and the page carries
+    // structures both levels touch.
+    //
+    // Not diagnosed further, deliberately. The half of the question
+    // that could have been *this VMM's bug* - a page resolved to the
+    // wrong frame - is settled above by two independent translations
+    // agreeing, and that was the reason to look. Whether the level
+    // above ever writes a page it owns is its business, and it is not
+    // worth wedging the boot to watch it.
+    //
+    // `nested_vmx::watch_vp_assist_page` turns it back on for anyone
+    // who wants to take that on with a bounded arm-and-release rather
+    // than an arm-for-ever.
+    if constexpr (nested_vmx::watch_vp_assist_page) {
+        if (auto armed = watch_guest_page_writes(
+                *walked,
+                &hypervisor::on_vp_assist_write,
+                this,
+                page_watch::mode::notify);
+            armed) {
+            this->vp_assist_watch_armed = 1;
+        } else {
+            this->vp_assist_watch_armed =
+                static_cast<std::uint64_t>(armed.error().code()) |
+                (1ull << 32);
+        }
+    }
+}
+
+void hypervisor::record_guest_state_divergence(std::size_t cpu,
+                                              std::size_t index,
+                                              std::uint64_t in_vmcs02,
+                                              std::uint64_t in_vmcs12)
+{
+    if ((cpu >= max_cpus) || (in_vmcs02 == in_vmcs12)) {
+        return;
+    }
+
+    // The histogram first, because it is the summary that names the
+    // culprit and it is one increment.
+    if (index < std::size(this->shadow_divergence_by_field)) {
+        this->shadow_divergence_by_field[index] += 1;
+    }
+
+    auto seen = this->shadow_divergences[cpu];
+    this->shadow_divergences[cpu] = seen + 1;
+
+    // And the first few in full, for the context a histogram cannot
+    // carry. Bounded rather than a ring: the first divergence of a boot
+    // is the one that explains it, and a ring would overwrite it with
+    // the thousandth.
+    if (seen >= shadow_divergence_slots) {
+        return;
+    }
+
+    this->shadow_divergence_field[seen] =
+        (index < std::size(guest_state_fields))
+            ? static_cast<std::uint64_t>(guest_state_fields[index])
+            : 0;
+    this->shadow_divergence_in_vmcs02[seen] = in_vmcs02;
+    this->shadow_divergence_in_vmcs12[seen] = in_vmcs12;
+    this->shadow_divergence_owner[seen] = this->guest_current_vmcs[cpu];
+    this->shadow_divergence_dirty[seen] = this->guest_state_dirty[cpu];
+    this->shadow_divergence_entries[seen] = this->l2_entries[cpu];
+}
+
+void hypervisor::set_guest_current_vmcs(std::size_t cpu,
+                                        std::uint64_t address)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // **One place, because four were three too many.** Changing which
+    // vmcs12 is current - or reloading the same one, which VMPTRLD does
+    // wholesale out of guest memory - invalidates the deferred
+    // guest-state copy, because that copy describes vmcs02's contents
+    // against *a particular* vmcs12 and an address comparison cannot
+    // tell a reload from a continuation.
+    //
+    // Found by `tests/nested_exit`'s ordering cases, which VMCLEAR a
+    // vmcs12 and load it again at the same address. No predicate test
+    // could have: the predicates were all correct.
+    this->guest_current_vmcs[cpu] = address;
+    this->guest_state_deferred[cpu] = false;
+}
+
+bool hypervisor::guest_state_deferral_licensed(std::size_t cpu) const
+{
+
+    // Both halves, and both were missing from the first attempt: vmcs02
+    // has run at least once, so the processor has actually saved
+    // something into it; and what it saved was an exit from the guest
+    // about to be entered, since vmcs02 is reused per processor. See
+    // `guest_state_deferred_vmcs`.
+    return (cpu < max_cpus) && this->guest_state_deferred[cpu] &&
+           this->vmcs02_launched[cpu] &&
+           (this->guest_state_deferred_vmcs[cpu] ==
+            this->guest_current_vmcs[cpu]);
+}
+
+bool hypervisor::may_defer_guest_state(std::size_t cpu) const
+{
+    // **The predicate and the decision are deliberately separate.**
+    // Shadow mode needs to know when the deferral *would* have skipped
+    // a write, and must not cause it to actually skip one - collapsing
+    // the two would turn the diagnostic into the very change it is
+    // meant to observe, which is how this would have reset the guest a
+    // fourth time.
+    if constexpr (!nested_vmx::defer_guest_state) {
+        return false;
+    }
+
+    return guest_state_deferral_licensed(cpu);
+}
+
+namespace
+{
+/** True where a deferrable guest-state field is also shadowed - the one
+ *  combination that cannot be made safe. See the assert below.
+ *
+ *  **Both shadow lists, not only the writable one.** The read-only list
+ *  used to live in `nested_shadow_vmcs.cpp`, where this could not see
+ *  it, so a guest-state field added there would have been published
+ *  into the shadow region out of a *deferred* vmcs12 - stale, with the
+ *  guest hypervisor then reading it with no exit to repair on. Same
+ *  hazard, and the direction of the copy does not soften it: the
+ *  deferral is what makes vmcs12 wrong, and read-only shadowing
+ *  publishes vmcs12. Nothing on the read-only list is guest state
+ *  today, so this half passes vacuously - which is exactly when to add
+ *  it, rather than after somebody has added `exit_qualification`'s
+ *  neighbours. Both directions were run: before the move the tree
+ *  compiled cleanly with `guest_gdtr_base` on the read-only list; after
+ *  it, that is a compile error. */
+constexpr bool deferrable_field_is_shadowed()
+{
+    auto shadowed_anywhere = [](field which) {
+        for (auto shadowed : nested_vmx::shadow_read_write_fields) {
+            if (static_cast<std::uint64_t>(which) ==
+                static_cast<std::uint64_t>(shadowed)) {
+                return true;
+            }
+        }
+
+        for (auto shadowed : nested_vmx::shadow_read_only_fields) {
+            if (static_cast<std::uint64_t>(which) ==
+                static_cast<std::uint64_t>(shadowed)) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    for (auto deferrable : guest_state_fields) {
+        if ((field::guest_cs_access_rights == deferrable) ||
+            (field::guest_ss_access_rights == deferrable)) {
+            // The two the exclusion below already names. Excluded by
+            // `guest_state_deferrable`, so their presence in both lists
+            // is deliberate and handled.
+            continue;
+        }
+
+        if (shadowed_anywhere(deferrable)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+} // namespace
+
+// **A deferred field that is also shadowed is handed over stale, and
+// nothing notices.** Deferral writes vmcs02 lazily and repairs on a read;
+// shadowing lets the guest hypervisor read the field out of the hardware
+// shadow region with no exit at all - so there is no read to repair on.
+// The value is simply wrong, invisibly, with no fault and no counter
+// moving.
+//
+// The two lists were in different translation units with only a comment
+// tying them, and `guest_state_deferrable` below excludes exactly the two
+// entries they share - by hand. This makes that a checked property.
+//
+// **The live hazard it guards is `field::guest_cr3`**: it is in
+// `guest_state_fields`, it is deferrable, and KVM shadows `GUEST_CR3`
+// (`.references/kvm/vmcs_shadow_fields.h`). Adding it to
+// `shadow_read_write_fields` is the obvious optimisation and the one
+// another VMM sanctions, and it would make a guest hypervisor read a
+// stale second-level CR3 - which looks exactly like a guest re-entering
+// a context it already had. This assert is what turns that from a
+// debugging session into a compile error.
+static_assert(!deferrable_field_is_shadowed(),
+              "a guest-state field is both deferrable and shadowed: the "
+              "guest hypervisor would read it out of the shadow region "
+              "with no exit, so the deferred write is never materialised "
+              "and a stale value is handed over silently. Either exclude "
+              "it in guest_state_deferrable, as guest_cs/ss_access_rights "
+              "are, or do not shadow it.");
+
+bool hypervisor::guest_state_deferrable(std::size_t index)
+{
+    // The two on `shadow_read_write_fields`, which the guest hypervisor
+    // reads out of the hardware shadow region without exiting - so there
+    // is no point at which a deferred value could be materialised, and a
+    // stale one would be handed over invisibly. See
+    // `guest_state_deferred`.
+    if (index >= std::size(guest_state_fields)) {
+        return false;
+    }
+
+    auto which = guest_state_fields[index];
+
+    return (field::guest_cs_access_rights != which) &&
+           (field::guest_ss_access_rights != which);
+}
+
+std::optional<std::size_t>
+hypervisor::guest_state_index_of(std::uint64_t encoding)
+{
+    // A linear scan over forty-six constants, on a path the guest
+    // hypervisor takes 494 times in a whole boot for writes and rarely
+    // for reads. A table would be a second copy of the list to keep in
+    // step with `guest_state_fields`, which is the defect this tree
+    // records under "the capacity carried here is a second copy of a
+    // constant that lives in the header".
+    for (std::size_t index{}; index < std::size(guest_state_fields);
+         ++index) {
+        if (encoding ==
+            static_cast<std::uint64_t>(guest_state_fields[index])) {
+            return index;
+        }
+    }
+
+    return {};
+}
+
+void hypervisor::mark_l2_guest_state_dirty(std::size_t cpu,
+                                           std::uint64_t encoding)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    if (auto index = guest_state_index_of(encoding); index) {
+        this->guest_state_dirty[cpu] |= (1ull << *index);
+    }
+}
+
+void hypervisor::materialise_l2_guest_state_for(std::size_t cpu,
+                                                std::uint64_t encoding)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto index = guest_state_index_of(encoding);
+
+    if (index && guest_state_deferrable(*index)) {
+        materialise_l2_guest_state(cpu);
+    }
+}
+
+void hypervisor::materialise_l2_guest_state(std::size_t cpu)
+{
+    // The switch first: with the deferral off nothing is ever deferred,
+    // so there is nothing to repair and no reason to borrow vmcs02.
+    // See the gate in `save_l2_state`.
+    if constexpr (!nested_vmx::defer_guest_state) {
+        return;
+    }
+
+    if ((cpu >= max_cpus) || !this->guest_state_deferred[cpu]) {
+        return;
+    }
+
+    // vmcs01 is current here - the guest hypervisor is running and has
+    // just taken an exit - so vmcs02 has to be made current to read the
+    // state the processor saved into it, and put back afterwards.
+    //
+    // Nothing has entered the second-level guest since that exit, so
+    // those values are still the ones it stopped with. A VMPTRLD pair
+    // is about 10,000 cycles against the 121,000 this deferral saves on
+    // every exit that does not come here.
+    // Bracketed rather than reasoned about: this is 81% of VMPTRLD and
+    // 273 microseconds a trust-level round trip, and the only question
+    // that matters is how much of it is VMCS traffic - which scales down
+    // on bare metal - against software, which does not. Three adjacent
+    // intervals plus the whole, and a count of the reads beside them.
+    auto whole_start = arch::x86_64::rdtsc();
+    auto whole_stop = zpp::scope_exit([&] {
+        this->phase_cycles[cpu][24] += arch::x86_64::rdtsc() - whole_start;
+        this->phase_calls[cpu][24] += 1;
+    });
+
+    auto mark = [&](std::size_t slot, std::uint64_t since) {
+        this->phase_cycles[cpu][slot] += arch::x86_64::rdtsc() - since;
+        this->phase_calls[cpu][slot] += 1;
+    };
+
+    auto in_start = arch::x86_64::rdtsc();
+    if ((0 == this->vmcs02_physical[cpu]) || point_at_vmcs(cpu, true)) {
+        return;
+    }
+    mark(21, in_start);
+
+    auto & shadow = this->guest_vmcs12[cpu];
+    auto dirty = this->guest_state_dirty[cpu];
+
+    auto loop_start = arch::x86_64::rdtsc();
+    std::size_t index{};
+    for (auto guest_field : guest_state_fields) {
+        // Anything the guest hypervisor has written since the last entry
+        // is **its** value and must not be overwritten with the
+        // processor's.
+        if (guest_state_deferrable(index) &&
+            (0 == (dirty & (1ull << index)))) {
+            shadow.write(guest_field, this->vmcs.read(guest_field));
+            this->materialise_reads[cpu] = this->materialise_reads[cpu] + 1;
+        }
+        ++index;
+    }
+    mark(22, loop_start);
+
+    auto out_start = arch::x86_64::rdtsc();
+    if (point_at_vmcs(cpu, false)) {
+        // Without its own VMCS there is nothing to return to. Same
+        // reasoning as `enter_or_park_l2`'s switch failure.
+        __builtin_trap();
+    }
+
+    mark(23, out_start);
+
+    this->guest_state_deferred[cpu] = false;
+    this->guest_state_materialises[cpu] =
+        this->guest_state_materialises[cpu] + 1;
+}
+
+void hypervisor::record_l2_entry_event(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // Read back out of vmcs02 rather than remembered from where it was
+    // written, which is the whole point: what the processor acts on is
+    // the field, and every other account of it is a claim about the
+    // field. The control sweep closed five dimensions this way and this
+    // is the same question asked of an event instead of a control.
+    //
+    // One VMREAD, about 4,340 cycles here, against roughly 300
+    // microseconds an exit - under two per cent, and only on the entry
+    // path.
+    constexpr std::uint64_t valid = 1ull << 31;
+    constexpr std::uint64_t vector_mask = 0xff;
+
+    auto given =
+        this->vmcs.read(field::vm_entry_interruption_information_field);
+
+    // **What the level above staged, before anything in this function
+    // rewrites it. Every census below reads this and not `given`.**
+    //
+    // Two arms here modify `given` on the way through - the VINA vector
+    // drop and `stall_breaker`'s withhold and restage - and a census
+    // taken downstream of them measures this VMM's own suppression while
+    // being labelled as the guest's behaviour. Measured, and it
+    // published a wrong reading twice:
+    //
+    // - `vtl1_any_entry_vector[0x40]` was **structurally zero whenever
+    //   `novina=1`**. It could not have counted a VINA however many
+    //   arrived, because the drop cleared the valid bit first.
+    // - the "no event" slot, index 256, was inflated by exactly the drop
+    //   count. That is where "what the entry running VTL1 carried: no
+    //   event 37,147, 100%" came from, and `BACKLOG.md`'s "the VINA was
+    //   requested 7,593 times and delivered 0" is the same line read
+    //   from the other side.
+    // - a dropped entry was sampled into `quiet_rip` rather than
+    //   `interrupted_rip`, biasing the very table whose declaration
+    //   documents it as the control that "injection cannot shape".
+    //
+    // The drop itself is unchanged and stays where it is: moving it past
+    // the census would put it after `stall_breaker`, which reads and
+    // writes the same field, and that would change what vmcs02 ends up
+    // carrying. Only the censuses move to the pre-suppression word.
+    //
+    // `l2_given_vector` deliberately keeps reading `given`. Its
+    // declaration makes it "the same field read back out of vmcs02 at
+    // the last instruction before entry", i.e. what the processor will
+    // act on, which *is* the post-suppression word. The pair is the
+    // instrument: `staged` says what arrived, `l2_given_vector` says
+    // what was entered with, and the difference is the suppression.
+    auto staged = given;
+
+    // Whether the entry is really about to run VTL1's address space, as
+    // opposed to merely following a `HvCallVtlCall` hypercall.
+    //
+    // **Both memory-walking blocks below used to gate on
+    // `vtl_half_mark_kind == 1` alone, and that flag does not mean what
+    // they need.** `mark_vtl_half` sets it from the hypercall latch, so
+    // it means "the last trust-level hypercall this processor made was
+    // `HvCallVtlCall`" - not "VTL1 is the address space we are about to
+    // enter". The two part company on a missed or refused switch, and
+    // the sign of the `vtl_switches` imbalance says they do: 13 more
+    // returns than calls on the wedged boot, i.e. the latch was left
+    // reading VTL0 when the hypercalls stopped.
+    //
+    // What that costs is not a wrong count. Both blocks walk a guest
+    // pointer chain and then **write** through it. In VTL1
+    // `[[gs:0] + 0x10] + 4` is the IUM block's flag byte; in VTL0
+    // `gs:0` is the KPCR and `[GdtBase + 0x10]` is a GDT descriptor
+    // qword, not a pointer. `translate_guest_linear` applies no
+    // canonicality check, no user/supervisor check and no
+    // write-permission check, so a descriptor qword that happens to
+    // resolve gets a byte of some unrelated guest page rewritten.
+    //
+    // So the gate is the extended-page-table pointer, which is what
+    // actually distinguishes the two trust levels - each VTL has its own
+    // second-level translation. The anchor is vmcs12's EPTP as it stood
+    // at the last `HvCallVtlReturn`, **not** at the last
+    // `HvCallVtlCall`: `capture_vtl_switch` runs before the hypercall is
+    // reflected, and `HvCallVtlReturn` is the one the secure kernel
+    // itself executes, so the vmcs12 current at that instant is VTL1's.
+    // The call side's slot holds VTL0's pointer. See `vtl_eptp_slot`.
+    //
+    // This is a strict conjunction with the old test, so it cannot make
+    // either block fire on an entry it did not fire on before - the only
+    // reachable change is fewer fires, and every refusal is counted
+    // (`vina_suppress_wrong_space`, `secure_dma_wrong_space`) so the
+    // next dump says whether the gate moved anything. Near zero and the
+    // earlier readings stand as taken; near the 10,075 of
+    // `vina_suppress_no_address` and the old gate was admitting VTL0
+    // entries, which is where they went.
+    // `[[maybe_unused]]`: both consumers are behind `if constexpr`
+    // switches that default off, so with defaults nothing calls this.
+    [[maybe_unused]] auto entering_vtl1_space = [&] {
+        // Zero until the first `HvCallVtlReturn` of the boot. A boot
+        // launches VTL1 first and hands over with an unmatched return,
+        // so this is populated before any entry that follows a
+        // `HvCallVtlCall`; and refusing while it is zero is the safe
+        // direction, because no walk means no write.
+        auto anchor = this->vtl_latest[cpu][1][vtl_eptp_slot];
+
+        return (0 != anchor) &&
+               (anchor ==
+                this->guest_vmcs12[cpu].read(field::ept_pointer));
+    };
+
+    // Whether the entry about to run VTL1 carries an interrupt, and
+    // which. See `vtl1_entry_vector`: this is the only direct evidence
+    // available about what ends the secure kernel's turn.
+    // Clear the notification the secure kernel is about to read, on
+    // **every** entry that runs VTL1 rather than only the first after the
+    // call. See `nested_vmx::suppress_vina`.
+    //
+    // Measured: the flag is clear on 98.4% of first entries, and the
+    // secure kernel reads it set moments later - because VTL1's half
+    // takes 7.7 exits, and on one of them the level above runs, sees
+    // `0x2f` pending for VTL0 and sets it before re-entering. Clearing
+    // only on the armed entry therefore missed almost every case that
+    // mattered. `vtl_half_mark_kind` holds `1` while VTL1 is the running
+    // level, which is exactly the window this has to cover.
+
+    // Force the securekernel's secure-PCI enable off so VBS degrades to
+    // no-DMA-protection, the only reachable nested state - there is no
+    // physical IOMMU here. See `nested_vmx::force_no_secure_dma`. The two
+    // securekernel `.data` policy globals are `SkpnpSdevDeviceTypesAvailable`
+    // (RVA 0x127a50, the SDEV enable) and `SkpnpIoProtectionPolicy`
+    // (RVA 0x127a60, the winload policy); `SkhalPciEnabled` reads bit1 of
+    // each live and nothing re-sets them after early init, so re-forcing
+    // on every VTL1 entry is durable and costs a read plus a 4-byte write
+    // only while bit1 is still set. Same `vtl_half_mark_kind == 1` window
+    // and the same walk primitives the VINA suppression below uses.
+    if constexpr (nested_vmx::force_no_secure_dma) {
+        // The old gate, then the address-space gate on top of it. Kept
+        // as two so the entries the latch admits and the address space
+        // refuses are counted rather than silently skipped - this block
+        // walks the securekernel's image from the entry RIP and writes
+        // 4 bytes into it, so on a wrong answer it would write into
+        // whatever VTL0 has at that linear address instead. See
+        // `entering_vtl1_space` above and `secure_dma_wrong_space`.
+        auto latched =
+            (cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]);
+        auto in_space = latched && entering_vtl1_space();
+
+        if (latched && !in_space) {
+            this->secure_dma_wrong_space[cpu] += 1;
+        }
+
+        if (in_space) {
+            // The image running in VTL1 is the secure kernel; its base is
+            // where the RVAs above are anchored. `image_base_of` walks the
+            // MZ from the entry RIP - vmcs02 carries VTL1's CR3/EPT here,
+            // the state we are about to enter with. Cached once per cpu.
+            if (0 == this->secure_kernel_base[cpu]) {
+                this->secure_kernel_base[cpu] =
+                    image_base_of(cpu, this->vmcs.read(field::guest_rip));
+            }
+
+            auto base = this->secure_kernel_base[cpu];
+
+            if (0 != base) {
+                for (auto rva : {std::uint64_t{0x127a50},
+                                 std::uint64_t{0x127a60}}) {
+                    // Secure-kernel linear -> VTL1 guest-physical ->
+                    // first-level physical, as the VINA walk does: these
+                    // pages are not in VTL0's tables, so the guest-table
+                    // step happens here.
+                    auto guest_physical =
+                        translate_guest_linear(cpu, base + rva);
+                    if (!guest_physical) {
+                        continue;
+                    }
+
+                    auto physical =
+                        l2_physical_to_l1(cpu, *guest_physical);
+                    if (!physical) {
+                        continue;
+                    }
+
+                    std::uint32_t value{};
+                    if (!read_guest_physical(
+                            *physical,
+                            std::as_writable_bytes(
+                                std::span(&value, 1)))) {
+                        continue;
+                    }
+
+                    if (0 != (value & 2)) {
+                        value = value & ~2u;
+                        if (write_guest_physical(
+                                *physical,
+                                std::as_bytes(std::span(&value, 1)))) {
+                            this->secure_dma_forced[cpu] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if constexpr (nested_vmx::suppress_vina) {
+        auto latched =
+            (cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]);
+
+        // The walk below reads `gs:0` and dereferences what it finds.
+        // `vtl_half_mark_kind` alone does not say that `gs:0` is VTL1's
+        // IUM self-pointer rather than VTL0's KPCR, so the walk runs
+        // only where the extended-page-table pointer identifies VTL1's
+        // address space. See `entering_vtl1_space` above. **Not an early
+        // return**: everything after this block - the vector drop,
+        // `stall_breaker`, and every census - has to run either way.
+        auto in_space = latched && entering_vtl1_space();
+
+        if (latched) {
+            // Counted before the address-space gate, so the breakdown
+            // stays exhaustive over it: `wrong_space` + `no_address` +
+            // `read_failed` + `already_clear` + `write_failed` +
+            // `vina_flag_cleared`. Its equality with
+            // `vtl1_any_entry_count` is a tautology - same function,
+            // identical predicate, no early return between them - and
+            // was once quoted as if it corroborated something.
+            this->vina_suppress_attempts[cpu] += 1;
+
+            if (!in_space) {
+                this->vina_suppress_wrong_space[cpu] += 1;
+            }
+        }
+
+        if (in_space) {
+            // Walked fresh rather than taken from
+            // `vina_block_l1_physical`, and that is the whole difference.
+            // The cached address read **clear on 21,921 of 22,317
+            // entries** while the secure kernel read the same flag set
+            // moments later - so the cache names the wrong bytes. The
+            // return path walks `[[gs:0] + 0x10] + 4` every time and its
+            // reads agree with the guest's behaviour, so the walk is what
+            // is trustworthy. vmcs02 already carries VTL1's GS base here,
+            // because it is the state we are about to enter with.
+            std::uint64_t at{};
+
+            {
+                auto gs = this->vmcs.read(
+                    arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                auto load = [&](std::uint64_t from,
+                                std::uint64_t & into) {
+                    auto physical = translate_guest_linear(cpu, from);
+                    return physical &&
+                           read_guest_memory(
+                               cpu,
+                               *physical,
+                               std::as_writable_bytes(
+                                   std::span(&into, 1)));
+                };
+
+                std::uint64_t self{};
+                std::uint64_t block{};
+
+                // Split by which link broke. `vina_suppress_no_address`
+                // read **10,075, 9.8% of attempts**, and one number
+                // over a three-pointer walk cannot say which step
+                // failed. The address-space half of that ambiguity is
+                // gone - a VTL0 entry never reaches here now, it is
+                // counted in `vina_suppress_wrong_space` - so what is
+                // left is a genuine VTL1 walk failing, and these three
+                // say where. One increment each, on a path that was
+                // already walking the same three pointers.
+                if (!load(gs, self) || (0 == self)) {
+                    this->vina_suppress_no_self[cpu] += 1;
+                } else if (!load(self + 0x10, block) || (0 == block)) {
+                    this->vina_suppress_no_block[cpu] += 1;
+                } else if (auto physical =
+                               translate_guest_linear(cpu, block)) {
+                    // All the way to a first-level physical address, as
+                    // the return path does: the page is not in VTL0's
+                    // extended page tables, so the guest-table step has
+                    // to happen here.
+                    if (auto l1 = l2_physical_to_l1(cpu, *physical);
+                        l1 && (0 != *l1)) {
+                        at = *l1;
+                    } else {
+                        this->vina_suppress_no_l1[cpu] += 1;
+                    }
+                } else {
+                    this->vina_suppress_no_l1[cpu] += 1;
+                }
+            }
+
+            // Kept as the total of the three above, so the 10,075 it
+            // read before stays directly comparable.
+            if (0 == at) {
+                this->vina_suppress_no_address[cpu] += 1;
+            } else {
+                std::uint8_t flags{};
+
+                if (!read_guest_physical(
+                        at + 4,
+                        std::as_writable_bytes(std::span(&flags, 1)))) {
+                    this->vina_suppress_read_failed[cpu] += 1;
+                } else if (0 == (flags & 1)) {
+                    this->vina_suppress_already_clear[cpu] += 1;
+                } else {
+                    flags = static_cast<std::uint8_t>(flags & ~1u);
+
+                    if (write_guest_physical(
+                            at + 4,
+                            std::as_bytes(std::span(&flags, 1)))) {
+                        // The flag-clearing arm's own counter. It used
+                        // to share `vina_suppressed` with the vector
+                        // drop below, which made that counter read
+                        // 17,115 for about 8,557 events. See
+                        // `vina_flag_cleared`.
+                        this->vina_flag_cleared[cpu] += 1;
+                    } else {
+                        this->vina_suppress_write_failed[cpu] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Withhold the notification interrupt itself, not just its flag.
+    //
+    // **Clearing the flag was the wrong half.** `ZPP_SUPPRESS_VINA`
+    // cleared the bit the secure kernel tests and the guest still
+    // stalled, because the *interrupt* was still delivered: the
+    // single-step trace shows `KiVinaInterruptShadow` into
+    // `KiVinaInterrupt` dispatched through VTL1's own descriptor table,
+    // and counting injections over **every** entry that runs VTL1 -
+    // rather than only the armed one, which is what reported "no event
+    // 100%" - finds vector `0x40` on 3,920 of 68,786 of them.
+    //
+    // So this drops that vector on entries that run VTL1, which is what
+    // faster hardware would produce by finishing `ShvlpProtectPages`
+    // before the notification arrived. It is advisory by design - it
+    // tells VTL1 that VTL0 would like the processor back - so declining
+    // to deliver it costs VTL0 latency and nothing else.
+    //
+    // **Deliberately still on `vtl_half_mark_kind` alone, unlike the two
+    // blocks above.** It is the same latch and it is wrong in the same
+    // cases, but the consequence is not the same: this dereferences
+    // nothing, so a mis-gate here costs one withheld advisory interrupt
+    // rather than a byte written through a GDT descriptor read as a
+    // pointer. Against that, `suppress_vina`'s effect on injections *is*
+    // the configuration eighteen boots were compared under - 6 of 18
+    // reaching the login screen, the wedge reproducing byte-identically
+    // at 12,387 - so narrowing when it fires would move the guest into a
+    // regime where none of that is comparable, and the review that
+    // found this defect argues on separate grounds that re-running the
+    // `novina` arm is not worth a boot.
+    //
+    // It costs nothing to know: `vina_suppress_wrong_space` above tests
+    // the same predicate over the same population on every entry the
+    // latch admits, so the next dump bounds how many of these drops were
+    // mis-gated without changing a single one of them. Gate it once
+    // that number says it matters.
+    if constexpr (nested_vmx::suppress_vina) {
+        constexpr std::uint64_t notification_vector = 0x40;
+
+        if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu]) &&
+            (0 != (given & valid)) &&
+            (notification_vector == (given & vector_mask))) {
+            this->vmcs.write(
+                field::vm_entry_interruption_information_field,
+                given & ~valid);
+
+            // The vector-dropping arm's own counter, separate from the
+            // flag-clearing arm's `vina_flag_cleared`. The two used to
+            // share one, and it read 17,115 where the arms are 8,561
+            // and 8,554 - the same ~8,557 events seen twice.
+            this->vina_vector_dropped[cpu] += 1;
+            given = given & ~valid;
+        }
+    }
+
+    // Refuse a repeat delivery at an instruction the guest has already
+    // been interrupted at, so it retires at least one. See
+    // `nested_vmx::stall_breaker` for the two histograms that motivate
+    // this and for why withholding defers rather than drops.
+    if constexpr (nested_vmx::stall_breaker) {
+        // A held event comes back the moment the entry would otherwise
+        // carry nothing. This is what makes a withhold a deferral: the
+        // guest ran one instruction without it, and now it lands.
+        if ((cpu < max_cpus) && (0 == (given & valid)) &&
+            (0 != this->stall_held_event[cpu])) {
+            // **Only where the processor will accept it.** SDM 27.2.1.1,
+            // guest-state checks: "Bit 0 (blocking by STI) and bit 1
+            // (blocking by MOV-SS) must both be 0 if the valid bit ... in
+            // the injected-event identification field is 1 and the event
+            // type ... has value 0, indicating external interrupt".
+            //
+            // Staging into an entry the level above did not choose means
+            // choosing the moment, and this is the constraint on it.
+            // Measured without the check: VM entry failed with
+            // **0x80000021**, invalid guest state, and the guest
+            // hypervisor answered by executing VMXOFF - it gave up
+            // virtualisation entirely and the machine stopped.
+            //
+            // The interrupt is not lost by waiting: the hold persists,
+            // and the blocking clears after one instruction by
+            // definition.
+            constexpr std::uint64_t blocking_by_sti_or_mov_ss = 0x3;
+
+            auto blocked =
+                0 != (this->vmcs.read(field::guest_interruptibility_state) &
+                      blocking_by_sti_or_mov_ss);
+
+            if (!blocked) {
+                given = this->stall_held_event[cpu];
+                this->stall_held_event[cpu] = 0;
+                this->stall_restaged_total[cpu] += 1;
+
+                this->vmcs.write(
+                    field::vm_entry_interruption_information_field, given);
+            } else {
+                this->stall_restage_blocked[cpu] += 1;
+            }
+        }
+
+        if ((cpu < max_cpus) && (0 != (given & valid))) {
+            auto rip = this->vmcs.guest_rip();
+            auto vector = given & vector_mask;
+
+            if ((rip == this->stall_last_rip[cpu]) &&
+                (vector == this->stall_last_vector[cpu])) {
+                if (this->stall_withheld_run[cpu] <
+                    nested_vmx::stall_breaker_limit) {
+                    this->vmcs.write(
+                        field::vm_entry_interruption_information_field,
+                        given & ~valid);
+
+                    // **Held, not dropped.** See `stall_held_event`.
+                    this->stall_held_event[cpu] = given;
+                    this->stall_withheld_run[cpu] += 1;
+                    this->stall_withheld_total[cpu] += 1;
+                    given = given & ~valid;
+                } else {
+                    // The cap. A guest genuinely spinning on one
+                    // instruction must not be starved for ever, and a
+                    // run that is all `forced` says the premise was
+                    // wrong rather than the guard being ineffective.
+                    this->stall_forced_total[cpu] += 1;
+                    this->stall_withheld_run[cpu] = 0;
+                }
+            } else {
+                // Progress: remember where this one landed, so the next
+                // delivery at the same place is the one refused.
+                this->stall_last_rip[cpu] = rip;
+                this->stall_last_vector[cpu] = vector;
+                this->stall_withheld_run[cpu] = 0;
+            }
+        }
+    }
+
+    // Every entry that runs VTL1, not just the armed one. See
+    // `vtl1_any_entry_vector`.
+    //
+    // On `staged`, the pre-suppression word. Read on `given` this table
+    // could not count a `0x40` at all with `novina=1` - the drop above
+    // had already cleared the valid bit - so slot `0x40` was
+    // structurally zero and slot 256 carried the difference.
+    if ((cpu < max_cpus) && (1 == this->vtl_half_mark_kind[cpu])) {
+        this->vtl1_any_entry_count[cpu] += 1;
+
+        if (0 != (staged & valid)) {
+            this->vtl1_any_entry_vector[cpu][staged & vector_mask] += 1;
+        } else {
+            this->vtl1_any_entry_vector[cpu][256] += 1;
+        }
+    }
+
+    if (0 != this->vtl1_entry_armed[cpu]) {
+        this->vtl1_entry_armed[cpu] = 0;
+
+        // Same word, same reason: what the level above staged for the
+        // armed entry, not what this function left in the field.
+        if (0 != (staged & valid)) {
+            this->vtl1_entry_vector[cpu][staged & vector_mask] += 1;
+        } else {
+            this->vtl1_entry_vector[cpu][256] += 1;
+        }
+
+        // And **where** it resumes, which is the thing that says whether
+        // it is progressing or starting over. See `vtl1_resume_rip`.
+        auto & slot = this->vtl1_resume_count[cpu];
+
+        this->vtl1_resume_rip[cpu][slot % vtl1_resume_capacity] =
+            this->vmcs.read(field::guest_rip);
+        slot = slot + 1;
+    }
+
+    // The interrupted-versus-quiet split, on `staged`.
+    //
+    // **This pair is the reason the pre-suppression word exists.**
+    // `interrupted_rip`'s claim to be unbiased rests on the interrupt
+    // arriving asynchronously to the guest's own code, and `quiet_rip`'s
+    // declaration says outright that it "cannot be shaped by injection
+    // at all". Split on `given` both claims are false: the VINA drop
+    // moves an entry from one table to the other, and `stall_breaker`
+    // withholds on a match against `stall_last_rip` - keyed on the very
+    // address being sampled. Split on what the level above staged, the
+    // choice of table is again independent of anything this function
+    // decides.
+    //
+    // **Keyed on `cpu`, and it was not until 2026-09-05.** This
+    // function runs on every processor and all eight members were
+    // single words, so a two-processor boot summed both processors
+    // into one cell, lost increments to the unlocked
+    // read-modify-write in `note_hot_rip`, and was printed under the
+    // heading "cpu 0". The guard matches the ones above it: a
+    // processor beyond `max_cpus` is absent from every census in this
+    // function alike, which is at least self-consistent.
+    //
+    // When the RIP census is enabled, read the actual field. Do not
+    // replace it with `hot_state_saved[cpu][0]` - the value is
+    // available there, it is one VMREAD per second-level entry, and it
+    // was examined for exactly that and refused. Three reasons, any one
+    // sufficient:
+    //
+    // - `hot_state_saved` is `build_vmcs02`'s *elision bookkeeping*: it
+    //   holds what `put_hot` believes vmcs02 holds. A census fed from
+    //   it reports this VMM's intention, and if the elision is ever
+    //   wrong the census agrees with the bug instead of exposing it.
+    //   The neighbouring instrument twelve lines up commits to the
+    //   opposite principle in as many words - "read back out of vmcs02
+    //   rather than remembered from where it was written, which is the
+    //   whole point".
+    // - That array is *known* to go stale, twice, in this file. Slot 4
+    //   is corrected by hand in `enter_or_park_l2` because
+    //   `put_hot(4, ...)` elides and the HLT path then writes the field
+    //   underneath it, and slot 3's identical break is argued at length
+    //   in `save_l2_state` where it was reachable and wrong. Both are
+    //   documented as benign only by call order. Trusting slot 0 for a
+    //   census would be the third instance.
+    // - `quiet_rip` and `interrupted_rip` are the live instrument of
+    //   the current investigation, not a closed one - they are what
+    //   named the wedge's hot addresses. A saving that costs accuracy
+    //   here is a bad trade at any price.
+    if constexpr (nested_vmx::census_entry_rip) {
+        // One read, used three times. It was two reads of the same field
+        // in two arms before, so hoisting it changes no behaviour and
+        // costs no VMREAD - and the comment above still holds: this is
+        // `guest_rip` out of vmcs02, not `hot_state_saved[cpu][0]`.
+        auto guest_rip = this->vmcs.guest_rip();
+
+        if (0 != (staged & valid)) {
+            this->interrupted_samples[cpu] += 1;
+            note_hot_rip(this->interrupted_rip[cpu],
+                         this->interrupted_hits[cpu],
+                         this->interrupted_overflow[cpu],
+                         guest_rip);
+        } else {
+            // Where the guest is on an entry the level above staged
+            // nothing on - the control for `interrupted_rip`. See
+            // `quiet_rip`.
+            this->quiet_samples[cpu] += 1;
+            note_hot_rip(this->quiet_rip[cpu],
+                         this->quiet_hits[cpu],
+                         this->quiet_overflow[cpu],
+                         guest_rip);
+        }
+
+        // And whose address space that address belongs to, which the two
+        // tables above cannot say and no reader of them can recover. See
+        // `user_rip_cr3` and `nested_vmx::census_user_rip`.
+        //
+        // **Gated on the address before the VMCS is touched, and that
+        // ordering is the whole cost argument.** There is no free source
+        // of the second-level guest's CR3 here - `l2_exit_cr3` is a read
+        // on every exit behind a second switch, and
+        // `guest_state_cache`'s copy is `build_vmcs02`'s own
+        // bookkeeping, stale for CR3 by its own comment and unable to
+        // follow a guest `mov cr3`, which does not exit. So this is a
+        // third VMREAD, taken only on entries that have something to
+        // attribute. The entry path already pays two at about 4,340
+        // cycles each; `65334f3` measured a cache-missing `guest_cr3`
+        // read at 2,876.
+        //
+        // Both tables are fed from one read, and they are deliberately
+        // different shapes: the pair table is hashed and evicts, the
+        // dictionary is linear and does not, so a disagreement between
+        // them is the pair table reporting its own saturation.
+        if constexpr (nested_vmx::census_user_rip) {
+            if (is_user_address(guest_rip)) {
+                this->user_rip_samples[cpu] += 1;
+
+                auto guest_cr3 = this->vmcs.guest_cr3();
+
+                if (!note_user_rip(this->user_rip_cr3[cpu],
+                                   this->user_rip_rip[cpu],
+                                   this->user_rip_hits[cpu],
+                                   this->user_rip_overflow[cpu],
+                                   guest_cr3,
+                                   guest_rip)) {
+                    // The CR3 masked to zero, so this sample names no
+                    // address space. Counted rather than stored, so that
+                    // an empty table can say which of the two reasons it
+                    // is empty for.
+                    this->user_rip_unattributed[cpu] += 1;
+                }
+
+                note_user_cr3(this->user_cr3_seen[cpu],
+                              this->user_cr3_hits[cpu],
+                              this->user_cr3_overflow[cpu],
+                              guest_cr3);
+            }
+        }
+    }
+
+    // What the processor will actually act on, which is a different
+    // question and stays on `given` - see `l2_given_vector`, which is
+    // defined as this field read back at the last instruction before
+    // entry. So `l2_given_vector[0x40]` reading zero under `novina=1` is
+    // correct and is the drop working, not a blinded instrument;
+    // `vtl1_any_entry_vector[0x40]` above is the one that was blind.
+    //
+    // The `return` stays keyed on `given` too, because what follows it
+    // is not only a census: `window_armed_on_drop` is set from there
+    // under `nested_vmx::window_on_tpr`. Keying it on `staged` would
+    // change what the guest is entered with.
+    if (0 != (given & valid)) {
+        this->l2_given_vector[cpu][given & vector_mask] += 1;
+        return;
+    }
+
+    // No event, so this entry is a moment the guest hypervisor chose
+    // not to deliver one. Whether it *could* have is what the priority
+    // decides. See `l2_low_priority_no_event`.
+    //
+    // Against the **task** priority, which the processor maintains,
+    // rather than the processor priority, which in this configuration
+    // it does not - SDM 32.1.1, cited where the sample is taken.
+    //
+    // **This is an UPPER BOUND. It over-counts, and the comment that
+    // used to stand here said the exact opposite.** It read "TPR is a
+    // lower bound on PPR, so this undercounts rather than over: every
+    // entry it counts is one the interrupt certainly could have been
+    // delivered on." The premise is right and the conclusion inverts
+    // it - a bound on the *threshold* is not a bound on the *count*,
+    // and a lower threshold blocks less and therefore counts more.
+    //
+    // SDM 13.8.3.1 (`.references/sdm.txt:171709`): "PPR[7:4] (the
+    // processor-priority class) the maximum of TPR[7:4] ... and
+    // ISRV[7:4]", and the processor "will deliver only those interrupts
+    // that have an interrupt-priority class higher than the
+    // processor-priority class in the PPR". So PPR >= TPR always, and
+    // therefore `{PPR < X}` is a *subset* of `{TPR < X}`. Testing TPR
+    // admits every entry the real rule admits **plus** every entry
+    // where an unacknowledged in-service vector held PPR up while TPR
+    // was down. Those extra entries are ones the interrupt could
+    // **not** have been delivered on.
+    //
+    // The direction is not a property of the register, it is a property
+    // of which branch is being counted: this branch is "deliverable",
+    // so reading TPR inflates it. See `deliver_on_drop` and
+    // `intercept_self_ipi`, whose true branch is "inhibited" and which
+    // are sound on VTPR for the same inequality read the other way.
+    //
+    // No fix is available here rather than declined: zpp cannot see
+    // ISRV at all. SDM 32.1.1 gives VISR (100H-170H) and VPPR (0A0H)
+    // only under "virtual-interrupt delivery", which is not offered
+    // here - which is why the measured VPPR of `0x00` on 100% of 15,812
+    // entries is specified behaviour and not a reading. So this stays a
+    // bound and is labelled as one.
+    constexpr std::uint64_t dispatch_class = 0x20;
+
+    if (this->l2_entry_priority[cpu] < dispatch_class) {
+        this->l2_low_priority_no_event[cpu] += 1;
+
+        // The priority has come down, so the window withheld while it was
+        // up is due on the next entry. **Inside this test, not before
+        // it**: set unconditionally it is always true, the withholding
+        // branch is unreachable, and `window_deferred_count` reads 0 on a
+        // run that was supposed to be exercising it - which is what the
+        // first version measured.
+        if constexpr (nested_vmx::window_on_tpr) {
+            this->window_armed_on_drop[cpu] = true;
+        }
+
+        // Split by whether the level above has anything pending at all.
+        // The bare count cannot tell a delivery fault here from the guest
+        // hypervisor declining, and those want opposite fixes. A
+        // hypervisor holding an interrupt it cannot yet deliver asks for
+        // an interrupt window, so that is the discriminator.
+        if (0 != (this->guest_vmcs12[cpu].read(
+                      field::primary_processor_based_vm_execution_controls) &
+                  primary_interrupt_window)) {
+            this->l2_no_event_window_asked[cpu] += 1;
+        } else {
+            this->l2_no_event_window_idle[cpu] += 1;
+        }
+
+        // And whether it could legally have been delivered at all,
+        // which the priority alone does not say. SDM 27.6.1 refuses an
+        // external interrupt while RFLAGS.IF is clear; 27.6.2 refuses
+        // it while the interruptibility state carries blocking by STI
+        // or by MOV SS. On either, the level above staging nothing is
+        // correct rather than a miss - and reading the bare counter as
+        // a miss is exactly the mistake this split exists to stop.
+        constexpr std::uint64_t rflags_if = 1ull << 9;
+        constexpr std::uint64_t blocking_by_sti = 1ull << 0;
+        constexpr std::uint64_t blocking_by_mov_ss = 1ull << 1;
+
+        auto rflags = this->vmcs.read(field::guest_rflags);
+        auto interruptibility =
+            this->vmcs.read(field::guest_interruptibility_state);
+
+        auto shadowed = 0 != (interruptibility &
+                              (blocking_by_sti | blocking_by_mov_ss));
+
+        if ((0 != (rflags & rflags_if)) && !shadowed) {
+            this->l2_eligible_no_event[cpu] += 1;
+        } else {
+            this->l2_masked_no_event[cpu] += 1;
+        }
+    }
+}
+
+void hypervisor::note_reflect_phase(std::size_t cpu,
+                                   std::size_t slot,
+                                   std::uint64_t start_tsc,
+                                   std::uint64_t start_reads,
+                                   std::uint64_t start_writes)
+{
+    // See `bucket_phase_cycles`. Only the two reasons being compared are
+    // recorded; everything else costs one compare and falls out.
+    if ((cpu >= max_cpus) || (slot >= reflect_slots)) {
+        return;
+    }
+
+    auto bucket = this->reason_bucket[cpu];
+    if (bucket >= reflect_buckets) {
+        return;
+    }
+
+    this->bucket_phase_cycles[bucket][slot] =
+        this->bucket_phase_cycles[bucket][slot] +
+        (arch::x86_64::rdtsc() - start_tsc);
+    this->bucket_phase_reads[bucket][slot] =
+        this->bucket_phase_reads[bucket][slot] +
+        (arch::x86_64::vmx::vmcs_reads_taken - start_reads);
+    this->bucket_phase_writes[bucket][slot] =
+        this->bucket_phase_writes[bucket][slot] +
+        (arch::x86_64::vmx::vmcs_writes_taken - start_writes);
+}
+
+void hypervisor::mark_vtl_half(std::size_t cpu, std::size_t kind)
+{
+    if ((cpu >= max_cpus) || (kind >= vtl_halves)) {
+        return;
+    }
+
+    auto now = arch::x86_64::rdtsc();
+    auto exits = this->exit_total[cpu];
+    auto previous = this->vtl_half_mark_kind[cpu];
+
+    // The half that just ended is named by the switch that *opened* it,
+    // not by this one: `HvCallVtlCall` opens the secure kernel's half
+    // and `HvCallVtlReturn` closes it.
+    //
+    // A repeat of the same kind is dropped rather than counted. It
+    // means a switch was missed - the ring is per processor and the
+    // capture runs before the reflection, so nothing here guarantees
+    // the pair - and attributing an unmatched interval to a half would
+    // put the other half's cost into it.
+    if ((0 != previous) && (static_cast<std::uint8_t>(kind + 1) !=
+                            previous)) {
+        auto half = static_cast<std::size_t>(previous - 1);
+
+        this->vtl_half_cycles[cpu][half] +=
+            now - this->vtl_half_mark_cycles[cpu];
+        this->vtl_half_exits[cpu][half] +=
+            exits - this->vtl_half_mark_exits[cpu];
+        this->vtl_half_count[cpu][half] += 1;
+    }
+
+    this->vtl_half_mark_cycles[cpu] = now;
+    this->vtl_half_mark_exits[cpu] = exits;
+    this->vtl_half_mark_kind[cpu] = static_cast<std::uint8_t>(kind + 1);
+}
+
+void hypervisor::arm_vtl_step(std::size_t cpu, std::size_t kind)
+{
+    // Off unless asked for. See `nested_vmx::step_vtl`: this is an exit
+    // per retired guest instruction and it is enough to move the guest
+    // between regimes, so a boot meant to be compared with another must
+    // not carry it.
+    if constexpr (!nested_vmx::step_vtl) {
+        return;
+    }
+
+    if ((cpu >= max_cpus) || (kind >= vtl_step_kinds)) {
+        return;
+    }
+
+    // Never two at once: the flag lives in this processor's vmcs02 and
+    // a second arming would append one side's instructions to the
+    // other's ring.
+    if (0 != this->vtl_step_active[cpu]) {
+        return;
+    }
+
+    // The one-shot pin. See `vtl_step_pin_request`: once the trace has
+    // been taken at the transition that matters, every later arming is
+    // refused so the ring still holds it when the guest is dumped.
+    if ((0 != this->vtl_step_pin_taken[cpu]) && (0 == kind)) {
+        return;
+    }
+
+    // Only the VtlCall side. `arm_vtl_step` is also called for the
+    // free-running kind on **every** second-level entry, so an
+    // unrestricted pin is taken by that before any trust-level
+    // transition happens - and then refuses the one it was for.
+    if ((0 != this->vtl_step_pin_request[cpu]) && (0 == kind)) {
+        this->vtl_step_pin_request[cpu] = 0;
+        this->vtl_step_pin_taken[cpu] = 1;
+
+        this->vtl_step_count[kind] = 0;
+        this->vtl_step_other[kind] = 0;
+        this->vtl_step_other_reason[kind] = 0;
+        this->vtl_step_at[kind] = this->vtl_switches[cpu][kind];
+        this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
+        return;
+    }
+
+    // The free-running kind counts second-level entries and the two
+    // trust-level kinds count switches, so which counter drives the
+    // period is the one thing that differs between them.
+    auto free_running = vtl_step_free_kind == kind;
+
+    auto count = free_running ? this->l2_entries[cpu]
+                              : this->vtl_switches[cpu][kind];
+
+    // **The free-running period is a boot-processor number, and it can
+    // never arm on an application processor.** The boot processor makes
+    // tens of thousands of second-level entries; an application
+    // processor makes a few dozen and then stops taking exits at all -
+    // measured at 36 and 17 on a three-processor boot - so
+    // `count < period` refuses every time and the one processor whose
+    // instruction stream is wanted is the one that never gets traced.
+    //
+    // A short period for the application processors only. It cannot
+    // flood the shared per-kind ring, because those processors stop
+    // long before they could.
+    constexpr std::uint64_t application_free_period = 4;
+
+    auto free_period = (0 == cpu) ? vtl_step_free_period
+                                  : application_free_period;
+    auto period = free_running ? free_period : vtl_step_rearm;
+
+    // Every period, overwriting, and the two trust-level sides half a
+    // period apart. See `vtl_step_rearm` for both: why a threshold
+    // alone is not enough, and why arming both on the same multiple
+    // starves the second side entirely.
+    auto phase = free_running ? 0 : (kind * (vtl_step_rearm / 2));
+
+    if ((count < period) || (phase != (count % period))) {
+        return;
+    }
+
+    this->vtl_step_count[kind] = 0;
+    this->vtl_step_other[kind] = 0;
+    this->vtl_step_other_reason[kind] = 0;
+    this->vtl_step_at[kind] = count;
+    this->vtl_step_active[cpu] = static_cast<std::uint8_t>(kind + 1);
+}
+
+void hypervisor::record_vtl_step(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto active = this->vtl_step_active[cpu];
+    if (0 == active) {
+        return;
+    }
+
+    auto kind = static_cast<std::size_t>(active - 1);
+    auto index = this->vtl_step_count[kind];
+
+    if (index >= vtl_step_capacity) {
+        // Disarmed here and in the VMCS both, because vmcs02 is current
+        // and the next resume would otherwise take one more trap exit
+        // that nothing above claims - it would fall through to "neither
+        // side asked for it" and reach the watched-page handler, which
+        // is not this trace's.
+        this->vtl_step_active[cpu] = 0;
+        monitor_trap_flag(false);
+        return;
+    }
+
+    auto rip = this->vmcs.guest_rip();
+
+    this->vtl_step_rip[kind][index] = rip;
+    this->vtl_step_cr3[kind][index] = this->vmcs.guest_cr3();
+    this->vtl_step_count[kind] = index + 1;
+
+    // And the instruction itself, for every step. See
+    // `vtl_step_code_size` for why it is not once per distinct address:
+    // the secure kernel's side ran 971 distinct addresses in 1,024
+    // steps, so a table of distinct ones is a table of all of them with
+    // a scan in front of it.
+    //
+    // A byte at a time, because a sixteen byte read can straddle a page
+    // boundary and the guest's next page may not be mapped - the same
+    // reason `capture_vtl_switch` reads its window that way. A short
+    // read leaves the rest zero, which the decoder outside reports as
+    // an instruction it could not decode rather than as one it could.
+    for (std::size_t i{}; i < vtl_step_code_size; ++i) {
+        auto physical = translate_guest_linear(cpu, rip + i);
+        if (!physical) {
+            break;
+        }
+
+        if (!read_guest_memory(
+                cpu,
+                *physical,
+                std::span(reinterpret_cast<std::byte *>(
+                              &this->vtl_step_code[kind][index][i]),
+                          1))) {
+            break;
+        }
+    }
+}
+
+void hypervisor::sample_guest_thread(std::size_t cpu)
+{
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    // Only one entry in every period or so, for the reason the
+    // declaration gives: four dependent reads through two levels of
+    // translation, on the hottest path here.
+    //
+    // **Aperiodic, and `guest_thread_sample_next` says why at length.**
+    // The short version: the period is counted in second-level entries,
+    // the guest produces second-level entries from a periodic loop, and
+    // a fixed stride therefore samples the same point of that loop every
+    // time - which reads as "the guest is retrying" whether it is or
+    // not. One comparison here, and the time-stamp counter is read only
+    // on the entry that actually samples.
+    if (this->l2_entries[cpu] < this->guest_thread_sample_next[cpu]) {
+        return;
+    }
+
+    this->guest_thread_sample_next[cpu] =
+        this->l2_entries[cpu] +
+        guest_thread_sample_stride(arch::x86_64::rdtsc());
+
+    // A 64-bit read of a guest linear address, through the guest's own
+    // page tables and then the guest hypervisor's extended ones. Both
+    // steps are `translate_guest_linear`'s now - see `l2_physical_to_l1`
+    // for why the second exists.
+    auto read = [&](std::uint64_t linear, std::uint64_t & into) -> bool {
+        auto physical = translate_guest_linear(cpu, linear);
+        if (!physical) {
+            return false;
+        }
+
+        std::uint64_t value{};
+        auto got = read_guest_memory(
+            cpu,
+            *physical,
+            std::span(reinterpret_cast<std::byte *>(&value),
+                      sizeof(value)));
+        if (!got) {
+            return false;
+        }
+
+        into = value;
+        return true;
+    };
+
+    // The kernel image first, and unconditionally.
+    //
+    // It used to be found inside the thread walk, which runs only for a
+    // sample this VMM can make sense of - and those are the samples from
+    // one of the two virtual trust levels, which are a minority. So the
+    // image was not located until twenty minutes into a boot, and
+    // everything that depends on it - the stack scan above all - sat idle
+    // until then. The identification refuses the wrong image by name, so
+    // trying on every sample costs a few reads and cannot record a wrong
+    // answer.
+    static_cast<void>(find_guest_kernel_base(cpu));
+
+    guest_thread_sample sample;
+
+    // SDM 27.4.1 keeps the guest's GS base in the VMCS, which in kernel
+    // mode is the processor control region. Nothing else here is
+    // architectural - every offset below belongs to another operating
+    // system's build and is documented as such.
+    sample.gs_base =
+        this->vmcs.read(arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+    if (0 == sample.gs_base) {
+        return;
+    }
+
+    if (!read(sample.gs_base + guest_windows::kpcr_current_prcb,
+              sample.prcb) ||
+        (0 == sample.prcb)) {
+        return;
+    }
+
+    if (!read(sample.prcb + guest_windows::kprcb_current_thread,
+              sample.thread) ||
+        (0 == sample.thread)) {
+        return;
+    }
+
+    // **Two operating systems share this processor and only one of them
+    // has these offsets.** Measured: the samples alternate between a GS
+    // base of 0xfffff80683294000, where every field reads coherently, and
+    // one of 0xfffff8068ac2ff80, where the thread pointer comes back as
+    // 0xfffff806 and the idle thread as zero. The second is the secure
+    // kernel's own processor region - its structures are
+    // securekernel.exe's, not ntoskrnl.exe's, and following one image's
+    // offsets through the other's memory is exactly the fabricated answer
+    // this project refuses everywhere else.
+    //
+    // Nothing here can tell them apart by identity, so it is told apart
+    // by plausibility: a thread pointer is a canonical kernel address.
+    // That rejects the truncated reads without pretending to know which
+    // trust level is running.
+    constexpr std::uint64_t kernel_address_floor = 0xffff800000000000;
+
+    if (sample.thread < kernel_address_floor) {
+        return;
+    }
+
+    static_cast<void>(read(sample.prcb + guest_windows::kprcb_idle_thread,
+                           sample.idle_thread));
+    static_cast<void>(
+        read(sample.thread + guest_windows::ethread_start_address,
+             sample.start_address));
+
+    // The three single-byte fields, read as words and masked. One read
+    // each rather than one read of the enclosing quadword, because they
+    // are not adjacent and a shared read would tie this to their spacing
+    // as well as their offsets.
+    constexpr std::uint64_t byte_mask = 0xff;
+
+    std::uint64_t word{};
+    if (read(sample.thread + guest_windows::kthread_state, word)) {
+        sample.state = word & byte_mask;
+    }
+    if (read(sample.thread + guest_windows::kthread_wait_reason, word)) {
+        sample.wait_reason = word & byte_mask;
+    }
+    if (read(sample.thread + guest_windows::kthread_wait_irql, word)) {
+        sample.wait_irql = word & byte_mask;
+    }
+
+    // Refreshed every sample, once the list exists.
+    //
+    // The walk itself runs once - it is expensive and the membership does
+    // not change while nothing happens - but *what those threads are
+    // doing* is the whole question, and the one snapshot taken when the
+    // list was built is from whatever moment happened to work. Here it
+    // caught `Phase1Initialization` still running.
+    refresh_guest_threads(cpu);
+    sample_guest_stack(cpu);
+
+    // And, once, everything else that thread's process is running.
+    //
+    // **Not from the idle thread**, which was the first attempt and
+    // answered with a list of one: the idle thread belongs to the *idle*
+    // process, which has exactly one thread per processor and never any
+    // others. What is wanted is a thread of the system process, and any
+    // sample taken while the guest is doing work is one - so the walk
+    // waits for a sample whose thread is not the idle thread rather than
+    // taking the first that reads cleanly.
+    walk_guest_threads(cpu, sample.thread);
+
+    // And where the task priority sits, which is what decides whether
+    // the deferred-call vector can be delivered at all. See
+    // `guest_priority_class`.
+    if (auto page = this->nested_virtual_apic_address[cpu]; 0 != page) {
+        constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+        constexpr std::uint64_t priority_class_shift = 4;
+
+        std::uint8_t vtpr{};
+        if (read_guest_physical(
+                page + virtual_task_priority_offset,
+                std::span(reinterpret_cast<std::byte *>(&vtpr),
+                          sizeof(vtpr)))) {
+            auto klass = vtpr >> priority_class_shift;
+            this->guest_priority_class[cpu][klass] =
+                this->guest_priority_class[cpu][klass] + 1;
+        }
+    }
+
+    // Whether a software interrupt is outstanding. See
+    // `kprcb_interrupt_request` - one clear reading settles what the
+    // deferred-call ratio cannot.
+    {
+        std::uint64_t requested{};
+        if (read(sample.prcb + guest_windows::kprcb_interrupt_request,
+                 requested)) {
+            constexpr std::uint64_t byte_mask = 0xff;
+
+            if (0 != (requested & byte_mask)) {
+                this->guest_interrupt_requested[cpu] =
+                    this->guest_interrupt_requested[cpu] + 1;
+            } else {
+                this->guest_interrupt_idle[cpu] =
+                    this->guest_interrupt_idle[cpu] + 1;
+            }
+        }
+    }
+
+    auto slot = this->guest_thread_sample_count[cpu] %
+                guest_thread_sample_capacity;
+    this->guest_thread_samples[cpu][slot] = sample;
+    this->guest_thread_sample_count[cpu] =
+        this->guest_thread_sample_count[cpu] + 1;
+}
+
+std::uint8_t hypervisor::record_interrupt_request(std::size_t cpu,
+                                                  std::uint64_t command)
+{
+    if (cpu >= max_cpus) {
+        return 0;
+    }
+
+    // SDM 30.1.1: "VTPR: the value of bits 7:0 of the byte at offset 080H
+    // on the virtual-APIC page". The processor keeps it there for the
+    // guest hypervisor, and it is the value the guest hypervisor's own
+    // decision to deliver or hold an interrupt is made against - so it is
+    // the only reading that separates "the guest really is at
+    // DISPATCH_LEVEL" from "the guest hypervisor is looking at a page
+    // this VMM pointed somewhere else".
+    constexpr std::uint64_t virtual_task_priority_offset = 0x80;
+
+    auto page = this->nested_virtual_apic_address[cpu];
+    std::uint8_t vtpr{};
+
+    if (0 != page) {
+        // Read rather than trusted: the address came out of vmcs12 and is
+        // used as a host-physical one, which is only sound because the
+        // extended page tables are an identity map. A failed read leaves
+        // the sample zero and is not otherwise reported - this is a
+        // diagnostic, and one that stops a processor to complain would be
+        // worse than the question it answers.
+        static_cast<void>(read_guest_physical(
+            page + virtual_task_priority_offset,
+            std::span(reinterpret_cast<std::byte *>(&vtpr),
+                      sizeof(vtpr))));
+    }
+
+    // As a histogram too, because the ring holds sixty-four requests
+    // and the guest makes tens of thousands. The *task* priority and
+    // not the processor priority - see `interrupt_request_vtpr_seen`
+    // for the field that was tried first and is not maintained here.
+    this->interrupt_request_vtpr_seen[cpu][vtpr] += 1;
+
+    auto slot =
+        this->interrupt_request_count[cpu] % interrupt_request_capacity;
+    this->interrupt_request_vtpr[cpu][slot] = vtpr;
+    this->interrupt_request_command[cpu][slot] = command;
+    this->interrupt_request_count[cpu] =
+        this->interrupt_request_count[cpu] + 1;
+
+    // SDM Figure 13-12 puts the vector in bits 7:0 of the interrupt
+    // command register, and the Hyper-V interface keeps that layout for
+    // its synthetic one.
+    constexpr std::uint64_t interrupt_command_vector_mask = 0xff;
+
+    auto vector = command & interrupt_command_vector_mask;
+    this->interrupt_request_vector[cpu][vector] =
+        this->interrupt_request_vector[cpu][vector] + 1;
+
+    return vtpr;
+}
+
+void hypervisor::install_shadow_neighbours(std::size_t cpu,
+                                           std::uint64_t page,
+                                           std::uint64_t shift,
+                                           std::uint64_t eptp12)
+{
+    if constexpr (!nested_vmx::eager_ept_neighbours) {
+        return;
+    }
+
+    if (cpu >= max_cpus) {
+        return;
+    }
+
+    auto size = 1ull << shift;
+    auto root = eptp12 & (((1ull << 52) - 1) & ~0xfffull);
+
+    // Aligned to the window rather than centred on the fault, so whichever
+    // page of a window faults first produces the same set - otherwise two
+    // faults in one window install overlapping and different neighbours.
+    auto base = page & ~((nested_vmx::eager_ept_window * size) - 1);
+
+    for (std::uint64_t index{}; index < nested_vmx::eager_ept_window;
+         ++index) {
+        auto at = base + (index * size);
+
+        if (at == page) {
+            continue;
+        }
+
+        auto walk = arch::x86_64::vmx::walk_ept(
+            root,
+            at,
+            physical_address_bits(),
+            execute_only_translations_offered,
+            [&](std::uint64_t from)
+                -> std::optional<arch::x86_64::vmx::epte> {
+                std::uint64_t value{};
+                auto read = read_guest_physical(
+                    from,
+                    std::span(reinterpret_cast<std::byte *>(&value),
+                              sizeof(value)));
+                if (!read) {
+                    return std::nullopt;
+                }
+                return arch::x86_64::vmx::epte(value);
+            });
+
+        // Only what the guest already maps, and only at the same page
+        // size. A neighbour the guest describes with a different size
+        // belongs to a different region of its tables and composing it
+        // here would be guessing at a boundary rather than following one.
+        if ((arch::x86_64::vmx::ept_walk_status::mapped != walk.status) ||
+            (shift != walk.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        auto composed = arch::x86_64::vmx::compose_ept(
+            walk,
+            host_ept_lookup(walk.physical_address),
+            execute_only_translations_offered);
+
+        if ((arch::x86_64::vmx::ept_compose_outcome::composed !=
+             composed.outcome) ||
+            (shift != composed.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        // A failure here is ordinary - the table pool is finite and
+        // `fill_shadow_leaf` reclaims other slots rather than failing -
+        // so it is counted and not reported. The faulting page is already
+        // installed by the caller, so nothing the guest needs depends on
+        // any of this succeeding.
+        if (!fill_shadow_leaf(cpu, at, walk, composed.page_shift)) {
+            this->shadow_ept_neighbours_refused[cpu] =
+                this->shadow_ept_neighbours_refused[cpu] + 1;
+            continue;
+        }
+
+        remember_shadow_page(cpu, at);
+
+        this->shadow_ept_neighbours_filled[cpu] =
+            this->shadow_ept_neighbours_filled[cpu] + 1;
+    }
+}
+
+hypervisor::l2_exit_outcome
+hypervisor::on_l2_ept_fault(std::size_t cpu,
+                            arch::x86_64::vmx::exit_reason reason,
+                            arch::x86_64::context & context,
+                            bool & advance_rip)
+{
+    // Phase timing; see `phase_cycles`. Added because the plan built on
+    // this being 41.5% of exits assumes it is also a large share of the
+    // *time*, and an exit handled here never leaves this VMM - no
+    // reflection, no VMCS switch, no second-level state save - so it may
+    // be an order of magnitude cheaper than a round trip and worth a
+    // twentieth of what the count suggests. Counting exits and spending
+    // cycles are different things and this tree has confused them before.
+    auto fault_start = arch::x86_64::rdtsc();
+    auto fault_stop = zpp::scope_exit([&] {
+        if (cpu < max_cpus) {
+            this->phase_cycles[cpu][9] +=
+                arch::x86_64::rdtsc() - fault_start;
+            this->phase_calls[cpu][9] += 1;
+        }
+    });
+
+    auto & vmcs = this->vmcs;
+    auto & shadow = this->guest_vmcs12[cpu];
+
+    // Nothing retired: the faulting access has not happened yet, and the
+    // whole point of every outcome below is to let it happen or to hand
+    // the fault to whoever can explain it.
+    advance_rip = false;
+
+    auto guest_physical = vmcs.guest_physical_address();
+    auto qualification = vmcs.exit_qualification();
+    auto rip = vmcs.guest_rip();
+
+    // How many times this exact fault has repeated, and everything the
+    // branches below learn about it on the way past.
+    //
+    // Compared among faults only, ignoring whatever exits happen in
+    // between. A livelocked second-level guest still takes its timer
+    // interrupts, and a counter reset by one of those would never reach
+    // any threshold - which is how the last of these went unnoticed for
+    // as long as it did.
+    if ((guest_physical == this->l2_ept_fault_address[cpu]) &&
+        (qualification == this->l2_ept_fault_qualification[cpu]) &&
+        (rip == this->l2_ept_fault_rip[cpu])) {
+        this->l2_ept_fault_repeats[cpu] =
+            this->l2_ept_fault_repeats[cpu] + 1;
+    } else {
+        this->l2_ept_fault_address[cpu] = guest_physical;
+        this->l2_ept_fault_qualification[cpu] = qualification;
+        this->l2_ept_fault_rip[cpu] = rip;
+        this->l2_ept_fault_repeats[cpu] = 1;
+    }
+
+    auto repeats = this->l2_ept_fault_repeats[cpu];
+
+    l2_ept_stall_record probe{};
+    probe.repeats = repeats;
+    probe.rip = rip;
+    probe.guest_physical = guest_physical;
+    probe.qualification = qualification;
+
+    // Every return below goes through this, so a branch cannot be added
+    // without saying which it is.
+    auto finish = [&](l2_ept_disposition disposition,
+                      l2_exit_outcome outcome) {
+        probe.disposition = disposition;
+
+        this->l2_ept_dispositions[cpu]
+                                 [static_cast<std::size_t>(disposition)] +=
+            1;
+
+        // Exactly at the threshold rather than past it. The first stall is
+        // the one that explains the boot, and a line per repeat afterwards
+        // would evict the sequence that led into it.
+        if (l2_ept_stall_threshold == repeats) {
+            probe.occurred = 1;
+            this->l2_ept_stall[cpu] = probe;
+
+            log("cpu {} second level made no progress: {} faults at rip "
+                "{} for {}, qualification {}, disposition {}, guest walk "
+                "{} permissions {}, composition {} permissions {}, "
+                "shadow {} permissions {}",
+                cpu,
+                repeats,
+                rip,
+                guest_physical,
+                qualification,
+                disposition,
+                probe.guest_walk_status,
+                probe.guest_walk_permissions,
+                probe.composition_outcome,
+                probe.composition_permissions,
+                probe.shadow_status,
+                probe.shadow_permissions);
+        }
+
+        return outcome;
+    };
+
+    auto primary12 =
+        shadow.read(field::primary_processor_based_vm_execution_controls);
+    auto secondary12 =
+        (0 != (primary12 & primary_secondary_controls))
+            ? shadow.read(
+                  field::secondary_processor_based_vm_execution_controls)
+            : std::uint64_t{};
+
+    // Without extended page tables of its own the guest hypervisor's guest
+    // runs on this VMM's, so the address that faulted is one of this VMM's
+    // own guest-physical addresses and the ordinary handler is the right
+    // one. That is the same code path the guest hypervisor's own faults
+    // take, which is what makes it correct rather than convenient.
+    if (0 == (secondary12 & secondary_enable_ept)) {
+        return finish(l2_ept_disposition::without_ept,
+                      l2_exit_outcome::deferred);
+    }
+
+    auto eptp12 = shadow.read(field::ept_pointer);
+    probe.ept_pointer = eptp12;
+
+    // Walk the guest hypervisor's tables for the address the processor
+    // reported, which is a second-level guest-physical one. The processor
+    // walked the *shadow*, so its account of which permissions were
+    // missing describes neither side's table on its own.
+    auto guest_walk = arch::x86_64::vmx::walk_ept(
+        eptp12 & (((1ull << 52) - 1) & ~0xfffull),
+        guest_physical,
+        physical_address_bits(),
+        execute_only_translations_offered,
+        [&](std::uint64_t at) -> std::optional<arch::x86_64::vmx::epte> {
+            std::uint64_t value{};
+            auto read = read_guest_physical(
+                at,
+                std::span(reinterpret_cast<std::byte *>(&value),
+                          sizeof(value)));
+            if (!read) {
+                return std::nullopt;
+            }
+            return arch::x86_64::vmx::epte(value);
+        });
+
+    auto host_walk = host_ept_lookup(guest_walk.physical_address);
+
+    auto composition = arch::x86_64::vmx::compose_ept(
+        guest_walk, host_walk, execute_only_translations_offered);
+
+    // Everything the branches below decide from, captured while it is in
+    // hand. A stall is recognised by a count, and a count says nothing
+    // about which of two tables refused what.
+    probe.guest_walk_status =
+        static_cast<std::uint64_t>(guest_walk.status);
+    probe.guest_walk_physical = guest_walk.physical_address;
+    probe.guest_walk_shift = guest_walk.page_shift;
+    probe.guest_walk_permissions = guest_walk.permissions.bits();
+    probe.host_walk_status = static_cast<std::uint64_t>(host_walk.status);
+    probe.host_walk_permissions = host_walk.permissions.bits();
+    probe.composition_outcome =
+        static_cast<std::uint64_t>(composition.outcome);
+    probe.composition_shift = composition.page_shift;
+    probe.composition_permissions = composition.permissions.bits();
+
+    // What the shadow itself holds, which is the one account nothing else
+    // here carries: the processor walked it, and the qualification it
+    // produced is that walk's, but the entry it stopped on is not saved
+    // anywhere. A stall whose shadow says "present, readable" while the
+    // qualification says a read was refused is a stale cached translation
+    // rather than a missing mapping, and the two need opposite fixes.
+    //
+    // Only once the fault has already repeated, because this is a walk of
+    // four tables through a reverse map and the fault path is the hottest
+    // one this VMM has - four hundred thousand of them in a bad minute. A
+    // first fault is ordinary and needs no account of itself; a second one
+    // for the same address is already the thing being watched for.
+    if (repeats > 1) {
+        auto in_shadow = shadow_ept_lookup(cpu, guest_physical);
+        probe.shadow_status = static_cast<std::uint64_t>(in_shadow.status);
+        probe.shadow_permissions = in_shadow.permissions.bits();
+    }
+
+    switch (composition.outcome) {
+    case arch::x86_64::vmx::ept_compose_outcome::reflect_violation:
+        // The guest hypervisor's own tables do not map it. Its guest would
+        // have taken this exact fault on bare metal, so it gets it - with
+        // a qualification synthesised from the walk of *its* tables rather
+        // than forwarded from the shadow's, which is the whole of
+        // reflected_ept_violation_qualification's reason for existing.
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::ept_violation),
+            arch::x86_64::vmx::reflected_ept_violation_qualification(
+                qualification, guest_walk, false));
+        return finish(l2_ept_disposition::reflected_walk,
+                      l2_exit_outcome::reflected);
+
+    case arch::x86_64::vmx::ept_compose_outcome::reflect_misconfiguration:
+        // Its tables hold a value the processor rejects. Reflected for the
+        // same reason, and with no qualification, because SDM 30.2.1 does
+        // not list EPT misconfiguration among the exits that save one.
+        reflect_l2_exit(
+            cpu,
+            static_cast<std::uint64_t>(basic_reason::ept_misconfiguration),
+            0);
+        return finish(l2_ept_disposition::reflected_misconfiguration,
+                      l2_exit_outcome::reflected);
+
+    case arch::x86_64::vmx::ept_compose_outcome::composed: {
+        // "Composed" means the intersection is non-empty, NOT that it
+        // permits what faulted, and the difference is a watched page.
+        //
+        // A watch clears write and keeps read and execute - see the
+        // `write(false)` in the watch setup - so a second-level guest
+        // writing a watched page composes to a perfectly valid read and
+        // execute mapping. `compose_ept` reports `host_denied` only when
+        // the intersection is *empty*, which that is not, so the write
+        // arrived here, a read-only leaf was installed, the write was
+        // resumed, and it faulted again on the leaf just installed.
+        //
+        // Measured, and it is what ends a Windows boot under Hyper-V:
+        // the last eight exits before the guest gave up were all exit
+        // reason 48 at one unchanging RIP with qualification 0x1aa - a
+        // write, to a page reported readable and executable but not
+        // writable - and 411,333 shadow leaves had been installed for
+        // 88,281 second-level entries. One leaf per fault, no progress.
+        // The watched pages are the local APIC page and the disk
+        // controller's registers, which a guest writes constantly.
+        //
+        // So the access decides, not the intersection - and then which
+        // side of the composition lacked it decides who answers.
+        auto access_read = 0 != (qualification & (1ull << 0));
+        auto access_write = 0 != (qualification & (1ull << 1));
+        auto access_fetch = 0 != (qualification & (1ull << 2));
+
+        auto permits =
+            [&](const arch::x86_64::vmx::ept_permissions & permissions) {
+                return (!access_read || permissions.read()) &&
+                       (!access_write || permissions.write()) &&
+                       (!access_fetch || permissions.execute());
+            };
+
+        // Which table refused it decides who answers, and the two are not
+        // interchangeable.
+        //
+        // The guest hypervisor's tables mapping the address is not the
+        // same as their permitting the access. Removing write from a page
+        // it has mapped is how a hypervisor watches one - it is what this
+        // VMM does to the local APIC page, and what Hyper-V does to its
+        // guest's - and the intersection with ours is then still
+        // non-empty, so it arrives here as `composed` rather than as a
+        // walk failure. Attributing that to this VMM hands its guest's
+        // trap to the wrong level: the watched-page machinery below would
+        // emulate an access the guest hypervisor was waiting to be told
+        // about, and a page only *it* watches would find nothing here
+        // watching it and stop the processor.
+        //
+        // So the guest hypervisor's own permissions are tested first. Its
+        // guest would have taken this fault on bare metal, which is the
+        // same test the walk-failure case above applies, and the
+        // qualification is synthesised the same way - bits 3, 4 and 5 come
+        // from the walk of *its* tables, which is exactly what it needs to
+        // see to know which permission it removed.
+        if (!permits(guest_walk.permissions)) {
+            reflect_l2_exit(
+                cpu,
+                static_cast<std::uint64_t>(basic_reason::ept_violation),
+                arch::x86_64::vmx::reflected_ept_violation_qualification(
+                    qualification, guest_walk, false));
+            return finish(l2_ept_disposition::reflected_permission,
+                          l2_exit_outcome::reflected);
+        }
+
+        // Left over: the guest hypervisor permits it and the composition
+        // does not, so the permission missing is this VMM's own.
+        if (!permits(composition.permissions)) {
+            if (!on_ept_violation(
+                    cpu, context, guest_walk.physical_address)) {
+                log("cpu {} second level {} to {} at first level {}, "
+                    "which nothing here watches",
+                    cpu,
+                    access_write ? "write" : "access",
+                    guest_physical,
+                    guest_walk.physical_address);
+                record_exit(cpu, reason, context, vmcs.guest_rip());
+                on_unhandled_exit(reason);
+
+                return finish(l2_ept_disposition::unwatched,
+                              l2_exit_outcome::handled);
+            }
+
+            return finish(l2_ept_disposition::watched,
+                          l2_exit_outcome::handled);
+        }
+
+        // Both levels permit it, so the shadow is behind and this is not
+        // a fault at all - it is a mapping that has to be put there.
+        //
+        // Rebuilding when the source or the generation moved is not
+        // enough, and the reason is architectural rather than a bug in
+        // the rebuild: a guest hypervisor that changes an EPT entry from
+        // not-present to present **is not required to invalidate
+        // anything**. SDM 31.4.3.3, "Guidelines for Use of the INVEPT
+        // Instruction", requires invalidation when an entry is made
+        // *more restrictive* and lists making one less restrictive among
+        // the cases where software may skip it. So a shadow built from a
+        // walk never learns about a page mapped after it was built,
+        // nothing moves the source or the generation, and the access is
+        // resumed to fault identically for ever.
+        //
+        // Measured on the rig, and it is what a Windows guest does within
+        // seconds of Hyper-V launching: exit reason 48 filling the boot
+        // processor's whole exit ring, qualification 0x184 - an
+        // instruction fetch, linear address valid - at one unchanging
+        // guest RIP, 1,062,627 exits, while the second level managed a
+        // hundred entries in total. The comment that used to be here
+        // called a loop the way a genuine bug would show itself. This is
+        // that loop, and the bug is the assumption above it.
+        //
+        // So the faulting mapping is installed rather than the whole
+        // shadow rebuilt. One leaf, not eleven thousand regions - the
+        // rebuild is still there for what it is for, which is the source
+        // or the generation actually moving.
+        auto pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!pointer) {
+            log("cpu {} shadow ept rebuild failed after an l2 fault at "
+                "{}: error {}",
+                cpu,
+                guest_physical,
+                pointer.error().code());
+            record_exit(cpu, reason, context, vmcs.guest_rip());
+            on_unhandled_exit(reason);
+            return finish(l2_ept_disposition::pointer_failed,
+                          l2_exit_outcome::handled);
+        }
+
+        // **Through `write_vmcs02_control`, because `field::ept_pointer`
+        // is in `control_fields`.** This was a direct
+        // `vmcs.ept_pointer(*pointer)`, which is exactly the hazard that
+        // list's own note describes and does not check: the cache records
+        // what `build_vmcs02` last wrote, a write that goes round it
+        // moves the field underneath the recording, and a later build
+        // that finds vmcs12's value equal to the recorded one skips its
+        // write and leaves vmcs02 holding somebody else's shadow root.
+        //
+        // The sequence is reachable, and it needs the slot set to
+        // renumber - which `shadow_ept_pointer_for` does on a stale
+        // generation. Build writes the pointer for slot 3 and the cache
+        // records it. The generation moves, this fault releases slot 3
+        // and the "a slot never used is taken first" loop picks slot 0
+        // instead, so the direct write put slot 0's pointer in vmcs02
+        // while the cache still names slot 3's. The next new root then
+        // takes slot 3 - now free - `build_vmcs02` computes slot 3's
+        // pointer, the cache agrees, and the write is elided. vmcs02
+        // still points at slot 0, so the second-level guest runs against
+        // the shadow of a root the guest hypervisor did not name, and
+        // that shadow is *filled*, so it does not even fault.
+        //
+        // Nothing else has to change: the value written is the same, so
+        // this is only a question of which path writes it.
+        write_vmcs02_control(cpu, field::ept_pointer, *pointer);
+
+        auto page =
+            guest_physical & ~((1ull << composition.page_shift) - 1);
+
+        if (auto installed = fill_shadow_leaf(
+                cpu, page, guest_walk, composition.page_shift);
+            !installed) {
+            log("cpu {} could not install a shadow leaf for {}: error {}",
+                cpu,
+                page,
+                installed.error().code());
+            record_exit(cpu, reason, context, vmcs.guest_rip());
+            on_unhandled_exit(reason);
+            return finish(l2_ept_disposition::install_failed,
+                          l2_exit_outcome::handled);
+        }
+
+        // The shadow's entry for this address has just changed from
+        // permitting nothing to permitting something, and this processor
+        // may hold the old one. Locally only: no other processor can have
+        // cached a translation through a shadow that is this one's alone.
+        invalidate_ept_locally();
+
+        this->shadow_ept_leaves_filled[cpu] =
+            this->shadow_ept_leaves_filled[cpu] + 1;
+
+        // Noted so a rebuild of this same root can install it without an
+        // exit. See `shadow_ept_recall`: the guest hypervisor discards
+        // this root on every trust-level protection change and wants it
+        // back on the next entry, and the pages it wants are scattered,
+        // so the set has to be remembered rather than guessed.
+        remember_shadow_page(cpu, page);
+
+        // And the pages around it, if this build asks for them. After the
+        // faulting page is in and remembered, so a failure in here cannot
+        // affect the access that faulted.
+        install_shadow_neighbours(cpu, page, composition.page_shift,
+                                  eptp12);
+
+        // The handler's own work, read back.
+        //
+        // Installing a mapping is the one disposition here that claims to
+        // have *fixed* something, and the claim is checkable: the access
+        // that faulted must now be permitted by what is in the table. When
+        // it is not, the guest is about to be resumed onto the identical
+        // fault and will be for ever, and every counter in this class will
+        // go on looking healthy while it happens - `leaves_filled` in
+        // particular climbs beautifully.
+        //
+        // That is not hypothetical. It has happened twice: a watched page
+        // composing to a valid read-and-execute leaf that a *write* then
+        // faulted on again, 411,333 leaves for 88,281 entries; and a 2 MB
+        // leaf where the composition was only valid for 4 KB. Both were
+        // found by hand, days later, from a ring full of one address.
+        //
+        // Only past the first repeat, since the walk is not free and a
+        // single fault cannot be a loop yet.
+        if (repeats > 1) {
+            auto after = shadow_ept_lookup(cpu, guest_physical);
+
+            probe.shadow_status = static_cast<std::uint64_t>(after.status);
+            probe.shadow_permissions = after.permissions.bits();
+
+            if (!permits(after.permissions)) {
+                this->shadow_ept_leaves_that_did_not_help[cpu] =
+                    this->shadow_ept_leaves_that_did_not_help[cpu] + 1;
+
+                log("cpu {} installed a shadow leaf for {} that still "
+                    "refuses the access: qualification {}, composed {}, "
+                    "installed {}",
+                    cpu,
+                    page,
+                    qualification,
+                    composition.permissions.bits(),
+                    after.permissions.bits());
+            }
+        }
+
+        return finish(l2_ept_disposition::installed,
+                      l2_exit_outcome::handled);
+    }
+
+    case arch::x86_64::vmx::ept_compose_outcome::host_denied:
+    default:
+        // This VMM's own tables refused it, so the guest hypervisor's are
+        // innocent and must not be told otherwise - it would go looking
+        // for a bug in tables that permit the access.
+        //
+        // Which leaves the watched-page machinery, keyed on this VMM's own
+        // guest-physical addresses. The walk of the guest hypervisor's
+        // tables just produced one, so it is handed over rather than taken
+        // from the VMCS: the field the processor wrote holds a
+        // second-level address, which no watch is keyed on.
+        //
+        // Opening a watched page changes this VMM's own tables and so
+        // bumps the generation the shadow was built against. Nothing is
+        // done about that here, because nothing needs to be: the resumed
+        // access faults again, the composition then says `composed`, and
+        // the branch above rebuilds. It costs a rebuild per stepped write
+        // and is paid only by a guest hypervisor whose guest touches a
+        // page this VMM watches - which is the disk channel's queue, owned
+        // by the first-level guest's own operating system.
+        //
+        // A page nothing watches stops the processor, exactly as the
+        // first-level guest's own access to the module does. BACKLOG.md
+        // records that as a limit rather than a design.
+        if (!on_ept_violation(cpu, context, guest_walk.physical_address)) {
+            log("cpu {} second level touched {} at first level {}, which "
+                "nothing here watches",
+                cpu,
+                guest_physical,
+                guest_walk.physical_address);
+            record_exit(cpu, reason, context, vmcs.guest_rip());
+            on_unhandled_exit(reason);
+
+            return finish(l2_ept_disposition::unwatched,
+                          l2_exit_outcome::handled);
+        }
+
+        return finish(l2_ept_disposition::watched,
+                      l2_exit_outcome::handled);
+    }
+}
+
+hypervisor::l2_exit_outcome
+hypervisor::on_l2_exit(std::size_t cpu,
+                       arch::x86_64::vmx::exit_reason reason,
+                       arch::x86_64::context & context,
+                       bool & advance_rip)
+{
+    // SDM 29, step 5: the launch state becomes launched only after the
+    // guest-state checks and the MSR loads have passed, so an entry
+    // failure leaves it where it was and the next attempt has to be a
+    // VMLAUNCH again.
+    if (!reason.entry_failure()) {
+        this->vmcs02_launched[cpu] = true;
+    }
+
+    // Latch securekernel's device-attach hypercalls so their HV_STATUS can be
+    // read from the resumed VTL1 RAX (secure-dma §18/§19). RCX low 16 bits is
+    // the call code; the family is 0x82 HvCallAttachDevice and 0xb1..0xb6
+    // (Create/Attach DeviceDomain etc. - modern VBS DMA-guard uses these).
+    // The VMCALL rip lets resume_guest match the return.
+    if ((cpu < max_cpus) && (basic_reason::vmcall == reason.basic())) {
+        auto code = context.rcx & 0xffff;
+
+        // Census: which hypercall codes does the guest actually issue.
+        this->vmcall_seen += 1;
+        if (code < 256) {
+            this->vmcall_code_bitmap[code >> 6] |= (1ull << (code & 63));
+        }
+        if (code > this->vmcall_max_code) {
+            this->vmcall_max_code = static_cast<std::uint16_t>(code);
+        }
+
+        // **0x76 joins them: `HvCallAddLogicalProcessor`.** It is the
+        // last exit before every two-processor boot resets, and the
+        // open question is precisely what this mechanism answers -
+        // whether the guest hypervisor's handler *returns*. If it does,
+        // `attach_captured` increments and `attach_status` holds the
+        // hypercall status it produced; if it does not, `attach_pending`
+        // is still set at the end and nothing was captured. Measured so
+        // far: no `vmresume` follows that exit, which suggests the
+        // handler never completes - this turns the suggestion into a
+        // reading, and gives the status if it is wrong.
+        if ((0x82 == code) || (0x76 == code) ||
+            ((code >= 0xb1) && (code <= 0xb6))) {
+            this->attach_pending[cpu] = 1;
+            this->attach_pending_rip[cpu] = this->vmcs.guest_rip();
+            this->attach_call_code[cpu] = static_cast<std::uint16_t>(code);
+        }
+    }
+
+    if (reason.entry_failure()) {
+        // The processor accepted the controls and the host state, loaded
+        // the guest state the guest hypervisor wrote, and then found it
+        // inconsistent. That is its guest's state and its own account to
+        // receive: SDM 29.8 delivers it as a VM exit with bit 31 of the
+        // reason set, and the guest hypervisor's own error handling is
+        // written around exactly that.
+        log("cpu {} second level entry failed after loading guest state, "
+            "reason {} qualification {}",
+            cpu,
+            reason.value(),
+            this->vmcs.exit_qualification());
+
+        // The guest state the processor just refused, read back off
+        // vmcs02 while it is still current - which is the only moment it
+        // can be read at all, since it is this processor's current VMCS
+        // and nothing outside can see it.
+        //
+        // Once per processor. This fires on the path that ends with the
+        // guest hypervisor tearing itself down, so it is the last chance
+        // to see the fields, and a repeat would evict the sequence that
+        // led here from the ring - which is the failure mode the ring's
+        // deduplication exists for.
+        //
+        // Split across lines because the ring truncates a long one, and
+        // a truncated field is indistinguishable from a zero one.
+        if ((cpu < max_cpus) && !this->l2_entry_failure_logged[cpu]) {
+            this->l2_entry_failure_logged[cpu] = true;
+
+            log("cpu {} vmcs02 refused: cr0 {} cr3 {} cr4 {} efer {}",
+                cpu,
+                this->vmcs.guest_cr0(),
+                this->vmcs.guest_cr3(),
+                this->vmcs.guest_cr4(),
+                this->vmcs.read(field::guest_ia32_efer));
+
+            log("cpu {} vmcs02 refused: rip {} rflags {} entry_ctls {} "
+                "activity {} interruptibility {}",
+                cpu,
+                this->vmcs.guest_rip(),
+                this->vmcs.guest_rflags(),
+                this->vmcs.vm_entry_controls(),
+                this->vmcs.read(field::guest_activity_state),
+                this->vmcs.read(field::guest_interruptibility_state));
+
+            // And what the guest hypervisor actually asked for, beside
+            // what the processor was given. The refused state is
+            // internally contradictory - CS.L set with the IA-32e-mode
+            // guest control clear - and these two lines are what say
+            // whether that contradiction was written by the level above
+            // or introduced here. One of them cannot answer it alone.
+            auto & asked = this->guest_vmcs12[cpu];
+
+            log("cpu {} vmcs12 asked: entry_ctls {} cs {} efer {} cr0 {} "
+                "rip {}",
+                cpu,
+                asked.read(field::vm_entry_controls),
+                asked.read(field::guest_cs_access_rights),
+                asked.read(field::guest_ia32_efer),
+                asked.read(field::guest_cr0),
+                asked.read(field::guest_rip));
+
+            log("cpu {} vmcs02 refused: cs {} ss {} tr {} link {} "
+                "pending_dbg {} entry_intr {}",
+                cpu,
+                this->vmcs.read(field::guest_cs_access_rights),
+                this->vmcs.read(field::guest_ss_access_rights),
+                this->vmcs.read(field::guest_tr_access_rights),
+                this->vmcs.read(field::vmcs_link_pointer),
+                this->vmcs.read(field::guest_pending_debug_exceptions),
+                this->vmcs.read(
+                    field::vm_entry_interruption_information_field));
+        }
+
+        reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
+        advance_rip = false;
+        return l2_exit_outcome::reflected;
+    }
+
+    // The VP assist page, retried until the level above has mapped it.
+    // See `settle_vp_assist_page`: settling on the register write alone
+    // found the page unmapped and armed nothing, and an unarmed watch
+    // reports "no writes" exactly like a watch that saw none.
+    if ((cpu < max_cpus) && (0 != this->vp_assist_pending[cpu]) &&
+        (0 == this->vp_assist_watch_armed)) {
+        constexpr std::uint64_t retry_every = 512;
+
+        // **Only while the trust level that owns the page is current.**
+        // Each virtual trust level has its own extended-page-table root
+        // here, and this file already records that VTL0's addresses do
+        // not translate at all under VTL1's - so retrying at an
+        // arbitrary exit walks the wrong tables and refuses, for ever,
+        // which is exactly what the first two attempts did. The pointer
+        // in force when the register was announced is the one that
+        // maps it.
+        auto eptp = this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+        if ((eptp == this->vp_assist_eptp[cpu]) &&
+            (0 == (this->l2_entries[cpu] % retry_every))) {
+            settle_vp_assist_page(cpu);
+        }
+    }
+
+    // The free-running trace, armed on an ordinary exit rather than on
+    // a hypercall. See `vtl_step_free_kind`: the two trust-level traces
+    // can only ever show the loop they were armed for, and what the
+    // priority histogram leaves open is what the guest executes on the
+    // 30 per cent of entries it spends at DISPATCH.
+    //
+    // Before the extended-page-table branch, because that one returns
+    // and a shadow fill is as much a part of what the guest is doing as
+    // anything else.
+    arm_vtl_step(cpu, vtl_step_free_kind);
+
+    // Extended page-table faults are decided by composing the two levels
+    // rather than by the table below, because which level refused the
+    // access is not something the exit itself says.
+    if ((basic_reason::ept_violation == reason.basic()) ||
+        (basic_reason::ept_misconfiguration == reason.basic())) {
+        auto outcome = on_l2_ept_fault(cpu, reason, context, advance_rip);
+        if (l2_exit_outcome::deferred != outcome) {
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        }
+        return outcome;
+    }
+
+    // Two questions in order, which is KVM's shape in
+    // `nested_vmx_reflect_vmexit` and is the order that matters: an exit
+    // this VMM must have is one no reflection may take away, and only
+    // after that does the guest hypervisor's own configuration decide.
+    // VMFUNC, function 0: extended-page-table pointer switching.
+    //
+    // **This is ours to answer and must never be the processor's.**
+    // vmcs02's VM-function controls are forced to zero in
+    // `build_vmcs02`, so every VMFUNC the second-level guest executes
+    // takes this exit rather than the processor loading a pointer
+    // itself - which is the whole safety property. The list the guest
+    // hypervisor publishes holds *its* extended-page-table pointers,
+    // and loading one of those into the real pointer would run a guest
+    // against unshadowed tables. Nothing about that failure is
+    // debuggable: it is not a stall, it is a machine that stops.
+    //
+    // SDM 26.5.5.3, "EPTP Switching": EAX selects the function, ECX
+    // indexes the list at the EPTP-list address, and the entry is used
+    // as the new extended-page-table pointer. A function that fails
+    // raises #UD rather than reporting anything, which is also what an
+    // out-of-range index or an absent list gets here.
+    if (basic_reason::vmfunc == reason.basic()) {
+        constexpr std::uint64_t eptp_switching = 0;
+        constexpr std::uint64_t list_entries = 512;
+
+        auto & shadow = this->guest_vmcs12[cpu];
+        auto function = context.rax & 0xffffffff;
+        auto index = context.rcx & 0xffffffff;
+        auto list = shadow.read(field::eptp_list_address);
+
+        this->l2_vmfunc_calls[cpu] = this->l2_vmfunc_calls[cpu] + 1;
+
+        if ((eptp_switching != function) || (index >= list_entries) ||
+            (0 == list)) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        std::uint64_t eptp12{};
+
+        if (!read_guest_physical(
+                list + (index * sizeof(eptp12)),
+                std::span(reinterpret_cast<std::byte *>(&eptp12),
+                          sizeof(eptp12))) ||
+            (0 == eptp12)) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        // Through the same cache every other entry uses, so a pointer
+        // switched to here and one entered with resolve to the same
+        // shadow - `shadow_ept_pointer_for` keys by the guest's own
+        // pointer, which is what makes that true.
+        auto pointer = shadow_ept_pointer_for(cpu, eptp12);
+        if (!pointer) {
+            this->l2_vmfunc_refused[cpu] =
+                this->l2_vmfunc_refused[cpu] + 1;
+            inject_invalid_opcode_exception();
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+
+        // Through `write_vmcs02_control` for the reason spelled out at
+        // the other one of these, in `on_l2_ept_fault`: the field is in
+        // `control_fields`, so a write that goes round the cache leaves
+        // it describing a vmcs02 somebody else moved. This site is the
+        // clearer of the two - VMFUNC switches the root deliberately, so
+        // the value written here differs from what the last
+        // `build_vmcs02` recorded every single time it fires.
+        write_vmcs02_control(cpu, field::ept_pointer, *pointer);
+
+        // And vmcs12's own field, because everything that walks the
+        // guest hypervisor's tables reads it from there - the fault
+        // path, `l2_physical_to_l1`, the capture. Leaving it stale
+        // would compose the next fault against the pointer the guest
+        // switched *away* from.
+        shadow.write(field::ept_pointer, eptp12);
+
+        this->l2_vmfunc_switched[cpu] = this->l2_vmfunc_switched[cpu] + 1;
+
+        advance_rip = true;
+        return l2_exit_outcome::handled;
+    }
+
+    // The instruction trace, which is this VMM's own exit and belongs to
+    // neither level. See `vtl_step_rip`.
+    //
+    // Answered here rather than through `l0_wants_l2_exit` and the
+    // ordinary dispatcher, because that path is the watched-page
+    // stepper's and its handler closes a page this trace never opened.
+    // The two never overlap - `stepping_watch` is tested first - and if
+    // they ever did, the watch is the one that must not be lost.
+    // One step after a protection answer, recording only where it
+    // landed. See `vtl_protect_step_rip`.
+    if ((basic_reason::monitor_trap_flag == reason.basic()) &&
+        !this->stepping_watch[cpu] && (0 == this->vtl_step_active[cpu]) &&
+        (cpu < max_cpus) && (0 != this->vtl_protect_step_pending[cpu])) {
+        this->vtl_protect_step_pending[cpu] = 0;
+
+        auto landed = this->vmcs.guest_rip();
+        bool placed{};
+
+        for (std::size_t k{}; k < 8; ++k) {
+            if (0 == this->vtl_protect_step_count[cpu][k]) {
+                this->vtl_protect_step_rip[cpu][k] = landed;
+                this->vtl_protect_step_count[cpu][k] = 1;
+                placed = true;
+                break;
+            }
+
+            if (landed == this->vtl_protect_step_rip[cpu][k]) {
+                this->vtl_protect_step_count[cpu][k] += 1;
+                placed = true;
+                break;
+            }
+        }
+
+        if (!placed) {
+            this->vtl_protect_step_other[cpu] += 1;
+        }
+
+        advance_rip = false;
+        return l2_exit_outcome::handled;
+    }
+
+    if ((basic_reason::monitor_trap_flag == reason.basic()) &&
+        !this->stepping_watch[cpu] && (0 != this->vtl_step_active[cpu])) {
+        record_vtl_step(cpu);
+        advance_rip = false;
+        return l2_exit_outcome::handled;
+    }
+
+    // Anything else taken while a trace runs is the trace being
+    // interrupted, and is recorded rather than left to be inferred from
+    // a gap in the addresses.
+    if ((0 != this->vtl_step_active[cpu]) && (cpu < max_cpus)) {
+        auto kind = static_cast<std::size_t>(this->vtl_step_active[cpu]) - 1;
+
+        if (kind < vtl_step_kinds) {
+            if (0 == this->vtl_step_other[kind]) {
+                this->vtl_step_other_reason[kind] = reason.value();
+            }
+
+            this->vtl_step_other[kind] = this->vtl_step_other[kind] + 1;
+        }
+    }
+
+    // The priority drop this VMM asked the processor to report, which
+    // is answered here rather than deferred: the generic dispatcher has
+    // no case for it, and an exit that reaches `default:` stops the
+    // processor. See `window_threshold_armed`.
+    //
+    // No RIP advance - a TPR-below-threshold exit happens at an
+    // instruction boundary and retires nothing.
+    //
+    // **And the assignment that says so, which this comment claimed and
+    // did not make.** `advance_rip` arrives here holding its default of
+    // `true`, so returning `handled` without clearing it sent
+    // `resume_guest` down its advancing branch with **vmcs02 current**:
+    // `context.rip += vm_exit_instruction_length()` and then
+    // `vmcs.guest_rip(context.rip)`, which moves the second-level
+    // guest's instruction pointer past an instruction it never executed.
+    //
+    // What it moves by is not a length at all. SDM 30.2.5 lists the
+    // exits for which the VM-exit instruction-length field is defined
+    // and ends "All VM exits other than those listed in the above items
+    // leave this field undefined" (`.references/sdm.txt:204135`); a
+    // TPR-below-threshold exit is on none of those items, so the field
+    // holds whatever the last instruction-caused exit left in it. Every
+    // other `handled` return in this function assigns the flag; this was
+    // the one that relied on a comment.
+    if constexpr (nested_vmx::window_on_tpr) {
+        if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
+            (basic_reason::tpr_below_threshold == reason.basic())) {
+            this->window_threshold_armed[cpu] = false;
+            this->window_armed_on_drop[cpu] = true;
+            this->window_granted_on_drop[cpu] += 1;
+
+            // **And take the threshold back down in vmcs02, here, now.**
+            // This exit fired because VTPR[7:4] fell below the 2 this VMM
+            // armed, and the entry that follows does not go through
+            // `build_vmcs02` - an exit this VMM handles is resumed
+            // straight into the second-level guest. So the threshold
+            // stays at 2 over a virtual task priority that is now below
+            // it, and that is a VM-entry consistency check: SDM 29.2.1.1,
+            // `.references/sdm.txt:202124`, quoted in full where the
+            // threshold is armed. The entry fails, and under KVM it comes
+            // back as a plain VMfail (`nested.c:5074`) into the entry
+            // stub's fall-through.
+            //
+            // Measured before this existed: `window_on_tpr` took the
+            // interrupt-window reflections from 1,500,914 to 3 and then
+            // the processor died in `nested_vmlaunch` with `#PF` at a
+            // tiny address - the first success of the mechanism was what
+            // killed it.
+            //
+            // vmcs02 is current here, which is the same fact the RIP
+            // note above turns on.
+            write_vmcs02_control(cpu,
+                                 field::tpr_threshold,
+                                 this->nested_tpr_threshold[cpu]);
+            this->window_threshold_disarmed[cpu] += 1;
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+    }
+
+    // The priority drop this VMM armed a threshold for, answered by
+    // **making sure the window is live in vmcs02 before resuming**.
+    // See `nested_vmx::deliver_on_drop`.
+    //
+    // Since nothing is withheld any more the window is normally already
+    // there, and `window_already_armed_at_drop` is expected to be almost
+    // all of the count. The write is kept for the case that is not
+    // normal and is the one that matters: the level above cleared its
+    // window request between the arming entry and this exit, and would
+    // then be woken by nothing at all at the instant its held vector
+    // became deliverable. That is the shape of every failure in this
+    // investigation, so it is closed rather than argued about.
+    //
+    // KVM arms it in the live VMCS and does nothing else:
+    // `vmx_enable_irq_window` is `exec_controls_setbit(to_vmx(vcpu),
+    // CPU_BASED_INTR_WINDOW_EXITING)` (`.references/kvm/vmx.c:4937`),
+    // and `kvm_check_and_inject_events` calls it again on every entry
+    // while `kvm_cpu_has_injectable_intr` still holds
+    // (`.references/kvm/x86.c:10445`). The vector is never consumed by
+    // a failed attempt - `kvm_apic_has_interrupt` only reads the
+    // request register (`.references/kvm/lapic.c:2934`) - so the cost
+    // of being early is a retry rather than a lost interrupt.
+    //
+    // Through `write_vmcs02_control` rather than a bare VMWRITE, so the
+    // control cache agrees with the field. A direct write would leave
+    // the cache holding the old value, and the next `build_vmcs02`
+    // computing that same old value would *elide* its write - so a
+    // control this VMM set here would survive into an entry that meant
+    // not to have it, silently and only sometimes.
+    if constexpr (nested_vmx::deliver_on_drop) {
+        if ((cpu < max_cpus) && this->window_threshold_armed[cpu] &&
+            (basic_reason::tpr_below_threshold == reason.basic())) {
+            this->window_threshold_armed[cpu] = false;
+            this->window_granted_on_drop[cpu] += 1;
+
+            // The threshold back down first. Left standing over a
+            // priority that has now fallen below it - which is why this
+            // exit fired - it is a VM-entry consistency check (SDM
+            // 29.2.1.1, `.references/sdm.txt:202124`) and the entry is
+            // refused outright. The entry that follows does not go
+            // through `build_vmcs02`, so here is the only place it can
+            // be done. Measured before this existed on the first
+            // version of the switch: the processor died in
+            // `nested_vmlaunch` with `#PF` at a tiny address, and the
+            // first success of the mechanism was what killed it.
+            //
+            // vmcs02 is current here, which is what both writes turn on.
+            write_vmcs02_control(cpu,
+                                 field::tpr_threshold,
+                                 this->nested_tpr_threshold[cpu]);
+            this->window_threshold_disarmed[cpu] += 1;
+
+            constexpr auto primary_field =
+                field::primary_processor_based_vm_execution_controls;
+
+            auto primary02 = this->vmcs.read(primary_field);
+
+            if (0 != (primary02 & primary_interrupt_window)) {
+                // Already live. Counted rather than assumed, because
+                // "the window is always there" is exactly the sort of
+                // claim this tree has been wrong about, and the two
+                // counters together say which case the machine is in.
+                this->window_already_armed_at_drop[cpu] += 1;
+            } else {
+                write_vmcs02_control(
+                    cpu,
+                    primary_field,
+                    arch::x86_64::vmx::adjust_msr(
+                        this->cached_vmx_msr(
+                            arch::x86_64::vmx::msr::
+                                true_processor_based_controls),
+                        primary02 | primary_interrupt_window));
+
+                this->window_armed_at_drop[cpu] += 1;
+            }
+
+            this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+
+            advance_rip = false;
+            return l2_exit_outcome::handled;
+        }
+    }
+
+    if (l0_wants_l2_exit(cpu, reason, context)) {
+        this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        return l2_exit_outcome::deferred;
+    }
+
+    if (!l1_wants_l2_exit(cpu, reason, context)) {
+        // Neither side asked for it, which can only happen where this
+        // VMM's own controls are wider than the union it built - the
+        // MONITOR and MWAIT intercepts are the two. The ordinary handler
+        // answers them the same way it does for any guest.
+        this->l2_exits_handled[cpu] = this->l2_exits_handled[cpu] + 1;
+        return l2_exit_outcome::deferred;
+    }
+
+    // Carried into the ring, and only here, where the second-level
+    // guest's registers are still the ones in hand.
+    if (cpu < max_cpus) {
+        this->l2_exit_detail[cpu] = context.rcx;
+
+        // And what went through that register, for the MSR reasons. See
+        // `exit_trace_entry::detail_value`: the reason and the register
+        // together cannot tell a clock being waited on from a clock that
+        // stopped, and the value can.
+        constexpr std::uint64_t low_half_mask = 0xffffffff;
+        constexpr std::uint64_t high_half_shift = 32;
+
+        this->l2_exit_detail_value[cpu] =
+            ((context.rdx & low_half_mask) << high_half_shift) |
+            (context.rax & low_half_mask);
+
+        // And a census of the synthetic range that outlives both rings.
+        // See `l2_synthetic_msr_reads`.
+        constexpr std::uint64_t synthetic_msr_block = 0xffffff00;
+        constexpr std::uint64_t synthetic_msr_base = 0x40000000;
+
+        if (synthetic_msr_base == (context.rcx & synthetic_msr_block)) {
+            auto slot = context.rcx & 0xff;
+
+            if (basic_reason::rdmsr == reason.basic()) {
+                this->l2_synthetic_msr_reads[cpu][slot] += 1;
+
+                // Once, at the poll, and only after the loop has clearly
+                // settled - an early capture would catch the boot path
+                // reading the counter rather than the loop that never
+                // leaves. See `l2_poll_code`.
+                constexpr std::uint64_t reference_count_slot = 0x20;
+                constexpr std::uint64_t settled = 200000;
+
+                // Retried, not one-shot, and throttled because the
+                // scan behind it walks pages looking for a PE header.
+                //
+                // One capture per boot was the first shape and it is not
+                // enough: the loop reaches the poll by more than one call
+                // path, and a sixty-four word window caught the driver's
+                // frames in one boot and nothing but the kernel in the
+                // next two. Retrying until a frame outside the kernel
+                // turns up costs a few hundred scans and removes the
+                // reboot from the loop.
+                constexpr std::uint64_t retry_every = 512;
+
+                if ((reference_count_slot == slot) &&
+                    (0 == this->l2_driver_base) &&
+                    (this->l2_synthetic_msr_reads[cpu][slot] > settled) &&
+                    (0 == (this->l2_synthetic_msr_reads[cpu][slot] %
+                           retry_every))) {
+                    capture_poll_site(cpu);
+                }
+            } else if (basic_reason::wrmsr == reason.basic()) {
+                this->l2_synthetic_msr_writes[cpu][slot] += 1;
+
+                // The synthetic interrupt controller's two pages, as the
+                // guest names them. See `l2_simp_msr`: a message slot the
+                // guest never consumes stops the controller delivering
+                // into it, which is what a lost handshake looks like from
+                // outside, and nothing here has ever read that page.
+                //
+                // Keyed on the extended-page-table pointer, because the
+                // controller is per-VTL and both levels write the same
+                // MSR index - see `record_synic_page`.
+                record_synic_page(
+                    cpu,
+                    slot,
+                    (context.rax & 0xffffffff) | (context.rdx << 32),
+                    this->guest_vmcs12[cpu].read(field::ept_pointer));
+
+                // Where the trust levels talk to each other. See
+                // `l2_vp_assist`: the loop's decision to call again is
+                // made from neither registers nor stack, both of which
+                // are byte-identical across thousands of switches, so it
+                // is made from this page.
+                //
+                // Recorded per trust level, keyed on the extended-page-
+                // table pointer in force, because the register is
+                // per-VTL and each level configures its own - one slot
+                // would hold whichever wrote last and there would be no
+                // way to tell which.
+                constexpr std::uint64_t vp_assist_slot = 0x73;
+
+                if (vp_assist_slot == slot) {
+                    this->vp_assist_pending[cpu] =
+                        this->l2_exit_detail_value[cpu];
+                    this->vp_assist_eptp[cpu] =
+                        this->guest_vmcs12[cpu].read(field::ept_pointer);
+                    settle_vp_assist_page(cpu);
+
+                    auto eptp =
+                        this->guest_vmcs12[cpu].read(field::ept_pointer);
+
+                    // The slot already claimed by this level, or the
+                    // first free one. Two levels, two slots, and a third
+                    // would mean the assumption that there are two is
+                    // wrong - which `l2_vp_assist_eptp` makes visible
+                    // rather than silently overwriting.
+                    for (std::size_t which{}; which < 2; ++which) {
+                        if ((this->l2_vp_assist_eptp[cpu][which] ==
+                             eptp) ||
+                            (0 == this->l2_vp_assist_eptp[cpu][which])) {
+                            this->l2_vp_assist[cpu][which] =
+                                this->l2_exit_detail_value[cpu];
+                            this->l2_vp_assist_eptp[cpu][which] = eptp;
+                            break;
+                        }
+                    }
+                }
+
+                // Kept so the page can be read from outside. See
+                // `l2_reference_tsc_written`.
+                constexpr std::uint64_t reference_tsc_slot = 0x21;
+
+                if (reference_tsc_slot == slot) {
+                    this->l2_reference_tsc_written[cpu] =
+                        this->l2_exit_detail_value[cpu];
+                }
+            }
+        }
+
+        // And the two hypercalls that switch virtual trust level, which
+        // are the only work this guest does that is not the idle loop.
+        //
+        // The call code is the low sixteen bits of the hypercall input
+        // value in RCX, which is the interface this VMM announces
+        // through the hypercall page MSR - not KVM's, which takes it in
+        // RAX. Both have been seen on this path, so the reason is
+        // checked as well as the register.
+        constexpr std::uint64_t hypercall_code_mask = 0xffff;
+        constexpr std::uint64_t vtl_call_code = 0x11;
+        constexpr std::uint64_t vtl_return_code = 0x12;
+
+        // Folded away entirely when the trace is off - `trace_vtl` is a
+        // `constexpr bool`, so the whole block below costs nothing and
+        // links out. Everything in it observes; see `nested_vmx::trace_vtl`.
+        if (nested_vmx::trace_vtl &&
+            (basic_reason::vmcall == reason.basic())) {
+            auto code = context.rcx & hypercall_code_mask;
+
+            // **The last hypercall, with when it was made.**
+            //
+            // The census says which codes were called and how often, and
+            // on a stuck guest every one of its counters is frozen - but
+            // a frozen counter cannot distinguish "no longer called" from
+            // "called once and never returned", and on multiple
+            // processors those are the two candidate explanations and
+            // they want opposite fixes.
+            //
+            // The timestamp settles it. If the last recorded call is
+            // seconds old while the machine is still taking exits, the
+            // guest is sitting inside that call; if it is recent, the
+            // calls are simply finishing and something else has stopped.
+            //
+            // Parameters too, because for a flush the interesting part is
+            // *which* processors it names, and that is the difference
+            // between a flush waiting on a parked processor and a flush
+            // that never targeted one.
+            // What VTL1 answered, for `HvCallVtlReturn` only. See
+            // `vtl_return_rbx`: the request side is already censused
+            // to death and says the same question is asked 3,778
+            // times; nothing yet watches the reply, and the two
+            // readings it separates want opposite fixes.
+            // Which trust level is current. The call/return pair is
+            // already decoded here for the re-entry census, so this is
+            // a store on a path that was being walked anyway. See
+            // `in_vtl1`.
+            if (cpu < max_cpus) {
+                constexpr std::uint64_t vtl_call_code = 0x11;
+                constexpr std::uint64_t vtl_back_code = 0x12;
+
+                if (vtl_call_code == code) {
+                    this->in_vtl1[cpu] = 1;
+                } else if (vtl_back_code == code) {
+                    this->in_vtl1[cpu] = 0;
+                }
+            }
+
+            if (constexpr std::uint64_t vtl_return_code = 0x12;
+                (vtl_return_code == code) && (cpu < max_cpus)) {
+                auto slot = this->vtl_return_count[cpu] %
+                            vtl_return_slots;
+
+                this->vtl_return_rbx[cpu][slot] = context.rbx;
+                this->vtl_return_rax[cpu][slot] = context.rax;
+
+                if ((0 != this->vtl_return_count[cpu]) &&
+                    (context.rbx != this->vtl_return_previous[cpu])) {
+                    this->vtl_return_distinct[cpu] += 1;
+                }
+
+                this->vtl_return_previous[cpu] = context.rbx;
+                this->vtl_return_count[cpu] += 1;
+            }
+
+            if (cpu < max_cpus) {
+                this->last_hypercall_code[cpu] = code;
+                this->last_hypercall_rcx[cpu] = context.rcx;
+                this->last_hypercall_rdx[cpu] = context.rdx;
+                this->last_hypercall_r8[cpu] = context.r8;
+                this->last_hypercall_tsc[cpu] = arch::x86_64::rdtsc();
+                this->last_hypercall_count[cpu] += 1;
+
+                // And the walk's progress beside it, on a wall-clock
+                // interval. See `vtl_code0_epoch_tsc`: this is the
+                // "rate over time" reading `BACKLOG.md` names as the one
+                // that separates a walk which finished from a walk which
+                // was cut off, and it is taken **here**, on the hypercall
+                // path, precisely so that a walk which has stopped keeps
+                // being sampled. Sampling it on the walk would stop the
+                // moment the answer became available.
+                {
+                    auto now = this->last_hypercall_tsc[cpu];
+                    auto since = now - this->vtl_code0_epoch_last[cpu];
+
+                    if ((0 == this->vtl_code0_epoch_last[cpu]) ||
+                        (since >= vtl_code0_epoch_ticks)) {
+                        auto slot = this->vtl_code0_epoch_count[cpu] %
+                                    vtl_code0_epoch_slots;
+
+                        this->vtl_code0_epoch_tsc[cpu][slot] = now;
+                        this->vtl_code0_epoch_pfn[cpu][slot] =
+                            this->vtl_code0_pfn_calls[cpu];
+                        this->vtl_code0_epoch_code0[cpu][slot] =
+                            this->vtl_code0_count[cpu];
+                        this->vtl_code0_epoch_calls[cpu][slot] =
+                            this->last_hypercall_count[cpu];
+
+                        // And the per-code hypercall census differenced
+                        // against the previous boundary, so one dump
+                        // names what is *still* being called rather than
+                        // what has ever been called. See
+                        // `l2_hypercall_epoch_delta`.
+                        //
+                        // `span` is recorded beside it because the
+                        // boundary is only crossed on a hypercall: when
+                        // they stop the epoch stretches, and a delta
+                        // divided by the nominal `vtl_code0_epoch_ticks`
+                        // then overstates the rate by exactly that
+                        // stretch. The divisor has to be measured.
+                        this->l2_hypercall_epoch_span[cpu] =
+                            now - this->l2_hypercall_epoch_tsc[cpu];
+                        this->l2_hypercall_epoch_tsc[cpu] = now;
+
+                        for (std::size_t s{}; s < l2_hypercall_cpu_slots;
+                             ++s) {
+                            auto seen =
+                                this->l2_hypercall_cpu_counts[cpu][s];
+
+                            this->l2_hypercall_epoch_delta[cpu][s] =
+                                seen -
+                                this->l2_hypercall_epoch_previous[cpu][s];
+                            this->l2_hypercall_epoch_previous[cpu][s] =
+                                seen;
+                        }
+
+                        this->vtl_code0_epoch_count[cpu] += 1;
+                        this->vtl_code0_epoch_last[cpu] = now;
+                    }
+                }
+
+                // The same census as `l2_hypercall_code_counts` below,
+                // per processor and with an overflow counter. That one
+                // has neither, so it sums across processors under a
+                // heading that says "cpu 0" and drops a seventeenth
+                // code without saying so. See `l2_hypercall_cpu_codes`.
+                {
+                    auto placed = false;
+
+                    for (std::size_t s{}; s < l2_hypercall_cpu_slots;
+                         ++s) {
+                        if (0 == this->l2_hypercall_cpu_counts[cpu][s]) {
+                            this->l2_hypercall_cpu_codes[cpu][s] = code;
+                        }
+
+                        if (this->l2_hypercall_cpu_codes[cpu][s] ==
+                            code) {
+                            this->l2_hypercall_cpu_counts[cpu][s] += 1;
+                            placed = true;
+                            break;
+                        }
+                    }
+
+                    if (!placed) {
+                        this->l2_hypercall_cpu_other[cpu] += 1;
+                    }
+                }
+            }
+
+            // Censused before the decode, so a code with no case here is
+            // counted rather than invisible. See `l2_hypercall_codes`:
+            // two of the 3.46 vmcalls a round trip are the trust-level
+            // pair below, and what the rest are has never been recorded.
+            for (std::size_t slot{}; slot < hypercall_code_slots; ++slot) {
+                if (0 == this->l2_hypercall_code_counts[slot]) {
+                    this->l2_hypercall_codes[slot] = code;
+                }
+
+                if (this->l2_hypercall_codes[slot] == code) {
+                    this->l2_hypercall_code_counts[slot] += 1;
+                    break;
+                }
+            }
+
+            // The guest's stack once a protection answer has landed.
+            // See `vtl_protect_after_stack`.
+            if ((cpu < max_cpus) &&
+                (0 != this->vtl_protect_early_pending[cpu])) {
+                this->vtl_protect_early_pending[cpu] = 0;
+
+                auto early = this->vtl_protect_early_rsp[cpu];
+
+                for (std::size_t w{}; w < 32; ++w) {
+                    this->vtl_protect_early_after[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, early + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t value{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&value, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_early_after[cpu][w] = value;
+                }
+            }
+
+            if ((cpu < max_cpus) &&
+                (0 != this->vtl_protect_after_pending[cpu])) {
+                this->vtl_protect_after_pending[cpu] = 0;
+
+                // What the guest did next, by exit reason. See
+                // `vtl_protect_next_reason`.
+                auto next = static_cast<std::size_t>(reason.basic());
+
+                if (next < 72) {
+                    this->vtl_protect_next_reason[cpu][next] += 1;
+                }
+
+                this->vtl_protect_next_last[cpu] = next;
+
+                // And which hypercall, which is the part that separates
+                // "the walk continued" from "the secure kernel yielded".
+                // See `vtl_protect_next_code`.
+                if (basic_reason::vmcall == reason.basic()) {
+                    auto code = context.rcx & 0xffff;
+
+                    this->vtl_protect_next_code_last[cpu] = code;
+
+                    if (code < 32) {
+                        this->vtl_protect_next_code[cpu][code] += 1;
+                    }
+                }
+                this->vtl_protect_after_read[cpu] = 0;
+
+                auto base = this->vtl_protect_last_rsp[cpu];
+
+                for (std::size_t w{}; w < 32; ++w) {
+                    this->vtl_protect_after_stack[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, base + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t value{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&value, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_after_stack[cpu][w] = value;
+                    this->vtl_protect_after_read[cpu] = w + 1;
+                }
+            }
+
+            if (vtl_call_code == code) {
+                // Which vmcs12 is current as the call is made. See
+                // `vtl_call_vmcs12`: the guest hypervisor switches trust
+                // level by making a different one current, so this and
+                // its partner at the return say whether the switch ever
+                // reaches this VMM.
+                if (cpu < max_cpus) {
+                    this->vtl_call_vmcs12[cpu] =
+                        this->guest_current_vmcs[cpu];
+                }
+
+                // What VTL0 could have done with an interrupt at the
+                // instant it handed over. See `vtl_call_if_clear`.
+                if (cpu < max_cpus) {
+                    constexpr std::uint64_t interrupt_enable = 1ull << 9;
+                    constexpr std::uint64_t blocking =
+                        (1ull << 0) | (1ull << 1);
+
+                    auto rflags = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rflags);
+                    auto state = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::
+                            guest_interruptibility_state);
+
+                    this->vtl_call_rflags[cpu] = rflags;
+                    this->vtl_call_interruptibility[cpu] = state;
+                    this->vtl_call_activity[cpu] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::
+                            guest_activity_state);
+
+                    if (0 == (rflags & interrupt_enable)) {
+                        this->vtl_call_if_clear[cpu] += 1;
+                    } else {
+                        this->vtl_call_if_set[cpu] += 1;
+                    }
+
+                    if (0 != (state & blocking)) {
+                        this->vtl_call_blocked[cpu] += 1;
+                    }
+
+                    // What VTL0 is leaving in the field the secure
+                    // kernel's loop turns on. See
+                    // `vtl_call_block_word`.
+                    if (0 != this->vina_block_l1_physical[cpu]) {
+                        std::uint32_t word{};
+
+                        if (read_guest_physical(
+                                this->vina_block_l1_physical[cpu],
+                                std::as_writable_bytes(
+                                    std::span(&word, 1)))) {
+                            this->vtl_call_block_last[cpu] = word;
+
+                            auto request = (word >> 8) & 0xff;
+                            auto done = word & 0xff;
+
+                            if ((request < 8) && (done < 4)) {
+                                this->vtl_call_block_word[cpu][request]
+                                                         [done] += 1;
+                            } else {
+                                this->vtl_call_block_other[cpu] += 1;
+                            }
+                        }
+                    }
+
+                    // And where the call came from. See `vtl0_call_rip`.
+                    auto & where = this->vtl0_call_count[cpu];
+                    auto at = where % vtl1_resume_capacity;
+
+                    this->vtl0_call_rip[cpu][at] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rip);
+
+                    // The caller behind the hypercall stub: one qword at
+                    // the stack pointer, which is where the stub's `ret`
+                    // will go. See `vtl0_call_return`.
+                    auto rsp = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rsp);
+
+                    this->vtl0_call_rsp[cpu] = rsp;
+
+                    std::uint64_t caller{};
+                    if (auto physical = translate_guest_linear(cpu, rsp)) {
+                        if (read_guest_memory(
+                                cpu,
+                                *physical,
+                                std::as_writable_bytes(
+                                    std::span(&caller, 1)))) {
+                            this->vtl0_call_return[cpu][at] = caller;
+                            this->vtl0_call_return_read[cpu] += 1;
+                        }
+                    }
+
+                    // And the frames above it. See `vtl0_call_stack`:
+                    // the immediate caller is a shim, and what the work
+                    // is waiting for is further up. Walked a word at a
+                    // time so a page boundary costs one entry rather
+                    // than the whole window.
+                    for (std::size_t k{}; k < vtl0_stack_words; ++k) {
+                        std::uint64_t word{};
+                        auto address = rsp + (8 * k);
+
+                        if (auto to = translate_guest_linear(cpu, address);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&word, 1)))) {
+                            this->vtl0_call_stack[cpu][k] = word;
+                        } else {
+                            this->vtl0_call_stack[cpu][k] = 0;
+                        }
+                    }
+
+                    this->vtl0_call_stack_read[cpu] += 1;
+
+                    where = where + 1;
+                }
+
+                capture_vtl_switch(cpu, 0, context);
+                mark_vtl_half(cpu, 0);
+                arm_vtl_step(cpu, 0);
+            } else if (vtl_return_code == code) {
+                capture_vtl_switch(cpu, 1, context);
+                mark_vtl_half(cpu, 1);
+                arm_vtl_step(cpu, 1);
+
+                // And which vmcs12 is current at the return. If this
+                // equals the one recorded at the call, the pointer never
+                // moved and both halves ran the same trust level. See
+                // `vtl_call_vmcs12`.
+                if (cpu < max_cpus) {
+                    this->vtl_return_vmcs12[cpu] =
+                        this->guest_current_vmcs[cpu];
+
+                    if (this->vtl_call_vmcs12[cpu] ==
+                        this->guest_current_vmcs[cpu]) {
+                        this->vtl_switch_same_vmcs[cpu] += 1;
+                    } else {
+                        this->vtl_switch_moved_vmcs[cpu] += 1;
+                    }
+                }
+
+                // Where it yielded from, beside the flag it yielded on.
+                // See `vtl1_resume_rip`: the pair says whether the
+                // secure kernel is walking through its work or looping
+                // over the same instruction.
+                if (cpu < max_cpus) {
+                    auto & where = this->vtl1_yield_count[cpu];
+
+                    this->vtl1_yield_rip[cpu]
+                                        [where % vtl1_resume_capacity] =
+                        this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_rip);
+                    where = where + 1;
+
+                    // And the secure kernel's stack, which is the only
+                    // reachable window on its private state. See
+                    // `vtl1_yield_stack`.
+                    auto sp = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_rsp);
+
+                    for (std::size_t k{}; k < vtl0_stack_words; ++k) {
+                        std::uint64_t word{};
+                        auto address = sp + (8 * k);
+
+                        if (auto to = translate_guest_linear(cpu, address);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&word, 1)))) {
+                            this->vtl1_yield_stack[cpu][k] = word;
+                        } else {
+                            this->vtl1_yield_stack[cpu][k] = 0;
+                        }
+                    }
+
+                    this->vtl1_yield_stack_read[cpu] += 1;
+                    this->vtl1_yield_cr3[cpu] = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_cr3);
+
+                    // The pointer the VINA handler dereferences, and a
+                    // window of what it names. See `vtl1_gs_zero`.
+                    if (0 == this->vtl1_gs_zero[cpu]) {
+                        auto gs = this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_gs_base);
+                        std::uint64_t self{};
+
+                        if (auto to = translate_guest_linear(cpu, gs);
+                            to && read_guest_memory(
+                                      cpu,
+                                      *to,
+                                      std::as_writable_bytes(
+                                          std::span(&self, 1)))) {
+                            this->vtl1_gs_zero[cpu] = self;
+
+                            for (std::size_t k{}; (0 != self) && (k < 32);
+                                 ++k) {
+                                std::uint64_t word{};
+
+                                if (auto at = translate_guest_linear(
+                                        cpu, self + (8 * k));
+                                    at && read_guest_memory(
+                                              cpu,
+                                              *at,
+                                              std::as_writable_bytes(
+                                                  std::span(&word, 1)))) {
+                                    this->vtl1_gs_block[cpu][k] = word;
+                                }
+                            }
+                        }
+                    }
+
+                    // The secure kernel's load base, once. See
+                    // `vtl1_sk_base`.
+                    if ((0 == this->vtl1_sk_base[cpu]) &&
+                        (0 == this->vtl1_sk_scanned[cpu])) {
+                        this->vtl1_sk_scanned[cpu] = 1;
+
+                        // `movabs rdx, 0x400000000000` then `test`, the
+                        // first non-padding bytes of `.text`.
+                        constexpr std::uint8_t want[] = {
+                            0x48, 0xba, 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x40, 0x00, 0x00, 0x48, 0x85};
+
+                        // Anchored on the pointers the processor
+                        // control region holds rather than on the GS
+                        // base. The block is **allocated memory**, so its
+                        // distance from the image is an allocator
+                        // coincidence and the earlier scan around it was
+                        // searching the wrong neighbourhood - which
+                        // explains its empty result better than the
+                        // signature being absent.
+                        //
+                        // `+0x088` and `+0x090` are page-aligned pointers
+                        // 50 MB and 130 MB below the block. Scanning from
+                        // below the lower of them to above the block
+                        // covers the region they bracket: 176 MB at
+                        // 64 KB steps, 2,816 probes, once.
+                        auto low = this->vtl1_gs_block[cpu][17];
+                        auto high = this->vtl1_gs_block[cpu][0];
+
+                        if ((0 == low) || (0 == high)) {
+                            low = this->vmcs.read(
+                                arch::x86_64::vmx::vmcs::field::
+                                    guest_gs_base);
+                            high = low;
+                        }
+
+                        auto from = (low & ~0xffffull) - 0x1000000ull;
+                        auto span =
+                            ((high - from) >> 16) + 0x200;
+
+                        if (span > 4096) {
+                            span = 4096;
+                        }
+
+                        for (std::size_t k{}; k < span; ++k) {
+                            auto candidate = from + (0x10000ull * k);
+                            auto at = candidate + 0x1008;
+                            bool same = true;
+
+                            for (std::size_t b{}; b < sizeof(want); ++b) {
+                                std::uint8_t byte{};
+
+                                auto to =
+                                    translate_guest_linear(cpu, at + b);
+
+                                if (!to ||
+                                    !read_guest_memory(
+                                        cpu,
+                                        *to,
+                                        std::as_writable_bytes(
+                                            std::span(&byte, 1))) ||
+                                    (byte != want[b])) {
+                                    same = false;
+                                    break;
+                                }
+                            }
+
+                            if (same) {
+                                this->vtl1_sk_base[cpu] = candidate;
+                                break;
+                            }
+                        }
+                    }
+
+                    // The caller's own code, once, from the address it
+                    // returns to. See `vtl1_caller_code`.
+                    if ((0 == this->vtl1_caller_at[cpu]) &&
+                        (0 != this->vtl1_yield_stack[cpu][0])) {
+                        auto from = this->vtl1_yield_stack[cpu][0];
+
+                        for (std::size_t k{}; k < 128; ++k) {
+                            std::uint8_t byte{};
+
+                            if (auto to = translate_guest_linear(cpu,
+                                                                 from + k);
+                                to && read_guest_memory(
+                                          cpu,
+                                          *to,
+                                          std::as_writable_bytes(
+                                              std::span(&byte, 1)))) {
+                                this->vtl1_caller_code[cpu][k] = byte;
+                            }
+                        }
+
+                        this->vtl1_caller_at[cpu] = from;
+                    }
+
+                    // The stub's own bytes, once. See
+                    // `vtl1_stub_bytes`.
+                    if (0 == this->vtl1_stub_at[cpu]) {
+                        auto rip = this->vmcs.read(
+                            arch::x86_64::vmx::vmcs::field::guest_rip);
+                        auto from = rip & ~0x3full;
+
+                        for (std::size_t k{}; k < 64; ++k) {
+                            std::uint8_t byte{};
+
+                            if (auto to = translate_guest_linear(cpu,
+                                                                 from + k);
+                                to && read_guest_memory(
+                                          cpu,
+                                          *to,
+                                          std::as_writable_bytes(
+                                              std::span(&byte, 1)))) {
+                                this->vtl1_stub_bytes[cpu][k] = byte;
+                            }
+                        }
+
+                        this->vtl1_stub_at[cpu] = from;
+                    }
+
+                    // And which image the caller belongs to, once. See
+                    // `vtl1_yield_image`.
+                    if ((0 == this->vtl1_yield_image[cpu]) &&
+                        (0 != this->vtl1_yield_stack[cpu][0])) {
+                        this->vtl1_yield_image_tried[cpu] += 1;
+
+                        constexpr std::uint64_t mz = 0x5a4d;
+                        constexpr std::uint64_t step = 0x10000;
+                        constexpr std::size_t reach = 512;
+
+                        auto from = this->vtl1_yield_stack[cpu][0] &
+                                    ~(step - 1);
+
+                        for (std::size_t k{}; k < reach; ++k) {
+                            auto candidate = from - (step * k);
+                            std::uint16_t signature{};
+
+                            auto to =
+                                translate_guest_linear(cpu, candidate);
+
+                            if (!to) {
+                                continue;
+                            }
+
+                            if (!read_guest_memory(
+                                    cpu,
+                                    *to,
+                                    std::as_writable_bytes(
+                                        std::span(&signature, 1)))) {
+                                continue;
+                            }
+
+                            if (mz == signature) {
+                                this->vtl1_yield_image[cpu] = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // The one bit the secure kernel tested to decide this.
+                // See `vina_flags`: VTL1 is the running guest here, so
+                // vmcs02 carries its GS base and the chain
+                // `[[gs:0] + 0x10] + 4` can be walked.
+                if (cpu < max_cpus) {
+                    this->vina_read[cpu] = 0;
+
+                    auto gs = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                    this->vina_gs_base[cpu] = gs;
+
+                    auto load = [&](std::uint64_t at,
+                                    std::uint64_t & out) {
+                        auto physical = translate_guest_linear(cpu, at);
+                        if (!physical) {
+                            return false;
+                        }
+                        return static_cast<bool>(read_guest_memory(
+                            cpu,
+                            *physical,
+                            std::as_writable_bytes(
+                                std::span(&out, 1))));
+                    };
+
+                    std::uint64_t self{};
+                    std::uint64_t block{};
+
+                    if (load(gs, self) && (0 != self) &&
+                        load(self + 0x10, block) && (0 != block)) {
+                        this->vina_block[cpu] = block;
+
+                        if (auto bp = translate_guest_linear(cpu, block)) {
+                            this->vina_block_physical[cpu] = *bp;
+
+                            // And once more, all the way to an
+                            // L1-physical address. See
+                            // `vina_block_l1_physical`: at the call this
+                            // page is not in VTL0's extended page tables
+                            // and cannot be, so the guest-table step has
+                            // to be done here and not there.
+                            if (auto l1 = l2_physical_to_l1(cpu, *bp)) {
+                                this->vina_block_l1_physical[cpu] = *l1;
+                            }
+                        }
+
+                        std::uint64_t flags{};
+                        if (load(block, flags)) {
+                            this->vina_flags[cpu] = flags;
+                            this->vina_read[cpu] = 1;
+
+                            // Bit 0 of the byte at offset 4.
+                            auto vina = ((flags >> 32) & 1);
+
+                            if (0 != vina) {
+                                this->vina_set_count[cpu] += 1;
+                            } else {
+                                this->vina_clear_count[cpu] += 1;
+                            }
+
+                            // And how long VTL1 ran, bucketed against
+                            // that. See `vtl1_duration`.
+                            if (0 != this->vtl_call_last_tsc[cpu]) {
+                                auto ran = arch::x86_64::rdtsc() -
+                                           this->vtl_call_last_tsc[cpu];
+
+                                std::size_t bucket{};
+                                while ((ran >> bucket) > 1) {
+                                    bucket = bucket + 1;
+                                }
+
+                                if (bucket >= vtl1_duration_buckets) {
+                                    bucket = vtl1_duration_buckets - 1;
+                                }
+
+                                this->vtl1_duration[cpu][vina][bucket] += 1;
+
+                            // And against the priority the matching call
+                            // was made at. See
+                            // `vtl_return_vina_by_call_class`.
+                            this->vtl_return_vina_by_call_class
+                                [cpu][vina]
+                                [(this->l2_entry_priority[cpu] >> 4) &
+                                 0xf] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // `HvCallModifyVtlProtectionMask`, decoded rather than
+            // censused raw.
+            //
+            // RCX is a structured control word, not an opaque value -
+            // `.references/xen/xen/arch/x86/include/asm/guest/hyperv-tlfs.h:419-425`:
+            // bits 15:0 the call code, bit 16 the fast form, bits 43:32
+            // the **rep count**, bits 59:48 the **rep start index**.
+            // This is a rep hypercall, and those two fields answer both
+            // open questions without interpreting any address:
+            //
+            // - rep count multiplies the call rate into a page rate. At
+            //   107 calls a second, a count near the 4,095 maximum makes
+            //   the whole of guest memory a few seconds of work and
+            //   kills the throughput framing outright; a count of one
+            //   makes it real.
+            // - rep start says whether the guest is *resuming*. A rep
+            //   call that cannot finish its slice returns
+            //   `HV_STATUS_TIMEOUT` with reps-completed set, and the
+            //   caller reissues with rep start advanced. Advancing is
+            //   progress; returning to zero is a fresh request; **not
+            //   advancing while the call repeats is a livelock**.
+            //
+            // And RDX is not a meaningless sentinel: `0xffffffffffffffff`
+            // is `HV_PARTITION_ID_SELF`, the first field of the input
+            // header, so it is behaving exactly as the interface says
+            // and it is kept as a check on the register order rather
+            // than as data.
+            //
+            // The answer is collected where the reference-counter answer
+            // already is - at the next second-level entry, where the
+            // guest hypervisor has loaded its guest's registers and RAX
+            // holds what it is about to be told. Bits 15:0 are the
+            // status and 43:32 the reps completed.
+            constexpr std::uint64_t modify_vtl_protection_code = 0x0c;
+
+            if ((modify_vtl_protection_code == code) && (cpu < max_cpus)) {
+                auto & count = this->vtl_protect_count[cpu];
+                auto slot = count % vtl_protect_capacity;
+
+                this->vtl_protect_rcx[cpu][slot] = context.rcx;
+                this->vtl_protect_rdx[cpu][slot] = context.rdx;
+                this->vtl_protect_rax[cpu][slot] = 0;
+
+                this->vtl_protect_answer_slot[cpu] = slot;
+                this->vtl_protect_answer_pending[cpu] = true;
+
+                // What this call asked for, so the answer can be
+                // compared against it. See `vtl_protect_reps_short`.
+                // Where it came from. See `vtl_protect_last_rip`: the
+                // last one of these is the last act of the work item
+                // that stops.
+                this->vtl_protect_last_r15[cpu] = context.r15;
+
+                // The secure kernel's current thread and the in-use bit
+                // both its scheduler and its call path test. See
+                // `vtl_protect_thread_flags`.
+                if (cpu < max_cpus) {
+                    this->vtl_protect_thread_read[cpu] = 0;
+
+                    auto gs = this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_gs_base);
+
+                    auto load = [&](std::uint64_t at, std::uint64_t & out) {
+                        auto physical = translate_guest_linear(cpu, at);
+                        if (!physical) {
+                            return false;
+                        }
+                        return static_cast<bool>(read_guest_memory(
+                            cpu,
+                            *physical,
+                            std::as_writable_bytes(std::span(&out, 1))));
+                    };
+
+                    std::uint64_t thread{};
+
+                    if (load(gs + 8, thread) && (0 != thread)) {
+                        this->vtl_protect_thread[cpu] = thread;
+
+                        std::uint64_t flags{};
+                        if (load(thread + 0xa8, flags)) {
+                            // 0xa8 holds two dwords; 0xac is the high one.
+                            auto word = (flags >> 32) & 0xffffffff;
+
+                            this->vtl_protect_thread_flags[cpu] = word;
+                            this->vtl_protect_thread_read[cpu] = 1;
+
+                            if (0 != (word & (1u << 4))) {
+                                this->vtl_protect_thread_locked[cpu] += 1;
+                            } else {
+                                this->vtl_protect_thread_clear[cpu] += 1;
+                            }
+                        }
+                    }
+                }
+
+                // The last page of the walk. See `vtl_step_pin_request`:
+                // this is the transition the trace has to catch, and the
+                // periodic arming would overwrite it within a period.
+                // Not `r15 == 1` alone: **every** walk's final page has
+                // one remaining, so that fired at switch 2 and pinned the
+                // trace thousands of calls before the freeze. The freeze
+                // itself is reproducible across boots to within ten calls
+                // - 39,264 / 39,266 / 39,272 / 39,274 - so the count is
+                // the selective condition and `r15` merely confirms it is
+                // a walk's last page.
+                // The pin is now taken at the entry that carries the
+                // answer - see nested_vmx.cpp - rather than at the
+                // trust-level call that follows it, so this request is
+                // no longer raised here.
+                this->vtl_protect_last_rip[cpu] = this->vmcs.guest_rip();
+                this->vtl_protect_last_cr3[cpu] =
+                    this->vmcs.read(
+                        arch::x86_64::vmx::vmcs::field::guest_cr3);
+
+                auto protect_rsp = this->vmcs.guest_rsp();
+                this->vtl_protect_last_rsp[cpu] = protect_rsp;
+                this->vtl_protect_last_caller[cpu] = 0;
+
+                for (std::size_t w{}; w < 32; ++w) {
+                    this->vtl_protect_last_stack[cpu][w] = 0;
+
+                    auto at = translate_guest_linear(
+                        cpu, protect_rsp + (w * sizeof(std::uint64_t)));
+                    if (!at) {
+                        break;
+                    }
+
+                    std::uint64_t back{};
+                    if (!read_guest_memory(
+                            cpu,
+                            *at,
+                            std::as_writable_bytes(std::span(&back, 1)))) {
+                        break;
+                    }
+
+                    this->vtl_protect_last_stack[cpu][w] = back;
+
+                    if (0 == w) {
+                        this->vtl_protect_last_caller[cpu] = back;
+                    }
+                }
+
+                // The refutation check. See `vtl_protect_early_before`.
+                if (100 == this->vtl_protect_count[cpu]) {
+                    this->vtl_protect_early_rsp[cpu] = protect_rsp;
+                    this->vtl_protect_early_pending[cpu] = 1;
+
+                    for (std::size_t w{}; w < 32; ++w) {
+                        this->vtl_protect_early_before[cpu][w] =
+                            this->vtl_protect_last_stack[cpu][w];
+                    }
+                }
+
+                this->vtl_protect_reps_pending[cpu] =
+                    (0 != (context.rcx & (1ull << 16)))
+                        ? 1
+                        : ((context.rcx >> 32) & 0xfff);
+
+                count = count + 1;
+            }
+
+            // The decode's own control, and the reason it is here rather
+            // than in a comment: `HvCallVtlCall` is **not** a rep
+            // hypercall, so its rep count and rep start must both be
+            // zero. If they are not, the shifts above are wrong and
+            // nothing measured with them counts. That is the "cannot be
+            // anything else" check this session found missing when a
+            // frame pointer was read as a page number.
+            if ((vtl_call_code == code) && (cpu < max_cpus)) {
+                this->vtl_call_rcx[cpu] = context.rcx;
+
+                // And the block RDX points at. See `vtl_call_block`:
+                // the status at offset 8 is the secure kernel's own
+                // answer, and it is the only thing measured so far that
+                // can say why a call taking zero exits declines.
+                this->vtl_call_rdx[cpu] = context.rdx;
+                this->vtl_call_block_read[cpu] = 0;
+
+                // The priority this call is made at. See
+                // `vtl_call_vtpr`: at class 13 both the clock vector and
+                // the deferred-call vector are masked, and either being
+                // pending holds VINA asserted - which is what the
+                // instruction trace shows preempting the secure kernel
+                // after it selects a thread.
+                this->vtl_call_vtpr[cpu][(this->l2_entry_priority[cpu] >>
+                                          4) &
+                                         0xf] += 1;
+
+                // And whether interrupts were even enabled at that
+                // priority. See `vtl_call_if_by_class`.
+                {
+                    constexpr std::uint64_t interrupt_enable = 1ull << 9;
+
+                    auto on = (0 != (this->vmcs.read(
+                                         arch::x86_64::vmx::vmcs::field::
+                                             guest_rflags) &
+                                     interrupt_enable))
+                                  ? 1u
+                                  : 0u;
+
+                    this->vtl_call_if_by_class
+                        [cpu][on]
+                        [(this->l2_entry_priority[cpu] >> 4) & 0xf] += 1;
+                }
+
+                // And how long since the last one. See
+                // `vtl_call_gap_buckets`: a rate cannot tell a loop
+                // delayed a little every iteration from one delayed
+                // enormously on a few, and those want opposite fixes.
+                auto call_now = arch::x86_64::rdtsc();
+
+                if (0 != this->vtl_call_last_tsc[cpu]) {
+                    auto gap = call_now - this->vtl_call_last_tsc[cpu];
+
+                    // Index by the position of the highest set bit, so
+                    // bucket n holds 2^n up to 2^(n+1)-1.
+                    std::size_t bucket{};
+                    while ((gap >> bucket) > 1) {
+                        bucket = bucket + 1;
+                    }
+
+                    if (bucket >= std::size(this->vtl_call_gap_buckets[0])) {
+                        bucket =
+                            std::size(this->vtl_call_gap_buckets[0]) - 1;
+                    }
+
+                    this->vtl_call_gap_buckets[cpu][bucket] += 1;
+                }
+
+                this->vtl_call_last_tsc[cpu] = call_now;
+
+                // The entry that follows this call is the one that runs
+                // VTL1 - it takes no exits, so there is exactly one.
+                // See `vtl1_entry_vector`.
+                this->vtl1_entry_armed[cpu] = 1;
+
+                // The VINA flag as it stands **before** VTL1 runs. See
+                // `vina_block_physical`: read through the physical
+                // address because VTL0's GS is the wrong address space.
+                if (0 != this->vina_block_l1_physical[cpu]) {
+                    std::uint64_t flags{};
+
+                    if (read_guest_physical(
+                            this->vina_block_l1_physical[cpu],
+                            std::as_writable_bytes(std::span(&flags, 1)))) {
+                        if (0 != ((flags >> 32) & 1)) {
+                            this->vina_at_call_set[cpu] += 1;
+                        } else {
+                            this->vina_at_call_clear[cpu] += 1;
+                        }
+                    } else {
+                        this->vina_at_call_unread[cpu] += 1;
+                    }
+                } else {
+                    this->vina_at_call_unread[cpu] += 1;
+                }
+
+                constexpr std::uint64_t kernel_address_floor =
+                    0xffff800000000000;
+
+                if (context.rdx >= kernel_address_floor) {
+                    auto physical =
+                        translate_guest_linear(cpu, context.rdx);
+
+                    if (physical) {
+                        this->vtl_call_block_physical[cpu] = *physical;
+
+                        if (read_guest_memory(
+                                cpu,
+                                *physical,
+                                std::as_writable_bytes(
+                                    std::span(this->vtl_call_block[cpu])))) {
+                            this->vtl_call_block_read[cpu] = 1;
+
+                            // Census the request byte and whether the
+                            // block moves at all. See
+                            // `vtl_call_request`: a sample is not a
+                            // census, and this is the difference
+                            // between "always 4" and "only looked when
+                            // it was 4".
+                            auto word = this->vtl_call_block[cpu][0];
+
+                            this->vtl_call_request[cpu]
+                                                  [(word >> 8) & 0xff] += 1;
+
+                            if (word != this->vtl_block_previous[cpu]) {
+                                this->vtl_block_changes[cpu] += 1;
+                                this->vtl_block_previous[cpu] = word;
+                            }
+
+                            // The header decoded as `ntoskrnl.exe`
+                            // writes it, rather than as this file has
+                            // been guessing. See `vtl_service_calls`
+                            // for the disassembly that settles it:
+                            // byte 0 is the call class, byte 1 is the
+                            // reason VTL1 writes on the way *back*, and
+                            // bytes 2-3 are the secure service number.
+                            //
+                            // Outside the `code 0` filter on purpose.
+                            // That filter tests byte 1, which every
+                            // caller has just memset to zero, so it
+                            // admits every ordinary call and excludes
+                            // only the re-entries - and those are
+                            // exactly the ones a stalled secure call
+                            // would consist of.
+                            {
+                                auto klass = word & 0xff;
+                                auto reason = (word >> 8) & 0xff;
+                                auto service = (word >> 16) & 0xffff;
+
+                                if (klass < 4) {
+                                    this->vtl_service_class[cpu][klass]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_class_other[cpu]
+                                        += 1;
+                                }
+
+                                if (reason < 8) {
+                                    this->vtl_service_reason[cpu][reason]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_reason_other[cpu]
+                                        += 1;
+                                }
+
+                                if (service < vtl_service_slots) {
+                                    this->vtl_service_calls[cpu][service]
+                                        += 1;
+                                } else {
+                                    this->vtl_service_other[cpu] += 1;
+                                }
+
+                                // And the image validation walk, which
+                                // is service 0x0f4 and not the 0x101
+                                // the walk instrument selects. Service
+                                // 0x0f4 is `VslCopyProtectedPage`,
+                                // called from `MiCopyPage` - the frame
+                                // in the stack this is all about - and
+                                // its first argument sits at the same
+                                // `block+0x08` the placeholder walk's
+                                // page frame number does.
+                                constexpr std::uint64_t copy_service =
+                                    0x00f4;
+
+                                if ((copy_service == service) &&
+                                    (2 == klass)) {
+                                    auto pfn =
+                                        this->vtl_call_block[cpu][1];
+
+                                    if ((0 == this->vtl_copy_calls[cpu]) ||
+                                        (pfn <
+                                         this->vtl_copy_min_pfn[cpu])) {
+                                        this->vtl_copy_min_pfn[cpu] = pfn;
+                                    }
+
+                                    if (pfn >
+                                        this->vtl_copy_max_pfn[cpu]) {
+                                        this->vtl_copy_max_pfn[cpu] = pfn;
+                                    }
+
+                                    if (0 != this->vtl_copy_calls[cpu]) {
+                                        auto last =
+                                            this->vtl_copy_last_pfn[cpu];
+
+                                        if (pfn == (last + 1)) {
+                                            this->vtl_copy_consecutive
+                                                [cpu] += 1;
+                                        } else if (pfn == last) {
+                                            this->vtl_copy_same[cpu] += 1;
+                                        } else if (pfn < last) {
+                                            this->vtl_copy_back[cpu] += 1;
+                                        } else {
+                                            this->vtl_copy_skip[cpu] += 1;
+                                        }
+                                    }
+
+                                    this->vtl_copy_last_pfn[cpu] = pfn;
+                                    this->vtl_copy_calls[cpu] += 1;
+
+                                    // **Latched here, inside the 0x0f4
+                                    // arm, and that is the whole
+                                    // point.** `vtl_call_block` holds
+                                    // the block of the most recent
+                                    // secure call of *any* service, and
+                                    // its words mean different things
+                                    // per service - so reading [2] and
+                                    // [3] as the copy's source and
+                                    // owner from a dump is only valid
+                                    // if nothing else has called since.
+                                    // Measured on a guest at the login
+                                    // screen: the block held service
+                                    // 0x00f1, `VslFastFlushSecureRangeList`,
+                                    // so those two words were already
+                                    // somebody else's. Latching them
+                                    // where the service is known is the
+                                    // only way they mean what they say.
+                                    //
+                                    // From `MiGetPagePrivilege`:
+                                    // block[2] is the source page's
+                                    // kernel virtual address, or for an
+                                    // image page its byte offset within
+                                    // the section; block[3] is a
+                                    // per-image or per-segment owner
+                                    // pointer, zero for a plain kernel
+                                    // page. Together they name which
+                                    // image the walk was on when it
+                                    // stopped, which is the one thing
+                                    // the wedged boots have never said.
+                                    this->vtl_copy_last_va[cpu] =
+                                        this->vtl_call_block[cpu][2];
+                                    this->vtl_copy_last_owner[cpu] =
+                                        this->vtl_call_block[cpu][3];
+
+                                    if (0 != this->vtl_call_block[cpu][3]) {
+                                        this->vtl_copy_image_pages[cpu]
+                                            += 1;
+                                    } else {
+                                        this->vtl_copy_plain_pages[cpu]
+                                            += 1;
+                                    }
+                                }
+
+                                // Re-entries, attributed to the call
+                                // stuck in them. See
+                                // `vtl_reentry_service` for the
+                                // disassembly: `0038df53` writes call
+                                // class 0 and service number 0 into
+                                // the block before re-issuing, so a
+                                // stuck call is counted **once** by
+                                // the service census above however
+                                // long it stays stuck, and every
+                                // re-entry lands on service 0x0000
+                                // beside the real `VslFlushEntireTb`.
+                                if ((0 == klass) && (0 == service)) {
+                                    this->vtl_reentries[cpu] += 1;
+
+                                    if (reason < 8) {
+                                        this->vtl_reentry_by_reason
+                                            [cpu][reason] += 1;
+                                    } else {
+                                        this->vtl_reentry_reason_other
+                                            [cpu] += 1;
+                                    }
+
+                                    // Whose re-entry is it? The last
+                                    // fresh call on this processor -
+                                    // safe to latch because the loop
+                                    // runs at CR8 = 0xf and nothing
+                                    // else can run here to interleave.
+                                    if (0 !=
+                                        this->vtl_reentry_owner_valid
+                                            [cpu]) {
+                                        auto owner =
+                                            this->vtl_reentry_owner[cpu]
+                                            & 0xffff;
+
+                                        if (owner < vtl_service_slots) {
+                                            this->vtl_reentry_service
+                                                [cpu][owner] += 1;
+                                        } else {
+                                            this
+                                                ->vtl_reentry_service_other
+                                                    [cpu] += 1;
+                                        }
+                                    } else {
+                                        this->vtl_reentry_orphan[cpu]
+                                            += 1;
+                                    }
+
+                                    // One stuck call re-enters through
+                                    // one block address, because the
+                                    // block is the caller's stack
+                                    // local. Distinct calls move.
+                                    auto block =
+                                        this->vtl_call_block_physical
+                                            [cpu];
+
+                                    if (0 != this->vtl_reentry_block
+                                                 [cpu]) {
+                                        if (block ==
+                                            this->vtl_reentry_block
+                                                [cpu]) {
+                                            this->vtl_reentry_block_same
+                                                [cpu] += 1;
+                                        } else {
+                                            this->vtl_reentry_block_moved
+                                                [cpu] += 1;
+                                        }
+                                    }
+
+                                    this->vtl_reentry_block[cpu] = block;
+
+                                    // And what the re-entry carries.
+                                    // `block+0x08` is the argument on
+                                    // the way in and the NTSTATUS on
+                                    // the way back, so consecutive
+                                    // slots give both directions of
+                                    // one round trip.
+                                    auto slot =
+                                        this->vtl_reentry_ring_count[cpu]
+                                        % vtl_reentry_ring_slots;
+                                    auto & row =
+                                        this->vtl_reentry_ring[cpu][slot];
+
+                                    row[0] = arch::x86_64::rdtsc();
+                                    row[1] = word;
+                                    row[2] = this->vtl_call_block[cpu][1];
+                                    row[3] = this->vtl_call_block[cpu][2];
+                                    row[4] = block;
+                                    row[5] = this->vtl_reentry_owner[cpu];
+
+                                    this->vtl_reentry_ring_count[cpu] += 1;
+                                } else {
+                                    this->vtl_fresh_calls[cpu] += 1;
+                                    this->vtl_reentry_owner[cpu] =
+                                        (klass << 16) | service;
+                                    this->vtl_reentry_owner_valid[cpu] = 1;
+
+                                    // The decode says this cannot
+                                    // happen. If it does, class 0 does
+                                    // not mark a re-entry and every
+                                    // count above is wrong.
+                                    if (0 == klass) {
+                                        this->vtl_class0_with_service[cpu]
+                                            += 1;
+                                    }
+                                }
+                            }
+
+                            // And, for the memory-manager requests, what
+                            // they actually ask for. See
+                            // `vtl_code0_param_changes`.
+                            if (0 == ((word >> 8) & 0xff)) {
+                                auto & seen = this->vtl_code0_count[cpu];
+                                auto slot = seen % 8;
+
+                                this->vtl_code0_ring[cpu][slot][0] = word;
+                                this->vtl_code0_ring[cpu][slot][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_ring[cpu][slot][2] =
+                                    this->vtl_call_block[cpu][2];
+
+                                // And the same into the wider window, so
+                                // the transition has context either side
+                                // of it rather than only its last few
+                                // moments. See `vtl_code0_wide`.
+                                auto wide = seen % 32;
+
+                                this->vtl_code0_wide[cpu][wide][0] = word;
+                                this->vtl_code0_wide[cpu][wide][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_wide[cpu][wide][2] =
+                                    this->vtl_call_block[cpu][2];
+
+                                auto differs =
+                                    (word !=
+                                     this->vtl_code0_previous[cpu][0]) ||
+                                    (this->vtl_call_block[cpu][1] !=
+                                     this->vtl_code0_previous[cpu][1]) ||
+                                    (this->vtl_call_block[cpu][2] !=
+                                     this->vtl_code0_previous[cpu][2]);
+
+                                if (differs && (0 != seen)) {
+                                    this->vtl_code0_param_changes[cpu] += 1;
+                                }
+
+                                this->vtl_code0_previous[cpu][0] = word;
+                                this->vtl_code0_previous[cpu][1] =
+                                    this->vtl_call_block[cpu][1];
+                                this->vtl_code0_previous[cpu][2] =
+                                    this->vtl_call_block[cpu][2];
+
+                                // Every distinct low half, with its
+                                // count. See `vtl_code0_word_value`: the
+                                // `0x01010002` filter below is an
+                                // assumption about what that word means,
+                                // and this is the population that tests
+                                // it. A filter cannot report that it is
+                                // aimed at the wrong field.
+                                {
+                                    auto low = word & 0xffffffff;
+                                    auto placed = false;
+
+                                    for (std::size_t s{};
+                                         s < vtl_code0_word_slots;
+                                         ++s) {
+                                        if (0 ==
+                                            this->vtl_code0_word_count
+                                                [cpu][s]) {
+                                            this->vtl_code0_word_value
+                                                [cpu][s] = low;
+                                        }
+
+                                        if (low ==
+                                            this->vtl_code0_word_value
+                                                [cpu][s]) {
+                                            this->vtl_code0_word_count
+                                                [cpu][s] += 1;
+                                            placed = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (!placed) {
+                                        this->vtl_code0_word_other[cpu]
+                                            += 1;
+                                    }
+                                }
+
+                                // The span it covered, over the one
+                                // subcode that carries a page frame
+                                // number. See `vtl_code0_min_pfn`: the
+                                // block's second quadword is a PFN only
+                                // for this subcode and a kernel virtual
+                                // address for others, and mixing them
+                                // gives a span of billions.
+                                constexpr std::uint64_t pfn_subcode =
+                                    0x01010002;
+
+                                if (pfn_subcode == (word & 0xffffffff)) {
+                                    auto pfn = this->vtl_call_block[cpu][1];
+
+                                    if ((0 == this->vtl_code0_pfn_calls[cpu]) ||
+                                        (pfn < this->vtl_code0_min_pfn[cpu])) {
+                                        this->vtl_code0_min_pfn[cpu] = pfn;
+                                    }
+
+                                    if (pfn > this->vtl_code0_max_pfn[cpu]) {
+                                        this->vtl_code0_max_pfn[cpu] = pfn;
+                                    }
+
+                                    // Against its own previous value,
+                                    // captured before it is overwritten.
+                                    //
+                                    // Partitioned rather than merely
+                                    // counted - see
+                                    // `vtl_code0_run_current`. A count
+                                    // of `+1` steps cannot tell one run
+                                    // of six thousand pages from nine
+                                    // hundred runs of eight, and this
+                                    // investigation published the second
+                                    // as though it were the first.
+                                    if (0 != this->vtl_code0_pfn_calls[cpu]) {
+                                        auto last =
+                                            this->vtl_code0_last_pfn[cpu];
+
+                                        if (pfn == (last + 1)) {
+                                            this->vtl_code0_consecutive[cpu]
+                                                += 1;
+                                            this->vtl_code0_run_current[cpu]
+                                                += 1;
+                                        } else {
+                                            if (pfn == last) {
+                                                this->vtl_code0_same[cpu] += 1;
+                                            } else if (pfn < last) {
+                                                this->vtl_code0_back[cpu] += 1;
+                                            } else {
+                                                this->vtl_code0_skip[cpu] += 1;
+                                            }
+
+                                            this->vtl_code0_run_current[cpu] =
+                                                0;
+                                        }
+
+                                        if (this->vtl_code0_run_current[cpu] >
+                                            this->vtl_code0_run_longest[cpu]) {
+                                            this->vtl_code0_run_longest[cpu] =
+                                                this->vtl_code0_run_current
+                                                    [cpu];
+                                        }
+                                    }
+
+                                    this->vtl_code0_last_pfn[cpu] = pfn;
+                                    this->vtl_code0_pfn_calls[cpu] += 1;
+
+                                    // What our own shadow says about it.
+                                    // See `vtl_protect_pfn_status`.
+                                    auto probe = shadow_ept_lookup(
+                                        cpu, pfn << 12);
+
+                                    this->vtl_protect_pfn_status[cpu] =
+                                        static_cast<std::uint64_t>(
+                                            probe.status);
+                                    this->vtl_protect_pfn_perms[cpu] =
+                                        probe.permissions.bits();
+                                    this->vtl_protect_pfn_probed[cpu] += 1;
+
+                                    if (arch::x86_64::vmx::ept_walk_status::
+                                            mapped != probe.status) {
+                                        this->vtl_protect_pfn_abnormal[cpu]
+                                            += 1;
+                                    } else {
+                                        auto bits =
+                                            probe.permissions.bits() & 0x7;
+
+                                        this->vtl_protect_pfn_perm_seen
+                                            [cpu][bits] += 1;
+
+                                        // Which frames they are. See
+                                        // `vtl_protect_readonly_pfn`.
+                                        if (1 == bits) {
+                                            auto & n = this->
+                                                vtl_protect_readonly_count
+                                                    [cpu];
+
+                                            if (n < 8) {
+                                                this->
+                                                    vtl_protect_readonly_pfn
+                                                        [cpu][n] = pfn;
+
+                                                // And what our own
+                                                // tables say. See
+                                                // `vtl_protect_host_perms`.
+                                                auto ours = host_ept_lookup(
+                                                    pfn << 12);
+
+                                                this->vtl_protect_host_perms
+                                                    [cpu][n] =
+                                                    ours.permissions.bits();
+                                                this->vtl_protect_host_status
+                                                    [cpu][n] =
+                                                    static_cast<
+                                                        std::uint64_t>(
+                                                        ours.status);
+
+                                                // And what the guest
+                                                // hypervisor's own
+                                                // tables say, which is
+                                                // the only reading that
+                                                // separates "it
+                                                // protected them" from
+                                                // "our composition is
+                                                // wrong". See
+                                                // `vtl_protect_guest_perms`.
+                                                {
+                                                    auto eptp12 =
+                                                        this->guest_vmcs12
+                                                            [cpu]
+                                                                .read(
+                                                                    field::
+                                                                        ept_pointer);
+
+                                                    auto walk = arch::
+                                                        x86_64::vmx::walk_ept(
+                                                            eptp12 &
+                                                                (((1ull
+                                                                   << 52) -
+                                                                  1) &
+                                                                 ~0xfffull),
+                                                            pfn << 12,
+                                                            physical_address_bits(),
+                                                            execute_only_translations_offered,
+                                                            [&](std::uint64_t
+                                                                    at)
+                                                                -> std::optional<
+                                                                    arch::x86_64::
+                                                                        vmx::epte> {
+                                                                std::uint64_t
+                                                                    value{};
+                                                                if (!read_guest_physical(
+                                                                        at,
+                                                                        std::as_writable_bytes(
+                                                                            std::span(
+                                                                                &value,
+                                                                                1)))) {
+                                                                    return std::
+                                                                        nullopt;
+                                                                }
+                                                                return arch::
+                                                                    x86_64::vmx::
+                                                                        epte(
+                                                                            value);
+                                                            });
+
+                                                    this->vtl_protect_guest_perms
+                                                        [cpu][n] =
+                                                        walk.permissions
+                                                            .bits();
+                                                    this->vtl_protect_guest_status
+                                                        [cpu][n] =
+                                                        static_cast<
+                                                            std::uint64_t>(
+                                                            walk.status);
+                                                }
+
+                                                // And in every root this
+                                                // processor has
+                                                // shadowed, so both
+                                                // trust levels are
+                                                // covered rather than
+                                                // whichever happens to
+                                                // be current. See
+                                                // `vtl_protect_root_perms`.
+                                                for (std::size_t r{};
+                                                     (r < 4) &&
+                                                     (r < shadow_ept_slots);
+                                                     ++r) {
+                                                    auto root =
+                                                        this->shadow_ept_source
+                                                            [cpu][r];
+
+                                                    this->vtl_protect_root_source
+                                                        [cpu][r] = root;
+
+                                                    if (0 == root) {
+                                                        continue;
+                                                    }
+
+                                                    auto each = arch::x86_64::
+                                                        vmx::walk_ept(
+                                                            root,
+                                                            pfn << 12,
+                                                            physical_address_bits(),
+                                                            execute_only_translations_offered,
+                                                            [&](std::uint64_t
+                                                                    at)
+                                                                -> std::optional<
+                                                                    arch::x86_64::
+                                                                        vmx::epte> {
+                                                                std::uint64_t
+                                                                    value{};
+                                                                if (!read_guest_physical(
+                                                                        at,
+                                                                        std::as_writable_bytes(
+                                                                            std::span(
+                                                                                &value,
+                                                                                1)))) {
+                                                                    return std::
+                                                                        nullopt;
+                                                                }
+                                                                return arch::
+                                                                    x86_64::vmx::
+                                                                        epte(
+                                                                            value);
+                                                            });
+
+                                                    this->vtl_protect_root_perms
+                                                        [cpu][r][n] =
+                                                        (arch::x86_64::vmx::
+                                                             ept_walk_status::
+                                                                 mapped ==
+                                                         each.status)
+                                                            ? (each.permissions
+                                                                   .bits() |
+                                                               0x100)
+                                                            : 0;
+                                                }
+                                            }
+
+                                            n = n + 1;
+                                        }
+                                    }
+                                }
+
+                                seen = seen + 1;
+                            }
+                        } else {
+                            // Counted, not dropped. See
+                            // `vtl_call_block_unreadable`: without these
+                            // three, "no such calls" and "thousands of
+                            // such calls dropped" are the same reading,
+                            // and every total above is a lower bound of
+                            // unknown tightness.
+                            this->vtl_call_block_unreadable[cpu] += 1;
+                        }
+                    } else {
+                        this->vtl_call_block_untranslated[cpu] += 1;
+                    }
+                } else {
+                    this->vtl_call_block_below_floor[cpu] += 1;
+                }
+            }
+        }
+
+        // The vector of an external interrupt on its way to the guest
+        // hypervisor. Available only because "acknowledge interrupt on
+        // exit" now reaches vmcs02 - see build_vmcs02 - and read here
+        // rather than in `reflect_l2_exit` because the valid bit has to
+        // be tested against the reason that produced it.
+        //
+        // Where the guest went after an entry that injected `0xd1`, at
+        // the first exit after it. Taken here because this is the last
+        // point at which the second-level guest's own VMCS is current,
+        // so the instruction pointer is its own.
+        if (0 != this->injection_landing_armed[cpu]) {
+            auto slot = this->injection_landing_count[cpu] %
+                        injection_landing_capacity;
+            this->injection_to_rip[cpu][slot] = this->vmcs.guest_rip();
+            this->injection_to_reason[cpu][slot] = reason.value();
+            this->injection_landing_count[cpu] =
+                this->injection_landing_count[cpu] + 1;
+            this->injection_landing_armed[cpu] = 0;
+        }
+
+        // SDM 27.9.2: bits 7:0 are the vector, bit 31 is validity.
+        if (basic_reason::external_interrupt == reason.basic()) {
+            auto information =
+                this->vmcs.read(field::vm_exit_interruption_information);
+
+            if (0 != (information & interruption_information_valid)) {
+                auto vector = information & interruption_vector_mask;
+                this->l2_external_vector[cpu][vector] =
+                    this->l2_external_vector[cpu][vector] + 1;
+            }
+        }
+
+        // The two halves of the synthetic timer comparison the machine
+        // stops on, taken on the way past. Both MSRs are outside the
+        // bitmap's ranges, so they exit unconditionally and are about to
+        // be reflected - this is the last point at which the
+        // second-level guest's registers are the ones in the processor.
+        //
+        // The write's value is here. The read's answer is not: Hyper-V
+        // produces it after the reflection, so all that can be done here
+        // is to note that one is owed, and `on_guest_vmlaunch` collects
+        // it from the registers Hyper-V loads before its VMRESUME.
+        constexpr std::uint32_t time_reference_count = 0x40000020;
+        constexpr std::uint32_t synthetic_timer0_config = 0x400000b0;
+        constexpr std::uint32_t synthetic_timer0_count = 0x400000b1;
+
+        auto index = static_cast<std::uint32_t>(context.rcx);
+
+        // A deliberate stretch of the second-level guest's own timer
+        // period, off unless asked for. See ZPP_STRETCH_GUEST_TIMER.
+        //
+        // This exists to separate two explanations that every
+        // measurement so far is equally consistent with. The guest arms
+        // its synthetic timer for 1.74 ms and a tick costs this VMM
+        // about 1.97 ms, so it never leaves its clock handler: 92,116
+        // consecutive requests for vector 0x2f, every one of them with
+        // the virtual-APIC page's task priority at 0xd0, which refuses
+        // priority 2 correctly. That is either a machine too slow to
+        // finish a tick inside a tick - a price - or a handler that
+        // would not finish however long it were given - a block. The
+        // two look identical from outside, and no amount of further
+        // optimisation distinguishes them, because optimisation only
+        // moves the machine along the axis they share.
+        //
+        // Multiplying the period does distinguish them, and does it
+        // without needing the 2.3x that would otherwise be required:
+        // give the handler eight times its budget and either it
+        // completes and the guest makes progress, or it does not and
+        // speed was never the question. `ZPP_SLOW_EXITS` is the same
+        // experiment pointed the other way and can only retreat from
+        // the threshold, never cross it.
+        //
+        // Only a *period* is scaled. The Hyper-V interface defines the
+        // count of a periodic timer as a period in 100 ns units and the
+        // count of a one-shot as an absolute expiry in reference-counter
+        // units, and multiplying an absolute time is meaningless. The
+        // two are separated by size, as measured on this rig: periods
+        // are 17,400 and 156,250, absolute deadlines are around 1.5e9.
+        // One second in 100 ns units sits between them with three orders
+        // of magnitude either side.
+        //
+        // **Diagnostic only.** A guest whose clock is eight times slow
+        // is a guest being lied to about time, which is the one thing
+        // this VMM is otherwise careful never to do.
+//
+// **Superseded by the floor below, and kept because the two are
+// different claims.** A multiplier scales whatever the guest
+// asked for, so it is a lie of unbounded size and it is what
+// turned a 64 Hz tick into a 2 Hz one and bugchecked the guest
+// sixteen times in one boot. A floor only ever refuses a period
+// *shorter* than one the same guest chose for itself minutes
+// earlier, and stops refusing the moment it asks for anything
+// longer.
+#ifndef ZPP_STRETCH_GUEST_TIMER
+#define ZPP_STRETCH_GUEST_TIMER 1
+#endif
+        if constexpr (1 != ZPP_STRETCH_GUEST_TIMER) {
+            if ((basic_reason::wrmsr == reason.basic()) &&
+                (synthetic_timer0_count == index)) {
+                constexpr std::uint64_t period_limit = 10000000;
+                auto value =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+
+                if ((0 != value) && (value < period_limit)) {
+                    value *= ZPP_STRETCH_GUEST_TIMER;
+                    context.rax = value & 0xffffffff;
+                    context.rdx = value >> 32;
+
+                    if (cpu < max_cpus) {
+                        this->guest_timer_stretched[cpu] =
+                            this->guest_timer_stretched[cpu] + 1;
+                    }
+                }
+            }
+        }
+
+        // A floor under the second-level guest's tick period, off
+        // unless asked for. See ZPP_TICK_FLOOR, in 100 ns units.
+        //
+        // The tick rate is the binding constraint on this boot and
+        // nothing else here can move it. Three of the four round trips a
+        // tick costs are the guest's writes of the synthetic
+        // end-of-interrupt, interrupt command and end-of-message
+        // registers, and those lie outside both ranges an MSR bitmap can
+        // describe - SDM 26.6.9 - so they exit *unconditionally*. They
+        // cannot be filtered, they cannot be made cheaper, and each is a
+        // full reflection. The only variable is how many ticks there
+        // are.
+        //
+        // Measured on the rig on 2026-08-15: the guest arms 156,250 -
+        // 15.625 ms, the ordinary 64 Hz tick - and then seventy-eight
+        // seconds later re-arms *periodic* at 17,400, 1.74 ms, and never
+        // changes it again. `capture_vtl_switch`'s third kind caught the
+        // site: `ntoskrnl.exe`+0x3a57f8, called from +0x35d4ed, with
+        // vector 0xd1 and IRQL 0xd on the stack - so the clock handler
+        // re-arms its own period from inside itself. At 64 Hz those four
+        // round trips are 7% of the wall clock. At 575 Hz they are most
+        // of it, and the guest is at CLOCK_LEVEL on 68% of its entries
+        // with ring 3 never entered once.
+        //
+        // **This is still a lie about time and it is bounded.** The
+        // floor is the period this same guest ran with for its first
+        // seventy-eight seconds, not a number invented here, and a
+        // request for anything longer passes through untouched. What it
+        // costs is that the guest's tick-driven system time advances
+        // more slowly than its reference counter, which stays honest -
+        // the two disagreeing is what is being traded for the budget to
+        // finish a tick inside a tick.
+        //
+        // Periods only, by the same size test the stretch above uses and
+        // for the same reason: the interface defines a periodic count as
+        // a period and a one-shot count as an absolute expiry, and a
+        // floor under an absolute time would push every deadline into
+        // the future. `l2_stimer_config`'s periodic bit is checked as
+        // well, so the test is the interface's own answer and not only
+        // the magnitude.
+        // The constant lives in `nested_vmx.h` so `build_switches.cpp`
+        // can print it. See it there for why that matters.
+        if constexpr (0 != nested_vmx::tick_floor_units) {
+            constexpr std::uint64_t floor_value =
+                nested_vmx::tick_floor_units;
+            constexpr std::uint64_t period_limit = 10000000;
+            constexpr std::uint64_t config_periodic = 1ull << 1;
+
+            if ((basic_reason::wrmsr == reason.basic()) &&
+                (synthetic_timer0_count == index) && (cpu < max_cpus) &&
+                (0 != (this->l2_stimer_config[cpu] & config_periodic))) {
+                auto value =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+
+                if ((0 != value) && (value < period_limit) &&
+                    (value < floor_value)) {
+                    context.rax = floor_value & 0xffffffff;
+                    context.rdx = floor_value >> 32;
+
+                    this->guest_tick_floored[cpu] =
+                        this->guest_tick_floored[cpu] + 1;
+                }
+            }
+        }
+
+        // Every synthetic MSR the second-level guest touches, counted.
+        // See the declaration for what this settles; the short version is
+        // that the end-of-message register at 0x40000084 is the one thing
+        // that says whether the interface's message protocol ever
+        // completed a round.
+        if (auto offset = index - 0x40000000u;
+            (index >= 0x40000000u) && (offset < synthetic_msr_capacity)) {
+            if (basic_reason::rdmsr == reason.basic()) {
+                this->synthetic_msr_reads[cpu][offset] =
+                    this->synthetic_msr_reads[cpu][offset] + 1;
+            } else if (basic_reason::wrmsr == reason.basic()) {
+                this->synthetic_msr_writes[cpu][offset] =
+                    this->synthetic_msr_writes[cpu][offset] + 1;
+                this->synthetic_msr_last_write_tsc[cpu][offset] =
+                    arch::x86_64::rdtsc();
+                this->synthetic_msr_last_value[cpu][offset] =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+            }
+        }
+
+        // The state a reflected `hlt` hands over, taken while vmcs02 is
+        // still current so these are the second-level guest's own values
+        // - the same ones `save_l2_state` is about to write into vmcs12,
+        // read from the same place it reads them.
+        if (basic_reason::hlt == reason.basic()) {
+            this->hlt_reflect_rflags[cpu] = this->vmcs.guest_rflags();
+            this->hlt_reflect_interruptibility[cpu] =
+                this->vmcs.read(arch::x86_64::vmx::vmcs::field::
+                                    guest_interruptibility_state);
+            this->hlt_reflect_activity[cpu] = this->vmcs.read(
+                arch::x86_64::vmx::vmcs::field::guest_activity_state);
+            this->hlt_reflect_rip[cpu] = this->vmcs.guest_rip();
+            this->hlt_reflect_tsc[cpu] = arch::x86_64::rdtsc();
+            this->hlt_reflect_count[cpu] =
+                this->hlt_reflect_count[cpu] + 1;
+        }
+
+        // The interrupt the guest is asking for, and the task priority in
+        // force as it asks. See `interrupt_request_vtpr` for why this is
+        // the one moment worth a guest memory read: the guest asks for
+        // vector 0x2f a quarter of a million times and receives it seven,
+        // and whether that is the guest hypervisor's fault or its guest's
+        // is decided by one byte on the virtual-APIC page.
+        constexpr std::uint32_t synthetic_interrupt_command = 0x40000071;
+
+        if ((basic_reason::wrmsr == reason.basic()) &&
+            (synthetic_interrupt_command == index)) {
+            auto command =
+                (context.rax & 0xffffffff) | (context.rdx << 32);
+
+            auto vtpr = record_interrupt_request(cpu, command);
+
+            // The ask half of the drop account, recorded whatever this
+            // VMM then does with the write. See
+            // `nested_vmx::count_dropped_requests`.
+            //
+            // The two spellings of "me" are the ones established below:
+            // destination shorthand 01, and shorthand 00 with a physical
+            // destination naming this processor. The measured commands
+            // are the *first* spelling - `0x4002f` sets bit 18, so all
+            // 297,465 of them carry shorthand 01. This comment used to
+            // claim the second, which is the mis-decode corrected below.
+            // Anything else is another processor's and not this
+            // account's.
+            //
+            // Only vectors below the dispatch class, because the whole
+            // question is a vector the priority can block. A clock
+            // vector at class 13 is admitted at almost every priority
+            // and has never been the one going missing.
+            if constexpr (nested_vmx::count_dropped_requests) {
+                constexpr std::uint64_t shorthand_mask = 3ull << 18;
+                constexpr std::uint64_t shorthand_self = 1ull << 18;
+                constexpr std::uint64_t destination_shift = 32;
+                constexpr std::uint64_t priority_class = 4;
+                constexpr std::uint64_t dispatch_class = 0x2f >> 4;
+
+                auto shorthand = command & shorthand_mask;
+                auto destination = command >> destination_shift;
+                auto vector = command & 0xff;
+
+                auto to_self =
+                    (shorthand_self == shorthand) ||
+                    ((0 == shorthand) &&
+                     (destination == static_cast<std::uint64_t>(cpu)));
+
+                if ((cpu < max_cpus) && to_self && (0 != vector) &&
+                    ((vector >> priority_class) <= dispatch_class)) {
+                    this->pending_vector_asked[cpu] += 1;
+
+                    if (0 != this->pending_vector_now[cpu]) {
+                        // Already in the level above's request
+                        // register, so this is architecturally the
+                        // same request - SDM 13.8.4 - and counting it
+                        // as a second one is how `asked` against
+                        // `delivered` came to look like a loss.
+                        this->pending_vector_coalesced[cpu] += 1;
+                    } else {
+                        this->pending_vector_now[cpu] =
+                            static_cast<std::uint8_t>(vector);
+                    }
+                }
+            }
+
+            // Held until the guest's own priority allows it. See
+            // `nested_vmx::deliver_self_ipi`; SDM Figure 13-12 puts the
+            // vector in bits 7:0 and the destination shorthand in 19:18,
+            // and 01 there is "self".
+            //
+            // **The shorthand IS how this guest says "me", and the
+            // paragraph that used to stand here decoded its own measured
+            // value wrongly.** It read `0x4002f` as "level asserted,
+            // destination shorthand 00, physical destination APIC id 0"
+            // and concluded that "testing the shorthand alone matched
+            // nothing at all". Neither field is what it says:
+            //
+            //     0x4002f & (3 << 18) == 0x40000  -> shorthand 01, self
+            //     0x4002f & (1 << 14) == 0        -> level NOT asserted
+            //
+            // Bit 18 is the shorthand's low bit and bit 14 is the level
+            // bit; the old reading swapped them. So the shorthand clause
+            // matches every one of those 297,465 commands on its own, and
+            // the second clause below was added to fix a failure to match
+            // that was never happening. This is the second bit-18-for-
+            // bit-14 slip in this tree - CLAUDE.md records the first, a
+            // control-bit constant "justified" by 0x1050ae ^ 0x1010ae -
+            // and both survived because the wrong arithmetic agreed with
+            // the wrong conclusion.
+            //
+            // A physical destination naming this processor is still the
+            // same request by the other spelling, and it is a spelling
+            // the Hyper-V synthetic register can use: its high half is
+            // the x2APIC destination field rather than a second
+            // shorthand. So the clause stays - but it must name *this*
+            // processor, not the number zero.
+            //
+            // **That is a multi-processor correctness fix, not a
+            // tidy-up.** The old clause hardcoded `0 == destination`, on
+            // the stated premise that "the second-level guest here has
+            // one virtual processor and its APIC id is zero". With two,
+            // the premise is false in the only direction that matters: a
+            // command sent *from* cpu 1 to destination 0 is an interrupt
+            // for **cpu 0**, and treating it as cpu 1's own self-IPI
+            // routes another processor's wake-up to the wrong processor
+            // and drops it. `l2_ipi_not_self` was the counter meant to
+            // catch exactly that, and it cannot - it only rises for
+            // commands matching *neither* spelling, and this one matched
+            // the wrong spelling rather than none.
+            //
+            // Comparing against `cpu` is correct for both: this VMM
+            // reports the processor's own index as its VP index
+            // (`case vp_index_msr: value = cpuid;`), so destination `N`
+            // is processor `N` and the single-processor guest that
+            // motivated the original clause still matches at `cpu == 0`.
+            if constexpr (nested_vmx::self_ipi_delivery) {
+                constexpr std::uint64_t shorthand_mask = 3ull << 18;
+                constexpr std::uint64_t shorthand_self = 1ull << 18;
+                constexpr std::uint64_t destination_shift = 32;
+
+                auto shorthand = command & shorthand_mask;
+                auto destination = command >> destination_shift;
+
+                auto to_self =
+                    (shorthand_self == shorthand) ||
+                    ((0 == shorthand) &&
+                     (destination == static_cast<std::uint64_t>(cpu)));
+
+                if (cpu < max_cpus) {
+                    if (to_self) {
+                        this->l2_self_ipi_pending[cpu] = command & 0xff;
+                    } else {
+                        this->l2_ipi_not_self[cpu] += 1;
+                    }
+                }
+
+                // And withheld from the level above, when the level
+                // above could not have delivered it either.
+                //
+                // The rule is the processor's own, SDM 13.8.3.1: an
+                // interrupt is admitted only when its priority class is
+                // **strictly greater** than the inhibiting priority's,
+                // which is why vector 0x2f - class 2 - is refused at
+                // task priority 0x20 and at everything above it. `vtpr`
+                // is the byte `record_interrupt_request` just sampled,
+                // from the virtual-APIC page of the trust level that is
+                // running, so the histogram it recorded and the
+                // decision taken here cannot disagree.
+                //
+                // **Keying the swallow on VTPR is SAFE and
+                // deliberate.** The architecture inhibits on
+                // PPR = max(TPR class, ISRV class), so PPR >= TPR and
+                // `!admitted` against VTPR implies `!admitted` against
+                // PPR: everything swallowed here really was
+                // undeliverable. The error is one-sided in the
+                // direction of swallowing too little, which reflects
+                // the write to the level above - the failing safe
+                // behaviour the third bullet below relies on. Do not
+                // "correct" this to a PPR test; there is none to make,
+                // and the counters that *do* over-count are the ones
+                // whose true branch is "deliverable".
+                //
+                // Three conditions, and each is a place this could do
+                // harm if it were dropped:
+                //
+                // - **self-directed only.** A command naming another
+                //   processor is the level above's to route, and this
+                //   VMM has no business consuming it. `l2_ipi_not_self`
+                //   counts the ones that are neither spelling.
+                // - **undeliverable only.** If the priority admits the
+                //   vector, the level above can and does deliver it -
+                //   measured 16 times - so the write is reflected
+                //   unchanged and nothing is withheld.
+                // - **the read must have succeeded.** A page this VMM
+                //   could not read leaves `vtpr` zero, which admits
+                //   every vector, so a failed read reflects rather than
+                //   swallows. Failing safe here means giving the write
+                //   to the level above, which is what happens today.
+                //
+                // `advance_rip` is set because the write is being
+                // *completed*, not skipped: the guest asked for an
+                // interrupt, and it will receive it at the first entry
+                // its own priority admits. Resuming without advancing
+                // would re-execute the same `wrmsr` for ever.
+                // The same swallow, scoped to a trust-level call.
+                // See `nested_vmx::hold_self_ipi_in_vtl1`: the condition
+                // to preserve is that no interrupt become deliverable to
+                // the normal world while a call is in flight, because
+                // the notification that follows is answered with a
+                // secure-call state `ntoskrnl` has no case for - which
+                // is disassembled, not assumed.
+                //
+                // Unlike `intercept_self_ipi` this holds only while
+                // `in_vtl1` is set, so everywhere else the level above
+                // keeps the pending interrupt it uses as its own wake
+                // condition. Taking that away globally is what froze the
+                // machine when that switch was tried.
+                if constexpr (nested_vmx::hold_self_ipi_in_vtl1) {
+                    constexpr std::uint64_t priority_class = 4;
+
+                    auto vector = command & 0xff;
+
+                    auto admitted =
+                        (vector >> priority_class) >
+                        (std::uint64_t{vtpr} >> priority_class);
+
+                    if ((cpu < max_cpus) && to_self && (0 != vtpr) &&
+                        !admitted && (0 != this->in_vtl1[cpu])) {
+                        this->l2_self_ipi_swallowed[cpu] =
+                            this->l2_self_ipi_swallowed[cpu] + 1;
+                        advance_rip = true;
+                        return l2_exit_outcome::handled;
+                    }
+                }
+
+                if constexpr (nested_vmx::intercept_self_ipi) {
+                    constexpr std::uint64_t priority_class = 4;
+
+                    auto vector = command & 0xff;
+
+                    auto admitted =
+                        (vector >> priority_class) >
+                        (std::uint64_t{vtpr} >> priority_class);
+
+                    if ((cpu < max_cpus) && to_self && (0 != vtpr) &&
+                        !admitted) {
+                        this->l2_self_ipi_swallowed[cpu] =
+                            this->l2_self_ipi_swallowed[cpu] + 1;
+                        advance_rip = true;
+                        return l2_exit_outcome::handled;
+                    }
+
+                    if ((cpu < max_cpus) && to_self) {
+                        this->l2_self_ipi_reflected[cpu] =
+                            this->l2_self_ipi_reflected[cpu] + 1;
+                    }
+                }
+            }
+        }
+
+        if ((basic_reason::rdmsr == reason.basic()) &&
+            (time_reference_count == index)) {
+            this->reference_read_pending[cpu] = true;
+        } else if (basic_reason::wrmsr == reason.basic()) {
+            // The count and the configuration in one ring, tagged, so
+            // their *order* survives - which is the whole reason to
+            // record the configuration at all.
+            //
+            // A count means two different things depending on it: the
+            // Hyper-V interface defines the count of a periodic timer as
+            // a period in 100 ns units, and the count of a one-shot timer
+            // as an absolute expiration time in reference-counter units.
+            // Measured on the rig, the root partition writes 156,250 -
+            // 15.625 ms as a period, and a time nine hours in the past as
+            // an absolute deadline, when the reference counter stands at
+            // about 1.5e9. Those are not the same claim and nothing
+            // recorded so far distinguishes them.
+            //
+            // The configuration also carries the enable bit and the
+            // synthetic interrupt source the expiry is posted to, and
+            // "enabled" is the specific thing in question: the guest
+            // hypervisor settles on a 2.38 second one-shot deadline on
+            // its own local APIC while a 15.625 ms synthetic timer is
+            // supposedly armed, which is what a hypervisor does when it
+            // believes nothing is due.
+            //
+            // Two configuration writes precede each count write, so the
+            // ring holds triples and the tag is what makes them readable.
+            auto tag = std::uint64_t{};
+
+            if (synthetic_timer0_count == index) {
+                tag = 1;
+            } else if (synthetic_timer0_config == index) {
+                tag = 2;
+            }
+
+            if (0 != tag) {
+                auto slot = this->stimer_arm_count[cpu] %
+                            reference_sample_capacity;
+                this->stimer_arm_value[cpu][slot] =
+                    (context.rax & 0xffffffff) | (context.rdx << 32);
+                this->stimer_arm_tsc[cpu][slot] = arch::x86_64::rdtsc();
+                this->stimer_arm_kind[cpu][slot] = tag;
+                this->stimer_arm_count[cpu] =
+                    this->stimer_arm_count[cpu] + 1;
+
+                // And who asked, the first time a periodic count is
+                // programmed short enough to matter.
+                //
+                // The tick rate is the binding constraint on this whole
+                // boot and it is the second-level guest's own choice.
+                // Measured on the rig: it arms 156,250 - 15.625 ms, the
+                // ordinary 64 Hz tick - and then seventy-eight seconds
+                // later re-arms at **17,400**, 1.74 ms, and never
+                // changes it again. Three of the four round trips a
+                // tick costs are synthetic-MSR writes that exit
+                // unconditionally, so at 575 Hz they alone are most of
+                // the wall clock; at 64 Hz the same four are seven per
+                // cent of it. Nothing about that is fixable from
+                // underneath unless it is known which component asked.
+                //
+                // One capture, on the first short periodic count, and
+                // nothing after it: the register diff would be
+                // meaningless across eight arms in a whole boot, and
+                // what is wanted is the stack.
+                constexpr std::uint64_t short_period = 100000;
+                constexpr std::uint64_t config_periodic = 1ull << 1;
+
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 == this->vtl_captured[timer_arm_kind]) &&
+                    (0 !=
+                     (this->l2_stimer_config[cpu] & config_periodic)) &&
+                    (0 != this->stimer_arm_value[cpu][slot]) &&
+                    (this->stimer_arm_value[cpu][slot] < short_period)) {
+                    capture_vtl_switch(cpu, timer_arm_kind, context);
+                }
+
+                if (2 == tag) {
+                    this->l2_stimer_config[cpu] =
+                        this->stimer_arm_value[cpu][slot];
+                }
+
+                // The asked half of the tick account. See the members:
+                // this is the only resident statement of "a 1.74 ms
+                // periodic timer expires after 0.926 ms", and until now
+                // it existed only as a ratio between two rates sampled
+                // from two counters over a window.
+                //
+                // Periodic counts only. The interface makes a one-shot
+                // count an absolute expiry in reference-counter units,
+                // and adding one of those to a sum of durations is the
+                // unit slip this file keeps re-learning. The periodic
+                // bit is the test rather than the magnitude, so a short
+                // absolute deadline cannot slip in on size alone.
+                constexpr std::uint64_t config_periodic_bit = 1ull << 1;
+
+                // A one-shot arm displaces a pending periodic one, and
+                // saying so is the whole difference between this being
+                // an account and being a coincidence.
+                //
+                // The pairing below assumes the next clock vector
+                // answers the periodic arm still pending. The guest
+                // breaks that assumption itself: it toggles the periodic
+                // bit every tick - `0x3000a` alternating with `0x30008`,
+                // the ring at the top of this file caught 4096 slots of
+                // exactly that - so it arms a long *period*, converts
+                // the timer to one-shot, and arms a short *deadline*
+                // before the period could elapse. The vector that
+                // arrives is the one-shot's, and crediting it to the
+                // period reports the period as having expired early by
+                // whatever ratio the two happen to stand in.
+                //
+                // Measured before this: "asked 6.887 ms, given 2.469 ms,
+                // EARLY by 2.790x" over 39,027 arms, with `unanswered`
+                // reading 2 - so the failure was invisible from the one
+                // place built to reveal it. It cannot be seen there
+                // because a one-shot arm never set `pending`, and only
+                // something that sets it can displace it.
+                //
+                // Rejected: gating `given` on the periodic bit at the
+                // vector instead. The bit is already back to one-shot by
+                // then, so that discards the honest pairings too and
+                // leaves the account empty.
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 == (this->l2_stimer_config[cpu] &
+                           config_periodic_bit)) &&
+                    (0 != this->stimer_arm_pending_tsc[cpu])) {
+                    this->stimer_unanswered[cpu] =
+                        this->stimer_unanswered[cpu] + 1;
+                    this->stimer_arm_pending_tsc[cpu] = 0;
+                }
+
+                if ((1 == tag) && (cpu < max_cpus) &&
+                    (0 != (this->l2_stimer_config[cpu] &
+                           config_periodic_bit))) {
+                    auto period = this->stimer_arm_value[cpu][slot];
+
+                    if (0 != period) {
+                        // An arm displaced before any vector answered
+                        // it, counted rather than dropped: the two arm
+                        // counts disagreeing is what says the vector is
+                        // not the answer to the arm, which is the whole
+                        // assumption the ratio rests on.
+                        if (0 != this->stimer_arm_pending_tsc[cpu]) {
+                            this->stimer_unanswered[cpu] =
+                                this->stimer_unanswered[cpu] + 1;
+                        }
+
+                        this->stimer_asked_units[cpu] =
+                            this->stimer_asked_units[cpu] + period;
+                        this->stimer_asked_arms[cpu] =
+                            this->stimer_asked_arms[cpu] + 1;
+                        this->stimer_arm_pending_tsc[cpu] =
+                            this->stimer_arm_tsc[cpu][slot];
+                    }
+                }
+            }
+        }
+    }
+
+    reflect_l2_exit(cpu, reason, this->vmcs.exit_qualification());
+    advance_rip = false;
+    return l2_exit_outcome::reflected;
+}
+
+} // namespace zpp::hypervisor

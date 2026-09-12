@@ -1,0 +1,1183 @@
+# Nested Windows boot investigation
+
+Updated 2026-09-12. The user confirmed that the optimized nested boot reached
+the Windows sign-in screen, then showed DRIVER_POWER_STATE_FAILURE. GDB
+captured bugcheck 0x9F/3 at 11:48:42 UTC. Sign-in is verified; stable boot
+remains unresolved. Earlier process-only observations were not screen proof.
+
+## Current setup
+
+The TinyCore rig is `tc@192.168.1.199`. Its RAM filesystem restores files from
+a backup on reboot, so inspect its actual launcher after every host restart.
+The current launch uses two vCPUs, 11,830 MiB, QEMU 11.0.3 with KVM, a split
+interrupt controller and `intremap=off`. The physical NVMe and GPU are passed
+through. The stack is KVM, zpp, Hyper-V, then Windows with VBS.
+
+The debug manifest has `nested=1 shadowvmcs=1 reftsc=1 vcache=1 hand=1`,
+with `diag=0 blocks=0 win=0`. Read the complete manifest from the deployed
+artifact; these few fields are not a replacement for it. Do not enable the
+KVM FIFO trace capture: prior runs corrupted the host kernel and pinned RAM.
+
+## Changes verified in this session
+
+- `8d0d3a9`: watched EPT stores retire by the decoded instruction length.
+  Intel SDM 30.2.5 leaves the VM-exit length undefined for ordinary EPT
+  operand faults, even when nonzero. Both allowed and filtered stores now
+  advance context and VMCS RIP consistently. Regression cases failed 12
+  assertions before the fix and pass after it. An unrelated nested-exit
+  test fixture now initializes EFER to long mode before testing an SCE change.
+- `9cbebd2`: process and power-IRP readers use complete, prompt-framed monitor
+  replies. They reject incomplete lists, and the watcher reports failed power
+  reads as `UNREADABLE`. A three-process read on the rig took 0.047 seconds;
+  watcher polls with a 20-second delay fell from about 57 to 24 seconds.
+  Power requests are now sampled every poll once the process count reaches six.
+- `755d2b7`: instruction emulation clears STI/MOV-SS blocking when the
+  instruction retires, preserving NMI/SMI blocking and leaving retries alone.
+  Fourteen assertions failed before this fix across three harnesses. The new
+  `vmcs_interrupt_shadows_cleared` counter records actual clearings.
+- `c054545`: the VMCS field cache invalidates a cached field when a write bypasses
+  the cache during a borrow. A new harness reproduces stale RIP/RSP/CR3
+  reads after another CPU's borrow ends without an epoch change. Three
+  assertions fail before the fix and pass after it. Its counter is
+  `vmcs_cache_bypass_invalidations`.
+- `5ac7cac`: private shadow clears invalidate only their owning CPU's rows for
+  that region, preserving unrelated cached fields. Hardware VMCLEAR and
+  pointer restoration remain. The helper is limited to the two shadow-copy
+  sites; generic clears still invalidate globally. This depends on the
+  preceding borrow-write fix. Both are deployed. Their original 63 cache
+  assertions pass; `vmcs_cache_owned_clears` measures use on the rig.
+- The resident reader preserves the module base across its VMCALL and
+  VTL1 resume-ring reports. They previously replaced that variable with a
+  row address, causing later globals and the log to be read elsewhere.
+  The manifest reader now requires the full terminated string; its old
+  256-byte prefix omitted `vcache` and other later switches. Six regression
+  assertions failed before these reader fixes and pass after them.
+- The VMCS cache now withholds fills for access-rights writes whose reserved
+  bits the processor may discard (SDM 27.4.1; KVM `handle_vmwrite`). The
+  next read gets the processor's actual value, preserving both permitted
+  processor behaviors. Three regression comparisons failed before the fix;
+  all 107 cache checks now pass. The new counter is
+  `vmcs_cache_reserved_bit_writes`, also available in delta reports.
+  This change is deployed; its counter remains zero through the latest
+  nine-minute read, so its cache path does not explain this boot's progress.
+
+All 27 rebuilt host tests passed after these code changes. All 224 Python
+tests, including fragmented replies and incomplete list cases, passed.
+The debug hypervisor and loaders build, and the ELF and bootability checks pass.
+These checks do not prove that Windows boots.
+
+## Current boot and next step
+
+**A new unchanged-binary repeat began at 15:58:57 UTC.** Supported teardown
+removed QEMU 12012, restored NVMe and returned 15,464 MB free. Fresh read-only
+ESP verification again matched the loader, Limine, launcher and disk anchors.
+New serial/DWARF resolve module `66d61000`, singleton `682f3000`; NT is now
+`fffff800ab200000`, PE-validated through System CR3 `1ae000`.
+
+LogonUI 1496 and dwm 1504 appear at 16:14:53 (15m56s). This repeat has no
+new physical screen confirmation. At 16:23:44 it remains running with 34
+processes and no armed power request. WerFault 824's checked command line
+is `WerFault.exe -k -c`, with no target PID; its presence does not identify
+a new process crash.
+
+Sole monitor watcher 7302 remains active. At 16:23:50 persistent GDB manager
+12957/client 12960 replace the earlier manager/client after their verified
+exit. Consult `gdb-persistent/manager.json` for current ownership. Sources
+and captures remain under `/tmp/zpp-20260912-power-dispatch-run/`.
+
+The manager can observe an already-aged power request of any device type,
+rechecking its IRP/watchdog-start identity and unique worker. Hardware State
+and worker-IRP write watchpoints remain beside the crash guard. USB/other
+requests trace the dispatcher epilogue and actual caller repeatedly; audio
+requests watch the WDF wait return. Thread/RSP pairing and unrelated hits
+remain explicit. State and return captures are bounded, and the manager
+admits further requests while accumulated worker captures remain below 10 s.
+Crash captures retain up to 12 KiB of each CPU's actual address-space stack,
+with missing pages explicit. Initial audio and USB candidates were already
+absent at worker attachment (16:10:08 and 16:20:41), so neither armed a State
+watchpoint or captured completion. The persistent client now receives a
+request and arms probes at its first stop, eliminating detach/resume/reattach
+between guard and worker observation. It also returns to guard mode in place.
+Current PE and probe bytes validate; no request has exercised this new path
+yet. Windows settings and the deployed binary are unchanged.
+
+**The unchanged 14:56:17 UTC repeat crashed at 15:36:16 with 0x9F/3.**
+GDB captured bugcheck entry in 131.2 ms. This request belongs to the virtual
+USB tablet, not the audio stack. No audio call hit was captured after the
+UI handoff. The supplemental aged-audio observer never attached.
+All GDB/monitor owners exited. Before teardown, 973 external files
+(8,334,618 bytes) were preserved in `completed-sha256.json`.
+Artifacts and exact probe sources are under `/tmp/zpp-20260912-audio-late-run/`.
+
+The failed IRP is `ffffad84823559a0`, PDO `ffffad848201b730`, with an actual
+300 s watchdog and age 300.344 s at bugcheck. Checked device links identify
+USBHUB3 → HidUsb and instance
+`USB\VID_0627&PID_0001\28754-0000:00:05.0-2`. The 16-stack IRP is at
+location 12. Its exact worker `ffffad847f4bc040` is Running, priority 30,
+and is CPU 1's CurrentThread at the atomic crash capture. CPU 1 is then
+inside zpp's VMREAD wrapper; that single stop does not measure VMREAD cost.
+The atomic shared ready queue has 26 threads.
+
+After GDB detaches and Windows freezes, that worker is Ready at priority
+30 in CPU 1's local ready list; its effective affinity mask is 2. Current
+code and unwind metadata validate all 35 frames to null through
+KiQuantumEnd → KiCheckForThreadDispatch → KeSetSystemGroupAffinityThread →
+KeGenericProcessorCallback → KeFlushQueuedDpcs → WDF/USB/HID → PopIrpWorker.
+This is a frozen post-crash stack, not an atomic bugcheck-entry stack.
+
+CPU 1's different frozen current thread is an ExpWorkerThread, also at
+priority 30 and also in the affinity/flush path, here called through
+MmPageEntireDriver and Msfs during a file close. Its 26 frames reach null
+using the current code and metadata. The first candidate unwind was wrong:
+an NMI interrupted the first PUSH of the vector-D1 shadow stub, leaving a
+hardware interrupt frame. Restoring its checked RIP/CS/RFLAGS/RSP/SS fixes
+the unwind; a mechanical early null return was not a complete stack.
+These observations target the next GDB probe at the shared flush/dispatch
+path and worker transitions; they do not establish a root cause yet.
+
+LogonUI 1432/dwm 1440 appeared at 15:26:59 (30m42s); no new physical screen
+confirmation was received. PlugPlay, RpcEptMapper and LSM all have checked
+Running/error-0 records at 15:33:58. GDB captured their 45,000 ms first-response
+calls and matched callees, but not their returns. A 46.0967 s host scheduling
+interval supplied each vCPU essentially its entire duration, with less than
+0.42 ms run-queue delay each. Host CPU availability does not explain that
+interval; runtime does not prove useful guest work.
+
+The loader, Limine, disk anchors and launcher were verified before this
+repeat. Module `66d61000`, singleton `682f3000`, NT `fffff800d3a00000` and
+System CR3 `1ae000` were freshly resolved/validated. Source, binary, Windows
+settings, nesting, CPU count and devices remained unchanged during the run.
+
+**The 13:37:30 UTC census-off boot crashed at 14:43:09 with 0x9F/3.**
+GDB captured the actual bugcheck entry in 125.7 ms. All monitor and GDB
+owners exited, then 4,234 external files (31,729,777 bytes) were preserved
+in `completed-sha256.json`. Supported teardown removed QEMU 9537, restored
+NVMe and returned 15,472 MB free. Disabling
+entry-RIP profiling did not resolve the audio power failure.
+
+The loader MD5 is `285777ed728a2c140d73a4d68b5895d7`; its exact embedded
+ELF SHA256 is `234a881fa1c97ccc4875d8eb583ce88c0ea5e0f4cafd18a60082471e4d588459`.
+Deployment and a separate fresh read-only ESP mount verified the candidate,
+unchanged Limine and launcher, and GPT/ESP/NTFS anchors. Full nesting, two
+CPUs and the devices remain as before. The manifest changes only by adding
+`entryrip=0` and making `userip=0`. All 27 rebuilt host tests and artifact
+checks passed. The default-ON entry recorder is byte-identical to the
+previous optimized build; OFF removes profiling reads/table updates while
+preserving entry-event delivery. No runtime improvement or stable boot is
+established yet.
+
+For the completed 13:37 boot, serial and deployed DWARF resolve zpp module
+`66d61000`, singleton `682f3000`; NT is `fffff807de400000`, validated through System CR3
+`1ae000` against timestamp `51a135d9` and size `1450000`. Sole monitor
+watcher 64936 began at 13:40:46. Final GDB manager 78348/client 78353
+captured the crash in `gdb-scm-v5/scm/`; both exited at 14:43:09, followed
+by the monitor watcher at 14:43:25. The earlier audio probe had no completed
+call before its planned SCM handoff. The crash capture includes actual
+power-worker states/stacks, both CPUs and local PRCB ready/DPC slices.
+Shared ready queues were captured at preceding service failures and
+separately after the crash, not at bugcheck entry.
+Raw artifacts and probe sources remain outside Git under
+`/tmp/zpp-20260912-census-off-run/`.
+
+**LogonUI 1388 and dwm 1404 first appear at 13:57:06, 19m36s after launch.**
+A physical screen check for this new boot is pending; the user's previous
+sign-in/BSOD observation belongs to the 10:50 boot. This milestone alone
+neither proves stable boot nor isolates a profiling cost improvement.
+
+The first GDB manager 64938 handed initial guard 64939 to SCM client 67931
+at 13:51:41, after services 508/base `7ff79c700000` was PE-validated.
+Actual first-response calls were captured for PlugPlay at 13:54:52,
+RpcEptMapper at 13:55:23 and LSM at 13:56:05, all requesting 45,000 ms.
+All three reached the imported wait routine on the same TID/RSP pairing.
+The first continuation's 39-packet audit shows hardware `Z1` breakpoints,
+one `vCont;c` resume and no software breakpoint, step or target write.
+SCM code validation follows mapping availability; the cold failure page is
+checked on a failure hit, not required at the initial call.
+
+At LSM's call, the response event was nonsignaled and its svchost PID 1320
+was alive (process SignalState 0, ExitStatus 259). The current kernel handle
+decoder code, object types and both handles validated. No first-response
+failure or cleanup breakpoint hit before the planned UI handoff to audio
+client 69366 at 13:57:08. The SCM script's manual-stop error records that
+handoff, not a guest failure. The wait return itself was not probed. A
+36.8 ms non-atomic read at 13:59:24 found all three traced services Running,
+internal state 3/error 0. In particular, LSM startup succeeded on this boot.
+
+A USBHUB3 power request (`ffffc081801d0010`, WatchdogStart 12881862018)
+remained armed through 14:02:54, age 219.1 s against its actual 300 s timer.
+GDB owners 64938/69366 exited before a 42.8 ms atomic worker snapshot by
+client 71030 at 14:02:59. The request was already absent and both power
+workers idle, so no State watchpoint was armed and no completion return
+was observed. The 14:03:15 monitor walk also had no armed requests. This
+sequence does not establish that the debugger caused completion. Client
+71030 then exited before the current audio manager attached.
+
+The completed initial guard, SCM, first audio and USB snapshots are preserved
+in 46 hashed files (116,773 bytes) under `completed-first-probes-sha256.json`.
+Do not modify those archived captures. Later audio/SCM probes through v4
+are separately preserved in `completed-scm-through-v4-sha256.json`
+(1,252 files, 2,229,135 bytes).
+
+The current blocked IRP is `ffffc08180d8ebd0`, PDO `ffffc08180eb7e00`.
+Checked device links identify IntcAudioBus → IntcAzAudAddService → ksthunk,
+again the Realtek `VEN_10EC&DEV_0294` codec. This request's actual watchdog
+interval is 300 s; the earlier crash's was 120 s. At bugcheck entry,
+worker `ffffc0817d4ef040` carries the exact blocked IRP and is already
+Ready (1), WaitStatus 0. Its saved stack unwinds to null through a WDF
+synchronous wait, Intel audio, Realtek, portcls and PopIrpWorker. Current
+code and unwind metadata validate all 25 frames. Unlike the previous
+post-crash-only Ready observation, this state is captured at the failure.
+Its duration and the actual wait return remain unobserved.
+
+The boot also has broad service failures. A complete 748-service walk at
+14:09 finds LSM/RPC running, ProfSvc error 1053 and UserManager error 1068.
+Subsequent GDB probes capture 26 actual first-response WAIT_TIMEOUT (258)
+failures, including ProfSvc, DNS, Asus services, Defender and audio helpers.
+The child processes are alive at their failure stops. Many are Ready with
+few context switches; bounded, link-checked shared-queue walks record
+56–147 runnable threads during the v5 failures. Both PRCBs reference the
+same shared queue, so counts must not be added. These snapshots do not
+measure how long a thread remained Ready or prove a scheduler defect.
+AsHidService's checked ALPC peer is services.exe; the candidate DNS unwind
+through SID lookup has only partial current-code validation and does not
+establish a common LSASS dependency.
+
+A 69.039 s non-atomic counter interval at 14:33–14:34 records CPU 0's
+398,406 VMWRITE and 271,181 VMREAD exits; CPU 1 predominantly takes
+VMRESUME, interrupt-window and WRMSR exits. These are workload counts,
+not handler costs. Separately, the reader now removes latency estimates
+derived from logical VMCS interface counts: reads include cache hits and
+the shared counters can include overlapping CPU work. All 233 Python checks
+pass for that report correction; the deployed binary is unchanged.
+Raw counters, validation ranges and complete captures
+remain outside Git. Next: inspect the failing worker's ready-queue and
+wait evidence, then retain audio wait/state/return tracing through the
+power phase on the next unchanged run.
+
+**The unchanged optimized repeat ran 12:04:22–13:28:36 UTC and was ended
+while running, without a new sign-in or BSOD.** Its maximum complete
+process count was 87, but no LogonUI or dwm appeared. At 13:12:20 a 289 ms
+stop-through-detach GDB capture found Winlogon 1116 waiting indefinitely
+on a nonsignaled event. All 82 requested current code/unwind ranges matched
+at 13:14:19. The current winsta helper's OpenEvent name is
+`Global\TermSrvReadyEvent`; its cached handle `0x1f0` exactly matches
+Winlogon's captured wait argument. At 13:19:44 the same event remained
+nonsignaled. This identifies the named wait without guessing an object header.
+
+The complete 748-record service walk at 13:21:38–43 found LSM stopped,
+internal state 4/error 1053, while its RpcSs, DcomLaunch and RpcEptMapper
+dependencies were running. Audiosrv also had 1053; AudioEndpointBuilder was
+running. No actual LSM failure transition was captured in that repeat, so
+1053 alone does not establish a timeout. This is why the next boot targets
+the first-response wait result rather than inferring its cause from status.
+
+The repeat completed 84 startup audio calls outside power-worker context,
+then **82 power-worker audio calls**, all waits and outer returns status 0,
+with no abandoned pairs. V3 completed 11, V5 36 and V6 35. V5/V6 captured
+285 hardware writes to the worker State byte, including Waiting →
+DeferredReady → Ready/Standby → Running. The first watched wait's remote
+packet audit verified five `Z2` insertions/removals and continue-only
+`vCont;c` resumes, with no step or target register/memory-write packets.
+The watchpoint is hardware-verified; software fallback is refused. Captures
+are limited to 12 state hits per wait and a cumulative time budget. Later
+transitions after that limit are unobserved; successful outer returns were
+still captured. Host timing includes debugging; zero KUSD deltas do not mean
+zero elapsed time. No failing audio call was observed in this repeat.
+
+All owners exited before supported teardown. QEMU 27598 disappeared,
+NVMe returned and 15,484 MB was free. The completed repeat is preserved in
+6,702 hashed files (36,706,373 bytes), excluding build caches, under
+`/tmp/zpp-20260912-audio-sync/completed-sha256.json`. Do not modify those
+archived files. The following details refer to that completed repeat.
+
+At12:15:45–46, a one-shot hardware probe catches the actual timer-worker
+epilogue, RET and caller (nt+30d475 → 30d487 → 30e265), all on thread
+ffff948da149c080. RSP changes match the checked epilogue and return.
+The52.65ms host interval includes debugger capture time; it is not the
+whole function's duration. SMSS752 appears12:16:01, Autochk776 at12:16:22,
+then Autochk is absent12:17:25. This timing does not establish causality
+between debugging and progress. The completed stops are preserved under
+`startup-return-completed/`. Earlier GDB owners36038/36039 exited before
+manager38977/guard38978 attached; no second client was opened.
+
+
+The previous guest was preserved in1,642 hashed files (18,130,395 bytes)
+under `/tmp/zpp-20260912-optimized-run/completed-sha256.json`, then ended
+with the supported teardown. QEMU29880 exited; NVMe returned and15,481 MB
+was free. A fresh read-only ESP mount verified the same optimized loader
+and Limine; GPT/ESP/NTFS anchors passed. No Windows settings changed.
+
+**Previous boot: the optimized debug comparison began at 10:50:25 UTC,
+reached sign-in, and crashed at 11:48:42 UTC.** The guest was preserved
+paused (shutdown) before teardown; watcher12724 and manager27043/client27045 exited.
+The actual bugcheck names PDO `ffff9e8129116dd0` and blocked IRP
+`ffff9e8129d65bc0`. Postmortem IRP layout and device-chain checks identify
+`IntcAudioBus` as the enumerator, `IntcAzAudAddService` as the current holder,
+and the Intel audio/Realtek codec instance `VEN_10EC&DEV_0294`. This is an
+audio power request; the earlier USB watchdog failure is a separate run.
+The waiting dependency and root cause remain unproven. V10 completed five
+USB calls with no outstanding captured call at the crash. Its external-stack
+dispatcher case was exercised while preserving the outer flush return.
+The WluiAbort return probe did not hit, and prepared v11 was never started.
+Raw evidence remains in `/tmp/zpp-20260912-optimized-run/`, including
+`gdb-v10/timer-stop/` and `final-power/`. Next: inspect the stopped audio
+request and its power-worker dependencies before another boot.
+
+The stopped power list has two workers: one idle, one carrying the exact
+blocked audio IRP. The latter is Ready1/WaitStatus0 at this post-crash read;
+its saved stack unwinds to null through WDF synchronous internal IOCTL,
+IntcAudioBus, Realtek, portcls and the power dispatch chain. This does not
+measure how long it waited or prove it was already Ready at bugcheck entry.
+Current code and unwind metadata were read from the stopped guest. The
+watchdog's actual DueTime minus WatchdogStart is exactly120s (bias0), and
+live resume/sleep defaults are120/300s. The old fixed300s reader was wrong
+for this request. Its replacement reads each armed timer's DueTime; all230
+Python checks pass, including five formerly failing deadline assertions.
+Artifacts: `final-workers/`, `final-worker-unwind/`, `final-audio-focus/`.
+
+
+The following timeline records the investigation before the crash. Only hypervisor C++ optimization changes to-g -O2;
+source and the full nesting manifest match6adda123. Loader MD5
+**53fc99e459abfc6885b2f9c3aa448ae8**,4,887,040 bytes, was verified through
+a fresh ESP mount. The exact candidate ELF is now
+`.rig-deployed-hypervisor.elf`; do not use the normal debug ELF for offsets.
+All27 rebuilt host tests and artifact checks passed before deployment.
+
+Current zpp module **66d61000**, singleton **682f3000**, independently
+resolved from this serial and candidate DWARF. The unchanged singleton
+address is a coincidence of the different module base/offset. Current NT
+base **fffff801dee00000**, timestamp51a135d9,size1450000, PE-validated
+through System CR3 **1ae000**. Complete process walks initially show
+System4, Secure System68 and Registry112. SMSS640 appears10:53:25, three
+minutes after launch; this one earlier milestone does not establish a
+completed boot or isolate optimization from run-to-run variation. Two CPUs
+and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
+
+Sole monitor watcher **12724** began10:52:01 in tmux
+`zpp-rig-20260911:optimized-watch`. The final GDB manager **27043** and v10
+probe **27045** began11:34:37 in `optimized-gdb-v10`; confirm subsequent
+ownership from `/tmp/zpp-20260912-optimized-run/gdb-v10/manager.json`.
+Current USBHUB3 **fffff80177c00000** and WDF **fffff80171430000** were
+discovered10:56:56, with PE/instruction validation before v5 started10:56:58.
+V5 completed two USB calls, then10:58:21 rejected a dispatcher hit with its
+combined RSP/thread-stack-bounds assertion. Its failed-stop registers were
+not retained; that third call remains unpaired, not proven stalled.
+Fallback crash guard14514 replaced exited14112. Both manager12722 and
+guard14514 exited before v8. V8 records outside-thread dispatcher stacks
+and drops inner pairing while preserving the outer flush; it also validates
+PRCB.Number and records failed-stop registers. The new case awaits a hit.
+V8 completed four calls before service discovery and three afterward. Its
+service cleanup page was initially unmapped, so that part did not arm.
+V9 arms the hardware breakpoint after validating the current service PE,
+deferring instruction validation until the actual hit. Both preceding
+manager15442 and GDB16859 exited before the v9 attachment. The outside-stack
+case still awaits a hit. The prior boot's one-shot hypercall-page address is
+not reused. At that stage, a visible screen was still unverified.
+
+Autochk668 appears10:55:10, is last present10:55:52, and is absent10:56:13;
+its exit status is uncaptured. SMSS752 appears10:56:35. CSRSS932 appears
+10:59:19 (8m54s after launch). Wininit500 appears11:05:22,
+Winlogon704 at11:05:42, services516 at11:06:23, and LSASS556 at11:06:43.
+The PnP event is Signal1 with an empty waiter list at v8/v9 initialization.
+At **11:18:15**, complete process walks first show **LogonUI1556 and dwm1568**
+(27m50s after launch), 23 processes total. The user subsequently confirmed a sign-in screen followed by the BSOD;
+its first visible time was not measured.
+
+At11:16:51, v9 captures an actual SCM cleanup entry for **LSM, error1070**,
+CPU0, services516/TID460, followed by the next instruction on the same
+thread/RSP. Its caller's saved status is StartPending2/checkpoint0/hint60000,
+while the live record is Running4, start_state3, start_error0. Current code
+and readable unwind ranges match the reference image; 12 unmapped exception
+data ranges use the matched Microsoft image. The checked services prefix
+reaches its startup entry, then stops at an uncaptured external user module.
+At11:18:30 the LSM record remains Running4, now start_state4/start_error1070.
+This supports another late-status race, not a measured60-second wait or a
+proven cause of the display delay. No RpcEptMapper cleanup has been captured
+on this boot. Artifacts: `scm-first-failure/` under the optimized run.
+
+At11:25:02 a424ms GDB capture finds Winlogon704/TID724 waiting for an
+ALPC reply, on its embedded `ETHREAD.AlpcWaitSemaphore` at thread+518.
+The checked kernel/user chain reaches null through RPC and **WluiAbort →
+AbortBlockedThread → StateMachineRun → WinMain**. This is a different wait
+from the earlier boot's TermSrvReadyEvent; the current screen remains
+unverified. All120 requested current code/metadata ranges match11:27:56;
+the Winlogon PDB GUID and Info/DBI ages validate. The generic capture's
+object-header bytes before this embedded semaphore are not an OBJECT_HEADER
+and must not be interpreted as one. Raw/checked artifacts: `winlogon-current/`.
+
+The brief capture handed GDB ownership17720/17722 → capture22191 →
+manager22205/client22207, with old clients exited before replacement. That
+probe later records WinHttpAutoProxySvc/Wcmsvc/WlanSvc/mpssvc cleanup1068;
+their dependency cause has not been traced. V10 replaces it after both old
+owners exit and adds a one-shot **WluiAbort RET at7ff6531536d0** followed by
+its actual caller. It retains the USB and bugcheck probes; the new user return
+probe is deferred during a USB cycle, and any interrupted inner pairing is
+discarded. No pairing or elapsed-time claim connects a future return to the
+11:25 snapshot across the handoff. The return probe has not hit yet.
+
+By11:34:42 there are69 processes. USB requestffff9e812ba0e910 is armed with
+age13.3s at11:34:21 and absent from the next complete list; the armed request
+then belongs to the audio stack instead. These are different request
+identities, not a continuously aging USB request. No new crash observed.
+
+The preceding running baseline was deliberately ended10:49:07 after the
+repeated-return instrument was verified, with six processes, no active
+paired USB call and no new crash. This is a censored run, not another9F.
+All readers exited before supported teardown; QEMU20932 exited, NVMe
+returned and15,481 MB RAM was free. Fresh pre/post-deploy reads match the
+launcher, Limine, GPT, ESP BPB and NTFS anchors byte-for-byte. Baseline
+archive `controlled-end-sha256.json` covers1,579 files/12,464,183 bytes.
+New deployment, preflight, launch and discovery artifacts are under
+`/tmp/zpp-20260912-optimized-run/`.
+
+## Ended baseline comparison, September12 09:29–10:49
+
+An unchanged boot began September12 09:29:15 UTC.
+The previous 07:22:39 guest crashed at09:15:18 with a GDB-captured tablet
+power timeout, was archived, then torn down through the supported script.
+NVMe returned, 15,474 MB RAM was free, and a fresh read-only mount validated
+the unchanged loader, Limine, launcher and disk anchors before restarting.
+
+The new Windows kernel is **fffff803e1600000**, PE timestamp51a135d9,
+size1450000, validated through CR3 **1ae000**. Current serial/ELF resolve
+zpp module66d47000 and singleton682f3000; the complete resident manifest
+matches the unchanged **6adda123** deployment. Five USB devices are direct
+root-port devices (tablet currently port2), with xHCI p2=8.
+SMSS552 first appeared at **09:50:22** (21m07s after launch). Autochk572
+appeared09:53:53, was last present09:54:35 and absent09:54:56; its exit
+result was not captured. SMSS676 first appears09:56:21. Five processes
+and122 modules through10:14. USB/WDF are discovered10:15:18 in a complete
+147-module walk: USBHUB3 **fffff803790d0000**, WDF **fffff80373c30000**,
+matching current PE sizes/stamps. V5 starts10:15:20. No verified
+sign-in/desktop.
+
+At its end, monitor watcher **89509** and GDB manager **9429**
+run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-vtl-ret`.
+The final v7 GDB was **9431**; historical ownership is in
+`gdb-with-vtl-ret/manager.json`. Earlier1329/2398,7786/7788 and8502/8504
+exited before replacement. v7 retains repeated dispatcher tracing and has
+completed its one-shot hypercall RET/caller observation. The manager adds
+SCM tracing after current services.exe discovery when no paired call is
+recorded active. Handoff races remain explicitly unpaired; never infer a
+return across a gap. New artifacts: `/tmp/zpp-20260912-repeat-dispatch/`.
+
+The initial resident report completed its state sections; its slow log
+walk was interrupted before the sole monitor ownership passed to the
+watcher. The kernel PE and complete process walk independently validate
+the new base. No stopped guest or old address/PID is current.
+
+
+At09:53:37, hardware stops at **KiQuantumEnd nt+299958 → nt+299963**
+record one matched lock acquisition on CPU0, threadffffdb0a8fb85040.
+RSP and target PRCB match; continue-to-stop interval9.214ms, captures
+107.8/99.7ms. The read sees the target CPU1 PRCB lock0; after acquisition
+it is1. Both PRCB.Number values validate. This does not pair with the
+preceding CPU1 timeout snapshot or establish a permanent scheduler lock
+problem. Checked current-byte stacks unwind through DPC interruption of
+MiReleasePtes, driver-image validation/loading, PnP and ExpWorkerThread.
+All117 requested code/unwind/pdata ranges are readable;115 match the PE,
+and both differing code ranges use their actual captured bytes.
+
+At10:12:22, a118.42-ms stopped GDB capture identifies SMSS676's sole
+Waiting thread **ffffdb0a8fc56080** in **PnpSerializeBoot**, waiting on
+**PnpSystemDeviceEnumerationComplete fffff803e258c3a0** (NotificationEvent,
+SignalState0). The active wait block's thread/object and event-tail links
+match. The code's RCX argument and checked saved stack agree on this event.
+The checked kernel stack reaches the user transition through NtSerializeBoot.
+A later97.4-ms non-atomic monitor read validates48 requested ranges; eight
+user metadata ranges are unmapped, so the complete user unwind remains a
+candidate. No actual wait return or continuous wait duration was captured.
+Artifacts: `smss-676/`, `smss-unwind-validation/` under the current boot root.
+
+An optimized debug candidate was prepared during this baseline. Same source as
+6adda123 and byte-identical full switch manifest, with only hypervisor
+C++ compilation changed from default-O0 to **-g -O2**. It preserves usable
+DWARF. Both artifact checks pass and all27 rebuilt host tests pass with
+-O2 (including228 Python checks). Loader MD5**53fc99e459abfc6885b2f9c3aa448ae8**,
+4,887,040 bytes; exact embedded ELF verified. Details and reproduction:
+[optimized candidate](docs/2026-09-12-optimized-debug-candidate.md).
+It is deployed in the new comparison described above.
+
+At10:34:41 a57.996-ms GDB capture identifies active PnpDeviceActionThread
+**ffffdb0a8fb85040**, current on CPU1. Its Running stack is excluded because
+CPU1's captured registers are in zpp. Both SMSS552/676 wait on the same
+unsignaled enumeration-complete event. By10:40:30 that event is signaled1
+with an empty waiter list. At10:40:31 GDB follows an actual hypercall-page
+RET into **HvlSwitchToVsmVtl1+ab**, same SMSS676 thread and RSP+8,
+10.893-ms continue-to-stop. Later same-boot win32k capture completes its
+checked kernel chain through secure image fixups, system-image loading,
+win32k, ExpInitializeSessionDriver and NtSetSystemInformation to the user
+transition. All44 requested NT ranges match; no user stack was captured.
+CSRSS928 appears10:40:55; six processes through the deliberate10:49 end,
+no verified login.
+
+Repeated-dispatch coverage now has actual hardware hits: two complete USB
+timer-stop calls10:40:41–43, each with six matched dispatcher RET/caller
+pairs, including both affinity calls and CPU0-to-CPU1 migration of the same
+worker. Both outer flushes and USB calls return. v6 earlier has one complete
+call and one explicitly abandoned cycle after another thread hits the
+shared breakpoint. These successes do not explain the preceding boot's
+later311-second outstanding flush. See the USB investigation note's latest
+entry for intervals, validation and the325-file completed-evidence archive.
+
+
+The **direct-port USB experiment crashed with 0x9F/3**. It began at
+21:12:41 UTC September 11 using unchanged deployed **6adda123**, loader
+MD5 **d564ca8f8057eabdb36a09db2c1e34d5**, two CPUs and the full manifest.
+Only xHCI `p2=8` changed: all five USB devices occupy direct root ports.
+Avoiding the external hub did not eliminate the power failure. The user
+now confirms **“driver power state failure”** on the physical screen.
+No sign-in screen or desktop has been verified.
+
+That stopped guest was archived (1,774 files, SHA-256 manifest) and torn
+down normally. NVMe returned and 15,476 MB RAM was free. The unchanged
+loader/launcher and disk anchors passed a fresh read-only mount check.
+
+The preceding same-configuration **GDB timer-stop run began 07:22:39 UTC
+September 12** and ended at09:15:18. At startup all channels answered and the
+actual five-device direct USB topology was unchanged. The following is its
+historical timeline; the addresses and client PIDs below are not current. Module 66d47000,
+singleton 682f3000, **new Windows base fffff804c5800000**, size 1450000.
+The kernel PE maps through CR3 1ae000. First process/module list attempts
+were too early (null list heads) and were rejected; later complete walks
+validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
+The sole monitor owner is `timer-probe-watch` in tmux session
+`zpp-rig-20260911`. `timer-probe-winlogon-valid` owns manager PID **78053** and exactly one GDB
+child (current v4 combined probe PID **78064**; confirm from manager.json). The
+USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
+handoff; neither has the preceding two/three-hour expiry. All new state,
+PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
+the current GDB manager/captures are specifically `timer-probe-gdb-winlogon-valid/` (earlier dispatcher capture remains
+in `timer-probe-gdb-dispatch/`).
+Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
+was first absent at 07:46:24. Its exit status/result was not captured. A
+bounded early KeFlushQueuedDpcs probe from about 07:42:17 to 07:44:17
+recorded no entry hit, detached, and automatically restored the indefinite
+bugcheck guard. No matching return or stalled call is inferred from that
+empty interval. The sole monitor watcher remained alive throughout.
+At 07:54:15 a separate bounded dispatcher probe obtained all three actual
+hardware stops: nt+2bb96b, nt+2bb97f, then its stack-derived caller
+nt+30e82e. Thread ffff9d8776b87040 stayed the same; RSP increased by 48h
+then 8, and restored RBX/RBP/RSI/RDI matched their saved values. The two
+continue-to-stop intervals totaled 18.2 ms host time; captures took
+29.2/22.3/21.0 ms. All three stacks unwind through HalpCmcWorkerRoutine,
+ExpWorkerThread and system-thread startup to null. This is a completed
+CMC-worker invocation, not a USB timer-stop or DPC-flush return. The old
+manager/guard exited before replacement; the indefinite guard is restored.
+At 07:55:54 the complete 147-module walk found **USBHUB3 fffff8045f5e0000**
+and **Wdf01000 fffff80457d80000**, with matching PE timestamps/sizes and
+probe instruction bytes. The first USB probe started at 07:55:57 and had
+no hits before an explicit handoff. V2 started **07:57:25**: it also tracks
+repeat flushes within a timer-stop and captures the timer owner/flags at
+both flush boundaries. The manager snapshots/hashes the exact probe source.
+At **08:14:22**, a 105.9-ms GDB capture of SMSS PID 816's single Waiting
+thread **ffff9d8776c700c0** unwinds through PnpSerializeBoot onto
+PnpSystemDeviceEnumerationComplete (**nt+f8c3a0**). Its saved KSP and
+SwapContext anchor validate. The current PnpSerializeBoot bytes later match
+the PE exactly. By v3 attach **08:18:51** the event's SignalState is 1 and
+its wait list empty; the selected thread's actual wait return was not caught.
+CSRSS PID 288 first appears at **08:19:50**. Through 08:23:12 there are six
+processes, no armed power watchdog and no LogonUI/dwm or verified login.
+
+At **08:15:33**, the preceding USB probe hit USB+15db6, WDF+4341a,
+nt+2bb96b and nt+2bb97f, all CPU 0, System thread **ffff9d87744bc040**.
+Wait=1; timer **ffff9d87777589c0** records that same stop owner, with
++158/+159 both zero. The dispatcher RET has the expected RSP+48h but
+returns to **nt+2bbb54 (KiProcessDeferredReadyList+0xb4)**, through
+KeSetPriorityThread and KeGenericProcessorCallback to KeFlushQueuedDpcs.
+The probe incorrectly required the affinity caller nt+30e82e and detached.
+This is an instrument error, not a guest crash or a proved stalled call.
+No complete timer/flush return was captured; do not pair across the gap.
+The manager restored an indefinite bugcheck guard automatically.
+
+V3 began **08:18:51** after the old manager/guard exited. It follows the
+actual stack-derived dispatcher caller; a mismatched inner frame preserves
+the outer flush return. A hardware PnP wait-return probe also validates the
+selected thread/RSP if reached, and defers during USB cycles to stay within
+three hardware breakpoints. Source SHA-256 is
+`e197275fbb7401caea742c7843fbe98e5fcd80312b9d65a27f0e33cbb8ddd69b`.
+As of 08:23:12 v3 has no hit. SMSS and first USB captures/unwind are in
+`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-werfault/`.
+At **08:29:20**, a 155.6-ms stopped GDB read captured current USB/WDF
+PE headers, RSDS, complete exception tables and 123 code/metadata ranges.
+Both symbol identities match. The four stacks now unwind with current
+bytes through WDF's D0-exit/power dispatch to nt!PoCallDriver, then stop
+at the still-unloaded metadata for fffff80460245697. Nine code ranges
+differ from the preceding boot; current captured bytes, not stale ones,
+were used. The recovered device **ffff9d877707c100** validates as HidUsb;
+its devnode is null, so the specific USB instance is not yet established.
+The prior USB thread is Waiting at this later snapshot; no old call's
+actual return is inferred. The v3 probe resumed unchanged immediately
+under manager 67026/GDB 67037; old manager 64140/GDB 64141 exited first.
+Validation artifacts are `timer-probe-gdb-validated/validation/`, and the
+new partial unwind is `timer-probe-gdb-smss/timer-stop/current-driver-unwind.txt`.
+The module list is no longer refreshed after probe configuration, so 147
+is the discovery count, not a later census. No C++ change, build,
+deployment or Windows configuration change was made.
+
+
+At **08:34:03 and 08:34:04**, the corrected probe captured **two complete
+USB timer-stop/flush pairs**, both System thread **ffff9d8776b91040**.
+Each follows USB+15db6 -> WDF+4341a -> nt+2bb96b -> nt+2bb97f ->
+actual caller nt+2bbb54 -> WDF+4341f -> USB+15dbb. Exact thread and
+stack relationships match. The first migrates CPU 0 to CPU 1 before its
+flush return; the second stays on CPU 1. USB contexts **ffff9d87776a6110**
+and **ffff9d87776eb110**, timers **ffff9d8776cf9a90** and
+**ffff9d8777758d20**. Both Wait=1 and both owner/flag reads agree.
+Continue-to-stop host intervals sum **43.54/50.68 ms** for the flushes,
+**69.96/72.90 ms** for full timer calls. Individual capture stops are
+24.9–46.1 ms and are excluded from those interval sums. These prove two
+completed calls, not every later call or the cause of the preceding crash.
+All 14 raw events and final index are in `timer-probe-gdb-audio/timer-stop/`.
+
+Startup has reached wininit 532, winlogon 484, services 808, LsaIso 812,
+lsass 832 and two fontdrvhost processes. **15 processes at 08:37:02**;
+no LogonUI/dwm or verified login. An IntcOED device SET_POWER request
+**ffff9d8776b9c970** aged from about 08:30:40 and was absent by 08:33:59,
+before its 300-second deadline; no completion status was caught. The
+08:33:53 stopped capture (1.006 s through detach) has both busy power
+workers in HidUsb, each Waiting in nt!KeWaitForSingleObject with return
+USB+3403a (matched prior symbols name HUBMISC_WaitForSignal+7a). Their
+wait objects differ: ffff9d8777477738 and ffff9d87776eb748. No live audio
+worker was identified by that list. The module walk hit its one-second
+budget at 160 entries; it is explicitly incomplete and no new full driver
+image was captured. The target IRP/PDO/holder and both worker stacks did
+complete. Artifacts are `timer-probe-gdb-audio/validation/`.
+
+At **08:36:37**, a 22.0-ms GDB read validated WerFault PID 304 and read
+`C:\WINDOWS\system32\WerFault.exe -k -c `. This command line names no
+process PID; it does not identify a currently crashed application. The
+unchanged v3 USB/bugcheck probe resumed under manager 69070/GDB 69081,
+tmux timer-probe-werfault, after manager 68304/GDB 68319 exited. Current
+artifacts are `timer-probe-gdb-werfault/`; both prior owner handoffs were
+explicit and no live timer cycle was discarded. The sole monitor watcher
+remains PID 49122. No guest configuration or binary change.
+
+At **08:36:47**, the PnP return probe caught svchost PID 1156/thread
+ffff9d8779d14040 at nt+5a0d76 with EAX=0 in 30.2 ms. This is explicitly
+not the old SMSS wait (thread/RSP mismatch). The old PnP probe is now
+replaced by a services.exe startup-cleanup probe. **V4 began 08:41:23**,
+manager **70399**, GDB **70404**, tmux **timer-probe-scm**, with current
+services PE timestamp/size and cleanup bytes validated. It captures the
+service record/name/requested error, then advances to a different hardware
+breakpoint after the first instruction before rearming. USB work defers
+SCM probing to keep at most three hardware breakpoints; a preempted SCM
+continuation is recorded unpaired. There is no lifetime cap. The old
+69070/69081 owner/child exited before attach; no active USB cycle was lost.
+V4 source SHA-256:
+`6dbafd6f841dcb4fc827a6898d8d1527c4a6b67a6f55c2b627dd4603e307e5a3`.
+Artifacts are `timer-probe-gdb-v4/`. Sixteen processes/no armed power IRP
+through 08:40:45; no login verified. No binary or guest configuration change.
+
+
+At **08:42:08**, real SCM hardware stops captured **RpcEptMapper cleanup
+requested error 1070**, then **RpcSs, BrokerInfrastructure, LSM and
+SystemEventsBroker error 1068** on services TID 764. All five adjacent
+instruction stops match. RpcEptMapper's live SERVICE_STATUS already reads
+**Running (4)**, checkpoint/wait hint 0, start_state 3, start_error 0 at
+cleanup entry. Its caller's saved status is **StartPending (2)**,
+checkpoint **1**, wait hint **61000**; initial checkpoint 1, ESI/R15=10,
+R14=6100. The resettable delay accumulator is 6100, not total elapsed time.
+
+The validated partial unwind identifies **ScLookForHungServices+209** ->
+ScStartMarkedServicesInServiceSet -> ScStartServicesInStartList ->
+ScStartEarlySetOfServices -> ScAutoStartServices -> SvcctrlMain -> wmain,
+then explicitly stops at unprovided external-user metadata. Current code
+confirms the final pending/checkpoint test, then virtual
+**CWin32ServiceRecord::ReportServiceHungInternal**, then unconditional
+CleanupStartFailure(1070). The virtual target rechecks current state and
+can return when it is no longer pending; the caller still requests cleanup.
+This supports a late-start/status-check race, not a proved VMM cause.
+No actual polling-loop entry or each Sleep return was observed, so this
+is not a measured 61-second duration. All relevant raw status/registers,
+stack and checked unwind are in `timer-probe-gdb-v4/timer-stop/`.
+
+At **08:46:15**, a 492.3-ms GDB read validates RPCSS host **PID1224**
+(`svchost.exe -k RPCSS -p`), all 22 loaded modules and nine threads.
+Eight Ready/Waiting stacks and user contexts are captured; ninth raw
+thread only, explicitly skipped by that capture bound. RpcEptMapper now
+has start_error **1070** while still Running/start_state3; RpcSs is Running
+with start_error0. LSM/BrokerInfrastructure/SystemEventsBroker remain
+Stopped with 1068. This read is four minutes after cleanup, not its instant.
+Artifacts are `timer-probe-gdb-rpc/validation/`; full user unwinds remain
+pending. Later cleanup captures include SENS and igfxCUIService2.0.0.0
+with 1068 at 08:47:52.
+
+The first SCM byte-validation capture at **08:50:47** detached after
+12.2 ms when its .pdata page was unmapped; it captured no requested code
+ranges and proves no code mismatch. The corrected **08:52:16** read took
+52.7 ms. Current PE/RSDS matches services GUID
+**07f96885-e22b-ad8b-e182-93afc8ad8a94/1**; all 26 readable requested ranges
+match, including the caller and hung-report bodies and virtual target.
+Twelve exception-data ranges and .pdata are paged out, so the checked
+unwind explicitly uses the matched Microsoft server PE for those. No
+page was faulted in or guest state changed. Exact captures and page errors
+are in `timer-probe-gdb-scm-checked/validation/`.
+
+Current manager **73432**, GDB **73443**, tmux **timer-probe-scm-checked**,
+uses unchanged v4 source/hash and indefinite guard. Each old manager/child
+exited before the next attached (71742/71757, then 72996/73007); the monitor
+watcher remains 49122. All intermediate probe roots remain archived. The
+v4 first run had one complete USB pair and one explicitly abandoned pair
+on a different thread's flush return. The RPC-capture run then recorded
+four more complete pairs (flush host intervals 65.9/47.5/46.3/70.4 ms),
+and the first SCM-validation run recorded five more. These add to the two
+08:34 pairs and do not exclude a later failure. Current boot reached
+**33 processes at 08:52:19**, no armed power IRP, no verified login.
+
+At **09:00:37**, a 206.8-ms GDB capture obtained all three waiting
+Winlogon PID484 threads and kernel/user stacks. Its first module walk
+stopped on a paged-out ucrtbase header after four entries. The corrected
+**09:08:19** read completed all 29 entries, reporting missing headers and
+CodeView pages individually, in 340.8 ms. All 48 requested readable
+kernel/ntdll/KERNELBASE/KERNEL32 code/unwind ranges match the earlier
+identified images. Current winlogon/winsta RSDS bytes are captured.
+The candidate main-thread unwind reaches winsta+ce31 -> exported
+_WinStationWaitForConnectEx+14 -> winlogon+5b79e -> winlogon+656b5 ->
+thread startup -> null. The two other stacks reach thread-pool waits and
+null. The additional winsta/Winlogon caller-byte and event-name validation
+is prepared but **not yet run**: an outstanding USB call takes priority.
+Do not call the full user unwind currently validated. Captures are
+`timer-probe-gdb-winlogon/validation/` and `timer-probe-gdb-winlogon-valid/validation/`.
+
+SCM cleanup also caught **AudioEndpointBuilder already Running4** at a
+1070 cleanup entry (**08:53:53**, TID1500), followed by Audiosrv1068.
+Its caller has not been unwound yet. Schedule1068 preceded it. The later
+Winlogon probe caught thirteen dependency-failure cleanups, including
+UserManager at09:05:53. It recorded five complete USB timer returns and
+one abandoned cycle on a different thread's flush return. The guest
+reached 70 processes at09:04:57; no LogonUI/dwm or verified login.
+
+At **09:10:07**, the unchanged v4 probe caught USB timer-stop and flush
+entry on **thread ffff9d87744ef040**, timer **ffff9d8779dc8aa0**, context
+**ffff9d877a2a50d0**. It then caught dispatcher epilogue, RET and its actual
+caller **KiProcessDeferredReadyList+b4** with matching RSP/thread. The
+first dispatcher returned, while the enclosing flush return remains
+unobserved through09:14. Current exception data reconstructs the entry
+chain through KeSetPriorityThread, KeGenericProcessorCallback,
+KeFlushQueuedDpcs, WDF/USB D0-exit and PoCallDriver; it stops explicitly
+at missing HidUsb unwind metadata. Five capture reads took15.7–21.0ms,
+with pre-checkpoint stops18.3–26.4ms. No debugger handoff occurred during
+this call.
+
+A **09:13:17** single non-atomic monitor capture associates that busy
+power worker with **IRP ffff9d8779b047f0** and HidUsb FDO; its parent PDO
+**ffff9d877a11caa0** names **USB\VID_0627&PID_0001\68284-0000:00:05.0-4**,
+the tablet. The timer stop-owner still matches. The worker is Running,
+so its saved KSP was excluded; the other power worker is Waiting/idle.
+The monitor request age was215.6s at09:13:52. This is not proof of one
+instruction's continuous residence. The watcher's PID49122 was briefly
+suspended with no child/connection during this sole-owner monitor read,
+then resumed; GDB remained attached and continued throughout. Artifacts:
+`timer-probe-outstanding-usb/` and the active probe root. The prepared
+Winlogon validation v2 must wait until this call ends or the guest stops.
+
+Current GDB manager **78053**, child **78064**, tmux
+**timer-probe-winlogon-valid**. Earlier73432/73443 exited before75929/75940,
+which exited before this pair. All use the unchanged v4 hash. One monitor
+watcher remains49122. Windows/loader/manifest are unchanged.
+
+Prior crashed-run coordinates follow; do not use them for the live probe.
+Kernel **fffff801e1c00000**, system CR3 **1ae000**,
+module **66d47000**, singleton **682f3000** are validated for this run.
+Final complete walks contain 34 processes, including LogonUI PID 1440 and
+dwm PID 1452, and 177 System threads. All raw System stacks are saved.
+The crash time was not captured: the startup watcher exhausted 360 polls
+at 23:38:35, and the later GDB guard expired at 00:34:34 September 12.
+All those clients exited. The final state was read around 06:57 UTC.
+This crash is a postmortem finding, not a direct KeBugCheckEx breakpoint hit.
+
+The failed IRP **ffff9784b5489010** names PDO **ffff9784badac060**, service
+HidUsb, instance `USB\VID_0627&PID_0001\28754-0000:00:05.0-2`: the tablet
+at root port 2. One power worker, **ffff9784b54ef040**, owns this IRP;
+the other is idle. A WDF power worker waits on the tablet's FxPkgPnp lock
+**ffff9784baaa6a38**. Its recorded owner is that same busy power worker.
+The WDF timer object's stop owner agrees too.
+
+The owner's Running saved KSP was excluded. Instead, the flushed VTL0
+software VMCS12 region **114fa0000** gives RIP **nt+5bf139** and RSP
+**ffff858055da8b60**, with CR3 1ae002 and CPU 1's Windows GS. The checked
+unwind follows the NMI freeze path onto the busy thread's actual stack:
+HvlEndSystemInterrupt -> KiDpcInterrupt -> KiCheckForThreadDispatch ->
+KeSetSystemGroupAffinityThread -> KeGenericProcessorCallback ->
+KeFlushQueuedDpcs -> **Wdf!imp_WdfTimerStop+19f** ->
+**UsbHub3!HUBPDO_EvtDeviceD0Exit+34b** -> WDF power dispatch ->
+HidUsb/HIDCLASS -> PopIrpWorker -> system-thread startup -> null.
+Recovered package/context/IRP pointers match the independently saved
+objects. This proves the crash-time dependency, not continuous residence
+in that call for the timeout duration or a specific VMM defect.
+
+Next: continue the corrected USB timer-stop and DPC-flush return hardware
+probes in the current boot, capturing a complete pair or bugcheck. Keep
+observation alive until a real terminal state or an explicit handoff;
+individual debugger stops and monitor reads remain bounded. Exact files,
+matching symbol identities and limitations are in
+[the USB power note](docs/2026-09-12-gdb-usb-hub-power.md).
+
+Earlier in that preceding crashed boot, an actual paired GDB stop captured one SMSS
+KeFlushQueuedDpcs call returning to MmPageEntireDriver in 14.9 ms of
+host time between continues/stops. That successful call does not exonerate
+later timer-stop calls. Its unchanged InterruptTime is not zero execution.
+
+The preceding same-binary crash is recorded below.
+
+The unchanged **6adda123** startup run, begun around **19:21 UTC** on
+September 11, crashed at **20:55:05 UTC**. Direct GDB caught KeBugCheckEx
+on CPU 0: **0x9F, parameter 1 = 3**, PDO `ffffe6044844a870`, triage
+`fffff8002952c600`, IRP `ffffe60448a40560`. The capture took 14.7 ms.
+The bugcheck stack reaches PopIrpWatchdog and the idle timer/DPC path.
+The run reached fifteen processes, without LogonUI/dwm or a verified login.
+No SCM failure breakpoint fired before the bugcheck; no RpcEptMapper/LSM
+ordering was established. Both the GDB coordinator and monitor watcher
+have exited. That stopped guest has now been archived and torn down.
+
+The PDO's validated device node names
+`USB\VID_0409&PID_55AA\MSFT20314159-0000:00:05.0-4`, service USBHUB3.
+QEMU's actual `info usb` places its automatically added USB hub at port 4,
+with two keyboards behind it. The launcher contains Bluetooth passthrough,
+a tablet and **three** keyboards. The earlier shorthand of one keyboard
+was incorrect. QEMU inserts a hub as its default four root ports fill.
+
+The IRP is at stack location 11 of 14, IRP_MJ_POWER/IRP_MN_SET_POWER,
+with completion UsbHub3+1c910 and context `ffffe6044aa480d0`. Both power
+workers are idle in the final stopped capture. The full System walk has
+173 threads: 172 Ready/Waiting stacks saved, one Running stack excluded.
+With current WDF/UsbHub3 images, 92 unwind to null and 80 stop at missing
+module metadata; no saved stack was accepted for the Running thread.
+The complete final resident report, serial, NVRAM, objects, driver images,
+exact deployed ELF and an 800-file SHA-256 manifest are preserved under
+`/tmp/zpp-20260911/rpc-gdb*`. CPUID census cross-check failures remain
+explicit and those census counts are not used.
+
+The now-completed single-variable experiment changed the launcher's controller from
+`qemu-xhci,id=xhci` to `qemu-xhci,id=xhci,p2=8`, retaining all five devices
+and input objects, two CPUs, full manifest and the same loader. An isolated
+128-MiB stopped TCG preflight with the rig's QEMU 11.0.3 confirmed five
+direct ports and no hub. It used generic devices and no Windows disk,
+VFIO or host input; it proves the configuration, not Windows success.
+Evidence preservation, supported teardown, launcher backup/readback and
+fresh-mount loader verification completed before this next boot. See
+[the hub crash evidence](docs/2026-09-12-gdb-usb-hub-power.md).
+
+The prior startup probes remain documented in
+[the SMSS note](docs/2026-09-11-smss-startup-gdb.md): actual autochk creation,
+SMSS main subsystem wait, separate asynchronous PnP wait, and rejected
+Phase1/CSRSS identity checks. No live CSRSS frame or matched return was
+obtained. New boots require fresh kernel/process/module coordinates.
+
+The completed preceding run is recorded below.
+
+The per-CPU borrow build **`6adda123` crashed with 0x9F** at
+**19:03:32 UTC**, September 11, after starting at 17:27 UTC. Loader MD5
+**`d564ca8f8057eabdb36a09db2c1e34d5`** and the full unchanged manifest
+matched the fresh mount. The two-CPU guest reached 73 processes but no
+LogonUI/dwm or verified login. QEMU subsequently paused (shutdown).
+
+The failed boot's module base was `0x66d47000`, singleton offset
+`0x15ac000`, physical `0x682f3000`. Windows base was
+`0xfffff801d4a00000`, system CR3 `0x1ae000`, timestamp `0x51a135d9`,
+size `0x1450000`. These are evidence coordinates, not reusable next-boot
+addresses. Resolve every resident field from the matching deployed ELF.
+
+The new gate keeps private shadow-copy suspension on its owning processor;
+an unidentifiable owner retains a global fallback. Generic clears/migration
+retain global epoch invalidation. The aggregate gauge remains diagnostic.
+All 222 cache assertions, 27 rebuilt host tests and 228 Python tests pass;
+debug loaders, invariants and bootability checks pass. No isolated live
+performance benefit or successful boot is established.
+
+**Direct Windows hardware breakpoints work through QEMU's GDB stub.**
+They proved an interrupted MiUnlockPageInline call returned and captured
+real Windows kernel/user stacks through a physical-memory CR3 walker.
+Use targeted scripted stops, remove a breakpoint before continuing, and
+detach automatically. Do not use single-stepping or inferior calls.
+See [the initial GDB evidence](docs/2026-09-11-gdb-windows-returns.md).
+
+The final [Winlogon/SCM and crash evidence](docs/2026-09-11-winlogon-scm-debug.md)
+establishes:
+
+- Winlogon's main thread waits on the named Global\TermSrvReadyEvent.
+  Matched kernel/user PE unwinds reach _WinStationWaitForConnectEx;
+  the event remained unsignaled at the bugcheck.
+- GDB caught services.exe terminating svchost PID 2388 through startup
+  cleanup with recovered error 1053. The specific service is not identified.
+- A complete 748-entry SCM database/dependency walk finds LSM Stopped
+  with error 1068. RpcEptMapper is Running but retains internal startup
+  error 1070. Its internal state is already completed (3), so the earlier
+  failure/late-completion sequence is a hypothesis requiring a new capture.
+- The actual bugcheck is 0x9F, parameter 1 = 3, USB PDO
+  ffff920946256060, IRP ffff920946165010. Its watchdog age already exceeded
+  300 seconds in a complete monitor reply before the 35-ms GDB capture.
+- Two final power workers are Ready inside affinity changes reached from
+  KeFlushQueuedDpcs through WDF/UsbHub3. Both complete saved-stack unwinds
+  reach HidUsb/HIDCLASS and PopIrpWorker. A third worker is idle; complete
+  worker-pool saturation and continuous 300-second residence are not proved.
+
+Some drivers unloaded/reloaded within this boot. The final 199-entry module
+list places HidUsb at fffff80170fc0000, UsbHub3 at fffff8016a120000,
+HIDCLASS at fffff80170800000 and WDF at fffff80167030000. Do not reuse the
+early HidUsb/IntcOED bases for the final stacks. Matched PDB validation
+requires GUID equality, Info age >= image age, and nonzero DBI age equal
+to image age; Info-age inequality alone incorrectly rejected usable WDF
+symbols earlier. The detailed note cites Microsoft's implementation.
+
+The preceding boot's watcher and GDB sessions exited. Its actual bugcheck artifacts
+are `cache-local-borrow-gdb-scm-child/index.json` and `stack.bin`, under
+`/tmp/zpp-20260911/`; the later redundant generic guard produced no index.
+Final driver images, power stacks, SCM records and RPC component images
+are preserved. Supported teardown completed: NVMe returned and 15,445 MB was free,
+without a host reboot. The final resident report, ELF and freshly mounted
+loader are archived; loader MD5 still matches. The new same-binary GDB run described above targets RpcEptMapper startup
+and SCM's 1070/1068 state transitions. No new hypervisor fix is yet
+justified, and no Windows service/registry/boot configuration was changed.
+
+The preceding cache-slot boot ran from 16:55 to 17:25 UTC, stayed at three
+processes, and was stopped using the supported teardown. NVMe returned and
+15,489 MB was free without a host restart. Repeated validated unwinds reached
+an interrupted unlock return while validating **Npfs.SYS**; final fresh VTL
+calls and user-mode samples did not advance. No reset, bugcheck or armed
+power IRP was observed. Its archived ELF and evidence are described in
+[the completed slot-boot note](docs/2026-09-11-slot-image-return.md).
+
+## Previous elision boot: progress followed by 0x9F
+
+The elision-only boot (`9f1caf2b`, loader MD5
+`98542ddf33cdd78402529b4b6b72423c`) ran from about 16:15 until
+**16:47:24 UTC**. It reached smss/autochk around fifteen minutes, csrss
+around twenty-five minutes and eventually fourteen processes, including
+services, winlogon and lsass. It did not produce LogonUI/dwm or verified
+login evidence. Fresh VTL calls and user-mode samples continued while two
+power requests aged.
+
+The preserved bugcheck is **0x9F, parameter 1 = 3**. Its PDO
+`ffffbf8157c538f0` and IRP `ffffbf815aa84be0` match the previously observed
+audio request: IntcAudioBus's PDO, with IntcOED as the current device.
+A separate USB request was also armed. Two worker-list reads showed one
+idle worker and one associated with the USB request; the pool was not
+saturated. Three saved Ready-thread stacks consistently reach
+KeFlushQueuedDpcs through affinity setup and interrupt dispatch, called
+from Wdf01000. They cover only 0.3 seconds and do not establish that this
+USB worker caused the separate audio timeout.
+
+See [the detailed evidence](docs/2026-09-11-elision-power-watchdog.md) for
+request identities, the checked saved-context reconstruction and its limits.
+The old ELF/loader and post-failure evidence were archived before supported
+teardown. NVMe and 15,488 MiB free RAM returned without a host reboot.
+
+## Earlier boots
+
+The reserved-access-rights boot (`fe1955ec`, loader MD5
+`476ff7711e5232f748513e40cb83c22b`) ran from about 15:54 to 16:13 UTC.
+It returned from VBoxSup's first timer request but remained in its release
+call, interrupted immediately after restoring CR8 during thread-affinity
+setup. Its stored grant stayed 500,000; the reserved-bit counter stayed
+zero. The final complete process walk still had three entries. Its late
+32.121-second sample had fresh VTL calls +0/+32, handler shares
+70.15%/10.59%, and no VMREAD/VMWRITE failures. Supported teardown returned
+NVMe and 15,479 MiB free RAM. The ELF and freshly read loader are archived
+as `access-rights-deployed.elf` and `access-rights-loader.efi`.
+See [the timer-return evidence](docs/2026-09-11-live-timer-return.md).
+
+The prior cache boot started around **15:19 UTC** with both cache changes:
+loader MD5 `2ac8432cd5f20272a6eeef00564a2844`, verified from a fresh mount.
+It has two CPUs, unchanged build switches and all startup channels answering.
+The corrected five-minute report proves the module base from its complete
+manifest and shows Hyper-V in VMX operation with L2 entries on both CPUs.
+
+At about six minutes there are still three processes, but this boot is making
+fresh VTL calls: CPU 0 +5 and CPU 1 +1,360 in 32.071 seconds. CPU 0 changed
+current threads during a separate validated timer sample, and DPC counts
+advance. No kernel timer-resolution request is active. Do not cycle a
+progressing guest just because the process count has not increased yet.
+
+The same window has 11,076 private clears/s and zero global epoch bumps;
+965 cached fields/s were invalidated by writes during a borrow. VMREAD and
+VMWRITE failure counters did not move. Handler shares are 68.78%/43.94%,
+L1 shares 23.66%/52.18%, L2 shares 7.56%/3.89%. The CPUs are doing different
+work from the previous stalled boot, so these are not an isolated speedup
+measurement or proof of a successful Windows boot.
+
+That prior boot's addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
+base `0xfffff8017fc00000`, CR3 `0x1ae000`. The private-clear counter is at
+ELF offset `0x50f7028`, physical `0x6beff028`; borrow-write invalidations
+are at offset `0x14eaec0`, physical `0x682f2ec0`. Use
+`.rig-deployed-hypervisor.elf`. The observer is the `cache-logon` tmux window.
+Artifacts include `cache-state-5min.out`, `cache-timer-6min.out`,
+`cache-delta-6min.out` and `cache-watcher-after-6min.txt`.
+
+By thirteen minutes this boot has reached VBoxSup's first timer-resolution
+request. Nine valid live unwinds recover the same unreturned call documented
+in [the timer-return evidence](docs/2026-09-11-live-timer-return.md), now with
+device extension `0xffffa30f8beaf1a0` and grant still zero. The ten-minute
+32.106-second window has no fresh CPU 0 VTL calls, 32 on CPU 1, and a 70.08%
+CPU 0 handler share. Global epoch bumps remain zero. The cache changes were
+exercised but did not remove this stall. The boot stopped around 15:53 UTC
+after about 34 minutes, following a final complete three-process walk and
+32.148-second counter window: fresh VTL calls +0/+33, handler shares
+70.07%/10.75%, and grant still zero. Supported teardown returned NVMe and
+15,491 MiB free RAM. The ELF and freshly read loader are archived as
+`cache-deployed.elf` and `cache-loader.efi` in the session directory.
+
+The unchanged baseline loader had MD5 `cb729d76cb6adb055ccbe4776cea0a38`.
+It still had only System, Secure System and Registry at 43 minutes.
+Counter samples showed roughly two hypercalls per second and no new user-mode
+samples. Its power-IRP list was empty. Its 156 emulated watched stores had
+zero instruction-length disagreements, so the fix above is **not a demonstrated
+cause of this baseline stall**. The guest was stopped with the supported script;
+NVMe returned and the host recovered its memory.
+
+The watched-store fix was then deployed and verified from a fresh mount:
+MD5 `12ad606548c29d04763ec5f07c53863b`. A new two-vCPU boot started around
+13:35 UTC on September 11. Channels passed their startup checks, and the
+resident log showed Hyper-V entering its nested guest. This boot was stopped
+with the supported script around 14:21 UTC after a final complete three-process
+walk and a late activity sample. NVMe returned and the host recovered its RAM.
+
+At 24 minutes it still had three processes. A late window measured 2.01
+hypercalls/s with no new CPU 0 VTL calls or user-mode samples. Repeated
+live-register captures and PE unwinds recovered VBoxSup's first call to
+`ExSetTimerResolution`; the driver has not stored the result, while Windows
+has committed the requested interval. See
+[the live timer-return evidence](docs/2026-09-11-live-timer-return.md).
+This narrows the earlier driver-loop account; the reason the timer worker
+does not return remains unresolved.
+
+At about 45 minutes the request's grant field was still zero, and CPU 0 had
+no new VTL calls. The last 31.910-second window measured 70.51% of CPU 0 time
+inside zpp's handler. The old cumulative 41% figure is not a current estimate.
+
+The prior interrupt-shadow fix was deployed with loader MD5
+`afecb8bfd26426c201d6d4dd7fa857cf`, verified from a fresh mount. It started
+around **14:22 UTC**, with two CPUs and unchanged build switches. All 26
+rebuilt host checks and the debug build passed before deployment; the EFI and
+ELF checks also pass. Startup channels answered and Hyper-V entered L2.
+Recheck live state before drawing conclusions: early process-list reads were
+incomplete, and the shadow-clear counter was zero at about one minute.
+
+At 21 minutes this boot still has three processes and 76 loaded modules.
+The shadow-clear counter remains zero through 19 minutes. Live unwinds
+show two storage paths interrupted immediately after lowering IRQL:
+CPU 0 at `KzLowerIrql+0x22`, CPU 1 at `KiSwapThread+0x795` with a successful
+wait result ready to return. VBoxSup has not loaded and no kernel timer-
+resolution request is active. See
+[the storage-return evidence](docs/2026-09-11-live-storage-returns.md).
+Both CPUs made zero fresh VTL calls in a 32.197-second window around
+14 minutes. DPC counts continue to advance. This is a distinct stall
+location, without demonstrated benefit from the shadow fix.
+
+That prior boot's addresses: module `0x66e08000`, singleton `0x682f3000`, Windows
+base `0xfffff801aa000000`, CR3 `0x1ae002`. The new counter's ELF offset is
+`0x50f7020` (physical `0x6beff020`). Its ELF is archived as
+`/tmp/zpp-20260911/interrupt-shadow-deployed.elf`.
+
+Session artifacts are under `/tmp/zpp-20260911/`, including the baseline
+loader, baseline ELF, serial/log captures, counter samples and test output.
+The tmux session is `zpp-rig-20260911`; the earlier `shadow-logon` observer is stopped.
+`/tmp/logon-watch.txt` holds the latest observation. Temporary files and tmux
+sessions are evidence locations, not durable completion claims.
+
+For the next boot, a short early stall is not a terminal result: several previous boots changed substantially between ten and eighteen
+minutes. Before cycling a guest, inspect both its current process list and a
+late counter window. Preserve a progressing guest and measure outstanding
+power requests. Prior runs have died to a power watchdog about 300 seconds
+after arming; a zero count predicts neither a visible login nor survival.
+
+Update before the cache deployment: the interrupt-shadow boot still has
+three processes after about 54 minutes. Its final 32.118-second sample has
+zero fresh VTL calls, handler shares 69.81%/74.18%, and 13,239.7 global
+epoch bumps/s. The process watcher is stopped and the final process walk
+completed. It was stopped with the supported script; NVMe returned and
+the host had 15,476 MiB free. Final evidence is `shadow-processes-final.txt`, `shadow-delta-final.out`
+and `interrupt-shadow-final-watch.txt` under the session artifact directory.
+
+The screen belongs to the passed-through GPU, so QEMU cannot capture it.
+If LogonUI and dwm appear, obtain a contemporaneous screen observation and
+continue checking that the guest survives. Never mark the goal complete from
+those process names alone.
+
+
+## 2026-09-12: GDB captures the outstanding tablet call's power-watchdog crash
+
+At **09:15:18 UTC**, KeBugCheckEx hardware stop records **9f/3**, PDO
+**ffff9d877a11caa0**, triage **fffff804582449f0**, fifth argument/IRP
+**ffff9d8779b047f0**. The capture took24.0ms and has1,640 readable DPC-stack
+bytes. Current process is wermgr2064 because the watchdog interrupted
+that context; this does not make wermgr the failing driver. The sole
+watcher observed paused(shutdown) at09:15:34. All three clients exited.
+The failed IRP is the same tablet request identified at09:13:17.
+
+The watched USB call began09:10:07. After the first dispatcher's actual
+RET/caller stops, **no flush-return breakpoint fired for311.2838s** up to
+bugcheck. The sum of host continue-to-stop intervals inside the flush is
+311.3115s, excluding captured-stop handling. This establishes an
+outstanding enclosing call during the observed interval, not continuous
+residence at one instruction. Seventeen earlier timer calls had complete
+entry/return pairs; two other cycles were explicitly abandoned on
+unrelated returns. The older v2 instrumentation failure is separate.
+
+Fresh final walks preserve **198 modules** and **200 System threads**
+(195 Waiting, three Ready, one Running, one Standby). All raw stacks are
+saved; unsupported saved contexts remain flagged. The IRP has type6,
+size1360, stack count16/location12, and valid CurrentStackLocation.
+PDO/HidUsb FDO identity remains the direct-port tablet instance
+USB\VID_0627&PID_0001\68284-0000:00:05.0-4.
+
+The deployed ELF revalidates vmcs12 offsets185bbe8/185bae8/187bbe8. Final
+resident traffic identifies the current VTL0 CPU1 region as**114f9f000**,
+not the preceding boot's114fa0000. Its flushed RIP is
+**nt+5bf139 KiCheckStall+79**, RSP**ffffc000fc3a8b60**, CR3**1ae002**,
+GS**ffffc000fc314000**. Both CPUs have completed VMXOFF. The remaining
+1,184 bytes of its NMI-stack page plus the actual owner-thread stack
+unwind through machine frames to null:
+
+    KiCheckStall -> freeze/NMI
+    HvlWriteApicCommandRegister -> HalpApicRequestInterrupt
+    HalpInterruptSendIpi -> HalRequestSoftwareInterrupt
+    KiEndInterruptCycleAccumulation -> KiInterruptDispatchNoLockNoEtw
+    KiDpcInterruptBypass -> KiInterruptDispatchNoLockNoEtw
+    KiCheckForThreadDispatch+7f -> KeSetSystemGroupAffinityThread+18e
+    KeGenericProcessorCallback+14e -> KeFlushQueuedDpcs+18f
+    WdfTimerStop -> USB/WDF D0-exit -> HidUsb/HIDCLASS
+    PopIrpWorker -> system-thread startup -> null
+
+This is a **later dispatcher call**, on the affinity path. The one GDB
+watched return at09:10:07 was the priority-change path through
+KiProcessDeferredReadyList/KeSetPriorityThread. v4 only instruments the
+first dispatcher per flush, so it did not catch this later entry/return.
+The next probe should preserve the outer flush return and observe each
+subsequent dispatcher, with explicit thread/RSP pairing.
+
+All current WDF/USB/HidUsb/HIDCLASS images are captured with missing pages
+explicit. All75 requested kernel code/exception ranges are readable;
+72 match the local PE and three code ranges differ. The final unwind
+uses the **actual current bytes**, and still reaches null. No inference
+uses the prior epilogue bytes at those differing ranges.
+
+The actual interrupt object is **ffff9d87744b26c0**, type22/size288,
+connected, vector**d1**, IRQL13, CPU1, service exactly
+**HalpTimerClockInterrupt (nt+30fe30)**, with TrapFrame matching
+ffff8687b181e7e0. A guessed RBX object atffff9d877a2d0000 failed structure
+validation and is explicitly rejected; it is not an interrupt identity.
+Both PRCB.Number values validate. CPU1's CurrentThread is the timer
+owner, with no active DPC and empty DPC queue in the frozen state.
+Clock handling interrupts the bypass/dispatcher path, but this alone
+proves neither duplicate clock injection nor a specific VMM defect.
+
+At09:23:04, a **frozen monitor read (no resume/GDB attach)** completed the
+remaining Winlogon validation: all74 requested ranges match, including
+selected user exception-table entries and winsta event-open/wait code.
+The09:00:37 main-thread stack now has a checked full unwind through
+_WinStationWaitForConnectEx to null; both pool threads also reach null.
+The retained wait block and current object identify **TermSrvReadyEvent**,
+notification event, SignalState0, handle**214h** matching FirstArgument
+and winsta's cached handle. LSM remains Stopped1068/internal4;
+RpcEptMapper remains Running/internal3 with retained1070; RpcSs remains
+Running/error0. BrokerInfrastructure now has internal1053 and is stopped;
+its final status does not supply the uncaptured transition. No login.
+
+Artifacts are all under `/tmp/zpp-20260912/`: final-resident,
+final-usb, final-system-stacks, vmcs12, frozen-cpu, frozen-kernel-validation,
+power-evidence, final-interrupt-state/object, final-winlogon-validation,
+and the GDB probe roots, each prefixed `timer-probe-`. The exact source
+scripts and raw snapshots are retained. The frozen guest has not yet been
+torn down.

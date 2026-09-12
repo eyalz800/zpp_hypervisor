@@ -1,18 +1,9 @@
+#include "zpp/loader.h"
 #include <cstddef>
 #include <cstdint>
 #include <ntddk.h>
 #include <ntstatus.h>
 #include <wdm.h>
-
-extern "C" int
-zpp_load_elf(void * (*allocate_rwx)(std::size_t),
-             std::uintptr_t (*physical_to_virtual)(std::uintptr_t),
-             int (*call_on_cpu)(std::size_t, int (*)(void *), void *),
-             std::size_t (*number_of_cpus)(void),
-             int (*adjust_launch_calling_convention)(
-                 int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
-                 std::size_t,
-                 std::uintptr_t (*)(std::uintptr_t)));
 
 static void * allocate_rwx(std::size_t size)
 {
@@ -29,19 +20,18 @@ static int call_on_cpu(std::size_t cpuid,
                        int (*function)(void *),
                        void * context)
 {
-    // The previous affinity.
+    // Pinning this thread is how the hypervisor is entered on a chosen
+    // processor here: vmxon and vmlaunch act on whichever processor
+    // executes them, so the launch is worthless unless it runs on the one
+    // the caller named. Restored afterwards because the thread belongs to
+    // the operating system, not to this driver.
     KAFFINITY previous{};
-
-    // Set new affinity to only given cpuid.
     previous = KeSetSystemAffinityThreadEx(1ull << cpuid);
 
-    // Call user function.
     int result = function(context);
 
-    // Restore previous affinity.
     KeRevertToUserAffinityThreadEx(previous);
 
-    // Return the result.
     return result;
 }
 
@@ -68,10 +58,15 @@ invoke_physical_to_virtual(std::uintptr_t)
 }
 
 static int __attribute__((naked))
-invoke_entry(int (*)(std::size_t, std::uintptr_t (*)(std::uintptr_t)),
+invoke_entry(int (*)(std::size_t, const zpp_launch_parameters *),
              std::size_t,
-             std::uintptr_t (*)(std::uintptr_t))
+             const zpp_launch_parameters *)
 {
+    // Two arguments now rather than three, because everything else the
+    // hypervisor is handed moved into the structure the second one
+    // points at. That is the point of the structure: this adapter is
+    // hand written assembly in two loaders, and it no longer has to
+    // change when the hypervisor needs to be told something new.
     asm(R"!!(
         .intel_syntax noprefix
         push rdi // Save rdi before use as it is non-volatile.
@@ -92,18 +87,52 @@ extern "C" NTAPI NTSTATUS driver_entry(PDRIVER_OBJECT driver_object,
 {
     driver_object->DriverUnload = [](PDRIVER_OBJECT) {};
 
-    // Load the ELF.
-    auto result = zpp_load_elf(allocate_rwx,
-                               invoke_physical_to_virtual,
-                               call_on_cpu,
-                               number_of_cpus,
-                               invoke_entry);
+    // Everything the platform has to supply. Designated initializers
+    // throughout, so a field added to the structure shows up here as a
+    // name rather than as a shifted position.
+    const zpp_loader_parameters parameters{
+        .allocate_rwx = allocate_rwx,
+        .physical_to_virtual = invoke_physical_to_virtual,
+        .call_on_cpu = call_on_cpu,
+        .number_of_cpus = number_of_cpus,
+        // Not supplied, because nothing here needs it: the hypervisor is
+        // launched on every processor from this loader, all of them
+        // already running under the operating system, so it never has to
+        // start one itself.
+        .allocate_below_one_megabyte = nullptr,
+        .diagnostic_channel = nullptr,
+        .sleep_control_port = 0,
+        .sleep_control_port_secondary = 0,
+        .sleep_control_width = 0,
+        .sleep_facs_physical = 0,
+        // Nor this, for the same reason. A guest's broadcast start-up IPI
+        // names processors this loader has already launched the
+        // hypervisor on, so every one of them is known by the time one
+        // arrives and there is nothing left for a roster to answer.
+        .processor_apic_ids = nullptr,
+        .number_of_processor_apic_ids = 0,
+        // Nor this. There is no graphics output protocol under a running
+        // operating system - it is a boot services protocol and boot
+        // services are long gone - and by this point the display driver
+        // owns the adapter and may have reprogrammed it, so the
+        // firmware's framebuffer would no longer describe the screen even
+        // if it could be found.
+        .framebuffer = {},
+        .adjust_launch_calling_convention = invoke_entry,
+    };
 
-    // If we failed, return an arbitrary failure.
+    auto result = zpp_load_elf(&parameters);
+
+    // Flattened, because a driver entry point's return value has to be an
+    // NTSTATUS and the hypervisor's own error codes are not. The UEFI
+    // loader is the one that prints them unflattened.
     if (result) {
         return STATUS_INTERNAL_ERROR;
     }
 
-    // Success, return a failure so the OS unloads us.
+    // A failure on success, deliberately: the hypervisor is resident in
+    // its own allocation and no longer needs this driver, so failing the
+    // load is how the driver gets unloaded again. The two failures are
+    // distinct codes so that the outcome is still readable from outside.
     return STATUS_INSUFFICIENT_POWER;
 }

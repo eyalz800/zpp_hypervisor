@@ -1,0 +1,11 @@
+[project-build]
+command=cmake --preset debug && cmake --build --preset debug
+cwd=$(VIM_ROOT)
+
+[project-build-release]
+command=cmake --preset release && cmake --build --preset release
+cwd=$(VIM_ROOT)
+
+[project-clean]
+command=cmake --build --preset debug --target clean && cmake --build --preset release --target clean
+cwd=$(VIM_ROOT)
