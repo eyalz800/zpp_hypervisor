@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-v2` owns manager PID **58201** and exactly one GDB
-child (current timer probe PID **58202**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-pnp` owns manager PID **64140** and exactly one GDB
+child (current v3 timer probe PID **64141**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-v2/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-v3/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -116,10 +116,37 @@ probe instruction bytes. The first USB probe started at 07:55:57 and had
 no hits before an explicit handoff. V2 started **07:57:25**: it also tracks
 repeat flushes within a timer-stop and captures the timer owner/flags at
 both flush boundaries. The manager snapshots/hashes the exact probe source.
-As of 07:58:21 it has no hit. Second SMSS PID 816 is present (first seen
-07:54:51); no LogonUI/dwm. The module list is no longer refreshed after
-probe configuration, so 147 is the discovery count, not a later census.
-No C++ change, build, deployment or Windows configuration change was made.
+At **08:14:22**, a 105.9-ms GDB capture of SMSS PID 816's single Waiting
+thread **ffff9d8776c700c0** unwinds through PnpSerializeBoot onto
+PnpSystemDeviceEnumerationComplete (**nt+f8c3a0**). Its saved KSP and
+SwapContext anchor validate. The current PnpSerializeBoot bytes later match
+the PE exactly. By v3 attach **08:18:51** the event's SignalState is 1 and
+its wait list empty; the selected thread's actual wait return was not caught.
+CSRSS PID 288 first appears at **08:19:50**. Through 08:23:12 there are six
+processes, no armed power watchdog and no LogonUI/dwm or verified login.
+
+At **08:15:33**, the preceding USB probe hit USB+15db6, WDF+4341a,
+nt+2bb96b and nt+2bb97f, all CPU 0, System thread **ffff9d87744bc040**.
+Wait=1; timer **ffff9d87777589c0** records that same stop owner, with
++158/+159 both zero. The dispatcher RET has the expected RSP+48h but
+returns to **nt+2bbb54 (KiProcessDeferredReadyList+0xb4)**, through
+KeSetPriorityThread and KeGenericProcessorCallback to KeFlushQueuedDpcs.
+The probe incorrectly required the affinity caller nt+30e82e and detached.
+This is an instrument error, not a guest crash or a proved stalled call.
+No complete timer/flush return was captured; do not pair across the gap.
+The manager restored an indefinite bugcheck guard automatically.
+
+V3 began **08:18:51** after the old manager/guard exited. It follows the
+actual stack-derived dispatcher caller; a mismatched inner frame preserves
+the outer flush return. A hardware PnP wait-return probe also validates the
+selected thread/RSP if reached, and defers during USB cycles to stay within
+three hardware breakpoints. Source SHA-256 is
+`e197275fbb7401caea742c7843fbe98e5fcd80312b9d65a27f0e33cbb8ddd69b`.
+As of 08:23:12 v3 has no hit. SMSS and first USB captures/unwind are in
+`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-v3/`.
+The module list is no longer refreshed after probe configuration, so 147
+is the discovery count, not a later census. No C++ change, build,
+deployment or Windows configuration change was made.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
 Kernel **fffff801e1c00000**, system CR3 **1ae000**,
@@ -151,14 +178,14 @@ Recovered package/context/IRP pointers match the independently saved
 objects. This proves the crash-time dependency, not continuous residence
 in that call for the timeout duration or a specific VMM defect.
 
-Next: probe the USB timer-stop call and its DPC-flush return with hardware
-breakpoints when the matching USB driver loads in the current boot. Keep
+Next: continue the corrected USB timer-stop and DPC-flush return hardware
+probes in the current boot, capturing a complete pair or bugcheck. Keep
 observation alive until a real terminal state or an explicit handoff;
 individual debugger stops and monitor reads remain bounded. Exact files,
 matching symbol identities and limitations are in
 [the USB power note](docs/2026-09-12-gdb-usb-hub-power.md).
 
-Earlier in this boot, an actual paired GDB stop captured one SMSS
+Earlier in that preceding crashed boot, an actual paired GDB stop captured one SMSS
 KeFlushQueuedDpcs call returning to MmPageEntireDriver in 14.9 ms of
 host time between continues/stops. That successful call does not exonerate
 later timer-stop calls. Its unchanged InterruptTime is not zero execution.

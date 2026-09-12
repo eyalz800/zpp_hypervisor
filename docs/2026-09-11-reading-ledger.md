@@ -78,6 +78,9 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/ap-mpinitlib-wakeup.md` (141 lines).
 - `.references/hyperv/hvix64-iommu-gsts-timeout.md` (258 lines).
 - `.references/hyperv/ap-startup-vs-iommu-stall.md` (251 lines).
+- `.references/hyperv/hvix64-reset-path-and-crash-record.md` (247 lines).
+- `.references/hyperv/l0-viommu-lever.md` (198 lines).
+- `.references/hyperv/loader-dmar-strip-design.md` (199 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -85,6 +88,17 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The Hyper-V reset record is useful only after image/state validation.
+  An empty record does not select a unique reset caller: the later crash
+  rendezvous note already documents many paths bypassing HvpBugCheck.
+  A boot's total runtime also does not date entry to a particular timeout.
+- The L0 vIOMMU and loader-strip designs anchor an old tree without current
+  nested VT-d support and claim a successful configuration not established
+  for this run. Their default-on DMAR hiding and reduced VBS scope conflict
+  with the present investigation's unchanged full nested configuration.
+  They are historical alternatives, not deployment instructions.
+
 
 - The GSTS/AP comparison corrects identification of a shared delay helper,
   but still repeats the later-withdrawn 82,494-call premise. Zero GSTS only

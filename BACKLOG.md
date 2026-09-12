@@ -80889,3 +80889,46 @@ in 18.2 ms total host continue-to-stop time, excluding the three captures.
 The sole GDB owner has returned to an indefinite bugcheck guard and will
 hand off to the USB probe after driver validation. Autochk has left the
 process list without a captured exit result; no login is verified.
+
+
+## 2026-09-12: live USB flush reaches a different dispatcher caller
+
+At 08:14:22, GDB captured SMSS PID 816's single Waiting thread
+ffff9d8776c700c0 in PnpSerializeBoot, waiting on nt+f8c3a0,
+PnpSystemDeviceEnumerationComplete. Saved KSP/SwapContext and the kernel
+unwind validate; stop through detach was 105.9 ms. At v3 attach 08:18:51,
+that event is signaled with an empty wait list and the full PnpSerializeBoot
+code range matches the PE. No actual return for the selected wait was
+observed. CSRSS PID 288 first appears at 08:19:50; no verified login.
+
+The first real USB sequence at 08:15:33 hit USB+15db6 (Wait=1), WDF+4341a,
+nt+2bb96b and nt+2bb97f. All are CPU 0/System thread ffff9d87744bc040.
+Timer ffff9d87777589c0 names that stop owner; bytes +158/+159 are zero.
+The first three stops took 35.8/27.9/26.7 ms through checkpoint; the final
+capture took 22.4 ms before the probe assertion. Dispatcher RSP+48h
+matches, but its actual return address is nt+2bbb54,
+KiProcessDeferredReadyList+0xb4. Both dispatcher stacks unwind through
+KeSetPriorityThread -> KeGenericProcessorCallback -> KeFlushQueuedDpcs ->
+WDF+4341f, stopping explicitly at missing current driver metadata.
+The fixed-affinity-caller assertion was wrong. The probe detached and its
+manager automatically restored an indefinite bugcheck guard. This is no
+guest failure, complete timer/flush return, or proof of continuous delay.
+
+The old manager 62898/fallback guard 63247 exited before v3 attached at
+08:18:51. An earlier handoff attempt first rejected stale child PID 62913
+without mutating anything. Current tmux timer-probe-pnp has manager 64140,
+GDB 64141, under /tmp/zpp-20260912/timer-probe-gdb-v3/. The corrected probe
+follows the actual dispatcher return address; unpaired inner dispatcher
+frames preserve the outer flush probe. It also watches the captured PnP
+wait's resume address by exact thread/RSP while no USB cycle is active.
+There are at most three hardware breakpoints, no guest byte/register writes,
+software breakpoints, stepping or inferior calls. The watcher remains PID
+49122 throughout. No pairing is claimed across the debugger handoff gap.
+
+V3 source snapshot SHA-256:
+e197275fbb7401caea742c7843fbe98e5fcd80312b9d65a27f0e33cbb8ddd69b.
+The earlier SMSS and USB captures, exact prior source and partial kernel
+unwind are in timer-probe-gdb-smss/. As of 08:23:12 v3 has no hit; process
+count six, no armed power watchdog, no LogonUI/dwm. The unchanged 07:22:39
+boot continues with both observers indefinite. No build/deploy or Windows
+configuration change was made.
