@@ -80856,3 +80856,26 @@ The observer originally exited during GDB's brief attach pause. Distinguish
 Applied to the temporary startup observer and rig-watch-logon.sh; shell
 syntax passes and the restarted startup reader completes its walks.
 This is an observation fix, not a guest reset, crash or binary change.
+
+
+## 2026-09-12: direct-port tablet failure links WDF timer stop to busy worker
+
+The p2=8 run also ended in 0x9F/3; the failed PDO is now the tablet at
+root port 2. The user confirms DRIVER POWER STATE FAILURE on screen.
+The complete final process list includes LogonUI/dwm, with no verified
+login. Fixed observer/guard lifetimes expired before this crash, so its
+exact time and KeBugCheckEx entry were missed. Keep future observation
+alive until terminal state or explicit handoff.
+
+Captured all 177 System raw stacks, current driver images, device contexts,
+and the tablet's FxPkgPnp lock. The lock owner and timer-stop owner both
+name the busy power worker holding the failed IRP; the other power worker
+is idle. Recovering the flushed VTL0 software VMCS12's NMI freeze stack
+provides a valid interrupted context for the Running owner, whose saved
+KSP was excluded. The full unwind reaches KeFlushQueuedDpcs via
+WdfTimerStop, HUBPDO_EvtDeviceD0Exit, WDF power dispatch, HidUsb/HIDCLASS,
+PopIrpWorker and null. IRP/package/context agree across independent reads.
+This identifies the next hardware entry/return probe, not a proved VMM
+fix or continuous stall duration. Do not remove another USB device merely
+to chase the next timeout. Exact evidence, limitations and coordinates:
+docs/2026-09-12-gdb-usb-hub-power.md and WINDOWS-BOOT-STATUS.md.

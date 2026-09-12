@@ -68,40 +68,55 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-The **direct-port USB experiment is running**, begun **21:12:41 UTC** on
-September 11. The launcher has only the added `p2=8` property. Its old
-interpreter exited before editing; a remote backup and exact readback are
-preserved. Supported teardown returned NVMe and over 15 GB free RAM.
-GPT, NTFS and ESP signatures matched; ESP remains at its recorded
-**33,423,360** sectors. A fresh read-only mount returned the unchanged
-loader MD5 **d564ca8f8057eabdb36a09db2c1e34d5**, byte-identical to the
-prior archived loader. Limine remains present and untouched.
+The **direct-port USB experiment crashed with 0x9F/3**. It began at
+21:12:41 UTC September 11 using unchanged deployed **6adda123**, loader
+MD5 **d564ca8f8057eabdb36a09db2c1e34d5**, two CPUs and the full manifest.
+Only xHCI `p2=8` changed: all five USB devices occupy direct root ports.
+Avoiding the external hub did not eliminate the power failure. The user
+now confirms **“driver power state failure”** on the physical screen.
+No sign-in screen or desktop has been verified.
 
-All startup channels answered; the real guest's USB topology is now five
-direct root ports, without an external hub. Module base **66d47000**;
-new Windows base **fffff801e1c00000**, system CR3 **1ae000**. Kernel PE
-identity and complete three-process walks validate these coordinates.
-SMSS PID 544 appeared by 21:24:07 UTC (11m26s after launch). No armed
-power request or LogonUI/dwm is observed through 21:24:47 UTC.
-**GDB PID 81451** guards KeBugCheckEx at **fffff801e20f90b0**. The sole
-monitor owner is `hub-startup-watch` (Python PID 78437); coordinator
-`hub-scm-coordinator` (see the current hub-scm-coordinator tmux pane for its PID) will hand off to direct SCM breakpoints
-when services.exe validates. Artifacts/state are `hub-direct-*` under
-`/tmp/zpp-20260911/`; coordinator state is
-`hub-direct-scm-coordinator.json`. Do not replace the GDB client without
-first updating/stopping its coordinator.
+QEMU remains **paused (shutdown)**; preserve this guest until its remaining
+evidence is archived. Kernel **fffff801e1c00000**, system CR3 **1ae000**,
+module **66d47000**, singleton **682f3000** are validated for this run.
+Final complete walks contain 34 processes, including LogonUI PID 1440 and
+dwm PID 1452, and 177 System threads. All raw System stacks are saved.
+The crash time was not captured: the startup watcher exhausted 360 polls
+at 23:38:35, and the later GDB guard expired at 00:34:34 September 12.
+All those clients exited. The final state was read around 06:57 UTC.
+This crash is a postmortem finding, not a direct KeBugCheckEx breakpoint hit.
 
-A short Phase1 probe identified a Running thread, excluded its saved
-stack, then rejected a host context RSP and later changed ETHREAD identity.
-No Phase1 Windows unwind was obtained. The above guard replaces the
-interrupted old guard 78231; the coordinator was restarted with 81451.
+The failed IRP **ffff9784b5489010** names PDO **ffff9784badac060**, service
+HidUsb, instance `USB\VID_0627&PID_0001\28754-0000:00:05.0-2`: the tablet
+at root port 2. One power worker, **ffff9784b54ef040**, owns this IRP;
+the other is idle. A WDF power worker waits on the tablet's FxPkgPnp lock
+**ffff9784baaa6a38**. Its recorded owner is that same busy power worker.
+The WDF timer object's stop owner agrees too.
 
-The first observer attempt mistook the brief GDB attach pause for a guest
-shutdown and exited. Its error is preserved separately. The replacement
-observer retries debugger/manual pauses and exits on paused (shutdown);
-its restarted process walks succeed. `rig-watch-logon.sh` now makes the
-same distinction, with shell syntax checked. This changes observation,
-not the guest binary or experiment configuration.
+The owner's Running saved KSP was excluded. Instead, the flushed VTL0
+software VMCS12 region **114fa0000** gives RIP **nt+5bf139** and RSP
+**ffff858055da8b60**, with CR3 1ae002 and CPU 1's Windows GS. The checked
+unwind follows the NMI freeze path onto the busy thread's actual stack:
+HvlEndSystemInterrupt -> KiDpcInterrupt -> KiCheckForThreadDispatch ->
+KeSetSystemGroupAffinityThread -> KeGenericProcessorCallback ->
+KeFlushQueuedDpcs -> **Wdf!imp_WdfTimerStop+19f** ->
+**UsbHub3!HUBPDO_EvtDeviceD0Exit+34b** -> WDF power dispatch ->
+HidUsb/HIDCLASS -> PopIrpWorker -> system-thread startup -> null.
+Recovered package/context/IRP pointers match the independently saved
+objects. This proves the crash-time dependency, not continuous residence
+in that call for the timeout duration or a specific VMM defect.
+
+Next: preserve/archive this evidence and probe the USB timer-stop call
+and its DPC-flush return with hardware breakpoints on a fresh boot. Keep
+observation alive until a real terminal state or an explicit handoff;
+individual debugger stops and monitor reads remain bounded. Exact files,
+matching symbol identities and limitations are in
+[the USB power note](docs/2026-09-12-gdb-usb-hub-power.md).
+
+Earlier in this boot, an actual paired GDB stop captured one SMSS
+KeFlushQueuedDpcs call returning to MmPageEntireDriver in 14.9 ms of
+host time between continues/stops. That successful call does not exonerate
+later timer-stop calls. Its unchanged InterruptTime is not zero execution.
 
 The preceding same-binary crash is recorded below.
 
@@ -133,7 +148,7 @@ exact deployed ELF and an 800-file SHA-256 manifest are preserved under
 `/tmp/zpp-20260911/rpc-gdb*`. CPUID census cross-check failures remain
 explicit and those census counts are not used.
 
-The running single-variable experiment changes the launcher's controller from
+The now-completed single-variable experiment changed the launcher's controller from
 `qemu-xhci,id=xhci` to `qemu-xhci,id=xhci,p2=8`, retaining all five devices
 and input objects, two CPUs, full manifest and the same loader. An isolated
 128-MiB stopped TCG preflight with the rig's QEMU 11.0.3 confirmed five

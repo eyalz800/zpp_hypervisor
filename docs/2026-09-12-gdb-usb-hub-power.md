@@ -147,3 +147,100 @@ The complete process walk first observed smss PID 544 at 21:24:07, about
 This is a progress comparison from one run, not causal proof. All fresh
 probe artifacts are hub-direct-phase1*, and the current GDB guard was
 restored afterwards. No armed power request was observed through 21:24.
+
+
+## Direct ports still fail: tablet timer stop and its lock owner
+
+The final stopped state, recovered around **06:57 UTC September 12**, is
+0x9F/3 with PDO **ffff9784badac060**, triage **fffff801746b49f0**, and IRP
+**ffff9784b5489010**. The user subsequently confirmed the physical display
+says **“driver power state failure.”** Neither this nor the complete
+34-process list (LogonUI 1440, dwm 1452) verifies a prior sign-in screen.
+The startup observer ended at its 360-poll bound at 23:38:35; the GDB
+guard later expired at 00:34:34. There is no direct breakpoint capture or
+known exact crash time for this run. Future observation must survive long
+boots rather than silently ending at two or three hours.
+
+The devnode instance is
+`USB\VID_0627&PID_0001\28754-0000:00:05.0-2`, service HidUsb, Started.
+The actual topology identifies root port 2 as the QEMU tablet. The PDO
+uses USBHUB3 and its attached FDO **ffff9784bae3d0a0** uses HidUsb. IRP
+stack count/location are 16/12, current completion UsbHub3+1c910, context
+**ffff9784b8479110**. IoStatus is c00000bb, Cancel/PendingReturned zero.
+An installed completion pointer does not establish that it ran.
+
+The final power-worker list has one busy worker **ffff9784b54ef040**, with
+this exact IRP/FDO, and one idle worker. Of 177 System threads, 169 are
+Waiting, seven Ready and one Running. All 177 raw stacks are preserved;
+176 saved Ready/Waiting contexts are eligible for the checked unwinder.
+With current WDF/UsbHub3/HidUsb/HIDCLASS and this boot's Msfs metadata,
+93 reach null and 83 explicitly stop at other missing module metadata.
+
+Thread **ffff9784b55d6040** waits in WDF's
+`FxPkgPnp::_PowerProcessEventInner+45`, holding package address
+**ffff9784baaa6830** in RDI, lock **ffff9784baaa6a38 = package+208** in RBX,
+and the failed PDO in R15. The lock's SignalState is zero and its owner
+field at +20 is **ffff9784b54ef040**. The work item at **ffff9784babad640**
+also records this busy power worker as WorkOnBehalfThread; that latter
+field alone is not ownership evidence. Here the lock itself establishes
+ownership. The independent timer object **ffff9784b8796810**, recovered
+from the owner unwind, also records that thread in its stop-owner field
+at +150, whose store is visible in current WDF code.
+
+The Running thread has no valid saved KSP or KTHREAD TrapFrame pointer,
+and both KPRCB ContextFrame records are zero. Its stack was instead
+recovered from the software VMCS12 region **114fa0000**. The exact deployed
+ELF supplies the VMCS12 layout; this is not a guessed hardware VMCS
+layout. The resident region ledger's last successful flush agrees with
+its RIP **fffff801e21bf139 = KiCheckStall+79**. RSP is
+**ffff858055da8b60**, CR3 **1ae002**, GS **ffff858055d14000** (CPU 1),
+CS 10. VMXOFF left current-VMCS pointers invalid; the flushed region and
+freeze stack are the preserved context. A first read hit the NMI stack's
+next unmapped page; the bounded 1,184-byte tail was then captured.
+
+The unwind reaches KiFreezeTargetExecution, KiCheckForFreezeExecution,
+KiProcessNMI, KxNmiInterrupt and KiNmiInterruptStart. The actual machine
+frame switches to **ffffeb033681e950** inside the preserved owner's stack,
+interrupted at HvlEndSystemInterrupt+1e. It continues through
+HalPerformEndOfInterrupt, KiDpcInterrupt, KiCheckForThreadDispatch+7f,
+KeSetSystemGroupAffinityThread+18e, KeGenericProcessorCallback+14e,
+KeFlushQueuedDpcs+18f, **imp_WdfTimerStop+19f**, and
+**HUBPDO_EvtDeviceD0Exit+34b**, then the tablet's WDF power state machine,
+HidUsb/HIDCLASS, PopIrpWorker and startup to null. The reconstructed IRP,
+package and USB context match the independent captures. No volatile
+register is claimed preserved across ordinary calls.
+
+Current WDF and UsbHub3 RSDS GUID/age match the already validated PDBs:
+**c7872216-06ea-52af-662a-b77697c12a13/1** and
+**22b2bc36-58b4-f6e1-69d3-bfa9bf10447c/1**. Current NMI, DPC and dispatch
+code anchors match the reference NT bytes exactly. The larger freeze
+code range has runtime patches after KiCheckStall; its own bytes and the
+relevant unwind prologues are retained, and this range is not described
+as an exact whole-range match.
+
+This is a complete crash-time dependency chain. It does not prove a
+300-second uninterrupted stall, a lost USB callback, or a specific zpp
+fix. A fresh hardware probe can stop at **UsbHub3+15db6** before the timer
+stop, then **Wdf+4341a** before KeFlushQueuedDpcs and **Wdf+4341f** after
+it. The final USB callback return is **UsbHub3+15dbb**. Resolve module
+bases again after boot; do not reuse absolute addresses.
+
+One earlier SMSS call to KeFlushQueuedDpcs did return: the paired hardware
+stops at 21:34:05 captured entry in 38.9 ms and return in 29.8 ms, with
+14.9 ms of host time between continue and stop. The caller was
+MmPageEntireDriver+4d, then this boot's Msfs+ae14. Unchanged shared
+InterruptTime does not establish zero execution or a stopped clock.
+That completed call cannot establish that all later flush calls return.
+
+New artifacts under `/tmp/zpp-20260911/`: `hub-direct-final-usb/`,
+`hub-direct-final-processes/`, `hub-direct-final-system-stacks/`,
+`hub-direct-final-system-unwind.txt`, `hub-direct-final-power-workers.txt`,
+`hub-direct-power-evidence/`, `hub-direct-lock-owner/`,
+`hub-direct-vmcs12/`, `hub-direct-frozen-cpu-page/`,
+`hub-direct-unwind-anchors/`, `hub-direct-flush-dpcs/`, `hub-direct-msfs/`,
+final serial/NVRAM and exact deployed ELF. The first resident report used
+an invalid --l2 40 CPU selector; its CPU-40 appendix is excluded. The
+replacement `hub-direct-final-resident-validated-selector.txt` uses CPU 1.
+Generic resident stack scans remain heuristic and are not the checked
+unwind above. Its broad region-path warning and compiled-out census
+zeros do not establish defects.
