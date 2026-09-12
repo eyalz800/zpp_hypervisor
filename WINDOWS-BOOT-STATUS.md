@@ -68,7 +68,45 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Latest state: an unchanged new boot began September12 09:29:15 UTC.**
+**Latest state: the optimized debug comparison began September12 10:50:25
+UTC and is running.** Only hypervisor C++ optimization changes to-g -O2;
+source and the full nesting manifest match6adda123. Loader MD5
+**53fc99e459abfc6885b2f9c3aa448ae8**,4,887,040 bytes, was verified through
+a fresh ESP mount. The exact candidate ELF is now
+`.rig-deployed-hypervisor.elf`; do not use the normal debug ELF for offsets.
+All27 rebuilt host tests and artifact checks passed before deployment.
+
+Current zpp module **66d61000**, singleton **682f3000**, independently
+resolved from this serial and candidate DWARF. The unchanged singleton
+address is a coincidence of the different module base/offset. Current NT
+base **fffff801dee00000**, timestamp51a135d9,size1450000, PE-validated
+through System CR3 **1ae000**. Complete process walks initially show
+System4, Secure System68 and Registry112. SMSS640 appears10:53:25, three
+minutes after launch; this one earlier milestone does not establish a
+completed boot or isolate optimization from run-to-run variation. Two CPUs
+and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
+
+Sole monitor watcher **12724**, GDB manager **12722**, initial crash guard
+**12725** began10:52:01 in tmux `zpp-rig-20260911:optimized-watch` /
+`optimized-gdb`. Confirm subsequent ownership from
+`/tmp/zpp-20260912-optimized-run/gdb/manager.json`. The manager will use the
+hardware-verified repeated dispatcher probe after current USB/WDF discovery,
+then add SCM tracing after services discovery. The prior boot's one-shot
+hypercall-page address is not reused. No successful boot is claimed yet.
+
+The preceding running baseline was deliberately ended10:49:07 after the
+repeated-return instrument was verified, with six processes, no active
+paired USB call and no new crash. This is a censored run, not another9F.
+All readers exited before supported teardown; QEMU20932 exited, NVMe
+returned and15,481 MB RAM was free. Fresh pre/post-deploy reads match the
+launcher, Limine, GPT, ESP BPB and NTFS anchors byte-for-byte. Baseline
+archive `controlled-end-sha256.json` covers1,579 files/12,464,183 bytes.
+New deployment, preflight, launch and discovery artifacts are under
+`/tmp/zpp-20260912-optimized-run/`.
+
+## Ended baseline comparison, September12 09:29–10:49
+
+An unchanged boot began September12 09:29:15 UTC.
 The previous 07:22:39 guest crashed at09:15:18 with a GDB-captured tablet
 power timeout, was archived, then torn down through the supported script.
 NVMe returned, 15,474 MB RAM was free, and a fresh read-only mount validated
@@ -87,9 +125,9 @@ and122 modules through10:14. USB/WDF are discovered10:15:18 in a complete
 matching current PE sizes/stamps. V5 starts10:15:20. No verified
 sign-in/desktop.
 
-Exactly one monitor watcher **89509** and current GDB manager **9429**
+At its end, monitor watcher **89509** and GDB manager **9429**
 run in `zpp-rig-20260911:repeat-dispatch-watch` / `repeat-dispatch-vtl-ret`.
-Current v7 GDB is **9431**; confirm later owners from
+The final v7 GDB was **9431**; historical ownership is in
 `gdb-with-vtl-ret/manager.json`. Earlier1329/2398,7786/7788 and8502/8504
 exited before replacement. v7 retains repeated dispatcher tracing and has
 completed its one-shot hypercall RET/caller observation. The manager adds
@@ -125,14 +163,14 @@ user metadata ranges are unmapped, so the complete user unwind remains a
 candidate. No actual wait return or continuous wait duration was captured.
 Artifacts: `smss-676/`, `smss-unwind-validation/` under the current boot root.
 
-An **optimized debug candidate is prepared, not deployed**. Same source as
+An optimized debug candidate was prepared during this baseline. Same source as
 6adda123 and byte-identical full switch manifest, with only hypervisor
 C++ compilation changed from default-O0 to **-g -O2**. It preserves usable
 DWARF. Both artifact checks pass and all27 rebuilt host tests pass with
 -O2 (including228 Python checks). Loader MD5**53fc99e459abfc6885b2f9c3aa448ae8**,
 4,887,040 bytes; exact embedded ELF verified. Details and reproduction:
 [optimized candidate](docs/2026-09-12-optimized-debug-candidate.md).
-The current unchanged repeated-dispatch boot remains the observation run.
+It is deployed in the new comparison described above.
 
 At10:34:41 a57.996-ms GDB capture identifies active PnpDeviceActionThread
 **ffffdb0a8fb85040**, current on CPU1. Its Running stack is excluded because
@@ -140,10 +178,12 @@ CPU1's captured registers are in zpp. Both SMSS552/676 wait on the same
 unsignaled enumeration-complete event. By10:40:30 that event is signaled1
 with an empty waiter list. At10:40:31 GDB follows an actual hypercall-page
 RET into **HvlSwitchToVsmVtl1+ab**, same SMSS676 thread and RSP+8,
-10.893-ms continue-to-stop. Its checked kernel prefix runs through secure
-image fixups and system-image loading, then stops at win32k.sys where
-current unwind metadata has not been captured. CSRSS928 appears10:40:55;
-six processes through10:43, no verified login.
+10.893-ms continue-to-stop. Later same-boot win32k capture completes its
+checked kernel chain through secure image fixups, system-image loading,
+win32k, ExpInitializeSessionDriver and NtSetSystemInformation to the user
+transition. All44 requested NT ranges match; no user stack was captured.
+CSRSS928 appears10:40:55; six processes through the deliberate10:49 end,
+no verified login.
 
 Repeated-dispatch coverage now has actual hardware hits: two complete USB
 timer-stop calls10:40:41–43, each with six matched dispatcher RET/caller

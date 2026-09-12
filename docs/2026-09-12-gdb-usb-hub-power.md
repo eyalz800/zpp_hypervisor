@@ -854,3 +854,18 @@ vtl-call-location, return-analysis, return-validation and execution-cost.
 `returns-completed-evidence/sha256.json` covers325 files/1,115,666 bytes,
 including exact sources, ended probes, validation and an immutable copy of
 v7's first46 events. Ongoing watcher/probe files are not claimed immutable.
+
+The later same-boot win32k.sys capture completes the10:40:31 kernel unwind.
+Current image sizec7000/timestamp760f2f97; twelve final pages are unmapped,
+and none is consumed by this chain. Five win32k frames lead back through
+ExpInitializeSessionDriver and NtSetSystemInformation, an internal syscall
+linkage, then the captured user transition. All44 requested NT code/unwind/
+pdata ranges match; the user stack was not captured. Artifacts are
+win32k-current, return-win32k-analysis and return-win32k-validation.
+
+At10:49:07 the running baseline was deliberately ended with six processes,
+no active paired call and no captured crash. Readers89509/9429/9431 all
+exited first. Its full completed SHA-256 ledger covers1,579 files/12,464,183
+bytes. The optimized debug comparison is now running; see the candidate
+note and WINDOWS-BOOT-STATUS.md. Ending this run to test execution cost
+censors its outcome; it is neither a new power failure nor a successful boot.

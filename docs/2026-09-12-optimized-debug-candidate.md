@@ -1,7 +1,8 @@
 # Optimized debug candidate for a controlled boot comparison
 
-Prepared September12; **not deployed**. The current rig still runs6adda123,
-loaderd564ca8f8057eabdb36a09db2c1e34d5, in the09:29:15 repeated-dispatch run.
+Prepared September12; **deployed for the10:50:25 comparison boot**.
+The preceding unchanged6adda123 baseline was deliberately ended10:49:07
+after verifying the repeated dispatcher probe; it had not crashed again.
 No successful sign-in or measured performance improvement is claimed.
 
 The observed USB flush stayed outstanding until a power watchdog, and SCM
@@ -14,8 +15,8 @@ and debug instrumentation while varying compiler optimization alone.
 ## Build and artifact validation
 
 Source HEAD8c38d09f has no changes versus6adda123 in hypervisor, shared
-loader, UEFI loader, CMake or toolchain sources. The deployed ELF equals
-the current normal debug output byte-for-byte. Its29 C++ translation units
+loader, UEFI loader, CMake or toolchain sources. The baseline deployed ELF
+equaled the normal debug output byte-for-byte. Its29 C++ translation units
 have no optimization option (Clang default-O0). Candidate commands retain
 all original defines and compile these same29 units with **-g -O2**.
 The UEFI loader keeps its normal debug flags and embeds the new ELF.
@@ -41,8 +42,8 @@ VMCS12/current-region/running-L2 member offsets185bbe8/185bae8/187bbe8.
 Read the module base from the candidate's own serial if it is deployed.
 
 Candidate copies are at `out/optimized-20260912/x86_64/` and
-`/tmp/zpp-20260912-optimized/out/`. These have not replaced either deployed
-artifact. The candidate's larger on-disk size includes debug information;
+`/tmp/zpp-20260912-optimized/out/`. Deployment now uses these artifacts,
+including the matching `.rig-deployed-hypervisor.elf`. The candidate's larger on-disk size includes debug information;
 llvm-size text totals are530,819 bytes versus638,082 for the baseline.
 Those sizes do not measure execution speed.
 
@@ -57,8 +58,8 @@ exact contents remain in `host-test-presets.json`; result and full logs are
 The suite's own ELF entry checks the normal debug output; the candidate ELF
 was independently graded using `check-invariants.sh optimized-20260912`.
 
-Keep the current repeated-dispatch observation until its relevant outcome
-is captured. A later comparison should use this candidate with the same
+The baseline observation ended after repeated dispatcher coverage was
+verified on hardware. The new comparison uses this candidate with the same
 two-CPU launcher, direct USB topology, full nesting and Windows installation.
 Use the supported teardown/deploy/boot procedures, verify disk/loader anchors
 and rediscover every guest address. Compare measured progress and actual
@@ -78,3 +79,29 @@ include halt time. The observed TSC rate is about1.992GHz on both CPUs.
 This is a PnP-stage baseline, not a measurement of the earlier USB stall or
 an optimized-build result. Raw replies, serial, offline GDB layout and
 calculation are in `/tmp/zpp-20260912-repeat-dispatch/execution-cost/`.
+
+## Deployment and first comparison milestones
+
+The baseline ended deliberately10:49:07 with six processes and no active
+paired USB call. It had verified the repeated dispatcher instrument through
+complete calls and supplied a defined cost window; the later crash was not
+reproduced before ending it. Supported teardown removed QEMU20932, returned
+NVMe and left15,481 MB RAM free. Fresh pre/post-deployment mounts preserve
+Limine, launcher, GPT, ESP BPB and NTFS anchors byte-for-byte. The supported
+deployment script verifies the candidate's exact hash and full manifest,
+then archives its ELF for all subsequent offsets.
+
+The new two-CPU boot starts10:50:25, all channels answering. Serial gives
+module66d61000; candidate singleton offset1592000 gives682f3000. The module
+base member independently agrees. NTfffff801dee00000 validates its PE
+size1450000/timestamp51a135d9 through System CR31ae000; complete walks agree
+with native DTB1ae002. The same five USB devices occupy direct ports1–5.
+SMSS640 appears10:53:25 (three minutes); the preceding baseline's first SMSS
+appeared21m07s after launch, but one milestone does not control all timing
+variation or establish successful boot.
+
+Sole watcher12724, manager12722, initial GDB guard12725. Artifacts and exact
+preflight/launch scripts are under `/tmp/zpp-20260912-optimized-run/`.
+USB/WDF addresses will be discovered afresh before arming the now-verified
+repeated dispatcher probe, and SCM tracing follows services discovery.
+No Windows driver, service, registry, BCD or power-policy change.

@@ -81364,3 +81364,25 @@ recorded in the optimized candidate note; the candidate remains undeployed.
 All85 direct hyperv reference Markdown files have been read, with later
 corrections retained in the reading ledger. The entire recursive corpus
 and full80,000-line backlog are not claimed read. No C++/Windows change.
+
+## 2026-09-12: optimized debug comparison deployed
+
+End the unchanged baseline deliberately10:49:07 after successful repeated
+USB dispatcher instrumentation and the defined42.2-second cost window.
+Six processes and no active paired call/crash at its end; do not label this
+censored observation a new9F. All readers exit before supported teardown;
+QEMU20932 is gone, NVMe returns,15,481 MB free. A1,579-file SHA-256 ledger
+preserves12,464,183 bytes. The later checked win32k kernel unwind now reaches
+the user transition through ExpInitializeSessionDriver/NtSetSystemInformation;
+its44 requested NT ranges all match. No user stack completion claim.
+
+Deploy the already-tested same-source/full-manifest -g -O2 candidate using
+scripts/deploy-to-rig.sh. Exact loader MD553fc99e459abfc6885b2f9c3aa448ae8
+and matching ELF verified. Fresh mount checks preserve launcher, Limine and
+disk anchors. New boot10:50:25, two CPUs/same direct USB topology, module
+66d61000, singleton682f3000, NTfffff801dee00000, CR31ae000 PE/list validated.
+SMSS640 first appears10:53:25. Earlier SMSS appearance is a comparison
+milestone, not a completed boot or proof of a specific timeout cause.
+Current watcher12724, manager12722, guard12725; current owners in
+/tmp/zpp-20260912-optimized-run/gdb/manager.json. Source and Windows settings
+unchanged; all27 rebuilt host tests/artifact checks passed before deployment.
