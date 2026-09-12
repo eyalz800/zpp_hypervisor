@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-scm` owns manager PID **70399** and exactly one GDB
-child (current v4 combined probe PID **70404**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-scm-checked` owns manager PID **73432** and exactly one GDB
+child (current v4 combined probe PID **73443**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-v4/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-scm-checked/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -214,6 +214,62 @@ V4 source SHA-256:
 `6dbafd6f841dcb4fc827a6898d8d1527c4a6b67a6f55c2b627dd4603e307e5a3`.
 Artifacts are `timer-probe-gdb-v4/`. Sixteen processes/no armed power IRP
 through 08:40:45; no login verified. No binary or guest configuration change.
+
+
+At **08:42:08**, real SCM hardware stops captured **RpcEptMapper cleanup
+requested error 1070**, then **RpcSs, BrokerInfrastructure, LSM and
+SystemEventsBroker error 1068** on services TID 764. All five adjacent
+instruction stops match. RpcEptMapper's live SERVICE_STATUS already reads
+**Running (4)**, checkpoint/wait hint 0, start_state 3, start_error 0 at
+cleanup entry. Its caller's saved status is **StartPending (2)**,
+checkpoint **1**, wait hint **61000**; initial checkpoint 1, ESI/R15=10,
+R14=6100. The resettable delay accumulator is 6100, not total elapsed time.
+
+The validated partial unwind identifies **ScLookForHungServices+209** ->
+ScStartMarkedServicesInServiceSet -> ScStartServicesInStartList ->
+ScStartEarlySetOfServices -> ScAutoStartServices -> SvcctrlMain -> wmain,
+then explicitly stops at unprovided external-user metadata. Current code
+confirms the final pending/checkpoint test, then virtual
+**CWin32ServiceRecord::ReportServiceHungInternal**, then unconditional
+CleanupStartFailure(1070). The virtual target rechecks current state and
+can return when it is no longer pending; the caller still requests cleanup.
+This supports a late-start/status-check race, not a proved VMM cause.
+No actual polling-loop entry or each Sleep return was observed, so this
+is not a measured 61-second duration. All relevant raw status/registers,
+stack and checked unwind are in `timer-probe-gdb-v4/timer-stop/`.
+
+At **08:46:15**, a 492.3-ms GDB read validates RPCSS host **PID1224**
+(`svchost.exe -k RPCSS -p`), all 22 loaded modules and nine threads.
+Eight Ready/Waiting stacks and user contexts are captured; ninth raw
+thread only, explicitly skipped by that capture bound. RpcEptMapper now
+has start_error **1070** while still Running/start_state3; RpcSs is Running
+with start_error0. LSM/BrokerInfrastructure/SystemEventsBroker remain
+Stopped with 1068. This read is four minutes after cleanup, not its instant.
+Artifacts are `timer-probe-gdb-rpc/validation/`; full user unwinds remain
+pending. Later cleanup captures include SENS and igfxCUIService2.0.0.0
+with 1068 at 08:47:52.
+
+The first SCM byte-validation capture at **08:50:47** detached after
+12.2 ms when its .pdata page was unmapped; it captured no requested code
+ranges and proves no code mismatch. The corrected **08:52:16** read took
+52.7 ms. Current PE/RSDS matches services GUID
+**07f96885-e22b-ad8b-e182-93afc8ad8a94/1**; all 26 readable requested ranges
+match, including the caller and hung-report bodies and virtual target.
+Twelve exception-data ranges and .pdata are paged out, so the checked
+unwind explicitly uses the matched Microsoft server PE for those. No
+page was faulted in or guest state changed. Exact captures and page errors
+are in `timer-probe-gdb-scm-checked/validation/`.
+
+Current manager **73432**, GDB **73443**, tmux **timer-probe-scm-checked**,
+uses unchanged v4 source/hash and indefinite guard. Each old manager/child
+exited before the next attached (71742/71757, then 72996/73007); the monitor
+watcher remains 49122. All intermediate probe roots remain archived. The
+v4 first run had one complete USB pair and one explicitly abandoned pair
+on a different thread's flush return. The RPC-capture run then recorded
+four more complete pairs (flush host intervals 65.9/47.5/46.3/70.4 ms),
+and the first SCM-validation run recorded five more. These add to the two
+08:34 pairs and do not exclude a later failure. Current boot reached
+**33 processes at 08:52:19**, no armed power IRP, no verified login.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
 Kernel **fffff801e1c00000**, system CR3 **1ae000**,
