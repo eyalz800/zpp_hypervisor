@@ -81569,3 +81569,28 @@ workers are idle, so the proposed State watchpoint is not armed. Completion
 was not traced and debugger causality is unproven. Ownership returns to the
 audio probe. Completed evidence is hashed outside Git; current owners and
 measurement limits are in status.
+
+## 2026-09-12: census-off boot reproduces the audio power crash
+
+GDB catches 0x9F/3 at 14:43:09 after the 13:37:30 boot. The exact blocked
+audio IRP's worker is Ready with WaitStatus 0 at bugcheck entry, removing
+the earlier post-crash-only timing ambiguity. All 25 saved frames validate
+against current code/metadata through WDF, Intel/Realtek audio, portcls and
+PopIrpWorker. The actual watchdog interval is 300 s in this run, versus
+120 s in the earlier crash. The inner IRP is complete/status 0 when read
+afterward; no actual wait return or Ready duration was captured.
+
+Earlier SCM probes catch 26 first-response WAIT_TIMEOUT failures with live
+children. Bounded shared ready-queue walks show 56–147 runnable threads;
+a complete post-crash walk finds 101, including the power worker at priority
+15. These observations do not establish the scheduler's root cause.
+CPU 1's actual crash-time code is matched hvix64, immediately after a
+VMREAD. VMCS exit counts and cumulative handler costs are preserved outside
+Git; neither a sibling CPU's breakpoint snapshot nor whole-boot averages
+identify the failing request's delay.
+
+Entry-RIP profiling removal did not resolve the failure. The next unchanged
+run retains audio call/wait/return tracing through the power phase, reserving
+full captures and hardware State watchpoints for requests armed at least
+60 guest seconds. Early calls are counted; the full-capture budget is 30 s.
+Raw captures and all probe scripts remain outside the repository.

@@ -68,7 +68,28 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Current boot began at 13:37:30 UTC with entry-RIP profiling disabled.**
+**An unchanged census-off repeat began at 14:56:17 UTC.** Its probes retain
+audio wait/state/return tracing through the power phase, with full captures
+reserved for requests armed at least 60 guest seconds and a 30 s capture
+budget. Early power calls are counted. All scripts and captures are under
+`/tmp/zpp-20260912-audio-late-run/`. Fresh read-only ESP verification matches
+the same loader, Limine and launcher; disk anchors pass. No source, Windows
+settings, nesting, CPU count or device configuration changed.
+Fresh serial/DWARF again resolve module `66d61000`, singleton `682f3000`;
+the new NT base is `fffff800d3a00000`, PE-validated through CR3 `1ae000`.
+Monitor watcher 86896 owns the new process/power polling. The initial
+manager stopped after treating an incomplete early process walk as an
+error; its GDB client detached. The replacement in `gdb-v2/` waits for a
+complete walk while keeping the crash guard armed. Consult its
+`manager.json` for the current sole GDB PID.
+
+**The 13:37:30 UTC census-off boot crashed at 14:43:09 with 0x9F/3.**
+GDB captured the actual bugcheck entry in 125.7 ms. All monitor and GDB
+owners exited, then 4,234 external files (31,729,777 bytes) were preserved
+in `completed-sha256.json`. Supported teardown removed QEMU 9537, restored
+NVMe and returned 15,472 MB free. Disabling
+entry-RIP profiling did not resolve the audio power failure.
+
 The loader MD5 is `285777ed728a2c140d73a4d68b5895d7`; its exact embedded
 ELF SHA256 is `234a881fa1c97ccc4875d8eb583ce88c0ea5e0f4cafd18a60082471e4d588459`.
 Deployment and a separate fresh read-only ESP mount verified the candidate,
@@ -80,14 +101,16 @@ previous optimized build; OFF removes profiling reads/table updates while
 preserving entry-event delivery. No runtime improvement or stable boot is
 established yet.
 
-Fresh serial and deployed DWARF resolve zpp module `66d61000`, singleton
-`682f3000`; current NT is `fffff807de400000`, validated through System CR3
+For the completed 13:37 boot, serial and deployed DWARF resolve zpp module
+`66d61000`, singleton `682f3000`; NT is `fffff807de400000`, validated through System CR3
 `1ae000` against timestamp `51a135d9` and size `1450000`. Sole monitor
-watcher 64936 began at 13:40:46. Current GDB manager 71359/client 71360 owns
-the audio probe in tmux `zpp-rig-20260911:census-audio-v2`; ownership is
-recorded in `/tmp/zpp-20260912-census-off-run/gdb-audio-v2/manager.json`.
-The audio probe currently has no completed call. Its crash capture includes
-power-worker states/stacks and both processors' DPC/ready-queue slices.
+watcher 64936 began at 13:40:46. Final GDB manager 78348/client 78353
+captured the crash in `gdb-scm-v5/scm/`; both exited at 14:43:09, followed
+by the monitor watcher at 14:43:25. The earlier audio probe had no completed
+call before its planned SCM handoff. The crash capture includes actual
+power-worker states/stacks, both CPUs and local PRCB ready/DPC slices.
+Shared ready queues were captured at preceding service failures and
+separately after the crash, not at bugcheck entry.
 Raw artifacts and probe sources remain outside Git under
 `/tmp/zpp-20260912-census-off-run/`.
 
@@ -126,7 +149,41 @@ sequence does not establish that the debugger caused completion. Client
 
 The completed initial guard, SCM, first audio and USB snapshots are preserved
 in 46 hashed files (116,773 bytes) under `completed-first-probes-sha256.json`.
-Do not modify those archived captures. The live audio capture is separate.
+Do not modify those archived captures. Later audio/SCM probes through v4
+are separately preserved in `completed-scm-through-v4-sha256.json`
+(1,252 files, 2,229,135 bytes).
+
+The current blocked IRP is `ffffc08180d8ebd0`, PDO `ffffc08180eb7e00`.
+Checked device links identify IntcAudioBus → IntcAzAudAddService → ksthunk,
+again the Realtek `VEN_10EC&DEV_0294` codec. This request's actual watchdog
+interval is 300 s; the earlier crash's was 120 s. At bugcheck entry,
+worker `ffffc0817d4ef040` carries the exact blocked IRP and is already
+Ready (1), WaitStatus 0. Its saved stack unwinds to null through a WDF
+synchronous wait, Intel audio, Realtek, portcls and PopIrpWorker. Current
+code and unwind metadata validate all 25 frames. Unlike the previous
+post-crash-only Ready observation, this state is captured at the failure.
+Its duration and the actual wait return remain unobserved.
+
+The boot also has broad service failures. A complete 748-service walk at
+14:09 finds LSM/RPC running, ProfSvc error 1053 and UserManager error 1068.
+Subsequent GDB probes capture 26 actual first-response WAIT_TIMEOUT (258)
+failures, including ProfSvc, DNS, Asus services, Defender and audio helpers.
+The child processes are alive at their failure stops. Many are Ready with
+few context switches; bounded, link-checked shared-queue walks record
+56–147 runnable threads during the v5 failures. Both PRCBs reference the
+same shared queue, so counts must not be added. These snapshots do not
+measure how long a thread remained Ready or prove a scheduler defect.
+AsHidService's checked ALPC peer is services.exe; the candidate DNS unwind
+through SID lookup has only partial current-code validation and does not
+establish a common LSASS dependency.
+
+A 69.039 s non-atomic counter interval at 14:33–14:34 records CPU 0's
+398,406 VMWRITE and 271,181 VMREAD exits; CPU 1 predominantly takes
+VMRESUME, interrupt-window and WRMSR exits. These are workload counts,
+not handler costs. Raw counters, validation ranges and complete captures
+remain outside Git. Next: inspect the failing worker's ready-queue and
+wait evidence, then retain audio wait/state/return tracing through the
+power phase on the next unchanged run.
 
 **The unchanged optimized repeat ran 12:04:22–13:28:36 UTC and was ended
 while running, without a new sign-in or BSOD.** Its maximum complete
