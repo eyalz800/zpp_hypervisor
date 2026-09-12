@@ -81477,3 +81477,15 @@ stack reaches null through a WDF synchronous internal IOCTL, Intel/Realtek
 audio and portcls. Current code/metadata validate the unwind, but the
 post-crash Ready state does not establish when the wait completed. Capture
 that transition with GDB on the next boot. Raw evidence stays outside Git.
+
+## 2026-09-12: repeat optimized boot with actual audio wait/return probes
+
+After preserving the crash in1,642 hashed external files, supported teardown
+returned NVMe and15,481 MB free. Fresh read-only ESP checks match the same
+optimized loader and Limine; disk anchors pass. The repeat began12:04:22,
+with unchanged source, binaries, nesting, launcher and two CPUs. Sole
+monitor36036 and GDB manager36038/guard36039 started12:05:17; dynamic audio
+module discovery precedes hardware call/wait/return probes. At bugcheck,
+the new probe captures all power workers at the actual stop, resolving the
+prior post-crash snapshot's timing limitation. External scripts/evidence:
+/tmp/zpp-20260912-audio-sync/. Current bases and owners are in status.

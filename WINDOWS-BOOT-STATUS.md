@@ -68,8 +68,29 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Latest state: the optimized debug comparison began September 12 at
-10:50:25 UTC, reached sign-in, and crashed at 11:48:42 UTC.** The guest is
+**Latest state: a repeat of the optimized build began at 12:04:22 UTC.**
+This run targets the Intel audio synchronous IOCTL with hardware call,
+wait and return breakpoints. Source, deployed binaries, full nesting,
+two CPUs, and the launcher are unchanged. Current NT base is
+`fffff801b3e00000`, System CR3 `1ae000`, zpp module `66d61000`, singleton
+`682f3000`; kernel PE and deployed ELF fingerprints validate. Sole monitor
+watcher36036 and GDB manager36038/initial guard36039 began12:05:17 in
+`zpp-rig-20260911:audio-watch` / `audio-gdb`. The first incomplete process
+walk was rejected; the next complete walk showed one process. Audio module
+discovery is pending. Read current ownership from
+`/tmp/zpp-20260912-audio-sync/gdb/manager.json`. A future bugcheck capture
+includes the power workers at the actual stop. The probe bounds cumulative
+capture time and retains the crash breakpoint if audio capture is exhausted.
+No physical sign-in has been verified on this repeat.
+
+The previous guest was preserved in1,642 hashed files (18,130,395 bytes)
+under `/tmp/zpp-20260912-optimized-run/completed-sha256.json`, then ended
+with the supported teardown. QEMU29880 exited; NVMe returned and15,481 MB
+was free. A fresh read-only ESP mount verified the same optimized loader
+and Limine; GPT/ESP/NTFS anchors passed. No Windows settings changed.
+
+**Previous boot: the optimized debug comparison began at 10:50:25 UTC,
+reached sign-in, and crashed at 11:48:42 UTC.** The guest is
 paused (shutdown); watcher12724 and manager27043/client27045 have exited.
 The actual bugcheck names PDO `ffff9e8129116dd0` and blocked IRP
 `ffff9e8129d65bc0`. Postmortem IRP layout and device-chain checks identify
