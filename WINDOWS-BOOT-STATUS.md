@@ -68,6 +68,15 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
+**Latest state: the September12 07:22:39 boot crashed at09:15:18 UTC.**
+GDB caught KeBugCheckEx **9f/3** directly with tablet PDO
+**ffff9d877a11caa0**, triage **fffff804582449f0**, IRP
+**ffff9d8779b047f0**. The guest is now **paused (shutdown)**; monitor49122,
+manager78053 and GDB78064 all exited. Do not attach a new live-run probe
+or use any older PID as an owner. The frozen guest is preserved for
+read-only investigation. No verified sign-in/desktop, no new deployment.
+
+
 The **direct-port USB experiment crashed with 0x9F/3**. It began at
 21:12:41 UTC September 11 using unchanged deployed **6adda123**, loader
 MD5 **d564ca8f8057eabdb36a09db2c1e34d5**, two CPUs and the full manifest.
@@ -640,3 +649,90 @@ The screen belongs to the passed-through GPU, so QEMU cannot capture it.
 If LogonUI and dwm appear, obtain a contemporaneous screen observation and
 continue checking that the guest survives. Never mark the goal complete from
 those process names alone.
+
+
+## 2026-09-12: GDB captures the outstanding tablet call's power-watchdog crash
+
+At **09:15:18 UTC**, KeBugCheckEx hardware stop records **9f/3**, PDO
+**ffff9d877a11caa0**, triage **fffff804582449f0**, fifth argument/IRP
+**ffff9d8779b047f0**. The capture took24.0ms and has1,640 readable DPC-stack
+bytes. Current process is wermgr2064 because the watchdog interrupted
+that context; this does not make wermgr the failing driver. The sole
+watcher observed paused(shutdown) at09:15:34. All three clients exited.
+The failed IRP is the same tablet request identified at09:13:17.
+
+The watched USB call began09:10:07. After the first dispatcher's actual
+RET/caller stops, **no flush-return breakpoint fired for311.2838s** up to
+bugcheck. The sum of host continue-to-stop intervals inside the flush is
+311.3115s, excluding captured-stop handling. This establishes an
+outstanding enclosing call during the observed interval, not continuous
+residence at one instruction. Seventeen earlier timer calls had complete
+entry/return pairs; two other cycles were explicitly abandoned on
+unrelated returns. The older v2 instrumentation failure is separate.
+
+Fresh final walks preserve **198 modules** and **200 System threads**
+(195 Waiting, three Ready, one Running, one Standby). All raw stacks are
+saved; unsupported saved contexts remain flagged. The IRP has type6,
+size1360, stack count16/location12, and valid CurrentStackLocation.
+PDO/HidUsb FDO identity remains the direct-port tablet instance
+USB\VID_0627&PID_0001\68284-0000:00:05.0-4.
+
+The deployed ELF revalidates vmcs12 offsets185bbe8/185bae8/187bbe8. Final
+resident traffic identifies the current VTL0 CPU1 region as**114f9f000**,
+not the preceding boot's114fa0000. Its flushed RIP is
+**nt+5bf139 KiCheckStall+79**, RSP**ffffc000fc3a8b60**, CR3**1ae002**,
+GS**ffffc000fc314000**. Both CPUs have completed VMXOFF. The remaining
+1,184 bytes of its NMI-stack page plus the actual owner-thread stack
+unwind through machine frames to null:
+
+    KiCheckStall -> freeze/NMI
+    HvlWriteApicCommandRegister -> HalpApicRequestInterrupt
+    HalpInterruptSendIpi -> HalRequestSoftwareInterrupt
+    KiEndInterruptCycleAccumulation -> KiInterruptDispatchNoLockNoEtw
+    KiDpcInterruptBypass -> KiInterruptDispatchNoLockNoEtw
+    KiCheckForThreadDispatch+7f -> KeSetSystemGroupAffinityThread+18e
+    KeGenericProcessorCallback+14e -> KeFlushQueuedDpcs+18f
+    WdfTimerStop -> USB/WDF D0-exit -> HidUsb/HIDCLASS
+    PopIrpWorker -> system-thread startup -> null
+
+This is a **later dispatcher call**, on the affinity path. The one GDB
+watched return at09:10:07 was the priority-change path through
+KiProcessDeferredReadyList/KeSetPriorityThread. v4 only instruments the
+first dispatcher per flush, so it did not catch this later entry/return.
+The next probe should preserve the outer flush return and observe each
+subsequent dispatcher, with explicit thread/RSP pairing.
+
+All current WDF/USB/HidUsb/HIDCLASS images are captured with missing pages
+explicit. All75 requested kernel code/exception ranges are readable;
+72 match the local PE and three code ranges differ. The final unwind
+uses the **actual current bytes**, and still reaches null. No inference
+uses the prior epilogue bytes at those differing ranges.
+
+The actual interrupt object is **ffff9d87744b26c0**, type22/size288,
+connected, vector**d1**, IRQL13, CPU1, service exactly
+**HalpTimerClockInterrupt (nt+30fe30)**, with TrapFrame matching
+ffff8687b181e7e0. A guessed RBX object atffff9d877a2d0000 failed structure
+validation and is explicitly rejected; it is not an interrupt identity.
+Both PRCB.Number values validate. CPU1's CurrentThread is the timer
+owner, with no active DPC and empty DPC queue in the frozen state.
+Clock handling interrupts the bypass/dispatcher path, but this alone
+proves neither duplicate clock injection nor a specific VMM defect.
+
+At09:23:04, a **frozen monitor read (no resume/GDB attach)** completed the
+remaining Winlogon validation: all74 requested ranges match, including
+selected user exception-table entries and winsta event-open/wait code.
+The09:00:37 main-thread stack now has a checked full unwind through
+_WinStationWaitForConnectEx to null; both pool threads also reach null.
+The retained wait block and current object identify **TermSrvReadyEvent**,
+notification event, SignalState0, handle**214h** matching FirstArgument
+and winsta's cached handle. LSM remains Stopped1068/internal4;
+RpcEptMapper remains Running/internal3 with retained1070; RpcSs remains
+Running/error0. BrokerInfrastructure now has internal1053 and is stopped;
+its final status does not supply the uncaptured transition. No login.
+
+Artifacts are all under `/tmp/zpp-20260912/`: final-resident,
+final-usb, final-system-stacks, vmcs12, frozen-cpu, frozen-kernel-validation,
+power-evidence, final-interrupt-state/object, final-winlogon-validation,
+and the GDB probe roots, each prefixed `timer-probe-`. The exact source
+scripts and raw snapshots are retained. The frozen guest has not yet been
+torn down.
