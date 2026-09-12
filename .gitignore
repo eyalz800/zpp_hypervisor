@@ -69,3 +69,10 @@ __pycache__/
 # lists it.
 tests/decoder/corpus-*.s
 tests/decoder/corpus-*.dis
+
+# Local debugger captures and CTest results are generated, not source inputs.
+/.dump*.txt
+/.delta*.txt
+/.modules*.txt
+/.phases*.txt
+/Testing/
