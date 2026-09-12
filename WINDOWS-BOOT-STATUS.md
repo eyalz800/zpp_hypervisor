@@ -74,14 +74,28 @@ wait and return breakpoints. Source, deployed binaries, full nesting,
 two CPUs, and the launcher are unchanged. Current NT base is
 `fffff801b3e00000`, System CR3 `1ae000`, zpp module `66d61000`, singleton
 `682f3000`; kernel PE and deployed ELF fingerprints validate. Sole monitor
-watcher36036 and GDB manager36038/initial guard36039 began12:05:17 in
-`zpp-rig-20260911:audio-watch` / `audio-gdb`. The first incomplete process
-walk was rejected; the next complete walk showed one process. Audio module
-discovery is pending. Read current ownership from
-`/tmp/zpp-20260912-audio-sync/gdb/manager.json`. A future bugcheck capture
-includes the power workers at the actual stop. The probe bounds cumulative
+watcher36036 began12:05:17 in `zpp-rig-20260911:audio-watch`. GDB
+manager38977/client39876 now owns the audio probe in `audio-gdb-v2`, started
+12:18:51 after its startup guard38978 exited. Current audio module
+`fffff8014b200000` (IntcAudioBus, timestamp5ce754c1,size46000) and WDF
+`fffff80146390000` (timestamp468042e6,sizef0000) validate. Read current
+ownership from `/tmp/zpp-20260912-audio-sync/gdb-v2/manager.json`. Audio
+call/wait/return coverage is armed; no audio call has hit yet. A future
+bugcheck capture includes power-worker states/stacks and both CPUs' actual
+registers, including any running power worker's current stack. The probe bounds cumulative
 capture time and retains the crash breakpoint if audio capture is exhausted.
 No physical sign-in has been verified on this repeat.
+
+At12:15:45–46, a one-shot hardware probe catches the actual timer-worker
+epilogue, RET and caller (nt+30d475 → 30d487 → 30e265), all on thread
+ffff948da149c080. RSP changes match the checked epilogue and return.
+The52.65ms host interval includes debugger capture time; it is not the
+whole function's duration. SMSS752 appears12:16:01, Autochk776 at12:16:22,
+then Autochk is absent12:17:25. This timing does not establish causality
+between debugging and progress. The completed stops are preserved under
+`startup-return-completed/`. Earlier GDB owners36038/36039 exited before
+manager38977/guard38978 attached; no second client was opened.
+
 
 The previous guest was preserved in1,642 hashed files (18,130,395 bytes)
 under `/tmp/zpp-20260912-optimized-run/completed-sha256.json`, then ended

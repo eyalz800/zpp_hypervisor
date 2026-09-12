@@ -81489,3 +81489,12 @@ module discovery precedes hardware call/wait/return probes. At bugcheck,
 the new probe captures all power workers at the actual stop, resolving the
 prior post-crash snapshot's timing limitation. External scripts/evidence:
 /tmp/zpp-20260912-audio-sync/. Current bases and owners are in status.
+
+At12:15:45–46 the repeat's one-shot timer probe captures the epilogue, RET
+and matching caller on one thread/RSP chain. The52.65ms interval includes
+debugger time and does not measure the whole function. SMSS and Autochk
+then appear; that sequence alone does not establish a debugger-caused
+improvement. GDB ownership36038/36039 →38977/38978 →38977/39876 is serialized.
+The audio probe starts12:18:51 with current PE-validated Intel/WDF bases;
+its future bugcheck capture also includes both CPUs and any running power
+worker's actual stack. Current addresses and artifacts are in status.
