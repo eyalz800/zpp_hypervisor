@@ -5,6 +5,10 @@ rig and contribution instructions. They apply to Codex as well. Read
 [WINDOWS-BOOT-STATUS.md](WINDOWS-BOOT-STATUS.md) for the current boot investigation,
 then the relevant recent entries in [BACKLOG.md](BACKLOG.md).
 
+Keep raw debugger captures, memory dumps, logs and generated test results
+outside the repository, for example under `/tmp`. Commit source, configuration
+and concise investigation notes; do not add raw diagnostic output to Git.
+
 The backlog, README and reference notes contain historical conclusions that
 were later corrected. Check later corrections, current source and live rig
 state before treating a claim as established. Do not replace Hyper-V nesting
