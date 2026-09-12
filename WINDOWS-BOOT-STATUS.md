@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-scm-checked` owns manager PID **73432** and exactly one GDB
-child (current v4 combined probe PID **73443**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-winlogon-valid` owns manager PID **78053** and exactly one GDB
+child (current v4 combined probe PID **78064**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-scm-checked/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-winlogon-valid/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -270,6 +270,58 @@ four more complete pairs (flush host intervals 65.9/47.5/46.3/70.4 ms),
 and the first SCM-validation run recorded five more. These add to the two
 08:34 pairs and do not exclude a later failure. Current boot reached
 **33 processes at 08:52:19**, no armed power IRP, no verified login.
+
+At **09:00:37**, a 206.8-ms GDB capture obtained all three waiting
+Winlogon PID484 threads and kernel/user stacks. Its first module walk
+stopped on a paged-out ucrtbase header after four entries. The corrected
+**09:08:19** read completed all 29 entries, reporting missing headers and
+CodeView pages individually, in 340.8 ms. All 48 requested readable
+kernel/ntdll/KERNELBASE/KERNEL32 code/unwind ranges match the earlier
+identified images. Current winlogon/winsta RSDS bytes are captured.
+The candidate main-thread unwind reaches winsta+ce31 -> exported
+_WinStationWaitForConnectEx+14 -> winlogon+5b79e -> winlogon+656b5 ->
+thread startup -> null. The two other stacks reach thread-pool waits and
+null. The additional winsta/Winlogon caller-byte and event-name validation
+is prepared but **not yet run**: an outstanding USB call takes priority.
+Do not call the full user unwind currently validated. Captures are
+`timer-probe-gdb-winlogon/validation/` and `timer-probe-gdb-winlogon-valid/validation/`.
+
+SCM cleanup also caught **AudioEndpointBuilder already Running4** at a
+1070 cleanup entry (**08:53:53**, TID1500), followed by Audiosrv1068.
+Its caller has not been unwound yet. Schedule1068 preceded it. The later
+Winlogon probe caught thirteen dependency-failure cleanups, including
+UserManager at09:05:53. It recorded five complete USB timer returns and
+one abandoned cycle on a different thread's flush return. The guest
+reached 70 processes at09:04:57; no LogonUI/dwm or verified login.
+
+At **09:10:07**, the unchanged v4 probe caught USB timer-stop and flush
+entry on **thread ffff9d87744ef040**, timer **ffff9d8779dc8aa0**, context
+**ffff9d877a2a50d0**. It then caught dispatcher epilogue, RET and its actual
+caller **KiProcessDeferredReadyList+b4** with matching RSP/thread. The
+first dispatcher returned, while the enclosing flush return remains
+unobserved through09:14. Current exception data reconstructs the entry
+chain through KeSetPriorityThread, KeGenericProcessorCallback,
+KeFlushQueuedDpcs, WDF/USB D0-exit and PoCallDriver; it stops explicitly
+at missing HidUsb unwind metadata. Five capture reads took15.7–21.0ms,
+with pre-checkpoint stops18.3–26.4ms. No debugger handoff occurred during
+this call.
+
+A **09:13:17** single non-atomic monitor capture associates that busy
+power worker with **IRP ffff9d8779b047f0** and HidUsb FDO; its parent PDO
+**ffff9d877a11caa0** names **USB\VID_0627&PID_0001\68284-0000:00:05.0-4**,
+the tablet. The timer stop-owner still matches. The worker is Running,
+so its saved KSP was excluded; the other power worker is Waiting/idle.
+The monitor request age was215.6s at09:13:52. This is not proof of one
+instruction's continuous residence. The watcher's PID49122 was briefly
+suspended with no child/connection during this sole-owner monitor read,
+then resumed; GDB remained attached and continued throughout. Artifacts:
+`timer-probe-outstanding-usb/` and the active probe root. The prepared
+Winlogon validation v2 must wait until this call ends or the guest stops.
+
+Current GDB manager **78053**, child **78064**, tmux
+**timer-probe-winlogon-valid**. Earlier73432/73443 exited before75929/75940,
+which exited before this pair. All use the unchanged v4 hash. One monitor
+watcher remains49122. Windows/loader/manifest are unchanged.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
 Kernel **fffff801e1c00000**, system CR3 **1ae000**,

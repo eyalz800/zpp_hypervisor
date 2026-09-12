@@ -85,6 +85,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/ap-trampoline-cr0-exit-arithmetic.md` (466 lines).
 - `.references/hyperv/degrade-downstream-check.md` (270 lines).
 - `.references/hyperv/force-nosecuredma-patch.md` (554 lines).
+- `.references/hyperv/hvix64-lp-trampoline-emit-decompiled.md` (717 lines).
+- `.references/hyperv/lp-trampoline-location.md` (all 1,178 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -92,6 +94,15 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The LP trampoline location note retracts its fixed87000 address and
+  skipped-emit theory. The complete emit note shows failure propagating
+  to fatal init; the loader-selected page and BSS observations belong to
+  their original boot. A progress word2 alone does not locate one failing
+  instruction. Low-RVA section layout and a byte search alone cannot rule
+  out relocated runtime code; the final firmware attribution requires the
+  actual mapping/bytes. Its remaining APIC-ID diagnosis is a hypothesis,
+  and its single-step/MMIO advice does not supersede current rig rules.
 
 - CR0 interception depends on the mask/read-shadow predicate; an instruction
   hardware breakpoint precedes execution and does not prove retirement.
