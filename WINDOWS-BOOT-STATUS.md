@@ -75,11 +75,11 @@ two CPUs, and the launcher are unchanged. Current NT base is
 `fffff801b3e00000`, System CR3 `1ae000`, zpp module `66d61000`, singleton
 `682f3000`; kernel PE and deployed ELF fingerprints validate. Sole monitor
 watcher36036 began12:05:17 in `zpp-rig-20260911:audio-watch`. GDB
-manager49168/client49174 now owns the audio probe in `audio-gdb-v4`, started
-12:43:47 after manager42485/client42491 exited. Current audio module
+manager52866/client52868 now owns the audio probe in `audio-gdb-v5`, started
+12:56:18 after manager49168/client49174 exited. Current audio module
 `fffff8014b200000` (IntcAudioBus, timestamp5ce754c1,size46000) and WDF
 `fffff80146390000` (timestamp468042e6,sizef0000) validate. Read current
-ownership from `/tmp/zpp-20260912-audio-sync/gdb-v4/manager.json`. The initial
+ownership from `/tmp/zpp-20260912-audio-sync/gdb-v5/manager.json`. The initial
 probe completed84 non-power-worker calls before its15s capture budget.
 V3 filters for power workers:11 calls and their waits/returns
 completed12:37:53–12:38:20, all status0, no abandoned pairs. Wait arguments
@@ -94,6 +94,16 @@ V4 also captures both processors' DPC/ready-queue RAM slices at bugcheck;
 matched PDB offsets and both current PRCB.Number values validate. No pair
 was active at the handoff. V3's292 completed files (401,967 bytes) are hashed
 in `completed-v3-sha256.json` outside Git. V4 has no call or crash hit yet.
+V4 ended without a call/crash hit and is preserved in `completed-v4-sha256.json`.
+V5 adds a hardware write watchpoint on the active audio worker's State byte
+only during its WDF wait. It records state changes and observed Ready-to-return
+timing, with12 state stops per wait and the existing cumulative capture bound.
+Software fallback is refused. GDB17.1's x86/remote continuation rules, Intel
+SDM20.3.1.2, KVM's debug exit and QEMU11.0.3's write-watchpoint dispatch were
+checked; the local GDB architecture confirms no nonsteppable watchpoint.
+The first actual watchpoint still needs hardware verification. Its remote
+packet audit is enabled only for the first watched wait. Source/evidence stay
+under `gdb-v5/` and `watchpoint-reference/` outside Git.
 No physical sign-in has been verified on this repeat.
 
 An optional RIP-census gate is prepared locally, **not deployed**. Default
