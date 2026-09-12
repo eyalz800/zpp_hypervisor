@@ -98,6 +98,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/securekernel-image-copy-and-handles.md` (831 lines).
 - `.references/hyperv/symbols.md` (all 2,142 lines).
 - `.references/hyperv/msix-enable-gate.md` (all 2,108 lines).
+- `docs/kvm-review-nested-ept.md` (all 678 lines).
+- `docs/multicore-death-second-is-a-pci-sweep.md` (166 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -474,3 +476,18 @@ selected relevant ranges and the current tail have been read). Many other
 reference notes were read earlier in the session; this incremental list
 does not claim to enumerate all of them. Third-party Markdown under the
 reference tooling is also not covered by this ledger.
+
+The KVM review is historical: later commits11b454fa and3a8300d9 change
+the nested guest-memory walker and EPT bit10 presence handling. Its blanket
+statements about missing checks and guarantees require current source review.
+Guest RAM below512GB alone does not prove that every guest-supplied page-table
+address is below512GB; a decoder's successful read does not prove either
+correct translation or fabricated bytes. The PCI-sweep note's raw stack scan
+does not validate its claimed call ancestry, and first observing four loader
+markers at45 seconds cannot by itself exclude earlier transitions. Its event
+trace is evidence of PCI reads, not proof of who issued them or what caused
+the stop. These readings authorize no new tracing or guest changes.
+
+Inventory scope excludes duplicate `.claude/worktrees/` checkouts and build
+dependencies. A broad initial inventory included those copies and was
+truncated; it is not a read of their contents.

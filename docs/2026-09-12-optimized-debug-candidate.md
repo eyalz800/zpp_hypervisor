@@ -105,3 +105,27 @@ preflight/launch scripts are under `/tmp/zpp-20260912-optimized-run/`.
 USB/WDF addresses will be discovered afresh before arming the now-verified
 repeated dispatcher probe, and SCM tracing follows services discovery.
 No Windows driver, service, registry, BCD or power-policy change.
+
+USB/WDF discovery completes10:56:56 (6m31s), with USBHUB3fffff80177c00000
+and WDFfffff80171430000 validated before GDB starts10:56:58. Autochk668 is
+present10:55:10–52 and absent10:56:13 (exit status uncaptured); SMSS752
+appears10:56:35 and CSRSS932 at10:59:19. Six processes through11:02.
+The67.594-second counter window10:55:53.906–10:57:01.500 attributes handler/
+L1/L2 spans56.665%/26.455%/16.882% on CPU0 and57.790%/26.294%/15.918% on CPU1.
+Mean closed handler spans141,115/129,799 cycles. This window includes Autochk
+exit and second-SMSS startup, unlike the baseline's later PnP window, so it
+is not a controlled per-operation speedup measurement. Raw reads take
+12.58/17.94ms; first-TSC fingerprints/layouts match.
+
+V5 completes two USB timer-stop calls, then10:58:21 its combined RSP/thread-
+stack-bounds assertion rejects a CPU1 dispatcher entry atnt+2bb96b. The failed
+registers/bounds were not journaled. The third call is unpaired across the
+detach, not proven stuck. The fallback crash guard attaches afterward.
+At11:01:23, after old manager12722/guard14514 exit, manager15442/GDB15444
+start v8 in gdb-v8/. It records dispatchers outside their thread-stack bounds,
+retains the outer flush return and declines inner pairing for that case.
+PRCB.Number is now checked against the debugger CPU; failed-stop registers
+are retained. These changes are only in the host GDB script, and await a
+hardware hit of the new case. V8 SHA256
+f1d803899ba869bcfb5a0738238937d197f461155961afb01d686ef2a8fcb7f1.
+At initialization the PnP completion event is signaled with an empty list.

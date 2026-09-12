@@ -86,13 +86,26 @@ minutes after launch; this one earlier milestone does not establish a
 completed boot or isolate optimization from run-to-run variation. Two CPUs
 and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
 
-Sole monitor watcher **12724**, GDB manager **12722**, initial crash guard
-**12725** began10:52:01 in tmux `zpp-rig-20260911:optimized-watch` /
-`optimized-gdb`. Confirm subsequent ownership from
-`/tmp/zpp-20260912-optimized-run/gdb/manager.json`. The manager will use the
-hardware-verified repeated dispatcher probe after current USB/WDF discovery,
-then add SCM tracing after services discovery. The prior boot's one-shot
+Sole monitor watcher **12724** began10:52:01 in tmux
+`zpp-rig-20260911:optimized-watch`. Current GDB manager **15442** and v8
+probe **15444** began11:01:23 in `optimized-gdb-v8`; confirm subsequent
+ownership from `/tmp/zpp-20260912-optimized-run/gdb-v8/manager.json`.
+Current USBHUB3 **fffff80177c00000** and WDF **fffff80171430000** were
+discovered10:56:56, with PE/instruction validation before v5 started10:56:58.
+V5 completed two USB calls, then10:58:21 rejected a dispatcher hit with its
+combined RSP/thread-stack-bounds assertion. Its failed-stop registers were
+not retained; that third call remains unpaired, not proven stalled.
+Fallback crash guard14514 replaced exited14112. Both manager12722 and
+guard14514 exited before v8. V8 records outside-thread dispatcher stacks
+and drops inner pairing while preserving the outer flush; it also validates
+PRCB.Number and records failed-stop registers. The new case awaits a hit.
+The manager adds SCM tracing after services discovery. The prior boot's one-shot
 hypercall-page address is not reused. No successful boot is claimed yet.
+
+Autochk668 appears10:55:10, is last present10:55:52, and is absent10:56:13;
+its exit status is uncaptured. SMSS752 appears10:56:35. CSRSS932 appears
+10:59:19 (8m54s after launch); six processes through11:02. The PnP event is
+Signal1 with an empty waiter list at v8 initialization. No sign-in verified.
 
 The preceding running baseline was deliberately ended10:49:07 after the
 repeated-return instrument was verified, with six processes, no active

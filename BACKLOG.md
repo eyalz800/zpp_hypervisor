@@ -81386,3 +81386,21 @@ milestone, not a completed boot or proof of a specific timeout cause.
 Current watcher12724, manager12722, guard12725; current owners in
 /tmp/zpp-20260912-optimized-run/gdb/manager.json. Source and Windows settings
 unchanged; all27 rebuilt host tests/artifact checks passed before deployment.
+
+## 2026-09-12: optimized USB discovery and dispatcher-probe boundary fix
+
+Optimized boot discovers USB/WDF10:56:56 (6m31s); current hubfffff80177c00000,
+WDFfffff80171430000. Autochk668 exits between its10:55:52 last appearance and
+10:56:13 absence, status uncaptured. SMSS752 appears10:56:35, CSRSS932
+10:59:19 (8m54s), six processes through11:02. No verified login.
+
+V5 completes two USB calls, then rejects a CPU1 dispatcher entry10:58:21
+with the combined RSP/thread-stack-bounds assertion. That failed stop's
+registers were not saved; its third call is explicitly unpaired. The fallback
+crash guard resumes coverage. V8 now preserves outside-thread dispatcher
+captures, drops inner pairing and retains the outer flush return; it validates
+PRCB.Number and retains failed-stop registers. No guest or deployed-code edit.
+At11:01:23 old manager12722/guard14514 are gone before new manager15442/GDB15444,
+state /tmp/zpp-20260912-optimized-run/gdb-v8/manager.json. Watcher12724 stays
+sole monitor owner. New behavior awaits a hit; PnP event signaled on attach.
+Detailed intervals, cost-window limitations and hash are in the candidate note.
