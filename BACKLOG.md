@@ -81527,3 +81527,29 @@ Meanwhile the unchanged repeat completes84 startup audio calls, then a
 serialized GDB handoff limits full capture to power workers. Eleven such
 calls, their waits and outer returns complete successfully, with no abandoned
 pairs. Current ownership, timestamps and measurement limits are in status.
+
+
+## 2026-09-12: verified audio worker transitions and direct SCM failure probe
+
+The unchanged optimized repeat ends deliberately at 13:28:36, still running
+but without LogonUI/dwm or another BSOD. Its 82 actual power-worker audio
+calls all complete with status 0; hardware State-byte watchpoints capture
+285 transitions. The first remote packet audit confirms write watchpoints
+and continue-only resumes, without target data/register writes or stepping.
+Per-wait and cumulative capture limits leave some later states unobserved.
+This does not explain the previous sign-in/audio 0x9F crash.
+
+A checked current Winlogon unwind and the winsta helper's event name/cache
+identify an indefinite wait on nonsignaled Global\TermSrvReadyEvent. A
+complete 748-service walk finds LSM stopped/error 1053 with all three RPC
+startup dependencies running. Inferring a timeout from 1053 was rejected:
+ScWaitForFirstResponse can assign it after different wait results. The next
+GDB probe records the call arguments and actual failure result, then verifies
+the 1053 assignment and cleanup continuation without stepping. Shared wait
+API entry hits only rearm the SCM call site and do not prove a matched wait.
+
+The independently tested census-off loader deploys with fresh ESP verification
+and boots at 13:37:30. Nesting, CPUs, devices and launcher are unchanged.
+Profiling and host probe coverage differ from the preceding run, so timing
+alone will not isolate a performance effect. Current identity and owners are
+in WINDOWS-BOOT-STATUS.md; all raw evidence remains outside Git.

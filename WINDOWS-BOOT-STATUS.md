@@ -68,53 +68,68 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**Latest state: a repeat of the optimized build began at 12:04:22 UTC.**
-This run targets the Intel audio synchronous IOCTL with hardware call,
-wait and return breakpoints. Source, deployed binaries, full nesting,
-two CPUs, and the launcher are unchanged. Current NT base is
-`fffff801b3e00000`, System CR3 `1ae000`, zpp module `66d61000`, singleton
-`682f3000`; kernel PE and deployed ELF fingerprints validate. Sole monitor
-watcher36036 began12:05:17 in `zpp-rig-20260911:audio-watch`. GDB
-manager52866/client52868 now owns the audio probe in `audio-gdb-v5`, started
-12:56:18 after manager49168/client49174 exited. Current audio module
-`fffff8014b200000` (IntcAudioBus, timestamp5ce754c1,size46000) and WDF
-`fffff80146390000` (timestamp468042e6,sizef0000) validate. Read current
-ownership from `/tmp/zpp-20260912-audio-sync/gdb-v5/manager.json`. The initial
-probe completed84 non-power-worker calls before its15s capture budget.
-V3 filters for power workers:11 calls and their waits/returns
-completed12:37:53–12:38:20, all status0, no abandoned pairs. Wait arguments
-were900ms for nine calls and100ms for two; observed host wait intervals
-were65ms–1.576s, including debugger time, not guest execution durations.
-Winlogon1116/services1128 are present by12:39:10. No armed power timer remains
-at12:40:11. Audio call/wait/return coverage remains armed. A future
-bugcheck capture includes power-worker states/stacks and both CPUs' actual
-registers, including any running power worker's current stack. The probe bounds cumulative
-capture time and retains the crash breakpoint if audio capture is exhausted.
-V4 also captures both processors' DPC/ready-queue RAM slices at bugcheck;
-matched PDB offsets and both current PRCB.Number values validate. No pair
-was active at the handoff. V3's292 completed files (401,967 bytes) are hashed
-in `completed-v3-sha256.json` outside Git. V4 has no call or crash hit yet.
-V4 ended without a call/crash hit and is preserved in `completed-v4-sha256.json`.
-V5 adds a hardware write watchpoint on the active audio worker's State byte
-only during its WDF wait. It records state changes and observed Ready-to-return
-timing, with12 state stops per wait and the existing cumulative capture bound.
-Software fallback is refused. GDB17.1's x86/remote continuation rules, Intel
-SDM20.3.1.2, KVM's debug exit and QEMU11.0.3's write-watchpoint dispatch were
-checked; the local GDB architecture confirms no nonsteppable watchpoint.
-The first actual watchpoint still needs hardware verification. Its remote
-packet audit is enabled only for the first watched wait. Source/evidence stay
-under `gdb-v5/` and `watchpoint-reference/` outside Git.
-No physical sign-in has been verified on this repeat.
+**Current boot began at 13:37:30 UTC with entry-RIP profiling disabled.**
+The loader MD5 is `285777ed728a2c140d73a4d68b5895d7`; its exact embedded
+ELF SHA256 is `234a881fa1c97ccc4875d8eb583ce88c0ea5e0f4cafd18a60082471e4d588459`.
+Deployment and a separate fresh read-only ESP mount verified the candidate,
+unchanged Limine and launcher, and GPT/ESP/NTFS anchors. Full nesting, two
+CPUs and the devices remain as before. The manifest changes only by adding
+`entryrip=0` and making `userip=0`. All 27 rebuilt host tests and artifact
+checks passed. The default-ON entry recorder is byte-identical to the
+previous optimized build; OFF removes profiling reads/table updates while
+preserving entry-event delivery. No runtime improvement or stable boot is
+established yet.
 
-An optional RIP-census gate is prepared locally, **not deployed**. Default
-ON preserves diagnostics; OFF removes the interrupted/quiet/user profiling
-reads and table updates. VTL/interrupt behavior remains outside the gate.
-All27 rebuilt host tests pass; the regression previously failed its two
-census/VMREAD assertions while entry-event delivery passed. The isolated
-optimized candidate passes ELF and bootability checks, embeds its exact ELF
-once, and differs in manifest only by new `entryrip=0` and effective
-`userip=0`. Build/capture artifacts stay in `/tmp/zpp-20260912-audio-sync/`.
-No execution-cost improvement or stable boot has yet been measured.
+Fresh serial and deployed DWARF resolve zpp module `66d61000`, singleton
+`682f3000`; current NT is `fffff807de400000`, validated through System CR3
+`1ae000` against timestamp `51a135d9` and size `1450000`. Sole monitor
+watcher 64936 and GDB manager 64938/client 64939 began at 13:40:46. Current
+ownership is recorded in `/tmp/zpp-20260912-census-off-run/gdb/manager.json`.
+The initial guard captures bugcheck state, power workers and processor
+queues. When services.exe is discovered, the manager serially replaces it
+with first-response call/failure/cleanup hardware probes. The immediate
+callee breakpoint rearms the call site without stepping; a failure's saved
+wait result distinguishes timeout from a signaled process handle. Call-site
+to failure intervals include debugging and failure processing, not just the
+wait. If LogonUI and dwm appear, the manager switches to the verified audio
+worker probe. Raw artifacts and probe sources remain outside Git under
+`/tmp/zpp-20260912-census-off-run/`.
+
+**The unchanged optimized repeat ran 12:04:22–13:28:36 UTC and was ended
+while running, without a new sign-in or BSOD.** Its maximum complete
+process count was 87, but no LogonUI or dwm appeared. At 13:12:20 a 289 ms
+stop-through-detach GDB capture found Winlogon 1116 waiting indefinitely
+on a nonsignaled event. All 82 requested current code/unwind ranges matched
+at 13:14:19. The current winsta helper's OpenEvent name is
+`Global\TermSrvReadyEvent`; its cached handle `0x1f0` exactly matches
+Winlogon's captured wait argument. At 13:19:44 the same event remained
+nonsignaled. This identifies the named wait without guessing an object header.
+
+The complete 748-record service walk at 13:21:38–43 found LSM stopped,
+internal state 4/error 1053, while its RpcSs, DcomLaunch and RpcEptMapper
+dependencies were running. Audiosrv also had 1053; AudioEndpointBuilder was
+running. No actual LSM failure transition was captured in that repeat, so
+1053 alone does not establish a timeout. This is why the next boot targets
+the first-response wait result rather than inferring its cause from status.
+
+The repeat completed 84 startup audio calls outside power-worker context,
+then **82 power-worker audio calls**, all waits and outer returns status 0,
+with no abandoned pairs. V3 completed 11, V5 36 and V6 35. V5/V6 captured
+285 hardware writes to the worker State byte, including Waiting →
+DeferredReady → Ready/Standby → Running. The first watched wait's remote
+packet audit verified five `Z2` insertions/removals and continue-only
+`vCont;c` resumes, with no step or target register/memory-write packets.
+The watchpoint is hardware-verified; software fallback is refused. Captures
+are limited to 12 state hits per wait and a cumulative time budget. Later
+transitions after that limit are unobserved; successful outer returns were
+still captured. Host timing includes debugging; zero KUSD deltas do not mean
+zero elapsed time. No failing audio call was observed in this repeat.
+
+All owners exited before supported teardown. QEMU 27598 disappeared,
+NVMe returned and 15,484 MB was free. The completed repeat is preserved in
+6,702 hashed files (36,706,373 bytes), excluding build caches, under
+`/tmp/zpp-20260912-audio-sync/completed-sha256.json`. Do not modify those
+archived files. The following details refer to that completed repeat.
 
 At12:15:45–46, a one-shot hardware probe catches the actual timer-worker
 epilogue, RET and caller (nt+30d475 → 30d487 → 30e265), all on thread
