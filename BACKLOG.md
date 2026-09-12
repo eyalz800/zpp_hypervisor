@@ -81404,3 +81404,25 @@ At11:01:23 old manager12722/guard14514 are gone before new manager15442/GDB15444
 state /tmp/zpp-20260912-optimized-run/gdb-v8/manager.json. Watcher12724 stays
 sole monitor owner. New behavior awaits a hit; PnP event signaled on attach.
 Detailed intervals, cost-window limitations and hash are in the candidate note.
+
+## 2026-09-12: optimized boot reaches LogonUI; actual LSM late-status failure
+
+Current v9 manager17720/GDB17722 starts11:08:45 after preceding owners exit;
+watcher12724 remains sole monitor reader. The service cleanup code page was
+unmapped during v8 initialization. V9 validates the service PE, arms its
+hardware breakpoint and validates the instruction at the actual hit. No
+guest-byte writes, stepping or deployed-code changes.
+
+At11:16:51 the probe captures LSM cleanup1070 and its next instruction on
+the same services516/TID460/RSP. The saved caller status is StartPending2,
+checkpoint0/hint60000; the live record is already Running4. Current readable
+services code/metadata agrees in26 ranges, with12 unmapped exception ranges
+from the matched Microsoft image. The checked services prefix reaches its
+startup code; external user frames are not completed. LSM is still Running4
+at11:18:30, now retaining start_error1070. This supports a late-status race,
+not a measured polling duration or a proven cause of boot delay.
+
+LogonUI1556 and dwm1568 first appear11:18:15, 27m50s after launch. Physical
+screen verification requested, still pending. Detailed timing/ownership and
+validation limits are in docs/2026-09-12-optimized-debug-candidate.md; actual
+captures and offline analysis are in the optimized run's scm-first-failure/.

@@ -129,3 +129,57 @@ are retained. These changes are only in the host GDB script, and await a
 hardware hit of the new case. V8 SHA256
 f1d803899ba869bcfb5a0738238937d197f461155961afb01d686ef2a8fcb7f1.
 At initialization the PnP completion event is signaled with an empty list.
+
+## Services and the first LogonUI appearance
+
+Wininit500 first appears11:05:22, Winlogon704 at11:05:42, services516 at
+11:06:23, LSASS556 at11:06:43, and the two font hosts at11:10:27. V8 completes
+four USB calls before its services-discovery handoff and three after it,
+with no abandoned cycles. These totals do not cover the unpaired v5 call.
+The service cleanup code page was unmapped at initialization, so v8's SCM
+probe did not arm despite the manager's handoff label.
+
+At11:08:45, old manager15442/GDB16859 have exited before v9 manager17720 and
+GDB17722 attach. Watcher12724 remains the sole monitor reader. V9 validates
+the current services PE header/stamp/size, then arms the hardware breakpoint
+even if its instruction page is unmapped. It validates the actual bytes at
+the hit before interpreting the service record. Other read errors or mapped
+instruction mismatches still reject initialization. V9 SHA256:
+7834a6fbb5c93983f3be56d8953a8ebf2c9e266ca904c476b8eeb1102408493b.
+This changes only the host probe; the deployed candidate is unchanged.
+
+The deferred path is exercised11:16:51: actual cleanup entry for LSM1070,
+CPU0, services516/TID460, with a same-thread/same-RSP next-instruction hit
+11.276ms of host continue-to-stop later. Captures take32.34/14.21ms. These
+are not the cleanup routine's return or a measurement of its polling loop.
+The entry's live service record is Running4/start_state3/start_error0;
+the caller's saved status is StartPending2/checkpoint0/wait_hint60000.
+R14 and the resettable accumulator are6000; neither is total elapsed time.
+
+The checked services stack prefix is CleanupStartFailure, ScLookForHungServices,
+ScStartMarkedServicesInServiceSet, ScStartServicesInStartList,
+ScStartEarlySetOfServices, ScAutoStartServices, SvcctrlMain, wmain and its
+startup code. It stops at an external user module whose current bytes and
+metadata were not captured. Current services PE/RSDS match; all26 readable
+code/metadata ranges match in a210.5ms non-atomic read11:18:30. Twelve unmapped
+exception-data ranges use the matching Microsoft image. The live LSM record
+then remains Running4, now start_state4/start_error1070. This repeats the
+late-status race shape previously seen for RpcEptMapper, with a different
+service. No RpcEptMapper cleanup has been observed in this run.
+
+The same read identifies RPCSS host1196, DcomLaunch1140, separate LSM1268,
+and four later service hosts. At11:18:15 the watcher first sees LogonUI1556
+and dwm1568, 23 processes total, 27m50s after launch. A physical screen check
+is pending; process presence alone is not verified login. The entry/caller
+captures, requested/current byte ranges and checked analysis are saved under
+`/tmp/zpp-20260912-optimized-run/scm-first-failure/`.
+
+The first SCM evidence ledger covers38 files/34,498 bytes. A later defined
+counter window,11:19:23.821–11:21:03.404, lasts99.582 host seconds; two
+non-atomic reads take13.18/14.13ms. Deployed ELF/layout/first-TSC fingerprints
+agree. L2 entries increase60,812 on CPU0 and313,010 on CPU1, with positive
+L2 run-cycle deltas on both. Nested execution remains active after LogonUI
+appears; these counters do not establish what is visible on the display.
+The watcher reaches29 processes at11:19:37, with no armed power request
+through11:20:59. No new USB call or bugcheck has been captured by v9 yet.
+Raw counters are in `logon-stage-counters/` under the optimized run.

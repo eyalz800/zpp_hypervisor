@@ -491,3 +491,24 @@ the stop. These readings authorize no new tracing or guest changes.
 Inventory scope excludes duplicate `.claude/worktrees/` checkouts and build
 dependencies. A broad initial inventory included those copies and was
 truncated; it is not a read of their contents.
+
+Further completed root documents: `README.md` (387 lines), `VMD.md`
+(247 lines), and `DIAGNOSTICS.md` (477 lines).
+
+- README's no-nesting/no-host-IDT statements and old open Bochs fault are
+  historical. Current CLAUDE build instructions and source supersede its
+  Clang18 requirement and serial CPU-launch explanation. Its Windows/BCD
+  workarounds are not applied.
+- VMD's BAR-alignment upper bound does not prove that every address below
+  that bound belongs to the actual BAR. Capping bus scans does not establish
+  the window's size. Its later ordering discussion qualifies the earlier
+  claim that ordinary and VMD controllers cannot coexist. The VMD path was
+  compile-tested there, not validated on this ordinary-NVMe rig.
+- DIAGNOSTICS contains later disk-channel and IOMMU measurements that
+  supersede its earlier impossibility claims and proposed workarounds.
+  Those platform observations do not establish all devices' DMA domains or
+  the current nested guest's configuration. Its desktop observations used
+  an older VMX-hidden setup and do not establish today's boot goal. Reading
+  historical RMRR, DMAR and guest-page-table proposals authorizes no changes.
+  Broad firmware/TME/device-channel claims need platform evidence; a larger
+  event ring alone does not prove that preexisting completions cannot fill it.

@@ -87,9 +87,9 @@ completed boot or isolate optimization from run-to-run variation. Two CPUs
 and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
 
 Sole monitor watcher **12724** began10:52:01 in tmux
-`zpp-rig-20260911:optimized-watch`. Current GDB manager **15442** and v8
-probe **15444** began11:01:23 in `optimized-gdb-v8`; confirm subsequent
-ownership from `/tmp/zpp-20260912-optimized-run/gdb-v8/manager.json`.
+`zpp-rig-20260911:optimized-watch`. Current GDB manager **17720** and v9
+probe **17722** began11:08:45 in `optimized-gdb-v9`; confirm subsequent
+ownership from `/tmp/zpp-20260912-optimized-run/gdb-v9/manager.json`.
 Current USBHUB3 **fffff80177c00000** and WDF **fffff80171430000** were
 discovered10:56:56, with PE/instruction validation before v5 started10:56:58.
 V5 completed two USB calls, then10:58:21 rejected a dispatcher hit with its
@@ -99,13 +99,34 @@ Fallback crash guard14514 replaced exited14112. Both manager12722 and
 guard14514 exited before v8. V8 records outside-thread dispatcher stacks
 and drops inner pairing while preserving the outer flush; it also validates
 PRCB.Number and records failed-stop registers. The new case awaits a hit.
-The manager adds SCM tracing after services discovery. The prior boot's one-shot
-hypercall-page address is not reused. No successful boot is claimed yet.
+V8 completed four calls before service discovery and three afterward. Its
+service cleanup page was initially unmapped, so that part did not arm.
+V9 arms the hardware breakpoint after validating the current service PE,
+deferring instruction validation until the actual hit. Both preceding
+manager15442 and GDB16859 exited before the v9 attachment. The outside-stack
+case still awaits a hit. The prior boot's one-shot hypercall-page address is
+not reused. No successful boot is claimed yet.
 
 Autochk668 appears10:55:10, is last present10:55:52, and is absent10:56:13;
 its exit status is uncaptured. SMSS752 appears10:56:35. CSRSS932 appears
-10:59:19 (8m54s after launch); six processes through11:02. The PnP event is
-Signal1 with an empty waiter list at v8 initialization. No sign-in verified.
+10:59:19 (8m54s after launch). Wininit500 appears11:05:22,
+Winlogon704 at11:05:42, services516 at11:06:23, and LSASS556 at11:06:43.
+The PnP event is Signal1 with an empty waiter list at v8/v9 initialization.
+At **11:18:15**, complete process walks first show **LogonUI1556 and dwm1568**
+(27m50s after launch), 23 processes total. A physical screen check has been
+requested; this is not yet a verified sign-in screen.
+
+At11:16:51, v9 captures an actual SCM cleanup entry for **LSM, error1070**,
+CPU0, services516/TID460, followed by the next instruction on the same
+thread/RSP. Its caller's saved status is StartPending2/checkpoint0/hint60000,
+while the live record is Running4, start_state3, start_error0. Current code
+and readable unwind ranges match the reference image; 12 unmapped exception
+data ranges use the matched Microsoft image. The checked services prefix
+reaches its startup entry, then stops at an uncaptured external user module.
+At11:18:30 the LSM record remains Running4, now start_state4/start_error1070.
+This supports another late-status race, not a measured60-second wait or a
+proven cause of the display delay. No RpcEptMapper cleanup has been captured
+on this boot. Artifacts: `scm-first-failure/` under the optimized run.
 
 The preceding running baseline was deliberately ended10:49:07 after the
 repeated-return instrument was verified, with six processes, no active
