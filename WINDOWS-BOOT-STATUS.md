@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-validation` owns manager PID **67026** and exactly one GDB
-child (current v3 timer probe PID **67037**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-werfault` owns manager PID **69070** and exactly one GDB
+child (current v3 timer probe PID **69081**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-validated/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-werfault/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -143,7 +143,7 @@ selected thread/RSP if reached, and defers during USB cycles to stay within
 three hardware breakpoints. Source SHA-256 is
 `e197275fbb7401caea742c7843fbe98e5fcd80312b9d65a27f0e33cbb8ddd69b`.
 As of 08:23:12 v3 has no hit. SMSS and first USB captures/unwind are in
-`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-validated/`.
+`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-werfault/`.
 At **08:29:20**, a 155.6-ms stopped GDB read captured current USB/WDF
 PE headers, RSDS, complete exception tables and 123 code/metadata ranges.
 Both symbol identities match. The four stacks now unwind with current
@@ -160,6 +160,44 @@ new partial unwind is `timer-probe-gdb-smss/timer-stop/current-driver-unwind.txt
 The module list is no longer refreshed after probe configuration, so 147
 is the discovery count, not a later census. No C++ change, build,
 deployment or Windows configuration change was made.
+
+
+At **08:34:03 and 08:34:04**, the corrected probe captured **two complete
+USB timer-stop/flush pairs**, both System thread **ffff9d8776b91040**.
+Each follows USB+15db6 -> WDF+4341a -> nt+2bb96b -> nt+2bb97f ->
+actual caller nt+2bbb54 -> WDF+4341f -> USB+15dbb. Exact thread and
+stack relationships match. The first migrates CPU 0 to CPU 1 before its
+flush return; the second stays on CPU 1. USB contexts **ffff9d87776a6110**
+and **ffff9d87776eb110**, timers **ffff9d8776cf9a90** and
+**ffff9d8777758d20**. Both Wait=1 and both owner/flag reads agree.
+Continue-to-stop host intervals sum **43.54/50.68 ms** for the flushes,
+**69.96/72.90 ms** for full timer calls. Individual capture stops are
+24.9–46.1 ms and are excluded from those interval sums. These prove two
+completed calls, not every later call or the cause of the preceding crash.
+All 14 raw events and final index are in `timer-probe-gdb-audio/timer-stop/`.
+
+Startup has reached wininit 532, winlogon 484, services 808, LsaIso 812,
+lsass 832 and two fontdrvhost processes. **15 processes at 08:37:02**;
+no LogonUI/dwm or verified login. An IntcOED device SET_POWER request
+**ffff9d8776b9c970** aged from about 08:30:40 and was absent by 08:33:59,
+before its 300-second deadline; no completion status was caught. The
+08:33:53 stopped capture (1.006 s through detach) has both busy power
+workers in HidUsb, each Waiting in nt!KeWaitForSingleObject with return
+USB+3403a (matched prior symbols name HUBMISC_WaitForSignal+7a). Their
+wait objects differ: ffff9d8777477738 and ffff9d87776eb748. No live audio
+worker was identified by that list. The module walk hit its one-second
+budget at 160 entries; it is explicitly incomplete and no new full driver
+image was captured. The target IRP/PDO/holder and both worker stacks did
+complete. Artifacts are `timer-probe-gdb-audio/validation/`.
+
+At **08:36:37**, a 22.0-ms GDB read validated WerFault PID 304 and read
+`C:\WINDOWS\system32\WerFault.exe -k -c `. This command line names no
+process PID; it does not identify a currently crashed application. The
+unchanged v3 USB/bugcheck probe resumed under manager 69070/GDB 69081,
+tmux timer-probe-werfault, after manager 68304/GDB 68319 exited. Current
+artifacts are `timer-probe-gdb-werfault/`; both prior owner handoffs were
+explicit and no live timer cycle was discarded. The sole monitor watcher
+remains PID 49122. No guest configuration or binary change.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
 Kernel **fffff801e1c00000**, system CR3 **1ae000**,
