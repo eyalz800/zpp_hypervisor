@@ -373,3 +373,24 @@ unwind are in timer-probe-gdb-smss/. As of 08:23:12 v3 has no hit; process
 count six, no armed power watchdog, no LogonUI/dwm. The unchanged 07:22:39
 boot continues with both observers indefinite. No build/deploy or Windows
 configuration change was made.
+
+
+At 08:29:20, a brief GDB validation read took **155.6 ms through detach**.
+Current USB/WDF headers, RSDS, complete exception tables and 123 selected
+code/metadata ranges are captured. Both symbol identities match. Nine code
+ranges differ from the prior boot, so the offline unwind now consumes the
+current captured bytes throughout. All four 08:15:33 stacks reach WDF
+D0-exit/power dispatch -> IopPoHandleIrp -> PoCallDriver, then stop at
+fffff80460245697 without inventing missing module metadata. The recovered
+device ffff9d877707c100 validates as HidUsb with no devnode; the USB
+instance remains unknown. A second candidate is explicitly rejected as
+not a DEVICE_OBJECT. The previous USB thread is Waiting in this later
+snapshot, which is not an observed return of the old timer call.
+
+Old manager 64140/GDB 64141 exited first. The unchanged v3 probe resumes
+under manager **67026**, child **67037**, tmux **timer-probe-validation**,
+root **/tmp/zpp-20260912/timer-probe-gdb-validated/**. The validation source,
+index and raw bytes are in that root; the new partial unwind remains with
+the original stacks at timer-probe-gdb-smss/timer-stop/current-driver-unwind.txt.
+The sole monitor owner is unchanged; the guest, binary and manifest remain
+unchanged. Six processes/no armed power request through 08:29:56.

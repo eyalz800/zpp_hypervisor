@@ -88,12 +88,12 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-pnp` owns manager PID **64140** and exactly one GDB
-child (current v3 timer probe PID **64141**; confirm from manager.json). The
+`zpp-rig-20260911`. `timer-probe-validation` owns manager PID **67026** and exactly one GDB
+child (current v3 timer probe PID **67037**; confirm from manager.json). The
 USB timer-stop/flush entry-return probes and KeBugCheckEx guard are active. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-v3/` (earlier dispatcher capture remains
+the current GDB manager/captures are specifically `timer-probe-gdb-validated/` (earlier dispatcher capture remains
 in `timer-probe-gdb-dispatch/`).
 Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
 was first absent at 07:46:24. Its exit status/result was not captured. A
@@ -143,7 +143,20 @@ selected thread/RSP if reached, and defers during USB cycles to stay within
 three hardware breakpoints. Source SHA-256 is
 `e197275fbb7401caea742c7843fbe98e5fcd80312b9d65a27f0e33cbb8ddd69b`.
 As of 08:23:12 v3 has no hit. SMSS and first USB captures/unwind are in
-`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-v3/`.
+`timer-probe-gdb-smss/`; current probe/manager state is `timer-probe-gdb-validated/`.
+At **08:29:20**, a 155.6-ms stopped GDB read captured current USB/WDF
+PE headers, RSDS, complete exception tables and 123 code/metadata ranges.
+Both symbol identities match. The four stacks now unwind with current
+bytes through WDF's D0-exit/power dispatch to nt!PoCallDriver, then stop
+at the still-unloaded metadata for fffff80460245697. Nine code ranges
+differ from the preceding boot; current captured bytes, not stale ones,
+were used. The recovered device **ffff9d877707c100** validates as HidUsb;
+its devnode is null, so the specific USB instance is not yet established.
+The prior USB thread is Waiting at this later snapshot; no old call's
+actual return is inferred. The v3 probe resumed unchanged immediately
+under manager 67026/GDB 67037; old manager 64140/GDB 64141 exited first.
+Validation artifacts are `timer-probe-gdb-validated/validation/`, and the
+new partial unwind is `timer-probe-gdb-smss/timer-stop/current-driver-unwind.txt`.
 The module list is no longer refreshed after probe configuration, so 147
 is the discovery count, not a later census. No C++ change, build,
 deployment or Windows configuration change was made.
