@@ -80879,3 +80879,13 @@ This identifies the next hardware entry/return probe, not a proved VMM
 fix or continuous stall duration. Do not remove another USB device merely
 to chase the next timeout. Exact evidence, limitations and coordinates:
 docs/2026-09-12-gdb-usb-hub-power.md and WINDOWS-BOOT-STATUS.md.
+
+
+At 07:54:15 the same next boot produced three real dispatcher hardware
+stops: the post-CR8 epilogue, RET, and its stack-derived affinity caller.
+Thread/RSP/restored nonvolatiles match. The complete stacks identify
+HalpCmcWorkerRoutine, not the pending USB path. This invocation returned
+in 18.2 ms total host continue-to-stop time, excluding the three captures.
+The sole GDB owner has returned to an indefinite bugcheck guard and will
+hand off to the USB probe after driver validation. Autochk has left the
+process list without a captured exit result; no login is verified.

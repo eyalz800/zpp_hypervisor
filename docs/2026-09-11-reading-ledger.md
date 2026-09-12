@@ -55,6 +55,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/device_interrupt_delivery.md` (305 lines).
 - `.references/hyperv/vp-run-state.md` (183 lines).
 - `.references/hyperv/live-read-unblock.md` (105 lines).
+- `.references/hyperv/ept-kvm-faithful.md` (154 lines).
+- `.references/hyperv/hvix64-nvme-passthrough.md` (129 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -62,6 +64,19 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The old EPT-parity note anchors 2d93273 and correctly asks for the full
+  deployed manifest. Two eager switches being off does not exonerate all
+  EPT behavior or prove a watchdog must be an interrupt bug. A linear
+  data sweep can still revisit code/page-table pages; subtree reuse costs
+  and fault populations need measurements, not that ranking alone.
+- The NVMe note's absent strings do not prove an absence of emulation,
+  and one functioning admin queue does not establish every I/O queue's
+  mapping or completion. Its inert-inner-IOMMU premise is superseded by
+  current nested VT-d support. Doorbell, DMA and interrupt claims require
+  the actual mappings and request/completion sequence; the note explicitly
+  had no rig ownership and does not establish this run's failure.
+
 
 - The VP run-state note derives start/suspend fields from setters but
   explicitly leaves scheduler consumers and other writers unresolved.

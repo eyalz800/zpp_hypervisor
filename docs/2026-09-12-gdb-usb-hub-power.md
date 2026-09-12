@@ -279,3 +279,28 @@ The later USB timer-stop probe now additionally has bounded hardware
 stops on the dispatcher epilogue and RET; unrelated dispatch threads
 leave the outer flush pairing intact. Probe events are journaled with
 bounded per-stop writes, with no lifetime limit on completed pairs.
+
+
+At 07:46:24 autochk was first absent from the complete process walk
+(last present 07:46:03). No exit status or check/repair result was captured.
+The module list later contains 127 drivers; USBHUB3 is still absent.
+
+An independent bounded dispatcher return probe at **07:54:15** reached
+nt+2bb96b, nt+2bb97f and its actual caller nt+30e82e, all on CPU 0,
+System thread **ffff9d8776b87040**. RSP advanced 0x48 then 8 and all four
+saved/restored nonvolatiles matched. Capture durations were 29.2, 22.3
+and 21.0 ms; the two continue-to-stop host intervals total 18.2 ms.
+Each captured stack independently unwinds through KeSetSystemGroupAffinityThread,
+**HalpCmcWorkerRoutine**, ExpWorkerThread and system-thread startup to null.
+This invocation returns; it is not the USB timer-stop path and does not
+exonerate other calls. A breakpoint directly at the epilogue can catch
+execution after a call whose entry occurred before debugger attachment.
+
+The prior GDB manager/guard were interrupted and verified exited before
+starting `timer-probe-gdb-dispatch` in the same tmux session. Its bounded
+probe completed, and the manager restored an indefinite bugcheck guard.
+The monitor watcher remains the same sole owner. Current manager state,
+three raw stacks/register captures, transcript and checked kernel unwind
+are under `/tmp/zpp-20260912/timer-probe-gdb-dispatch/`. The prepared USB
+probe still takes over when matching USB/WDF images validate. No guest
+binary, configuration, register or code-byte changes were made.

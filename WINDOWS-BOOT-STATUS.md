@@ -88,18 +88,29 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-gdb-early` owns manager PID **53983** and exactly one GDB
-child (current initial guard PID **54548**; confirm from manager.json). It initially guards KeBugCheckEx, then hands off once matching
+`zpp-rig-20260911`. `timer-probe-gdb-dispatch` owns manager PID **57249** and exactly one GDB
+child (current initial guard PID **57283**; confirm from manager.json). It initially guards KeBugCheckEx, then hands off once matching
 USB/WDF images validate to the timer-stop/flush entry-return probes plus
 the bugcheck guard. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
 PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
-the current GDB manager/captures are specifically `timer-probe-gdb-early/`.
-Autochk PID 712 appeared at 07:42:11; no exit result is captured yet. A
+the current GDB manager/captures are specifically `timer-probe-gdb-dispatch/`.
+Autochk PID 712 appeared at 07:42:11, was last present at 07:46:03, and
+was first absent at 07:46:24. Its exit status/result was not captured. A
 bounded early KeFlushQueuedDpcs probe from about 07:42:17 to 07:44:17
 recorded no entry hit, detached, and automatically restored the indefinite
 bugcheck guard. No matching return or stalled call is inferred from that
 empty interval. The sole monitor watcher remained alive throughout.
+At 07:54:15 a separate bounded dispatcher probe obtained all three actual
+hardware stops: nt+2bb96b, nt+2bb97f, then its stack-derived caller
+nt+30e82e. Thread ffff9d8776b87040 stayed the same; RSP increased by 48h
+then 8, and restored RBX/RBP/RSI/RDI matched their saved values. The two
+continue-to-stop intervals totaled 18.2 ms host time; captures took
+29.2/22.3/21.0 ms. All three stacks unwind through HalpCmcWorkerRoutine,
+ExpWorkerThread and system-thread startup to null. This is a completed
+CMC-worker invocation, not a USB timer-stop or DPC-flush return. The old
+manager/guard exited before replacement; the indefinite guard is restored.
+Latest complete module walk has 127 entries, with USBHUB3 still absent.
 No C++ change, build, deployment or Windows configuration change was made.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.
@@ -132,8 +143,8 @@ Recovered package/context/IRP pointers match the independently saved
 objects. This proves the crash-time dependency, not continuous residence
 in that call for the timeout duration or a specific VMM defect.
 
-Next: preserve/archive this evidence and probe the USB timer-stop call
-and its DPC-flush return with hardware breakpoints on a fresh boot. Keep
+Next: probe the USB timer-stop call and its DPC-flush return with hardware
+breakpoints when the matching USB driver loads in the current boot. Keep
 observation alive until a real terminal state or an explicit handoff;
 individual debugger stops and monitor reads remain bounded. Exact files,
 matching symbol identities and limitations are in
