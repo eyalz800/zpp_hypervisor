@@ -3679,5 +3679,80 @@ class TheVmcsGlobalsAreReadInBothModes(unittest.TestCase):
             "the caller census neither reported nor explained itself")
 
 
+class SharedVmcsCountsDoNotMeasureInstructionLatency(unittest.TestCase):
+    def assert_accounting_limits(self, text):
+        self.assertIn("shared counters", text)
+        self.assertIn("cache hits", text)
+        self.assertIn("overlap", text)
+        for claim in ("cyc/access", "cyc/acc", "/acc", "cycles each",
+                      "excess is hardware", "software that touches nothing",
+                      "Both are a SUBSET"):
+            self.assertNotIn(claim, text)
+
+    def test_window_reports_keep_cycles_without_deriving_hardware_latency(self):
+        module = load_dump_state()
+        rows = PerHandlerCyclesAreWindowedNotBootWide.ROWS
+        before = {(name, 0): 0 for name in rows}
+        after = {(name, 0): value for name, value in zip(
+            rows, (100_000, 1_000, 100, 10, 10))}
+        text = "\n".join(module.delta_handler_reason_lines(
+            before, after, 1, 1.0, 100_000, 10))
+        self.assertIn("10,000", text)
+        self.assert_accounting_limits(text)
+
+    def test_build_window_does_not_compare_different_denominators(self):
+        module = load_dump_state()
+        names = ("vmcs02_split_cycles", "vmcs02_split_reads",
+                 "vmcs02_split_writes")
+        before = {(name, i): 0 for name in names
+                  for i in range(len(module.VMCS02_SPLIT))}
+        after = dict(before)
+        after.update({(name, 0): value for name, value in zip(
+            names, (100_000, 1_000, 100))})
+        text = "\n".join(module.delta_vmcs02_split_lines(before, after, 10))
+        self.assertIn("10,000", text)
+        self.assert_accounting_limits(text)
+
+    def test_cumulative_reports_use_the_same_accounting_limits(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from unittest import mock
+
+        module = load_dump_state()
+        offsets = {}
+
+        def layout(_elf, names, **_kwargs):
+            for name in names:
+                offsets.setdefault(name, 0x1000 * (len(offsets) + 1))
+            return {name: offsets[name] for name in names}
+
+        class Memory:
+            def __init__(self, *_args):
+                self.reads = []
+
+            def queue(self, address, count):
+                self.reads.extend(address + 8 * i for i in range(count))
+
+            def run(self):
+                return {address: 10 for address in self.reads}
+
+        args = SimpleNamespace(rig="unused", port=0, cpus=2)
+        with mock.patch.object(module, "gdb_offsets", layout), \
+                mock.patch.object(module, "gdb_flat_lengths",
+                                  return_value={"handler_reason_exits": 64}), \
+                mock.patch.object(module, "gdb_lengths",
+                                  return_value={"phase_cycles": 52}), \
+                mock.patch.object(module, "Monitor", Memory):
+            for report in (module.dump_handler_by_reason,
+                           module.dump_vmcs02_split,
+                           module.dump_reflect_buckets):
+                with self.subTest(report=report.__name__):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        report(args, "unused", 0)
+                    self.assert_accounting_limits(output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

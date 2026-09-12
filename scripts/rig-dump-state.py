@@ -3521,6 +3521,15 @@ def dump_regions(args, elf, instance):
                       f"{1.74 * span / max(span - hidden, 1):.2f} ms of it")
 
 
+VMCS_ACCESS_ACCOUNTING_NOTE = (
+    "  Access columns are deltas of shared counters: reads include cache hits;\n"
+    "  writes exclude elided writes and can include eVMCS stores. CPU handlers\n"
+    "  can overlap, counting another CPU's activity in the same interval.\n"
+    "  These columns do not measure VMREAD/VMWRITE latency or attribute\n"
+    "  hardware time to a reason or phase."
+)
+
+
 def dump_handler_by_reason(args, elf, instance):
     """Where the handler's time goes, by the reason that caused the exit.
 
@@ -3604,6 +3613,9 @@ def dump_handler_by_reason(args, elf, instance):
     print(f"\nall {args.cpus} processors: where the handler's time "
           f"goes, by exit reason "
           f"({total_cycles / total_exits:,.0f} cycles/exit overall)")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
+    print("  reason          exits    cyc/exit   %cyc  "
+          "read_ctr/ex write_ctr/ex  whose")
     for cycles, exits, i in sorted(rows, reverse=True):
         # Whose exit it was. A second-level exit is reflected and comes
         # back as the guest hypervisor's VMRESUME, so the two are one
@@ -3611,43 +3623,19 @@ def dump_handler_by_reason(args, elf, instance):
         l2 = row("handler_reason_from_l2", i)
         whose = "L2" if l2 == exits else ("L1" if l2 == 0 else f"{l2}/{exits}")
 
-        # Accesses beside cycles, over the same span. This is what says
-        # whether a reason's cost is VMCS traffic or software: cycles
-        # over accesses near the ~3,100 measured price means hardware,
-        # far above it means the path is doing something that touches
-        # nothing.
+        # Preserve the raw counter deltas without deriving instruction
+        # prices from logical reads and overlapping processor intervals.
         rd = row("handler_reason_reads", i)
         wr = row("handler_reason_writes", i)
-        access = rd + wr
-        each = (f"{cycles / access:>8,.0f}" if access else f"{'-':>8}")
         print(f"  {EXIT_REASON.get(i, i):<14} {exits:>9,} "
               f"{cycles // max(exits, 1):>9,}cyc "
               f"{100.0 * cycles / max(total_cycles, 1):>5.1f}% "
-              f"{rd / max(exits, 1):>7.1f}rd {wr / max(exits, 1):>7.1f}wr "
-              f"{each}/acc  {whose}")
+              f"{rd / max(exits, 1):>11.1f} {wr / max(exits, 1):>12.1f}  "
+              f"{whose}")
 
     print(f"  --- split covers {100.0 * split_cycles / max(total_cycles, 1):.1f}% "
           f"of the cycles and {100.0 * split_exits / total_exits:.1f}% "
           f"of the exits")
-
-    # The one comparison the whole hypothesis turns on, printed rather
-    # than left to be computed by hand from two rows.
-    def per(reason_name):
-        for i, name in EXIT_REASON.items():
-            if name != reason_name:
-                continue
-            exits = row("handler_reason_exits", i) or 1
-            return ((row("handler_reason_reads", i) +
-                     row("handler_reason_writes", i)) / exits,
-                    row("handler_reason_cycles", i) / exits)
-        return None
-
-    call, msr = per("vmcall"), per("wrmsr")
-    if call and msr and msr[0]:
-        print(f"  --- vmcall takes {call[0] / msr[0]:.2f}x the VMCS accesses "
-              f"of a wrmsr and costs {call[1] / max(msr[1], 1):.2f}x the "
-              f"cycles; near-equal ratios mean the excess is hardware, a "
-              f"cost ratio far above the access ratio means it is software")
 
 
 VMCS02_SPLIT = ["controls read and validated",
@@ -3719,92 +3707,25 @@ def dump_vmcs02_split(args, elf, instance):
     print(f"\nall {args.cpus} processors: build_vmcs02, split "
           f"({whole // whole_calls:,} cycles a "
           f"call over {whole_calls:,} calls)")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
     print(f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
-          f"{'rd/call':>8} {'wr/call':>8} {'cyc/access':>11}")
+          f"{'read_ctr/call':>13} {'write_ctr/call':>14}")
     for i, cycles in sorted(enumerate(split), key=lambda kv: -kv[1]):
-        access = reads[i] + writes[i]
-        # The number the whole cost model turns on. A slot whose cycles
-        # over its accesses lands near the launch-time price vindicates
-        # that price in the settled state; one that lands far from it
-        # tells us the marginal price for the first time.
-        # Blank unless the slot really takes accesses. A slot with one
-        # access in three hundred thousand calls divides to a number in
-        # the hundreds of millions, which reads as a finding and is an
-        # artefact of the denominator.
-        each = (f"{cycles / access:>11,.0f}"
-                if access and (access / whole_calls) >= 0.01
-                else f"{'-':>11}")
         print(f"  {VMCS02_SPLIT[i]:<40} {cycles // whole_calls:>9,} "
               f"{100.0 * cycles / total:>5.1f}% "
-              f"{reads[i] / whole_calls:>8.2f} {writes[i] / whole_calls:>8.2f}"
-              f" {each}")
-
-    all_access = sum(reads) + sum(writes)
-
-    # Over the slots that *take* accesses only. Dividing the whole
-    # phase's cycles by the whole phase's accesses charges the software
-    # slots to the hardware price and answers a question nobody asked.
-    hot = [i for i in range(slots)
-           if (reads[i] + writes[i]) / whole_calls >= 0.01]
-    hot_cycles = sum(split[i] for i in hot)
-    hot_access = sum(reads[i] + writes[i] for i in hot)
-    cold_cycles = total - hot_cycles
+              f"{reads[i] / whole_calls:>13.2f} "
+              f"{writes[i] / whole_calls:>14.2f}")
 
     print(f"  --- coverage {100.0 * total / max(whole, 1):.1f}% of the "
           f"phase's cycles, {100.0 * calls / whole_calls:.1f}% of its calls "
           f"reached the end")
-    print(f"  --- {all_access / whole_calls:.1f} VMCS accesses a call; over "
-          f"the slots that take them, {hot_cycles / max(hot_access, 1):,.0f} "
-          f"cycles each")
-    # **The launch-time price was HARDCODED here as "~3,100 a read,
-    # ~2,200 a write" and the read half is stale by two orders of
-    # magnitude.** The hypervisor measures it on every boot - 1,000
-    # accesses each of `exit_reason`, `guest_rip` (shadowed),
-    # `guest_gdtr_base` (unshadowed), and writes of `guest_rsp` and
-    # `guest_gdtr_limit` - into `vmread_benchmark_cycles` and its four
-    # siblings, and read live off a running guest they give:
-    #
-    #     read  shadowed    57.3 cyc   unshadowed    60.4   ratio 1.05x
-    #     write shadowed 2,038.2 cyc   unshadowed 2,043.2   ratio 1.00x
-    #
-    # The write half of the hardcoded pair was right; the read half was
-    # not, and it predates `shadowvmcs=1` - whose own note records
-    # shadowing taking VMREAD and VMWRITE "from 65.7% of every exit to
-    # six and 411". Shadowing made reads cheap and the printed constant
-    # never followed.
-    #
-    # That constant was load-bearing: a cost model built on ~3,100 (and
-    # on a separate ~4,600 derived by dividing an exit's whole cost by
-    # its access count) concluded 81% of the handler was read latency.
-    # At the measured price it is under 1%. **A number printed beside a
-    # measurement gets read as part of it** - this is the same family as
-    # `vmcs.h:143` quoting a retracted 1,606 cycles, which BACKLOG.md
-    # records as the third instance of a number outliving its
-    # retraction.
-    print(f"  --- launch-time price list, MEASURED per 1000 accesses, is "
-          f"in vmread_benchmark_cycles / vmread_shadowed_cycles / "
-          f"vmread_unshadowed_cycles / vmwrite_shadowed_cycles / "
-          f"vmwrite_unshadowed_cycles. Read them rather than assuming a "
-          f"price; the read half of the constant that used to be printed "
-          f"here was stale by ~50x.")
-    print(f"  --- {100.0 * hot_cycles / max(total, 1):.1f}% of the phase is "
-          f"slots that touch the VMCS, {100.0 * cold_cycles / max(total, 1):.1f}%"
-          f" is software that touches nothing")
 
 
 REFLECT_SLOTS = ["save_l2_state", "reflect_l2_exit", "exit information"]
 
 
 def dump_reflect_buckets(args, elf, instance):
-    """A `vmcall` reflection against a `wrmsr` one, phase by phase.
-
-    Every reflection on this machine costs about 51 VMCS accesses except
-    `vmcall`, which costs 230.4, and both take the same path - so the
-    extra accesses are in a phase they share.  These three are the
-    phases an L2 exit takes; they do not bracket the whole handler, so
-    the residue against `handler_reason_*` for the same reason is printed
-    as coverage rather than left implied.
-    """
+    """Compare recorded reflection phases; shared access deltas can overlap."""
     members = ["bucket_phase_cycles", "bucket_phase_reads",
                "bucket_phase_writes", "bucket_calls",
                "handler_reason_cycles", "handler_reason_reads",
@@ -3834,14 +3755,17 @@ def dump_reflect_buckets(args, elf, instance):
                 return got.get(instance + off[member] + 8 * i, 0)
         return 0
 
-    print("\ncpu 0 a vmcall reflection against a wrmsr one, by phase")
+    print(f"\nall {args.cpus} processors: a vmcall reflection against "
+          "a wrmsr one, by phase")
+    print(VMCS_ACCESS_ACCOUNTING_NOTE)
     for bucket, reason in ((0, "vmcall"), (1, "wrmsr")):
         exits = whole("handler_reason_exits", reason) or 1
         wc = whole("handler_reason_cycles", reason)
         wr = whole("handler_reason_reads", reason)
         ww = whole("handler_reason_writes", reason)
         print(f"  {reason} ({exits:,} exits, {wc // exits:,} cyc, "
-              f"{(wr + ww) / exits:.1f} accesses an exit)")
+              f"{wr / exits:.1f} read_ctr/ex, "
+              f"{ww / exits:.1f} write_ctr/ex)")
         sc = sr = sw = 0
         for slot in range(slots):
             c = cell("bucket_phase_cycles", bucket, slot)
@@ -3851,12 +3775,15 @@ def dump_reflect_buckets(args, elf, instance):
             sr += r
             sw += w
             print(f"    {REFLECT_SLOTS[slot]:<18} {c / exits:>10,.0f} cyc "
-                  f"{r / exits:>7.1f}rd {w / exits:>7.1f}wr")
+                  f"{r / exits:>7.1f} read_ctr/ex "
+                  f"{w / exits:>7.1f} write_ctr/ex")
         print(f"    {'residue':<18} {(wc - sc) / exits:>10,.0f} cyc "
-              f"{(wr - sr) / exits:>7.1f}rd {(ww - sw) / exits:>7.1f}wr")
+              f"{(wr - sr) / exits:>7.1f} read_ctr/ex "
+              f"{(ww - sw) / exits:>7.1f} write_ctr/ex")
         print(f"    --- the three phases hold "
               f"{100.0 * sc / max(wc, 1):.1f}% of the cycles and "
-              f"{100.0 * (sr + sw) / max(wr + ww, 1):.1f}% of the accesses")
+              f"{100.0 * (sr + sw) / max(wr + ww, 1):.1f}% "
+              "of the access-counter deltas")
 
 
 def dump_profile(args, elf, instance):
@@ -6514,9 +6441,8 @@ def delta_handler_reason_lines(before, after, slots, seconds,
       the same pair of reads (`resume_guest`), so they must sum to each
       other; a split that does not is measuring a different span from
       the one it is being compared against;
-    - reads and writes beside cycles over the same span, which is what
-      separates a reason whose cost is VMCS traffic from one whose cost
-      is software;
+    - shared read/write counter deltas, including logical reads and
+      overlapping processor activity; these cannot price instructions;
     - **the verdict**, in words, when a reason's windowed share differs
       from its boot-wide share by more than `DELTA_SHARE_DRIFT_POINTS`.
 
@@ -6604,8 +6530,9 @@ def delta_handler_reason_lines(before, after, slots, seconds,
              f"({split_exits:,} exits,",
              f"  {split_exits / seconds:,.1f}/s). Cycles are summed over "
              f"EVERY processor, as the member is.",
+             VMCS_ACCESS_ACCOUNTING_NOTE,
              "  reason             exits    exits/s   cyc/exit    %cyc"
-             "    rd/ex   wr/ex  cyc/acc  whose"]
+             "  read_ctr/ex write_ctr/ex  whose"]
 
     for reason in sorted(exits, key=lambda r: -cycles.get(r, 0)):
         if not exits[reason]:
@@ -6613,7 +6540,6 @@ def delta_handler_reason_lines(before, after, slots, seconds,
         name = EXIT_REASON.get(reason, reason)
         took = cycles.get(reason, 0)
         rd, wr = reads.get(reason, 0), writes.get(reason, 0)
-        access = rd + wr
         l2 = from_l2.get(reason, 0)
         whose = ("L2" if l2 == exits[reason]
                  else ("L1" if not l2 else f"{l2}/{exits[reason]}"))
@@ -6622,8 +6548,7 @@ def delta_handler_reason_lines(before, after, slots, seconds,
             f"{exits[reason] / seconds:>10,.1f} "
             f"{took // exits[reason]:>10,} "
             f"{100.0 * took / max(split_cycles, 1):>6.1f}% "
-            f"{rd / exits[reason]:>7.1f} {wr / exits[reason]:>7.1f} "
-            f"{(took / access) if access else 0:>8,.0f}  {whose}")
+            f"{rd / exits[reason]:>11.1f} {wr / exits[reason]:>12.1f}  {whose}")
 
     # Coverage, as the header says it must be, and against the window
     # rather than against the boot.
@@ -6666,31 +6591,13 @@ def delta_handler_reason_lines(before, after, slots, seconds,
 
 
 def delta_vmcs02_split_lines(before, after, calls):
-    """`dump_vmcs02_split`, over the measured window instead of the boot.
+    """Windowed phase cycles and shared access-counter deltas per build call.
 
-    **The cumulative table is the instrument that produced this
-    session's one unreconciled number.**  `a59a51c` read its
-    "every guest-state field" slot at 10.10 writes a call against
-    `7678f44`'s prediction of at most 5.18, on a boot five minutes old,
-    and recorded "I cannot reconcile them from data taken this way".
-    It could not: every elision inside `build_vmcs02` has a
-    precondition that is false until a vmcs02 has run and been saved
-    from - `vmcs02_launched`, `hot_state_valid`,
-    `guest_state_deferred` - so a boot-cumulative mean is weighted by
-    exactly the calls that cannot elide, and a young boot is mostly
-    those.  The same table also cannot be checked against `writes/exit`,
-    which *is* differenced, so the two were being compared across
-    different windows.
-
-    Differenced, the slot says what the settled guest costs, and the
-    arithmetic closes: `build_vmcs02`'s writes a call divided by exits
-    a call must not exceed the handler's writes an exit, since the one
-    is a subset of the other.
-
-    `calls` is the windowed `phase_calls[cpu][2]` summed over every
-    processor - `vmcs02_split_*` is a single array all processors add
-    into, so one processor's denominator reads high by the processor
-    count.
+    `calls` sums phase_calls[cpu][2] over every processor. Shared access
+    counters can include other CPUs, and reads include cache hits, so
+    their deltas cannot attribute hardware costs. Counts per build call
+    also cannot be compared as a subset of counts per handler exit:
+    those ratios have different denominators.
     """
     if calls is None:
         return ["",
@@ -6731,26 +6638,14 @@ def delta_vmcs02_split_lines(before, after, calls):
              f"build_vmcs02, split IN THIS WINDOW "
              f"({sum(cycles.values()) // calls:,} cycles a call over "
              f"{calls:,} calls)",
+             VMCS_ACCESS_ACCOUNTING_NOTE,
              f"  {'slot':<40} {'cyc/call':>9} {'share':>6} "
-             f"{'rd/call':>8} {'wr/call':>8} {'cyc/access':>11}"]
+             f"{'read_ctr/call':>13} {'write_ctr/call':>14}"]
 
     for i, spent in sorted(cycles.items(), key=lambda kv: -kv[1]):
-        access = reads[i] + writes[i]
-        each = (f"{spent / access:>11,.0f}"
-                if access and (access / calls) >= 0.01
-                else f"{'-':>11}")
         lines.append(f"  {VMCS02_SPLIT[i]:<40} {spent // calls:>9,} "
                      f"{100.0 * spent / total:>5.1f}% "
-                     f"{reads[i] / calls:>8.2f} {writes[i] / calls:>8.2f}"
-                     f" {each}")
-
-    lines.append(f"  --- {sum(writes.values()) / calls:.2f} writes and "
-                 f"{sum(reads.values()) / calls:.2f} reads a call. "
-                 f"Both are a SUBSET of the")
-    lines.append("      handler's writes and reads an exit above - if "
-                 "either exceeds it, the")
-    lines.append("      two figures are from different windows and "
-                 "neither may be quoted.")
+                     f"{reads[i] / calls:>13.2f} {writes[i] / calls:>14.2f}")
     return lines
 
 

@@ -11,15 +11,17 @@
 namespace zpp::arch::x86_64::vmx
 {
 /**
- * How many VMCS field accesses this processor has executed.
+ * Shared counters for calls through the VMCS field interface.
  *
- * A diagnostic, and the only way to stop guessing at the number that
- * decides everything about this VMM's cost. Nested under a hypervisor
- * that does not offer VMCS shadowing, every one of these is an exit to
- * the layer below - measured at about 3,735 cycles for a read and 2,542
- * for a write, which this VMM prints at launch - so the access *count*
- * per exit is the cost, and it had been estimated twice from cycles
- * divided by those prices and both estimates informed a wrong decision.
+ * Reads include cache hits and enlightened-page loads. Writes exclude
+ * cached identical writes, but include enlightened-page stores. Neither
+ * counter measures executed VMREAD/VMWRITE instructions. Direct calls
+ * to the instruction wrappers also bypass these interface counters.
+ *
+ * An interval's delta can include another processor's calls. Overlapping
+ * handler or phase intervals can therefore count the same activity more
+ * than once; dividing their cycles by these deltas does not measure
+ * instruction latency or separate hardware cost from software cost.
  *
  * Deliberately not per-processor and not atomic. One counter that is
  * occasionally short by a racing increment answers "about how many per

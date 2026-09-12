@@ -81594,3 +81594,15 @@ run retains audio call/wait/return tracing through the power phase, reserving
 full captures and hardware State watchpoints for requests armed at least
 60 guest seconds. Early calls are counted; the full-capture budget is 30 s.
 Raw captures and all probe scripts remain outside the repository.
+
+The performance reader still derived instruction prices from shared logical
+interface counters. `vmcs_reads_taken` increments before cache hits/eVMCS
+loads; writes exclude identical-write elisions and may use eVMCS stores.
+Per-handler and phase differences can also include another CPU's concurrent
+activity. The earlier `cycles/access` values and hardware/software verdicts
+cannot establish instruction cost. Five report paths now label those counter
+deltas and retain measured cycle totals without deriving latency. The build
+split also stops claiming that counts per build call are a subset of counts
+per handler exit: the denominators differ. Three new Python tests expose five
+failing report paths before the fix; all 233 Python tests pass afterward.
+Hypervisor changes are comments only; the live repeat's binary is unchanged.

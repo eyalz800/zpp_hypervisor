@@ -82,6 +82,8 @@ manager stopped after treating an incomplete early process walk as an
 error; its GDB client detached. The replacement in `gdb-v2/` waits for a
 complete walk while keeping the crash guard armed. Consult its
 `manager.json` for the current sole GDB PID.
+Replacement manager 87114/client 87119 is healthy with the crash guard armed
+at 15:06; the complete process walk still contains the three initial processes.
 
 **The 13:37:30 UTC census-off boot crashed at 14:43:09 with 0x9F/3.**
 GDB captured the actual bugcheck entry in 125.7 ms. All monitor and GDB
@@ -180,7 +182,11 @@ establish a common LSASS dependency.
 A 69.039 s non-atomic counter interval at 14:33–14:34 records CPU 0's
 398,406 VMWRITE and 271,181 VMREAD exits; CPU 1 predominantly takes
 VMRESUME, interrupt-window and WRMSR exits. These are workload counts,
-not handler costs. Raw counters, validation ranges and complete captures
+not handler costs. Separately, the reader now removes latency estimates
+derived from logical VMCS interface counts: reads include cache hits and
+the shared counters can include overlapping CPU work. All 233 Python checks
+pass for that report correction; the deployed binary is unchanged.
+Raw counters, validation ranges and complete captures
 remain outside Git. Next: inspect the failing worker's ready-queue and
 wait evidence, then retain audio wait/state/return tracing through the
 power phase on the next unchanged run.

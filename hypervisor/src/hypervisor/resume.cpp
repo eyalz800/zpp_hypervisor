@@ -1620,10 +1620,10 @@ void hypervisor::resume_guest(std::uint64_t cpuid,
                         this->handler_reason_from_l2[slot] + 1;
                 }
 
-                // And the accesses over the same span. See
-                // `handler_reason_reads` - this is what separates a
-                // vmcall's excess being hardware from its being
-                // software, and the two answers need opposite work.
+                // Shared interface-counter deltas over this span.
+                // Reads include cache hits, and another processor can
+                // advance either counter while this handler runs.
+                // These do not attribute VMX instruction costs.
                 this->handler_reason_reads[slot] =
                     this->handler_reason_reads[slot] +
                     (arch::x86_64::vmx::vmcs_reads_taken -
