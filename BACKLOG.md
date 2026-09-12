@@ -81518,6 +81518,11 @@ effective user census. Candidate loader SHA256
 It is not deployed; cost and boot outcome remain unmeasured. Logs and full
 configuration remain outside Git in `/tmp/zpp-20260912-audio-sync/census-off/`.
 
+The isolated default-ON build's complete2,645-byte entry-event function is
+byte-identical to the deployed optimized function; its manifest only gains
+`entryrip=1`. OFF compiles that function to1,414 bytes. This checks the
+default's compatibility, not runtime speed; raw comparison is external.
+
 Meanwhile the unchanged repeat completes84 startup audio calls, then a
 serialized GDB handoff limits full capture to power workers. Eleven such
 calls, their waits and outer returns complete successfully, with no abandoned
