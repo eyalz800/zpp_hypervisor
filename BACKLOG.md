@@ -81620,3 +81620,28 @@ Host scheduling during a 46.0967 s interval supplies both vCPUs essentially
 the entire interval, with less than 0.42 ms run-queue delay each. This rejects
 host CPU unavailability for that interval, not guest-side idle spinning or
 expensive nesting. No launcher or binary change follows from that check.
+
+
+## 2026-09-12: unchanged repeat fails in the USB flush path
+
+The 14:56 repeat reaches LogonUI/dwm and then crashes at 15:36:16 with
+0x9F/3 on the virtual USB tablet's 300 s power request. The atomic capture
+has its exact worker Running at priority 30 on CPU 1. No audio call is hit;
+the aged-audio observer never attaches. In the frozen post-crash state, the
+worker is Ready in CPU 1's local queue with affinity mask 2. Its checked
+35-frame stack reaches null through the affinity branch of KeFlushQueuedDpcs,
+WDF, USB and HID. This repeats the earlier USB path, with different timing
+evidence from the audio worker's atomic Ready state.
+
+CPU 1's different frozen current thread is another priority-30 worker inside
+KeFlushQueuedDpcs, through MmPageEntireDriver/Msfs on file close. Its unwind
+requires the hardware interrupt frame present before vector D1's first PUSH:
+Intel SDM 7.14.2 pushes SS/RSP unconditionally in 64-bit mode; KVM
+vmx_inject_irq requests ordinary external-interrupt delivery. Current stub
+bytes, CS/RFLAGS and restored stack bounds validate that specific frame.
+The earlier candidate's mechanical null return was not a complete unwind.
+With that correction, 26 frames reach null against current code/metadata.
+
+The next GDB experiment follows the shared flush/dispatcher path and actual
+worker transitions. Neither those post-crash stacks nor a sibling CPU stopped
+in a VMREAD identify the delay's cause. All raw evidence stays outside Git.

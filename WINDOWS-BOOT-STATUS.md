@@ -68,49 +68,51 @@ These checks do not prove that Windows boots.
 
 ## Current boot and next step
 
-**An unchanged census-off repeat began at 14:56:17 UTC.** Its probes retain
-audio wait/state/return tracing through the power phase, with full captures
-reserved for requests armed at least 60 guest seconds and a 30 s capture
-budget. Early power calls are counted. All scripts and captures are under
-`/tmp/zpp-20260912-audio-late-run/`. Fresh read-only ESP verification matches
-the same loader, Limine and launcher; disk anchors pass. No source, Windows
-settings, nesting, CPU count or device configuration changed.
-Fresh serial/DWARF again resolve module `66d61000`, singleton `682f3000`;
-the new NT base is `fffff800d3a00000`, PE-validated through CR3 `1ae000`.
-Monitor watcher 86896 owns the process/power polling. The initial manager
-stopped on an incomplete early process walk; its replacement waits for a
-complete walk. A serialized handoff at 15:13:22 adds the previously checked
-timer-worker epilogue/RET/caller probe. No timer hit is observed before SMSS
-appears at 15:13:42. This does not establish when that operation returned.
-Manager 91535 in `gdb-v3/` switches to SCM client 93724 at 15:21:14, after
-discovering services 576. PlugPlay, RpcEptMapper and LSM reach their actual
-first-response calls/callees at 15:24:50, 15:25:26 and 15:25:57. All request
-45,000 ms; no failure hit is captured before the UI handoff. Their wait
-returns remain unobserved. The three early USBHUB3 requests are absent by
-15:24:57; completion was not traced.
+**The unchanged 14:56:17 UTC repeat crashed at 15:36:16 with 0x9F/3.**
+GDB captured bugcheck entry in 131.2 ms. This request belongs to the virtual
+USB tablet, not the audio stack. No audio call hit was captured after the
+UI handoff. The supplemental aged-audio observer never attached.
+All GDB/monitor owners exited; QEMU remains frozen for postmortem reads.
+Artifacts and exact probe sources are under `/tmp/zpp-20260912-audio-late-run/`.
 
-**LogonUI 1432 and dwm 1440 appear at 15:26:59**, 30m42s after launch.
-This is process evidence, not a new physical screen confirmation. Audio
-client 95312 attaches at 15:27:00. Consult `gdb-v3/manager.json` for current
-ownership. At 15:32:05 a new USBHUB3 request is armed at age 49.1 s; the
-audio call breakpoint has not fired yet.
+The failed IRP is `ffffad84823559a0`, PDO `ffffad848201b730`, with an actual
+300 s watchdog and age 300.344 s at bugcheck. Checked device links identify
+USBHUB3 → HidUsb and instance
+`USB\VID_0627&PID_0001\28754-0000:00:05.0-2`. The 16-stack IRP is at
+location 12. Its exact worker `ffffad847f4bc040` is Running, priority 30,
+and is CPU 1's CurrentThread at the atomic crash capture. CPU 1 is then
+inside zpp's VMREAD wrapper; that single stop does not measure VMREAD cost.
+The atomic shared ready queue has 26 threads.
 
-The late-call filter has a coverage gap: an audio call entered before the
-60 s threshold could remain blocked without another entry. A supplemental
-probe is prepared under the same external root to attach to an already-aged
-request, revalidate its IRP/start identity and unique worker, and watch the
-worker's State and IRP fields plus the WDF wait return. Observer 95968 in
-`aged-audio-observer-v2/` waits for an armed audio request aged at least
-60 s and detaches the existing owner before attaching. It owns no target
-connection while waiting. The worker probe is not yet run.
-Any return must be paired against the captured initial stack before calling
-it the same wait; unrelated returns and capture limits remain explicit.
-Raw clock globals and shared ready-queue heads accompany its snapshots.
+After GDB detaches and Windows freezes, that worker is Ready at priority
+30 in CPU 1's local ready list; its effective affinity mask is 2. Current
+code and unwind metadata validate all 35 frames to null through
+KiQuantumEnd → KiCheckForThreadDispatch → KeSetSystemGroupAffinityThread →
+KeGenericProcessorCallback → KeFlushQueuedDpcs → WDF/USB/HID → PopIrpWorker.
+This is a frozen post-crash stack, not an atomic bugcheck-entry stack.
 
-A 46.0967 s host scheduling interval gives each vCPU about 46.096 s runtime,
-with run-queue delays of 0.0967/0.4194 ms. Host CPU availability does not
-explain this interval's slow progress; runtime does not prove useful guest
-work. The read is non-atomic and preserved under `host-scheduling/`.
+CPU 1's different frozen current thread is an ExpWorkerThread, also at
+priority 30 and also in the affinity/flush path, here called through
+MmPageEntireDriver and Msfs during a file close. Its 26 frames reach null
+using the current code and metadata. The first candidate unwind was wrong:
+an NMI interrupted the first PUSH of the vector-D1 shadow stub, leaving a
+hardware interrupt frame. Restoring its checked RIP/CS/RFLAGS/RSP/SS fixes
+the unwind; a mechanical early null return was not a complete stack.
+These observations target the next GDB probe at the shared flush/dispatch
+path and worker transitions; they do not establish a root cause yet.
+
+LogonUI 1432/dwm 1440 appeared at 15:26:59 (30m42s); no new physical screen
+confirmation was received. PlugPlay, RpcEptMapper and LSM all have checked
+Running/error-0 records at 15:33:58. GDB captured their 45,000 ms first-response
+calls and matched callees, but not their returns. A 46.0967 s host scheduling
+interval supplied each vCPU essentially its entire duration, with less than
+0.42 ms run-queue delay each. Host CPU availability does not explain that
+interval; runtime does not prove useful guest work.
+
+The loader, Limine, disk anchors and launcher were verified before this
+repeat. Module `66d61000`, singleton `682f3000`, NT `fffff800d3a00000` and
+System CR3 `1ae000` were freshly resolved/validated. Source, binary, Windows
+settings, nesting, CPU count and devices remained unchanged during the run.
 
 **The 13:37:30 UTC census-off boot crashed at 14:43:09 with 0x9F/3.**
 GDB captured the actual bugcheck entry in 125.7 ms. All monitor and GDB
