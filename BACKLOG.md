@@ -81426,3 +81426,22 @@ LogonUI1556 and dwm1568 first appear11:18:15, 27m50s after launch. Physical
 screen verification requested, still pending. Detailed timing/ownership and
 validation limits are in docs/2026-09-12-optimized-debug-candidate.md; actual
 captures and offline analysis are in the optimized run's scm-first-failure/.
+
+## 2026-09-12: optimized Winlogon waits for WluiAbort RPC; arm actual return
+
+The424ms GDB capture11:25:02 finds Winlogon704/TID724 waiting on its embedded
+ETHREAD.AlpcWaitSemaphore. All120 requested current code/metadata ranges
+later match; the checked kernel/user chain reaches null through WluiAbort,
+AbortBlockedThread, StateMachineRun and WinMain. This differs from the earlier
+boot's TermSrvReadyEvent wait, but does not verify the current screen or
+measure this RPC's duration. The generic raw object-header interpretation is
+rejected for the embedded semaphore. Current Winlogon PDB GUID/Info/DBI ages
+validate; the unmatched nearest startup public symbol is not used as a name.
+
+Old GDB owners exit before each handoff. Current manager27043/client27045
+starts v10 at11:34:37, with USB/SCM/crash coverage and a one-shot WluiAbort
+hardware RET/caller probe. Any later pair is independent of the earlier
+snapshot across the gap. Watcher12724 stays sole monitor reader. The brief
+armed USB request seen11:34:21 is absent at11:34:42; the then-armed request
+is audio, not the same USB request. Physical screen verification is pending.
+Full details and artifact paths are in the optimized candidate note.

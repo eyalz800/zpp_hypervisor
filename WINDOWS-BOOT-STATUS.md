@@ -87,9 +87,9 @@ completed boot or isolate optimization from run-to-run variation. Two CPUs
 and the same five direct USB devices are confirmed, tablet port2, xHCIp2=8.
 
 Sole monitor watcher **12724** began10:52:01 in tmux
-`zpp-rig-20260911:optimized-watch`. Current GDB manager **17720** and v9
-probe **17722** began11:08:45 in `optimized-gdb-v9`; confirm subsequent
-ownership from `/tmp/zpp-20260912-optimized-run/gdb-v9/manager.json`.
+`zpp-rig-20260911:optimized-watch`. Current GDB manager **27043** and v10
+probe **27045** began11:34:37 in `optimized-gdb-v10`; confirm subsequent
+ownership from `/tmp/zpp-20260912-optimized-run/gdb-v10/manager.json`.
 Current USBHUB3 **fffff80177c00000** and WDF **fffff80171430000** were
 discovered10:56:56, with PE/instruction validation before v5 started10:56:58.
 V5 completed two USB calls, then10:58:21 rejected a dispatcher hit with its
@@ -127,6 +127,31 @@ At11:18:30 the LSM record remains Running4, now start_state4/start_error1070.
 This supports another late-status race, not a measured60-second wait or a
 proven cause of the display delay. No RpcEptMapper cleanup has been captured
 on this boot. Artifacts: `scm-first-failure/` under the optimized run.
+
+At11:25:02 a424ms GDB capture finds Winlogon704/TID724 waiting for an
+ALPC reply, on its embedded `ETHREAD.AlpcWaitSemaphore` at thread+518.
+The checked kernel/user chain reaches null through RPC and **WluiAbort →
+AbortBlockedThread → StateMachineRun → WinMain**. This is a different wait
+from the earlier boot's TermSrvReadyEvent; the current screen remains
+unverified. All120 requested current code/metadata ranges match11:27:56;
+the Winlogon PDB GUID and Info/DBI ages validate. The generic capture's
+object-header bytes before this embedded semaphore are not an OBJECT_HEADER
+and must not be interpreted as one. Raw/checked artifacts: `winlogon-current/`.
+
+The brief capture handed GDB ownership17720/17722 → capture22191 →
+manager22205/client22207, with old clients exited before replacement. That
+probe later records WinHttpAutoProxySvc/Wcmsvc/WlanSvc/mpssvc cleanup1068;
+their dependency cause has not been traced. V10 replaces it after both old
+owners exit and adds a one-shot **WluiAbort RET at7ff6531536d0** followed by
+its actual caller. It retains the USB and bugcheck probes; the new user return
+probe is deferred during a USB cycle, and any interrupted inner pairing is
+discarded. No pairing or elapsed-time claim connects a future return to the
+11:25 snapshot across the handoff. The return probe has not hit yet.
+
+By11:34:42 there are69 processes. USB requestffff9e812ba0e910 is armed with
+age13.3s at11:34:21 and absent from the next complete list; the armed request
+then belongs to the audio stack instead. These are different request
+identities, not a continuously aging USB request. No new crash observed.
 
 The preceding running baseline was deliberately ended10:49:07 after the
 repeated-return instrument was verified, with six processes, no active

@@ -183,3 +183,50 @@ appears; these counters do not establish what is visible on the display.
 The watcher reaches29 processes at11:19:37, with no armed power request
 through11:20:59. No new USB call or bugcheck has been captured by v9 yet.
 Raw counters are in `logon-stage-counters/` under the optimized run.
+
+## Current Winlogon RPC wait and return instrumentation
+
+At11:25:02, after manager17720/client17722 exit, GDB22191 captures the current
+Winlogon704 process and four waiting threads. Capture through detach is
+424.0ms; its complete module list has36 entries. Manager22205/client22207
+then restores v9 USB/SCM/crash coverage. The sole monitor watcher is unchanged.
+
+Main threadffff9e812bb020c0, TID724, has State5/WaitReason17 and499 context
+switches. Its wait objectffff9e812bb025d8 equals ETHREAD+518, the embedded
+AlpcWaitSemaphore from the matching type record. Type5/Signal0 agree. The
+generic object's preceding-byte read is not an executive OBJECT_HEADER;
+its raw object_header/info_mask fields are rejected, not decoded as a name.
+
+The checked chain reaches null through KiSwapContext, KiSwapThread,
+KiCommitThreadWait, KeWaitForSingleObject, AlpcpSignalAndWait,
+AlpcpReceiveSynchronousReply, AlpcpProcessSynchronousRequest,
+NtAlpcSendWaitReceivePort, the syscall/user transition, RPC DoSendReceive,
+SendReceive, NdrpClientCall3/NdrClientCall3, WluiAbort, AbortBlockedThread,
+StateMachineRun, WinMain, unnamed startup code, KERNEL32 and ntdll. The other
+three captured threads are in worker-factory waits and also unwind to null.
+These are captured waits, not measured wait durations or a verified screen.
+
+All120 requested current code/metadata ranges, including consumed user
+function-table entries and selected caller bodies, match at11:27:56 in a
+219.7ms non-atomic read. Winlogon and RPC runtime RSDS are captured; ntdll
+and KERNEL32 debug pages are unmapped, while their actual used code/metadata
+is readable and checked. Winlogon symbols come from Microsoft's matching
+PDB: GUID9FF88BFC-5057-EF9D-C472-B88F9BFA1323, image age1, Info age2, DBI age1.
+The nearest public symbol for startup RVA656b5 is outside its function and
+is deliberately not used as its name. No second live debugger was opened.
+
+The resumed v9 probe captures cleanup1068 for WinHttpAutoProxySvc/Wcmsvc
+at11:29:24, WlanSvc11:29:27 and mpssvc11:32:55. Their dependency causes remain
+untraced. At11:34:37, after22205/22207 exit, v10 manager27043/client27045
+starts with a one-shot WluiAbort RET/caller probe beside USB/SCM/bugcheck.
+Winlogon base7ff653140000, RET7ff6531536d0, current header and RET byte checked.
+At most four hardware breakpoints are armed. The user probe is deferred
+during a USB cycle; a pending inner return interrupted by USB is abandoned
+explicitly. A future actual RET/caller pair will not establish invocation
+identity or elapsed time from the earlier snapshot across this handoff.
+V10 SHA256779efba56bc37a8602cd1dd917a09419aeea3c6aca5ffa02bc0a49a3662d79d0.
+
+The watcher reaches69 processes by11:34:42. USB power requestffff9e812ba0e910
+is armed, age13.3s, at11:34:21 and absent at11:34:42; that next armed request
+is an audio request with a different IRP/PDO. No new USB timeout or visible
+sign-in has been verified. Artifacts remain under the optimized run.

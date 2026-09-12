@@ -512,3 +512,29 @@ Further completed root documents: `README.md` (387 lines), `VMD.md`
   historical RMRR, DMAR and guest-page-table proposals authorizes no changes.
   Broad firmware/TME/device-channel claims need platform evidence; a larger
   event ring alone does not prove that preexisting completions cannot fill it.
+
+Also completed: `ESP-RESERVATION.md` (357 lines), `RESERVED-REGION.md`
+(419 lines), and `NVME-LOG.md` (1,137 lines).
+
+- ESP-RESERVATION's fill test supports that tested filesystem boundary;
+  its signature guard does not serialize against filesystem growth. The
+  blanket no-writes-on-refusal wording cannot cover a failure after a prior
+  write succeeds, and endpoint signatures alone do not validate every
+  interior block against later corruption. Its original partition-path
+  validation limits are historical; current deployment uses separate GPT
+  and fresh-mount checks. No reservation is changed by this reading.
+- RESERVED-REGION explicitly distinguishes table construction and synthetic
+  walks from an OS honoring an RMRR on hardware. A rewalk plus leaf CAS
+  does not itself solve concurrent intermediate-page reclamation; its
+  preflight pass also cannot guarantee all-or-nothing installation if a
+  later pass races changes. Those claims require external lifetime and
+  synchronization guarantees. Current diagnostic switches remain off.
+- NVME-LOG preserves successive and contradictory reservation designs; its
+  later measured grant limit restores the need for the completion patch.
+  Masking a device interrupt alone does not exclude an ISR already running
+  or a guest poller. A single equal submitted/completed snapshot cannot
+  exclude earlier queue-full periods; zero counters in an old disk header
+  do not prove later records were retained. Its older no-EPT-decoder and
+  never-run inventories are superseded by later source and measurements.
+  None of these older disk-channel boot observations proves today's nested
+  Windows sign-in, and no channel experiment is started by reading them.
