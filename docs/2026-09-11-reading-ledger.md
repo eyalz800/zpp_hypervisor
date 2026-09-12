@@ -71,6 +71,13 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/vp1-hpet-vs-pm.md` (201 lines).
 - `.references/hyperv/ap-lp-init-loop.md` (74 lines).
 - `.references/hyperv/ap-lp-post-entry.md` (154 lines).
+- `.references/hyperv/securekernel.md` (all 1,836 lines).
+- `.references/hyperv/add-logical-processor-one-call.md` (217 lines).
+- `.references/hyperv/ap-add-deposit-retry-loop.md` (240 lines).
+- `.references/hyperv/ap-lp-trampoline-placement.md` (141 lines).
+- `.references/hyperv/ap-mpinitlib-wakeup.md` (141 lines).
+- `.references/hyperv/hvix64-iommu-gsts-timeout.md` (258 lines).
+- `.references/hyperv/ap-startup-vs-iommu-stall.md` (251 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -78,6 +85,41 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The GSTS/AP comparison corrects identification of a shared delay helper,
+  but still repeats the later-withdrawn 82,494-call premise. Zero GSTS only
+  identifies a failed acknowledgement after establishing a specific command
+  and the actual polling predicate. Its DMAR-removal and unsupported-nesting
+  claims predate current nested VT-d support and are not current fixes.
+  A short matching instruction sequence alone is not full image identity.
+
+
+- The AddLP/deposit notes retract a retry diagnosis caused by mistaking a
+  total counter's last-code label for a per-code count. Their two-guard
+  wrapper is not the whole worker state machine; state zero alone does not
+  identify which early path ran. A decompiler's void prototype also does
+  not settle the actual status ABI. Their separation of two alleged boot
+  faults remains historical inference, not this run's finding.
+- The trampoline-placement and MpInitLib notes contain withdrawn direct
+  launch recipes. Absent immediate bytes do not prove no wakeup operation;
+  recalled firmware layouts are not validated struct offsets. The later
+  emitter/arrival notes correct the template-copy and placement account.
+  Nothing here authorizes rewriting guest startup state on this live boot.
+
+
+- The securekernel history repeatedly retracts its claimed blocker:
+  processor-start rendezvous, inert service-3 body, PFN claim spin, then
+  an idle-thread resume interpretation. Service 2/3 and byte 0/byte 1 were
+  confused in earlier passes. The current meaning of a call requires its
+  actual dispatch/resume boundary and owning thread, not its cumulative
+  service number. An unchanged call counter does not show work completed.
+- That history explicitly lacks parts of the securekernel image and the
+  imported CNG code. An address above the SK image is not sufficient to
+  identify CNG; module bounds are needed. No PAUSE instruction is not proof
+  of no loop or delay, and one CPU does not by itself exclude intervening
+  writes/preemption. Its no-CF8-clear result still admits unresolved aliases.
+  Its VINA-suppression experiment changed the failure and was not a fix.
+
 
 - The three VP1 timer notes successively replace a rendezvous diagnosis
   with TSC calibration, then correct LAPIC-thunk names and HPET selection
