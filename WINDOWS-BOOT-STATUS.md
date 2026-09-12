@@ -83,17 +83,50 @@ established yet.
 Fresh serial and deployed DWARF resolve zpp module `66d61000`, singleton
 `682f3000`; current NT is `fffff807de400000`, validated through System CR3
 `1ae000` against timestamp `51a135d9` and size `1450000`. Sole monitor
-watcher 64936 and GDB manager 64938/client 64939 began at 13:40:46. Current
-ownership is recorded in `/tmp/zpp-20260912-census-off-run/gdb/manager.json`.
-The initial guard captures bugcheck state, power workers and processor
-queues. When services.exe is discovered, the manager serially replaces it
-with first-response call/failure/cleanup hardware probes. The immediate
-callee breakpoint rearms the call site without stepping; a failure's saved
-wait result distinguishes timeout from a signaled process handle. Call-site
-to failure intervals include debugging and failure processing, not just the
-wait. If LogonUI and dwm appear, the manager switches to the verified audio
-worker probe. Raw artifacts and probe sources remain outside Git under
+watcher 64936 began at 13:40:46. Current GDB manager 71359/client 71360 owns
+the audio probe in tmux `zpp-rig-20260911:census-audio-v2`; ownership is
+recorded in `/tmp/zpp-20260912-census-off-run/gdb-audio-v2/manager.json`.
+The audio probe currently has no completed call. Its crash capture includes
+power-worker states/stacks and both processors' DPC/ready-queue slices.
+Raw artifacts and probe sources remain outside Git under
 `/tmp/zpp-20260912-census-off-run/`.
+
+**LogonUI 1388 and dwm 1404 first appear at 13:57:06, 19m36s after launch.**
+A physical screen check for this new boot is pending; the user's previous
+sign-in/BSOD observation belongs to the 10:50 boot. This milestone alone
+neither proves stable boot nor isolates a profiling cost improvement.
+
+The first GDB manager 64938 handed initial guard 64939 to SCM client 67931
+at 13:51:41, after services 508/base `7ff79c700000` was PE-validated.
+Actual first-response calls were captured for PlugPlay at 13:54:52,
+RpcEptMapper at 13:55:23 and LSM at 13:56:05, all requesting 45,000 ms.
+All three reached the imported wait routine on the same TID/RSP pairing.
+The first continuation's 39-packet audit shows hardware `Z1` breakpoints,
+one `vCont;c` resume and no software breakpoint, step or target write.
+SCM code validation follows mapping availability; the cold failure page is
+checked on a failure hit, not required at the initial call.
+
+At LSM's call, the response event was nonsignaled and its svchost PID 1320
+was alive (process SignalState 0, ExitStatus 259). The current kernel handle
+decoder code, object types and both handles validated. No first-response
+failure or cleanup breakpoint hit before the planned UI handoff to audio
+client 69366 at 13:57:08. The SCM script's manual-stop error records that
+handoff, not a guest failure. The wait return itself was not probed. A
+36.8 ms non-atomic read at 13:59:24 found all three traced services Running,
+internal state 3/error 0. In particular, LSM startup succeeded on this boot.
+
+A USBHUB3 power request (`ffffc081801d0010`, WatchdogStart 12881862018)
+remained armed through 14:02:54, age 219.1 s against its actual 300 s timer.
+GDB owners 64938/69366 exited before a 42.8 ms atomic worker snapshot by
+client 71030 at 14:02:59. The request was already absent and both power
+workers idle, so no State watchpoint was armed and no completion return
+was observed. The 14:03:15 monitor walk also had no armed requests. This
+sequence does not establish that the debugger caused completion. Client
+71030 then exited before the current audio manager attached.
+
+The completed initial guard, SCM, first audio and USB snapshots are preserved
+in 46 hashed files (116,773 bytes) under `completed-first-probes-sha256.json`.
+Do not modify those archived captures. The live audio capture is separate.
 
 **The unchanged optimized repeat ran 12:04:22–13:28:36 UTC and was ended
 while running, without a new sign-in or BSOD.** Its maximum complete

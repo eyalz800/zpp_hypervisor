@@ -81553,3 +81553,19 @@ and boots at 13:37:30. Nesting, CPUs, devices and launcher are unchanged.
 Profiling and host probe coverage differ from the preceding run, so timing
 alone will not isolate a performance effect. Current identity and owners are
 in WINDOWS-BOOT-STATUS.md; all raw evidence remains outside Git.
+
+
+The census-off boot reaches LogonUI/dwm at 13:57:06 (19m36s). GDB captures
+three actual SCM first-response calls, including LSM's 45,000 ms wait, and
+validates the nonsignaled event and live service process through the current
+kernel handle decoder. No failure breakpoint hits before the UI handoff;
+a later checked live record has LSM Running/internal state 3/error 0.
+The wait return is not captured, and elapsed time alone does not isolate
+profiling overhead. A new physical screen check remains pending.
+
+A subsequent USBHUB3 request is last armed at age 219.1 s, then absent in
+a 42.8 ms GDB snapshot five seconds later, before its 300 s deadline. Both
+workers are idle, so the proposed State watchpoint is not armed. Completion
+was not traced and debugger causality is unproven. Ownership returns to the
+audio probe. Completed evidence is hashed outside Git; current owners and
+measurement limits are in status.
