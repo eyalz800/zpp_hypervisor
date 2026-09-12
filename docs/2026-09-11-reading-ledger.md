@@ -53,6 +53,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/crash-rendezvous-barrier.md` (246 lines).
 - `.references/hyperv/ap-lp-apic-id.md` (105 lines).
 - `.references/hyperv/device_interrupt_delivery.md` (305 lines).
+- `.references/hyperv/vp-run-state.md` (183 lines).
+- `.references/hyperv/live-read-unblock.md` (105 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -60,6 +62,18 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The VP run-state note derives start/suspend fields from setters but
+  explicitly leaves scheduler consumers and other writers unresolved.
+  A start mask alone does not prove runnable state; a nonzero suspend
+  byte can be a normal in-progress call, not a permanently missed clear.
+  Its fixed addresses belong to its historical boot.
+- The live-read note requires matching Hyper-V identity and linkage, but
+  overstates what follows. Equal assist-page bytes alone do not establish
+  equal backing; unequal asynchronous reads may reflect intervening writes.
+  A lazy-EOI snapshot can precede normal reconciliation. Its base/alignment
+  shortcut must pass actual PE/RSDS and translation checks on each boot.
+
 
 - The APIC-ID note maps an old Hyper-V initialization check; its expected
   LP ID must be compared in the selected APIC mode at that check. A later

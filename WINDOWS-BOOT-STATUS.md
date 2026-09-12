@@ -88,12 +88,18 @@ The kernel PE maps through CR3 1ae000. First process/module list attempts
 were too early (null list heads) and were rejected; later complete walks
 validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
-`zpp-rig-20260911`. `timer-probe-gdb` owns the manager and exactly one GDB
-child. It initially guards KeBugCheckEx, then hands off once matching
+`zpp-rig-20260911`. `timer-probe-gdb-early` owns manager PID **53983** and exactly one GDB
+child (current initial guard PID **54548**; confirm from manager.json). It initially guards KeBugCheckEx, then hands off once matching
 USB/WDF images validate to the timer-stop/flush entry-return probes plus
 the bugcheck guard. Both observe until real terminal state or explicit
 handoff; neither has the preceding two/three-hour expiry. All new state,
-PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`.
+PID records and captures are under `/tmp/zpp-20260912/timer-probe-*`;
+the current GDB manager/captures are specifically `timer-probe-gdb-early/`.
+Autochk PID 712 appeared at 07:42:11; no exit result is captured yet. A
+bounded early KeFlushQueuedDpcs probe from about 07:42:17 to 07:44:17
+recorded no entry hit, detached, and automatically restored the indefinite
+bugcheck guard. No matching return or stalled call is inferred from that
+empty interval. The sole monitor watcher remained alive throughout.
 No C++ change, build, deployment or Windows configuration change was made.
 
 Prior crashed-run coordinates follow; do not use them for the live probe.

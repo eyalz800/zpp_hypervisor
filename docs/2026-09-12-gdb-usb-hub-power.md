@@ -265,3 +265,17 @@ The new temporary probe scripts passed syntax checks; actual breakpoint
 hits remain to be demonstrated. A concurrent unrelated return abandons a
 pair explicitly. Positive guard timeouts remain supported, but this run
 uses timeout zero for an indefinite guard. No source/binary/Windows change.
+
+
+The new run observed SMSS PID 692 at 07:29:12 and autochk PID 712 at
+07:42:11. An early kernel flush/dispatcher probe was tried while USBHUB3
+was still unloaded. Its 120-second window (roughly 07:42:17–07:44:17)
+recorded no entry breakpoint, detached without a call/return claim, and
+the manager restored an indefinite hardware bugcheck guard. The old
+manager/GDB pair was explicitly interrupted and verified exited before
+replacement; the monitor watcher never changed owners. Active state is
+`timer-probe-gdb-early/manager.json` and the corresponding tmux window.
+The later USB timer-stop probe now additionally has bounded hardware
+stops on the dispatcher epilogue and RET; unrelated dispatch threads
+leave the outer flush pairing intact. Probe events are journaled with
+bounded per-stop writes, with no lifetime limit on completed pairs.
