@@ -51,6 +51,8 @@ Completed during the later September 11 investigation:
 - `.references/hyperv/lazy-eoi-and-interrupt-window.md` (290 lines).
 - `.references/hyperv/vapic-reinjection-loop.md` (229 lines).
 - `.references/hyperv/crash-rendezvous-barrier.md` (246 lines).
+- `.references/hyperv/ap-lp-apic-id.md` (105 lines).
+- `.references/hyperv/device_interrupt_delivery.md` (305 lines).
 - All nine Markdown files in
   `.superpowers/sdd/2026-08-03-cmake-modernization/`.
 - `docs/superpowers/plans/2026-08-03-cmake-modernization.md`:
@@ -58,6 +60,20 @@ Completed during the later September 11 investigation:
   already read; its remaining lines 1–43 and 964–1020 were read separately.
 
 Corrections that matter when continuing:
+
+- The APIC-ID note maps an old Hyper-V initialization check; its expected
+  LP ID must be compared in the selected APIC mode at that check. A later
+  matching read does not establish that an earlier comparison passed.
+  Its historical CPU/LP example is not the current two-CPU topology.
+- The device-delivery note explicitly contains no rig measurements. Its
+  conditional posted-interrupt paths and EOI bitmap setters do not prove
+  which VMCS controls the current guest enabled, and its pending/in-flight
+  snapshots do not prove an event was never drained. Its categorical claim
+  that no enlightenment can relax the DPC watchdog is superseded by the
+  later UseRelaxedTiming correction recorded below. Neither
+  that old 0x133 diagnosis nor its proposed posted-interrupt implementation
+  is established by the current tablet's independently unwound 0x9F path.
+
 
 - The VBS Phase1 DMA note infers a repeated failed attach from static
   wrapper code and declares a loop it did not observe. Its own correction

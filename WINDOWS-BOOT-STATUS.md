@@ -84,8 +84,9 @@ A fresh same-configuration **GDB timer-stop run began 07:22:39 UTC
 September 12**. QEMU is running, all startup channels answered, and the
 actual five-device direct USB topology is unchanged. Module 66d47000,
 singleton 682f3000, **new Windows base fffff804c5800000**, size 1450000.
-The kernel PE maps through CR3 1ae000; first process/module list attempts
-were too early (null list heads), explicitly rejected, and will be retried.
+The kernel PE maps through CR3 1ae000. First process/module list attempts
+were too early (null list heads) and were rejected; later complete walks
+validate. SMSS PID 692 appeared at 07:29:12 (about 6m33s after launch).
 The sole monitor owner is `timer-probe-watch` in tmux session
 `zpp-rig-20260911`. `timer-probe-gdb` owns the manager and exactly one GDB
 child. It initially guards KeBugCheckEx, then hands off once matching
