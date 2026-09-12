@@ -81460,3 +81460,20 @@ result files (10,746,855 bytes), archived with hashes in
 /tmp/zpp-repo-cleanup-20260912/. Narrow ignore rules cover these generated
 paths; CMake, Bochs and CI text inputs remain tracked. Keep future raw
 captures outside the repository. Cleanup commit399cab70.
+
+## 2026-09-12: read the actual power timer deadline
+
+The captured audio watchdog was120s: WatchdogStart33549060046, KTIMER
+DueTime34749060046, bias0. The live resume/sleep defaults read120/300s.
+The prior300s percentage showed42.1% after this request's timer had expired.
+Read each armed timer's DueTime against interrupt time, reject observed
+rearms/completions, and report unavailable deadlines without a fallback.
+Five regression assertions fail before the fix; all230 Python checks pass
+afterward. No guest timeout, service, driver or power setting changed.
+
+Two post-crash power workers are captured, one idle and one carrying the
+exact blocked IRP. The latter is Ready with WaitStatus0; its42-frame saved
+stack reaches null through a WDF synchronous internal IOCTL, Intel/Realtek
+audio and portcls. Current code/metadata validate the unwind, but the
+post-crash Ready state does not establish when the wait completed. Capture
+that transition with GDB on the next boot. Raw evidence stays outside Git.

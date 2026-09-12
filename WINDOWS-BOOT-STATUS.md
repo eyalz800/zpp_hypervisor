@@ -84,6 +84,19 @@ Raw evidence remains in `/tmp/zpp-20260912-optimized-run/`, including
 `gdb-v10/timer-stop/` and `final-power/`. Next: inspect the stopped audio
 request and its power-worker dependencies before another boot.
 
+The stopped power list has two workers: one idle, one carrying the exact
+blocked audio IRP. The latter is Ready1/WaitStatus0 at this post-crash read;
+its saved stack unwinds to null through WDF synchronous internal IOCTL,
+IntcAudioBus, Realtek, portcls and the power dispatch chain. This does not
+measure how long it waited or prove it was already Ready at bugcheck entry.
+Current code and unwind metadata were read from the stopped guest. The
+watchdog's actual DueTime minus WatchdogStart is exactly120s (bias0), and
+live resume/sleep defaults are120/300s. The old fixed300s reader was wrong
+for this request. Its replacement reads each armed timer's DueTime; all230
+Python checks pass, including five formerly failing deadline assertions.
+Artifacts: `final-workers/`, `final-worker-unwind/`, `final-audio-focus/`.
+
+
 The following timeline records the investigation before the crash. Only hypervisor C++ optimization changes to-g -O2;
 source and the full nesting manifest match6adda123. Loader MD5
 **53fc99e459abfc6885b2f9c3aa448ae8**,4,887,040 bytes, was verified through

@@ -87,6 +87,40 @@ class ReaderCompletion(unittest.TestCase):
                     # even a failed walk may already have printed an entry.
                     self.assertIn("ENABLED (armed", output)
 
+    def test_power_deadline_comes_from_each_timer(self):
+        head, entry = BASE + 0xf0bd70, 0x20000000
+        start, now = 1_000_000_000, 2_000_000_000
+        for timeout, expected in ((120, "timer due in 20.0 s"),
+                                  (300, "timer due in 200.0 s"),
+                                  (60, "timer overdue by 40.0 s"),
+                                  (None, "timer deadline unavailable")):
+            with self.subTest(timeout=timeout):
+                words = {
+                    head: entry, head + 8: entry, entry: head,
+                    entry + 8: head, entry + 0x10: 0x30000000,
+                    entry + 0x18: 0, entry + 0x28: 0,
+                    entry + 0x30: start,
+                    entry + 0x50: None if timeout is None else start + timeout * 10_000_000,
+                    0xfffff78000000008: now, 0xfffff780000003b0: 500_000_000,
+                }
+                status, output = run_reader("guest-power-irps.py", words,
+                    dwords={entry + 0xbc: 1, entry + 0x128: 1})
+                self.assertEqual(status, 0)
+                self.assertIn(expected, output)
+                self.assertNotIn("% to bugcheck", output)
+
+    def test_disabled_power_timer_has_no_deadline(self):
+        head, entry = BASE + 0xf0bd70, 0x20000000
+        status, output = run_reader("guest-power-irps.py", {
+            head: entry, head + 8: entry, entry: head, entry + 8: head,
+            entry + 0x10: 0x30000000, entry + 0x18: 0, entry + 0x28: 0,
+            entry + 0x30: 1_000_000_000, entry + 0x50: 2_000_000_000,
+            0xfffff78000000008: 1_500_000_000, 0xfffff780000003b0: 0,
+        }, dwords={entry + 0xbc: 1, entry + 0x128: 0})
+        self.assertEqual(status, 0)
+        self.assertNotIn("timer due in", output)
+        self.assertNotIn("% to bugcheck", output)
+
 
 if __name__ == "__main__":
     unittest.main()

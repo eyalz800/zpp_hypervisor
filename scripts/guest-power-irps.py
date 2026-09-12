@@ -4,28 +4,17 @@ Records outstanding power requests, their devices and watchdog ages for
 comparison with debugger captures. This list alone does not identify the
 cause of a delay.
 
-WHY 0x9F CANNOT ANSWER IT
--------------------------
-`PopEnableIrpWatchdog` (RVA 0x30a91c) arms a timer at
-`PopWatchdogSleepTimeout` / `PopWatchdogResumeTimeout` seconds; both read
-**600** in the shipped image (RVA 0xfc5090 / 0xfc517c) and nothing in
-5 MB of .text writes either - the only override is a registry value,
-which is out of bounds here. `PopIrpWatchdogBugcheck` then raises
-`KeBugCheckEx(0x9F, 3, Pdo, &TRIAGE_9F_POWER, Irp)`.
+DEADLINES AND DEVICE OWNERSHIP
+-----------------------------
+Read each armed WatchdogTimer.DueTime in the interrupt-time clock domain.
+Do not assume every request has the same timeout: on September 12, 2026,
+the captured audio resume request had a 120-second timer, while the live
+sleep timeout was 300 seconds. The earlier fixed 300-second display hid
+its expiry. A due time is not a prediction of the bugcheck's execution;
+DPC dispatch and completion races can delay or trigger that path.
 
-There is **no grace path**: `PopDisableIrpWatchdog` and
-`PopCompleteIrpWatchdog` both bugcheck themselves if `KeCancelTimer`
-returns FALSE, so an IRP completed perfectly at t=601 s still stops the
-machine. The stop code therefore certifies only "600 seconds of guest
-interrupt time elapsed with this IRP outstanding" - which a machine
-livelocked for ten minutes produces whichever driver happened to hold
-one.
-
-**And P2 is the `Pdo`, not the holder.** A PDO is created by its parent
-bus driver, so `P2->DriverObject->DriverName` names the *enumerator*.
-Reading it as the culprit is a mis-accusation; the driver actually
-sitting on the IRP is `CurrentDevice` (+0x28). This script prints both,
-side by side, so they cannot be confused again.
+Bugcheck parameter 2 names the PDO's enumerator. CurrentDevice identifies
+the current request holder. Neither alone establishes why it stalled.
 
 COMPARING READS
 ---------------
@@ -54,40 +43,23 @@ POPIRPLIST = 0xf0bd70              # LIST_ENTRY head; Link is at +0 of the
 #   PopIrpList               26:1097072 -> 0xE00000+0x10bd70 = 0xf0bd70
 #   PnpEnumerationInProgress 26:1614240 -> 0xE00000+0x18a190 = 0xf8a190
 #   PopIrpWorkerCount        26:1083256 -> 0xE00000+0x108778 = 0xf08778
-# PopWatchdogSleepTimeout is 27:144 and is deliberately NOT read here:
-# section 27's base is not established, and the 600 s deadline is the
-# documented default rather than something this script measures.
+# Section 27 begins at 0xfc5000 in the matched image. The live timeout
+# globals can differ by transition; the per-request timer is used below.
 PNPENUMERATIONINPROGRESS = 0xf8a190
 POPIRPWORKERCOUNT = 0xf08778
 
 # _POP_IRP_DATA, sizeof 0x138, offsets from the PDB type record.
 D_IRP, D_PDO, D_CURRENTDEVICE = 0x10, 0x18, 0x28
 D_WATCHDOGSTART = 0x30
+# _POP_IRP_DATA.WatchdogTimer (+0x38), _KTIMER.DueTime (+0x18).
+# Both offsets are from the matching PDB; DueTime uses biased interrupt time.
+D_WATCHDOGDUE = 0x50
 D_MINORFUNCTION, D_POWERSTATETYPE = 0xb8, 0xbc
 D_WATCHDOGSTATE = 0x128
 
 # KUSER_SHARED_DATA is at a fixed kernel VA on x64.
 KUSD_INTERRUPTTIME = 0xFFFFF78000000008
 KUSD_INTERRUPTTIMEBIAS = 0xFFFFF780000003B0
-
-# **MEASURED at 300 s on three independent boots, not 600.** The 600
-# came from `PopWatchdogSleepTimeout`'s value in the shipped image
-# (header, line 10) and it does not match what this guest does:
-#
-#     boot 209   age at death   300.0052 s
-#     boot 212   age at death   300.0002 s   (1,885.1 - 1,585.1, timestamps
-#                                             taken separately)
-#     boot 238   armed, read age 282.4 s at 09:44:09;
-#                `paused (shutdown)` by 09:45:06 -> 300 s from arming
-#
-# Three boots, computed by three different routes, agreeing to five
-# significant figures on 300. Printing "of 600 s" made every armed entry
-# read as half as urgent as it is, and made a guest 282 s into its
-# countdown look 47% of the way rather than 94%.
-#
-# The image's 600 is not disowned - it is what the constant reads - but
-# **what the machine does is 300**, and this reader reports the machine.
-BUGCHECK_AT = 3_000_000_000        # 300 s in 100ns units, measured
 
 WATCHDOG_STATE = {0: 'Disabled', 1: 'ENABLED (armed, running)',
                   2: 'Completed'}
@@ -337,9 +309,23 @@ while cur and cur != head and n < 64:
                       f'consistently. NO AGE REPORTED; re-read before '
                       f'concluding anything about this entry.')
             else:
-                print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s '
-                      f'of {BUGCHECK_AT / 1e7:.0f} s '
-                      f'({100.0 * age / BUGCHECK_AT:.1f}% to bugcheck)')
+                print(f'      age {age:,} (100ns) = {age / 1e7:,.1f} s')
+    if state == 1:
+        due = rq(cur + D_WATCHDOGDUE)
+        timer_now = rq(KUSD_INTERRUPTTIME)
+        # Reject an observed rearm/completion across this non-atomic read.
+        # Do not fall back to a timeout from another request or boot.
+        if (due is None or due <= 0 or timer_now is None or
+                rq(cur + D_WATCHDOGSTART) != start or
+                rq(cur + D_WATCHDOGDUE) != due or
+                rw(cur + D_WATCHDOGSTATE) != state):
+            print('      timer deadline unavailable (unreadable or changing)')
+        else:
+            remaining = (due - timer_now) / 1e7
+            timing = (f'due in {remaining:,.1f} s' if remaining >= 0 else
+                      f'overdue by {-remaining:,.1f} s')
+            print(f'      timer {timing} (sampled DueTime {due:,}; '
+                  'not a bugcheck countdown)')
     previous, cur = cur, rq(cur)
 
 if cur != head or rq(head + 8) != previous:
